@@ -40,9 +40,10 @@ cp mcp.json.example mcp.json
 # 7. Configure permissions
 cp settings.json.example settings.json
 
-# 8. Run
+# 8. Run (terminal wrapper with interactive UI)
 python plamen.py
-# Or: claude "/plamen core path/to/project"
+# Or from Claude Code: /plamen
+# Or add ~/.claude to PATH and just type: plamen
 ```
 
 ---
@@ -547,48 +548,95 @@ The `data/` directory (ChromaDB, caches) is gitignored. Each user builds their o
 
 ---
 
-## Usage
+## Two Ways to Run
 
-### Interactive (recommended)
+Plamen can be launched from its **dedicated terminal wrapper** or from **inside Claude Code**. Both go through the same audit pipeline — the difference is how you start it.
 
-```bash
-python plamen.py
-```
+### Option A: Terminal Wrapper (recommended for first-time setup)
 
-Guides you through mode selection, target, docs, scope, and strict mode with arrow-key menus.
-
-### CLI fast path
+The terminal wrapper is a standalone Rich + InquirerPy application that handles dependency checking, tool installation, cost estimation, and launches Claude Code for you.
 
 ```bash
-# Core audit
-python plamen.py core /path/to/project --docs /path/to/whitepaper.pdf
-
-# Thorough audit with scope
-python plamen.py thorough /path/to/project --scope scope.txt --network ethereum
-
-# Proven-only mode (cap unproven findings at Low)
-python plamen.py thorough /path/to/project --strict
-
-# Compare mode (post-audit improvement)
-python plamen.py compare --docs ground_truth.md
+plamen
 ```
 
-### Directly via Claude Code
+This opens an interactive UI with arrow-key menus:
+
+```
+ ██████╗ ██╗      █████╗ ███╗   ███╗███████╗███╗   ██╗
+ ██╔══██╗██║     ██╔══██╗████╗ ████║██╔════╝████╗  ██║
+ ██████╔╝██║     ███████║██╔████╔██║█████╗  ██╔██╗ ██║
+ ██╔═══╝ ██║     ██╔══██║██║╚██╔╝██║██╔══╝  ██║╚██╗██║
+ ██║     ███████╗██║  ██║██║ ╚═╝ ██║███████╗██║ ╚████║
+ ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═══╝
+
+⬡ Web3 Security Auditor  v1.0.0
+
+> Select audit mode:
+    Core       25-45 agents | ALL Medium+
+    Thorough   35-95 agents | ALL severities
+    ──────────
+    Compare    variable     | DELTA report
+    Setup      install tools + build RAG DB
+```
+
+The **Setup** option shows your full toolchain status and lets you install missing tools (Foundry, Solana, Aptos, Sui, Medusa, etc.) and build the RAG database — all from the same UI, with automatic prerequisite detection and cross-platform support (Windows, macOS, Linux).
+
+After selecting a mode, the wrapper walks you through target selection, documentation, scope, proven-only mode, shows a cost estimate, then hands off to Claude Code.
+
+**To make `plamen` available as a command**, add `~/.claude` to your PATH:
 
 ```bash
-claude "/plamen core /path/to/project docs: /path/to/docs nodocs network: ethereum"
-claude "/plamen thorough /path/to/project scope: scope.txt proven-only: true"
+# Unix/macOS — add to ~/.bashrc or ~/.zshrc
+export PATH="$HOME/.claude:$PATH"
+
+# Windows — run once in PowerShell
+[System.Environment]::SetEnvironmentVariable("Path", "$env:USERPROFILE\.claude;" + $env:Path, "User")
 ```
 
-### Launcher scripts
+Or run directly without PATH setup:
 
 ```bash
-# Unix
-./plamen.sh core /path/to/project
-
-# Windows
-plamen.bat core C:\path\to\project
+python ~/.claude/plamen.py          # any platform
+./plamen.sh                         # Unix/macOS
+plamen.bat                          # Windows
 ```
+
+**CLI fast path** (skip the wizard):
+
+```bash
+plamen core /path/to/project --docs whitepaper.pdf
+plamen thorough /path/to/project --scope scope.txt --network ethereum --strict
+plamen setup                        # just run the installer
+```
+
+### Option B: Inside Claude Code (`/plamen` command)
+
+If you're already in a Claude Code session, type `/plamen` to launch the audit wizard directly:
+
+```
+> /plamen
+```
+
+This presents a mode selection dialog with previews inside Claude Code, then walks you through target, docs, scope, and launches the full pipeline — all within the same session.
+
+You can also skip the wizard with arguments:
+
+```
+> /plamen core /path/to/project docs: /path/to/docs
+> /plamen thorough /path/to/project scope: scope.txt proven-only: true
+> /plamen compare report: audit.md ground_truth: reference.md
+```
+
+### When to use which
+
+| | Terminal Wrapper (`plamen`) | Claude Code (`/plamen`) |
+|---|---|---|
+| **First time** | Use this — Setup installs tools + builds RAG | Need tools already installed |
+| **Cost estimate** | Shows token/cost estimate before launch | No estimate |
+| **Dependency check** | Full toolchain box with install option | No check |
+| **Daily use** | Quick CLI: `plamen core .` | Quick command: `/plamen core .` |
+| **Already in Claude** | Opens new Claude session | Uses current session |
 
 ---
 
