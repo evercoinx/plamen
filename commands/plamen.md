@@ -20,7 +20,7 @@ description: "Launch Plamen security audit pipeline. Usage: /plamen [core|thorou
 - If `$ARGUMENTS` contains "compare", jump directly to the compare flow (Step 0e). If it also contains `report:` followed by a file path, set `REPORT_PATH`. If it contains `ground_truth:` followed by a file path, set `GROUND_TRUTH_PATH`. If both are set, skip the interactive file selection in Step 0e and proceed directly.
 - If `$ARGUMENTS` is empty, run the full interactive wizard starting at Step 0a.
 
-### Step 0a: Banner + Mode Selection
+### Step 0a: Banner + Toolchain Check + Mode Selection
 
 First, output the banner as text (no tool calls):
 
@@ -35,7 +35,35 @@ First, output the banner as text (no tool calls):
 
 **Web3 Security Auditor** v1.0
 
-Then immediately use `AskUserQuestion` with a mode selection using previews:
+Then run a quick toolchain probe (via Bash, all in one command):
+
+```bash
+echo "Toolchain:" && \
+echo -n "  Required: " && \
+(command -v claude >/dev/null 2>&1 && echo -n "✓claude " || echo -n "✗claude ") && \
+(command -v python >/dev/null 2>&1 && echo -n "✓python " || echo -n "✗python ") && \
+(command -v npx >/dev/null 2>&1 && echo -n "✓npx " || echo -n "✗npx ") && \
+(command -v git >/dev/null 2>&1 && echo -n "✓git" || echo -n "✗git") && echo "" && \
+echo -n "  EVM:      " && \
+(command -v forge >/dev/null 2>&1 && echo -n "✓forge " || echo -n "○forge ") && \
+(command -v slither >/dev/null 2>&1 && echo -n "✓slither " || echo -n "○slither ") && \
+(command -v medusa >/dev/null 2>&1 && echo -n "✓medusa" || echo -n "○medusa") && echo "" && \
+echo -n "  Solana:   " && \
+(command -v solana >/dev/null 2>&1 && echo -n "✓solana " || echo -n "○solana ") && \
+(command -v anchor >/dev/null 2>&1 && echo -n "✓anchor " || echo -n "○anchor ") && \
+(command -v trident >/dev/null 2>&1 && echo -n "✓trident" || echo -n "○trident") && echo "" && \
+echo -n "  Move:     " && \
+(command -v aptos >/dev/null 2>&1 && echo -n "✓aptos " || echo -n "○aptos ") && \
+(command -v sui >/dev/null 2>&1 && echo -n "✓sui" || echo -n "○sui") && echo ""
+```
+
+Display the output to the user. If any required tools (claude, python, npx, git) show ✗, warn:
+> **Warning**: Missing required tools. Run `plamen setup` in your terminal to install them.
+
+If optional tools are missing, note briefly:
+> Optional tools with ○ are not installed — the pipeline degrades gracefully but coverage may be reduced. Run `plamen setup` to install.
+
+Then proceed to mode selection using `AskUserQuestion` with previews:
 
 ```
 AskUserQuestion(questions=[{
