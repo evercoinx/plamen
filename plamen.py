@@ -96,7 +96,7 @@ NETWORKS = {
 }
 
 MODES = {
-    "light":    {"label": "Light Audit",    "agents": "14-17",    "scope": "ALL Medium+"},
+    "light":    {"label": "Light Audit",    "agents": "15-18",    "scope": "ALL Medium+"},
     "core":     {"label": "Core Audit",     "agents": "25-45",    "scope": "ALL Medium+"},
     "thorough": {"label": "Thorough Audit", "agents": "35-95",    "scope": "ALL severities"},
     "compare":  {"label": "Compare",        "agents": "variable", "scope": "DELTA report"},
@@ -902,20 +902,38 @@ def show_hint_panel():
 
 # ── Helpers ──────────────────────────────────────────────────
 
+_SKIP_DIRS = {'lib', 'node_modules', 'target', 'build', '.git', 'test', 'tests',
+              'out', 'cache', 'artifacts', '.anchor', '.aptos', 'mock', 'mocks',
+              'script', 'deploy', 'migrations', 'flatten', 'typechain',
+              'typechain-types', 'coverage', 'docs', 'doc'}
+_SRC_EXTS = {'.sol', '.rs', '.move'}
+
+
 def _count_source_files(d: str) -> int:
-    """Count .sol/.rs/.move files recursively, excluding non-source dirs."""
-    skip = {'lib', 'node_modules', 'target', 'build', '.git', 'test', 'tests',
-            'out', 'cache', 'artifacts', '.anchor', '.aptos', 'mock', 'mocks'}
+    """Count .sol/.rs/.move files recursively, pruning skip dirs on descent."""
     total = 0
-    for ext in ('*.sol', '*.rs', '*.move'):
-        for f in glob.glob(os.path.join(d, "**", ext), recursive=True):
-            parts = f.replace('\\', '/').split('/')
-            if not any(s in parts for s in skip):
-                total += 1
+    for root, dirs, files in os.walk(d):
+        dirs[:] = [x for x in dirs if x not in _SKIP_DIRS]
+        total += sum(1 for f in files if os.path.splitext(f)[1] in _SRC_EXTS)
     return total
 
 
+def _is_home_or_root(d: str) -> bool:
+    """Return True if d is a home directory, user root, or system root."""
+    d = os.path.normpath(d)
+    home = os.path.normpath(os.path.expanduser("~"))
+    if d == home or d == os.path.dirname(home):
+        return True
+    # Windows roots like C:\ or Unix /
+    if len(d) <= 3 or d in ("/", "\\"):
+        return True
+    return False
+
+
 def _detect_project_hint(d: str) -> str:
+    # Skip recursive scan on home/root dirs — they're too large
+    if _is_home_or_root(d):
+        return ""
     indicators = {
         "foundry.toml": "Foundry", "hardhat.config.js": "Hardhat",
         "hardhat.config.ts": "Hardhat", "truffle-config.js": "Truffle",
@@ -983,29 +1001,33 @@ def estimate_cost(target: str, mode: str,
     has_scope = len(scope_names) > 0
 
     # ── Count source files and lines ────────────────────────
-    skip = {'lib', 'node_modules', 'target', 'build', '.git', 'test', 'tests',
-            'script', 'deploy', 'migrations', 'mock', 'mocks', 'flatten',
-            'out', 'cache', 'artifacts', 'typechain', 'typechain-types',
-            'coverage', 'docs', 'doc'}
     total_files = 0
     total_lines = 0
 
-    for ext in ['*.sol', '*.rs', '*.move']:
-        for f in glob.glob(os.path.join(target, "**", ext), recursive=True):
-            parts = f.replace('\\', '/').split('/')
-            if any(s in parts for s in skip):
+    # Skip recursive scan on home/root dirs — too large, no useful results
+    if _is_home_or_root(target):
+        return {
+            "files": 0, "lines": 0, "agents": 0,
+            "input_mtok": 0, "output_mtok": 0, "api_cost": 0,
+            "pct_x5": 0, "pct_x20": 0, "pct_pro": 0, "scoped": False,
+        }
+
+    for root, dirs, files in os.walk(target):
+        dirs[:] = [x for x in dirs if x not in _SKIP_DIRS]
+        for fname in files:
+            if os.path.splitext(fname)[1] not in _SRC_EXTS:
                 continue
 
             # Apply scope filter if we have scope constraints
             if has_scope:
-                basename = os.path.basename(f).lower()
+                basename = fname.lower()
                 stem = os.path.splitext(basename)[0]
                 if not (basename in scope_names or stem in scope_names):
                     continue
 
             total_files += 1
             try:
-                with open(f, 'r', errors='ignore') as fh:
+                with open(os.path.join(root, fname), 'r', errors='ignore') as fh:
                     total_lines += sum(1 for _ in fh)
             except Exception:
                 pass
@@ -1172,6 +1194,10 @@ def estimate_cost(target: str, mode: str,
     pct_x20 = (total_input / ref_tokens_thorough_5k) * 9.0 if ref_tokens_thorough_5k else 0
     pct_x5 = pct_x20 * 4
 
+    # Pro plan estimate: ~1/8th of Max x5 weekly capacity (sonnet-only, no opus,
+    # significantly lower rate limits). Calibrated conservatively.
+    pct_pro = pct_x5 * 2.5 if mode == "light" else pct_x5 * 5
+
     return {
         "files": total_files,
         "lines": total_lines,
@@ -1181,6 +1207,7 @@ def estimate_cost(target: str, mode: str,
         "api_cost": round(api_cost, 0),
         "pct_x5": round(pct_x5, 1),
         "pct_x20": round(pct_x20, 1),
+        "pct_pro": round(pct_pro, 1),
         "scoped": has_scope and total_files > 0,
     }
 
@@ -1213,7 +1240,7 @@ def select_mode() -> str:
     return inquirer.select(
         message="Select audit mode:",
         choices=[
-            {"name": "Light      14-17 agents | Pro plan  | ALL Medium+",    "value": "light"},
+            {"name": "Light      15-18 agents | Pro plan  | best under 3k LOC", "value": "light"},
             {"name": "Core       25-45 agents | Max plan  | ALL Medium+",    "value": "core"},
             {"name": "Thorough   35-95 agents | Max plan  | ALL severities", "value": "thorough"},
             Separator(),
@@ -1509,8 +1536,12 @@ def show_summary(mode: str, target: str, docs: str,
         row("Tokens", f"~{cost_estimate['input_mtok']}M in / ~{cost_estimate['output_mtok']}M out")
         api = cost_estimate.get("api_cost", 0)
         row("API cost", f"~${api:.0f} USD", _C_WHITE)
+        pct_pro = cost_estimate.get("pct_pro", 0)
         pct5 = cost_estimate["pct_x5"]
         pct20 = cost_estimate["pct_x20"]
+        if pct_pro > 0:
+            color_pro = _C_RED if pct_pro > 80 else (_C_ORANGE if pct_pro > 40 else _C_GREEN)
+            row("Pro", f"~{pct_pro:.0f}% of weekly allowance", color_pro)
         if pct5 > 0:
             color5 = _C_RED if pct5 > 80 else (_C_ORANGE if pct5 > 40 else _C_GREEN)
             color20 = _C_RED if pct20 > 80 else (_C_ORANGE if pct20 > 40 else _C_GREEN)
@@ -1669,6 +1700,7 @@ def main():
                     choices=[
                         {"name": "No        standard severity rules",          "value": False},
                         {"name": "Yes       unproven findings capped at Low",  "value": True},
+                        *_back_separator(),
                     ],
                     default=False,
                     pointer="  >",

@@ -141,14 +141,14 @@ The workflow is fully autonomous — provide a smart contract project and option
 | Re-scan (3b/3c) | Skip | Skip | Full (2 iter + per-contract) |
 | Depth loop | 4 merged sonnet, iter 1 | 8+ agents, iter 1 | Iter 1-3 (Devil's Advocate) |
 | Niche agents | Skip | Flag-triggered | Flag-triggered |
-| Semantic invariants | Skip | Pass 1 | Pass 1 + Pass 2 |
+| Semantic invariants | Skip (state consistency tradeoff) | Pass 1 | Pass 1 + Pass 2 |
 | Confidence scoring | None (verdicts only) | 2-axis | 4-axis |
 | Invariant / Medusa fuzz | Skip | Skip | Yes (EVM) |
 | Chain analysis | 1 sonnet (merged) | 2 agents | 2 agents + iteration 2 |
 | Verification | ALL Medium+ (sonnet) | ALL Medium+ | ALL severities + fuzz |
 | Skeptic-Judge | Skip | Skip | HIGH/CRIT |
 | Report | 2 agents | 5 agents | 5 agents |
-| Agent count | **~14-17** | ~25-45 | ~35-95 |
+| Agent count | **~15-18** | ~25-45 | ~35-95 |
 
 **Proven-only mode** (`--strict`): Available in all modes. Caps findings with only `[CODE-TRACE]` evidence (no executed PoC or fuzzer counterexample) at Low severity. Useful for benchmark comparisons where only mechanically proven findings should drive severity.
 
@@ -580,8 +580,9 @@ This opens an interactive UI with arrow-key menus:
 ⬡ Web3 Security Auditor  v1.0.0
 
 > Select audit mode:
-    Core       25-45 agents | ALL Medium+
-    Thorough   35-95 agents | ALL severities
+    Light      15-18 agents | Pro plan  | best under 3k LOC
+    Core       25-45 agents | Max plan  | ALL Medium+
+    Thorough   35-95 agents | Max plan  | ALL severities
     ──────────
     Compare    variable     | DELTA report
     Setup      install tools + build RAG DB
@@ -766,7 +767,7 @@ The `plamen.py` wrapper estimates token usage before launch, accounting for mult
 
 - **Input/Output tokens** (millions)
 - **API cost** (USD, at current Anthropic pricing)
-- **Weekly plan usage** (% of Max x5 and Max x20 allowances)
+- **Weekly plan usage** (% of Pro, Max x5, and Max x20 allowances)
 
 Estimates are rough — actual usage varies with protocol complexity and finding count. Run `/cost` after an audit for actuals.
 

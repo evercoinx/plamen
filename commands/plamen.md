@@ -74,7 +74,7 @@ AskUserQuestion(questions=[{
     {
       label: "Light (Pro plan)",
       description: "Lightweight audit — all Sonnet agents, fits Pro rate limits",
-      preview: "~14-17 agents (all Sonnet/Haiku — no Opus)\n\nPipeline:\n  Recon (2) → Breadth (2-3) → Inventory\n  → Depth (4 merged) → Chain (1)\n  → Verify ALL Medium+ → Report (2)\n\nSkips:\n  · RAG meta-buffer + fork ancestry\n  · Semantic invariants\n  · Niche agents\n  · Confidence scoring\n  · Invariant/Medusa fuzz\n\nBest for: Pro plan, codebases < 3000 lines"
+      preview: "~15-18 agents (all Sonnet/Haiku — no Opus)\n\nPipeline:\n  Recon (2) → Breadth (2-3) → Inventory\n  → Depth (4 merged) → Chain (1)\n  → Verify ALL Medium+ → Report (2)\n\nSkips:\n  · RAG meta-buffer + fork ancestry\n  · Semantic invariants (state consistency\n    bugs harder to detect — use Core for\n    DeFi protocols with complex state)\n  · Niche agents\n  · Confidence scoring + RAG Sweep\n  · Invariant/Medusa fuzz\n\nBest for: Pro plan, codebases < 3000 lines"
     },
     {
       label: "Core (Recommended)",
@@ -308,7 +308,7 @@ When `MODE == light`, the orchestrator applies these overrides:
 2. **Recon**: Spawn 2 sonnet agents (not 4). Agent L1 = build + static analysis + tests (Tasks 1,2,8,9). Agent L2 = docs + patterns + surface + templates (Tasks 3,4,5,6,7,10). Skip RAG meta-buffer (Task 0) and fork ancestry entirely.
 3. **Breadth**: Cap at 2-3 sonnet agents (not 2-7 opus). Use same merge hierarchy.
 4. **Semantic Invariants**: Skip entirely. Depth agents read `state_variables.md` directly.
-5. **Depth Loop**: Spawn 4 merged sonnet agents — (a) combined token-flow + state-trace, (b) combined edge-case + external, (c) combined scanner A+B+C, (d) validation sweep. No niche agents, no injectable investigation agents. Iteration 1 only, no confidence scoring.
+5. **Depth Loop**: Spawn 4 merged sonnet agents — (a) combined token-flow + state-trace, (b) combined edge-case + external, (c) combined scanner A+B+C, (d) validation sweep. No niche agents, no injectable investigation agents. Iteration 1 only, no confidence scoring. **Note**: Merges (a) and (c) are deliberate exceptions to the standard merge hierarchy — token-flow + state-trace and 3-scanner compression reduce agent count at the cost of per-domain attention depth. This is a known tradeoff accepted for Pro plan rate limit compliance.
 6. **Chain Analysis**: Single sonnet agent performs both enabler enumeration and chain matching in one pass.
 7. **Verification**: ALL Medium+ (same scope as Core), but all verifiers are sonnet.
 8. **Report**: 1 sonnet writer (all tiers) + 1 haiku assembler. No separate index agent — writer handles ID assignment inline.
@@ -452,14 +452,14 @@ After all return:
 |------|-------------|-------|---------|
 | 4a | `~/.claude/prompts/{LANGUAGE}/phase4a-inventory-prompt.md` | Inventory (+ side effect trace) | Always |
 | 3b | `~/.claude/rules/phase3b-rescan-prompt.md` | Breadth Re-Scan (sonnet) | Thorough only (after 4a) |
-| 4a.5 | (inline below) | Semantic Invariant Agent (sonnet) | Always |
+| 4a.5 | (inline below) | Semantic Invariant Agent (sonnet) | Core/Thorough |
 | 4b (loop) | `~/.claude/prompts/{LANGUAGE}/phase4b-loop.md` | Orchestrator | Always |
 | 4b (depth) | `~/.claude/prompts/{LANGUAGE}/phase4b-depth-templates.md` | 4 Depth Agents | Always |
 | 4b (scanners) | `~/.claude/prompts/{LANGUAGE}/phase4b-scanner-templates.md` | 3 Scanners + Validation + Design Stress | Always |
 | 4c | `~/.claude/rules/phase4c-chain-prompt.md` | Chain Analysis (+ enabler enumeration) | Always |
 | 5 | `~/.claude/prompts/{LANGUAGE}/phase5-verification-prompt.md` + `~/.claude/rules/phase5-poc-execution.md` | Verifiers (with PoC execution) | Both (scope differs) |
 | 5.5 | (orchestrator inline) | Post-verification finding extraction | Always |
-| 6a-c | `~/.claude/rules/phase6-report-prompts.md` | Index → Tier Writers → Assembler | Always |
+| 6a-c | `~/.claude/rules/phase6-report-prompts.md` | Index → Tier Writers → Assembler | Core/Thorough (Light: 2-agent override) |
 
 ### Gate Enforcement
 
@@ -591,7 +591,9 @@ Return: 'DONE: {G} cluster_gaps, {T} consequence traces ({D} deep_propagation), 
 
 The orchestrator runs the full loop autonomously:
 
-1. **Iteration 1 (ALWAYS)**: Spawn ALL 8 standard agents + niche agents in parallel:
+1. **Light mode override**: When `MODE == light`, skip the standard 8-agent spawn. Instead spawn 4 merged sonnet agents per Light Mode Orchestration override #5: (a) combined token-flow + state-trace, (b) combined edge-case + external, (c) combined scanner A+B+C, (d) validation sweep. Skip niche agents, skip confidence scoring, skip iterations 2-3. After iteration 1 completes, proceed directly to Phase 4c chain analysis (single merged agent per override #6).
+
+1. **Iteration 1 (Core/Thorough)**: Spawn ALL 8 standard agents + niche agents in parallel:
    - 4 depth agents (token-flow, state-trace, edge-case, external)
    - Blind Spot Scanner A (Tokens & Parameters)
    - Blind Spot Scanner B (Guards, Visibility & Inheritance + Override Safety)
@@ -600,7 +602,7 @@ The orchestrator runs the full loop autonomously:
    - **Niche agents**: For each REQUIRED niche agent in `template_recommendations.md` → `Niche Agents` section, read its definition from `~/.claude/agents/skills/niche/{NAME}.md` and spawn alongside depth agents. Each niche agent = 1 budget slot.
    - **Timeout split-and-retry**: If any agent times out, split its findings into 2 "lite" agents (max 3 findings each, no static analyzer, max 5 files). 2 lite agents = 1 budget unit.
 
-2. **Score all findings**: Spawn haiku scoring agent → `confidence_scores.md`
+2. **Score all findings** (Core/Thorough only — Light mode skips scoring): Spawn haiku scoring agent → `confidence_scores.md`
    - **Core mode**: 2-axis scoring (Evidence x 0.5 + Analysis Quality x 0.5)
    - **Thorough mode**: 4-axis scoring (Evidence x 0.25 + Consensus x 0.25 + Analysis Quality x 0.3 + RAG Match x 0.2)
    - CONFIDENT (>= 0.7): no more depth needed
@@ -618,9 +620,11 @@ The orchestrator runs the full loop autonomously:
    - Force remaining < 0.4 to CONTESTED verdict
    - Write `adaptive_loop_log.md`
 
-5. **Post-verification error trace feedback**: After Phase 5, if verifiers returned CONTESTED with error traces AND budget remains, spawn targeted depth with error traces as investigation questions (AD-6).
+5. **Post-verification error trace feedback** (Core/Thorough only): After Phase 5, if verifiers returned CONTESTED with error traces AND budget remains, spawn targeted depth with error traces as investigation questions (AD-6).
 
-**Convergence**: Hard cap 3 iterations (Core: 1), dynamic budget cap `min(max(12, ceil(findings/5)+7), 20)`, progress check after each iteration.
+**Convergence**: Hard cap 3 iterations (Core: 1, Light: 1 with no scoring), dynamic budget cap `min(max(12, ceil(findings/5)+7), 20)`, progress check after each iteration.
+
+> **Light mode: Phase 4b.5 RAG Sweep** — Skip entirely. RAG validation is not performed in Light mode (no confidence scoring axis requires it).
 
 6. **Budget redirect (Thorough mode only)**: If `remaining_budget >= 3` at loop exit, spawn Design Stress Testing Agent.
 
@@ -646,6 +650,12 @@ After ALL verifiers complete:
 4. If NOT covered: create a new hypothesis and add to `hypotheses.md`
 5. Assign severity using the standard matrix
 6. These do NOT require re-verification
+
+### Phase 6: Report Generation
+
+> **Light mode override**: Do NOT read `~/.claude/rules/phase6-report-prompts.md`. Instead, spawn 2 agents: (1) a single sonnet writer handling ID assignment, root-cause consolidation, and all severity tiers inline; (2) a haiku assembler that merges the writer output with the report header template. No separate index agent or tier-split writers. Include the Light mode disclaimer per override #9.
+
+> **Core/Thorough**: Read `~/.claude/rules/phase6-report-prompts.md` and follow the full 5-agent pipeline (Index → 3 Tier Writers → Assembler).
 
 ---
 

@@ -15,7 +15,7 @@ You are **Plamen**, an autonomous Web3 security auditing agent. When asked to au
 | Dimension | Light | Core | Thorough |
 |-----------|-------|------|----------|
 | Target plan | Pro | Max | Max |
-| Orchestrator model | Sonnet | Opus | Opus |
+| Orchestrator model | User's session model (Pro default: Sonnet) | Opus | Opus |
 | Agent models | All Sonnet/Haiku | Opus + Sonnet | Opus + Sonnet |
 | Recon | 2 sonnet (no RAG, no fork) | 4 agents (RAG fire-and-forget) | 4 agents (full RAG) |
 | Breadth agents | 2-3 sonnet | 2-7 opus | 2-7 opus |
@@ -32,7 +32,7 @@ You are **Plamen**, an autonomous Web3 security auditing agent. When asked to au
 | Verification scope | Chains + ALL Medium+ (sonnet) | Chains + ALL Medium+ | ALL severities (with fuzz) |
 | Skeptic-Judge | Skip | Skip | HIGH/CRIT |
 | Report | 2 agents (sonnet + haiku) | 5 agents (opus + sonnet + haiku) | 5 agents |
-| Agent count | ~14-17 | ~25-45 | ~35-95 |
+| Agent count | ~15-18 | ~25-45 | ~35-95 |
 
 ---
 
