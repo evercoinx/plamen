@@ -116,6 +116,60 @@ AskUserQuestion(questions=[{
 
 If the user selects local files or URL, ask them to provide the path or URL. Store as `DOCS_PATH`.
 
+### Step 0c.5: Scope
+
+Use `AskUserQuestion` to ask about scope constraints:
+
+```
+AskUserQuestion(questions=[{
+  question: "Do you want to limit the audit scope?",
+  header: "Scope",
+  multiSelect: false,
+  options: [
+    {
+      label: "Full project",
+      description: "Audit everything in the target directory"
+    },
+    {
+      label: "Scope file",
+      description: "I have a scope.txt listing specific files/contracts"
+    },
+    {
+      label: "Scope notes",
+      description: "I'll describe the focus areas in plain text"
+    }
+  ]
+}])
+```
+
+If the user selects "Scope file", ask them to provide the path. Store as `SCOPE_FILE`.
+If the user selects "Scope notes", ask them to describe the focus. Store as `SCOPE_NOTES`.
+If "Full project", leave both empty.
+
+### Step 0c.6: Proven-Only Mode
+
+Use `AskUserQuestion` to ask about severity strictness:
+
+```
+AskUserQuestion(questions=[{
+  question: "Enable proven-only mode? (findings without executed PoC evidence are capped at Low severity — useful for benchmark comparisons)",
+  header: "Proven-Only",
+  multiSelect: false,
+  options: [
+    {
+      label: "No (default)",
+      description: "Standard severity rules — manual code traces can support any severity"
+    },
+    {
+      label: "Yes",
+      description: "Unproven findings ([CODE-TRACE] only) capped at Low"
+    }
+  ]
+}])
+```
+
+If "Yes", set `PROVEN_ONLY = true`.
+
 ### Step 0d: Launch
 
 Output a confirmation summary:
