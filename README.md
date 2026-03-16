@@ -61,7 +61,7 @@ python plamen.py
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Building the RAG Database](#building-the-rag-database)
-- [Usage](#usage)
+- [Two Ways to Run](#two-ways-to-run)
 - [Repository Structure](#repository-structure)
 - [Severity Matrix](#severity-matrix)
 - [Cost Estimation](#cost-estimation)
