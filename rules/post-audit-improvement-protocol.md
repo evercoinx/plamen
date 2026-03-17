@@ -76,13 +76,53 @@ For each FALSE_NEGATIVE, classify into exactly ONE root cause:
 - RC-NOVEL defaults to RAG entry. The user decides whether prior occurrence count justifies escalation.
 - RC-SCOPE is the highest-priority fix (nothing downstream can compensate for missing scope).
 - When in doubt between RC-METHOD and RC-DEPTH, prefer RC-DEPTH (smaller change footprint).
+- **When in doubt between RC-AGENT and any fix-eligible code, default to RC-AGENT.** See Step 2.5.
+
+### Step 2.5: RC-AGENT Presumption Gate (MANDATORY)
+
+> **Why this exists**: LLM orchestrators are biased toward fixable root causes. When they see a miss, they want to classify it as RC-METHOD or RC-DEPTH because those have actionable fixes. RC-AGENT feels like "giving up." In practice, many misses initially classified as methodology gaps turn out to be agent reasoning errors when examined more carefully. Adding rules for RC-AGENT errors creates bloat without improving recall.
+
+**Before classifying ANY miss as RC-METHOD, RC-DEPTH, or RC-CONTEXT, the orchestrator MUST pass the RC-AGENT Exclusion Test:**
+
+```
+RC-AGENT EXCLUSION TEST (all 3 must be YES to proceed past RC-AGENT):
+
+1. METHODOLOGY SEARCH: Grep existing rules (R1-R16), scanner checks,
+   depth templates, skills, and security rules for keywords related
+   to this vulnerability class.
+   → Did the search find ZERO relevant coverage? [YES/NO]
+   → If NO (coverage exists): DEFAULT TO RC-AGENT.
+     The agent had methodology and failed to apply it.
+
+2. REASONING TRACE: Read the agent's actual analysis output for the
+   relevant function/area.
+   → Did the agent SKIP the area entirely (no mention)? [YES/NO]
+   → If NO (agent analyzed it but reached wrong conclusion):
+     DEFAULT TO RC-AGENT. This is a reasoning error, not a gap.
+
+3. METHODOLOGY GAP PROOF: State in ONE sentence what specific
+   methodology instruction is missing — not "the agent should have
+   checked X" (that's a pattern) but "no existing rule tells the
+   agent HOW to systematically discover this class of bug."
+   → Can you state this without referencing the specific missed finding? [YES/NO]
+   → If NO: DEFAULT TO RC-AGENT. You are describing a pattern, not methodology.
+```
+
+**If any answer is NO → classify as RC-AGENT. No pipeline change.**
+
+**Reclassification rule**: If the user challenges a non-RC-AGENT classification during the session, re-run the exclusion test. The user's challenge is evidence that the orchestrator's bias is active. Track reclassifications in the session summary: *"Reclassified: {N} findings from RC-{original} → RC-AGENT after user challenge."*
 
 ### Step 3: Root Cause Evidence (in-session only)
 
-For each classified miss, the orchestrator documents the evidence chain in conversation:
+For each miss that PASSED the RC-AGENT Exclusion Test, document the evidence chain:
 
 ```
 Miss: {GT finding title}
+
+RC-AGENT Exclusion Test:
+1. Methodology search: [PASS — zero coverage found for {class}] / [FAIL → RC-AGENT]
+2. Reasoning trace: [PASS — agent skipped area entirely] / [FAIL → RC-AGENT]
+3. Methodology gap proof: "{the missing instruction}" / [FAIL → RC-AGENT]
 
 Classification: RC-DEPTH
 Evidence chain:
@@ -103,15 +143,16 @@ This evidence chain is used to walk the decision tree. It is NOT persisted.
 
 For each fix-eligible root cause (RC-SCOPE, RC-METHOD, RC-DEPTH, RC-CONTEXT):
 
+> **Prerequisite**: The miss MUST have passed the RC-AGENT Exclusion Test (Step 2.5) before entering this tree. If not yet tested, go back to Step 2.5.
+
 ```
 Is the gap covered by an EXISTING rule/skill/check?
-├── YES → Is the existing component failing to trigger?
-│   ├── YES → Fix the trigger condition (recon pattern flag, skill trigger)
+├── YES → STOP. Re-run RC-AGENT Exclusion Test question 1.
+│         If coverage exists, this is likely RC-AGENT.
+│   ├── Coverage exists but fails to trigger → Fix trigger condition
 │   │         [CHANGE TYPE: trigger-fix, ~2 lines, low risk]
-│   └── NO → Is the existing component's methodology incomplete?
-│       ├── YES → Extend the existing component with a sub-check or hint
-│       │         [CHANGE TYPE: extend, ~3-5 lines, medium risk]
-│       └── NO → Agent had the methodology but missed → RC-AGENT, no fix
+│   └── Coverage exists and triggered but agent still missed
+│       → RC-AGENT, no fix (agent reasoning error)
 │
 └── NO → Is the vulnerability class generalizable (applies to 2+ protocol types)?
     ├── YES → Is there an existing skill/rule it naturally extends?
@@ -225,10 +266,10 @@ One line per improvement version:
 
 ```
 ## Pipeline v{X} (date)
-{1-2 sentence description of methodology changes}. {N}×RC-{code} fixes. Recall: {X}% on {project type}.
+{1-2 sentence description of methodology changes}. {N}×RC-{code} fixes, {R}×RC-AGENT reclassified. Recall: {X}% on {project type}.
 ```
 
-This gives enough trend data ("recall is improving on vaults") without storing any specific findings, locations, or vulnerability descriptions that could anchor future audits.
+This gives enough trend data ("recall is improving on vaults") without storing any specific findings, locations, or vulnerability descriptions that could anchor future audits. The reclassification count tracks how often the orchestrator's initial classification was overridden — a persistently high count signals the exclusion test needs strengthening.
 
 ---
 
@@ -311,9 +352,10 @@ When running this protocol after an audit:
 - [ ] Present metrics to user
 
 ### Phase B: Classify (~30 min)
-- [ ] For each FALSE_NEGATIVE: apply root cause classification
-- [ ] Document evidence chain (in conversation)
-- [ ] Count: how many of each RC-code?
+- [ ] For each FALSE_NEGATIVE: run RC-AGENT Exclusion Test (Step 2.5) FIRST
+- [ ] Only if exclusion test passes all 3 → apply root cause classification
+- [ ] Document evidence chain (in conversation), including exclusion test results
+- [ ] Count: how many of each RC-code? How many reclassified to RC-AGENT?
 - [ ] Filter: only RC-SCOPE, RC-METHOD, RC-DEPTH, RC-CONTEXT proceed to Phase C
 
 ### Phase C: Decide (~20 min per fix)
