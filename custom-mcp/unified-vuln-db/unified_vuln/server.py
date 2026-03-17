@@ -1700,8 +1700,8 @@ describe("{bug_class} Exploit PoC", function () {{
     # ═══════════════════════════════════════════════════════════════════════════
 
     elif name == "search_solodit_live":
-        # Get API key
-        api_key = os.environ.get("SOLODIT_API_KEY")
+        # Get API key (strip whitespace — env vars from MCP configs can have trailing spaces)
+        api_key = (os.environ.get("SOLODIT_API_KEY") or "").strip()
         if not api_key:
             return [format_response({
                 "error": "SOLODIT_API_KEY not set",
@@ -1846,7 +1846,7 @@ def _ensure_db_loaded():
 async def _verify_solodit_api_key():
     """Verify Solodit API key at startup. Non-blocking diagnostic."""
     import sys
-    api_key = os.environ.get("SOLODIT_API_KEY")
+    api_key = (os.environ.get("SOLODIT_API_KEY") or "").strip()
     if not api_key:
         print("Solodit API: No SOLODIT_API_KEY set. Live search will be unavailable.", file=sys.stderr)
         return

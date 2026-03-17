@@ -74,8 +74,9 @@ VULN_TAGS = [
 
 
 def get_api_key() -> Optional[str]:
-    """Get Solodit API key from environment."""
-    return os.environ.get("SOLODIT_API_KEY")
+    """Get Solodit API key from environment (strip whitespace — MCP env configs can inject trailing spaces)."""
+    key = os.environ.get("SOLODIT_API_KEY")
+    return key.strip() if key else None
 
 
 def generate_id(title: str, finding_id: str) -> str:

@@ -62,7 +62,15 @@ Scan .move source files (exclude build/, tests/) to determine type:
 
 ### Step 2: Query unified-vuln-db
 
+> **PROBE FIRST**: Before batch calls, make ONE probe call to detect MCP schema incompatibility:
+> `mcp__unified-vuln-db__get_knowledge_stats()`
+> - If probe **succeeds** → set `RAG_TOOLS_AVAILABLE = true`, proceed with batches below
+> - If probe **fails** (API error, schema error, timeout) → set `RAG_TOOLS_AVAILABLE = false`, **skip ALL unified-vuln-db calls**, append to `{SCRATCHPAD}/build_status.md`: `RAG_TOOLS_AVAILABLE: false — unified-vuln-db MCP probe failed: {error}. Phase 4b.5 RAG Sweep will use WebSearch fallback.`
+> - If probe succeeds, also append: `RAG_TOOLS_AVAILABLE: true`
+
 > **PARALLELIZATION DIRECTIVE**: Make MCP calls in PARALLEL batches.
+
+**If RAG_TOOLS_AVAILABLE = false**: Skip Batch 1 and Batch 2 entirely. Write to `{SCRATCHPAD}/meta_buffer.md`: `## RAG: UNAVAILABLE — MCP tools failed probe. Phase 4b.5 will compensate.`
 
 **Batch 1** (single message, all in parallel):
 1. mcp__unified-vuln-db__get_common_vulnerabilities(protocol_type='{TYPE}')

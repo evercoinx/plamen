@@ -62,10 +62,18 @@ Execute these tasks IN ORDER:
 
 ### Step 2: Query unified-vuln-db for attack patterns
 
+> **PROBE FIRST**: Before batch calls, make ONE probe call to detect MCP schema incompatibility:
+> `mcp__unified-vuln-db__get_knowledge_stats()`
+> - If probe **succeeds** → set `RAG_TOOLS_AVAILABLE = true`, proceed with batches below
+> - If probe **fails** (API error, schema error, timeout) → set `RAG_TOOLS_AVAILABLE = false`, **skip ALL unified-vuln-db calls**, append to `{SCRATCHPAD}/build_status.md`: `RAG_TOOLS_AVAILABLE: false — unified-vuln-db MCP probe failed: {error}. Phase 4b.5 RAG Sweep will use WebSearch fallback.`
+> - If probe succeeds, also append: `RAG_TOOLS_AVAILABLE: true`
+
 > **PARALLELIZATION DIRECTIVE**: Make MCP calls in PARALLEL batches, not sequentially.
 > **Batch 1** (single message, all in parallel): calls 1-3 below.
 > **Batch 2** (single message, all in parallel): calls 4-5 below.
 > Do NOT wait for Batch 1 results before starting Batch 2 unless results from Batch 1 determine Batch 2 parameters.
+
+**If RAG_TOOLS_AVAILABLE = false**: Skip Batch 1 and Batch 2 entirely. Write to `{SCRATCHPAD}/meta_buffer.md`: `## RAG: UNAVAILABLE — MCP tools failed probe. Phase 4b.5 will compensate.`
 
 **Batch 1** — call ALL of these in a single message:
 1. mcp__unified-vuln-db__get_common_vulnerabilities(protocol_type='{TYPE}')

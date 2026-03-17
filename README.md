@@ -40,21 +40,23 @@ pip install -r custom-mcp/farofino-mcp/requirements.txt
 # 4b. EVM users only — install slither MCP (requires Python 3.11+, solc)
 pip install -e custom-mcp/slither-mcp    # skip if not auditing Solidity
 
-# 5. Build the RAG vulnerability database (~5 min, requires internet)
+# 5. Configure MCP servers + API keys (BEFORE building RAG)
+cp mcp.json.example mcp.json
+cp settings.json.example settings.json
+# Edit mcp.json — add your API keys (see Configuration below)
+# At minimum, get a free Solodit key: https://solodit.cyfrin.io
+# Then set it for the current shell:
+export SOLODIT_API_KEY=your_key_here     # needed for step 6
+
+# 6. Build the RAG vulnerability database (~5 min, requires internet)
+#    Without SOLODIT_API_KEY: only ~700 entries indexed (vs ~4000 with it)
 cd custom-mcp/unified-vuln-db
 python -m unified_vuln.indexer index -s solodit --max-pages 10
 python -m unified_vuln.indexer index -s defihacklabs
 python -m unified_vuln.indexer index -s immunefi
 cd ../..
 
-# 6. Configure MCP servers
-cp mcp.json.example mcp.json
-# Edit mcp.json — add your API keys (see Configuration below)
-
-# 7. Configure permissions
-cp settings.json.example settings.json
-
-# 8. Run (terminal wrapper with interactive UI)
+# 7. Run (terminal wrapper with interactive UI)
 python plamen.py
 # Or from Claude Code: /plamen
 # Or add ~/.claude to PATH and just type: plamen
@@ -445,27 +447,37 @@ pip install -r custom-mcp/farofino-mcp/requirements.txt
 pip install -e custom-mcp/slither-mcp
 ```
 
-### 3. Configure MCP servers
+### 3. Configure MCP servers and API keys
 
 ```bash
 cp mcp.json.example mcp.json
-```
-
-Edit `mcp.json` with your paths and API keys. See [Configuration](#configuration).
-
-### 4. Configure permissions
-
-```bash
 cp settings.json.example settings.json
 ```
 
-The default `settings.json.example` auto-approves all tool calls. Review and adjust if desired.
+Edit `mcp.json` with your API keys. See [Configuration](#configuration). At minimum, get a free [Solodit API key](https://solodit.cyfrin.io) — it's needed to index the largest RAG data source (3400+ findings).
 
-### 5. Build the RAG database
+The default `settings.json.example` auto-approves all tool calls required for autonomous auditing. **Critical permissions** — removing any of these will break the pipeline:
 
-See [Building the RAG Database](#building-the-rag-database).
+| Permission | Why Required |
+|-----------|-------------|
+| `Agent(*)` | Spawns all subagents (depth, scanner, verifier, chain analysis). **Without this, the pipeline silently fails.** |
+| `Bash(*)` | Runs `forge build/test`, `cargo test`, `aptos move test`, etc. |
+| `Read(*)`, `Write(*)`, `Edit(*)` | Reads source code, writes PoC tests, edits scratchpad artifacts |
+| `mcp__*` | All MCP server tool calls (Slither, RAG, Solodit, Foundry, etc.) |
 
-### 6. Verify installation
+The deny list blocks destructive operations (`rm -rf`, `sudo`, force push). Review and adjust if desired.
+
+### 4. Build the RAG database
+
+Set your Solodit key first, then build:
+
+```bash
+export SOLODIT_API_KEY=your_key_here
+```
+
+See [Building the RAG Database](#building-the-rag-database) for full instructions.
+
+### 5. Verify installation
 
 ```bash
 python plamen.py
@@ -525,12 +537,15 @@ The example below shows a subset. Copy `mcp.json.example` for the full 9-server 
 
 | Key | Where to Get | Cost | Used For |
 |-----|-------------|------|----------|
+| Solodit | [solodit.cyfrin.io](https://solodit.cyfrin.io) | Free | RAG database indexing (3400+ findings) + live search |
 | Etherscan | [etherscan.io/apis](https://etherscan.io/apis) | Free | Contract ABI verification |
-| Tavily | [tavily.com](https://tavily.com) | Free tier | Fork ancestry web search |
+| Tavily | [tavily.com](https://tavily.com) | Free tier | Fork ancestry web search, RAG fallback |
 | Helius | [helius.dev](https://helius.dev) | Free tier | Solana on-chain data |
 | RPC URL | Alchemy, Infura, or public | Free/Paid | Fork testing |
 
 All keys are optional. The pipeline degrades gracefully — missing keys mean reduced coverage, not failure. You can leave `YOUR_*` placeholders in `mcp.json` and the pipeline will skip those services.
+
+> **Recommended**: Get the free Solodit API key — it provides 3400+ indexed findings vs ~700 without it. The Tavily key is also recommended as the WebSearch fallback when RAG MCP tools are slow on first use.
 
 ---
 
@@ -574,6 +589,10 @@ python -m unified_vuln.indexer clear
 ```
 
 The `data/` directory (ChromaDB, caches) is gitignored. Each user builds their own database.
+
+### Cold start note
+
+The first MCP tool call in each Claude Code session loads the ChromaDB database and sentence-transformers embedding model into memory. This can take 1-5 minutes depending on your hardware. Subsequent calls are instant. The pipeline handles this automatically — the recon agent's probe-first pattern detects slow MCP responses and falls back to WebSearch (Tavily) or code-level analysis.
 
 ---
 

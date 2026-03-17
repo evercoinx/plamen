@@ -163,7 +163,7 @@ def _box_row(w, bx: str, W: int, content: str, right: str = ""):
 
 def _probe_rag_db() -> int:
     """Return the number of entries in the RAG vulnerability database, or -1 if not found."""
-    db_path = os.path.expanduser("~/.claude/custom-mcp/unified-vuln-db/data/chroma_db/chroma.sqlite3")
+    db_path = os.path.expanduser("~/.claude/unified-vuln-db/data/chroma_db/chroma.sqlite3")
     if not os.path.isfile(db_path):
         return -1
     try:
@@ -676,6 +676,13 @@ def _build_rag_db(w):
         return False
 
     py = _python_bin()
+
+    # Check for Solodit API key — needed for the largest data source
+    if not os.environ.get("SOLODIT_API_KEY", "").strip():
+        w(f"  {_C_ORANGE}Note: SOLODIT_API_KEY not set — Solodit indexing will be skipped{_RST}\n")
+        w(f"  {_C_GRAY}Get a free key at https://solodit.cyfrin.io{_RST}\n")
+        w(f"  {_C_GRAY}Set it: export SOLODIT_API_KEY=your_key_here{_RST}\n\n")
+
     steps = [
         ("Solodit — live API",       "~2 min",
          f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s solodit --max-pages 10'),

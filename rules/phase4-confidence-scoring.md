@@ -147,13 +147,21 @@ Each finding card sent to iteration 2+ agents contains ONLY:
 
 > **Trigger**: Always, after depth loop exits (Phase 4b DONE) and before confidence scoring.
 > **Purpose**: Ensures every finding gets RAG validation as a PIPELINE STAGE, not an optional agent tool call.
-> **Model**: haiku (mechanical — iterate findings, call tools, record results)
+> **Model**: sonnet (haiku rejects unified-vuln-db MCP tool schemas containing oneOf/allOf — see v1.0.1 fix)
 > **Budget**: 1 agent (not counted against depth budget)
+
+### Pre-check: RAG_TOOLS_AVAILABLE flag
+
+Before spawning, the orchestrator reads `{SCRATCHPAD}/build_status.md` for `RAG_TOOLS_AVAILABLE`. This flag is set by the recon agent's unified-vuln-db probe (Phase 1).
+
+- If `RAG_TOOLS_AVAILABLE = true` → spawn RAG sweep agent normally
+- If `RAG_TOOLS_AVAILABLE = false` → spawn RAG sweep agent with **web search fallback mode** (see fallback chain below)
+- If flag is missing (recon probe was skipped) → assume `true`, let the agent handle failures via its fallback chain
 
 ### Orchestrator spawns:
 
 ```
-Task(subagent_type="general-purpose", model="haiku", prompt="
+Task(subagent_type="general-purpose", model="sonnet", prompt="
 You are the RAG Validation Sweep Agent.
 
 ## Your Task
@@ -164,17 +172,30 @@ For EVERY finding in {SCRATCHPAD}/findings_inventory.md:
 
 If a tool call fails, record [RAG: TOOL_ERROR] for that finding — do NOT silently skip.
 
-## Fallback Chain (if search_solodit_live fails)
+## Fallback Chain (if MCP tools fail)
+If validate_hypothesis or search_solodit_live fails (API error, schema error, timeout):
 1. Try get_similar_findings(pattern='{finding description}')
-2. If no results: try get_common_vulnerabilities(category='{vulnerability class}')
-3. If all fail: record [RAG: ALL_TOOLS_FAILED] and score = 0.3
+2. If that also fails: try get_common_vulnerabilities(category='{vulnerability class}')
+3. If ALL MCP tools fail: use WebSearch fallback — search 'site:solodit.xyz {vulnerability class} {key term}' for each finding and extract match count + relevance
+4. If WebSearch also fails: record [RAG: ALL_TOOLS_FAILED] and score = 0.3
+
+**IMPORTANT**: If the FIRST MCP call fails with a schema/API error, assume ALL MCP calls will fail. Switch immediately to WebSearch fallback for remaining findings instead of retrying each one. This prevents N×timeout delays.
 
 ## Output
 Write to {SCRATCHPAD}/rag_validation.md:
 | Finding ID | validate_hypothesis Score | solodit_live Matches | Final RAG Score | Notes |
 
-Return: 'DONE: {N} findings validated, {E} tool errors'
+Return: 'DONE: {N} findings validated, {E} tool errors, fallback={MCP|WEB|NONE}'
 ")
+```
+
+### Retry on agent failure (orchestrator inline)
+
+If the RAG sweep agent itself fails (API error, crash, 0 output):
+1. **Do NOT retry with the same model** — the failure is likely schema-level, not transient
+2. Log: `"RAG sweep failed: {error}. Writing floor scores."`
+3. Write `{SCRATCHPAD}/rag_validation.md` with 0.3 floor for all findings
+4. Continue to confidence scoring — the floor score preserves pipeline progress
 ```
 
 The scoring agent reads `rag_validation.md` for Axis 4 instead of checking individual agent outputs.
