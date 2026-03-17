@@ -75,12 +75,12 @@ AskUserQuestion(questions=[{
     {
       label: "Light (Pro plan)",
       description: "Lightweight audit — all Sonnet agents, fits Pro rate limits",
-      preview: "~15-18 agents (all Sonnet/Haiku — no Opus)\n\nPipeline:\n  Recon (2) → Breadth (2-3) → Inventory\n  → Depth (4 merged) → Chain (1)\n  → Verify ALL Medium+ → Report (2)\n\nSkips:\n  · RAG meta-buffer + fork ancestry\n  · Semantic invariants (state consistency\n    bugs harder to detect — use Core for\n    DeFi protocols with complex state)\n  · Niche agents\n  · Confidence scoring + RAG Sweep\n  · Invariant/Medusa fuzz\n\nBest for: Pro plan, codebases < 3000 lines"
+      preview: "~15-18 agents (all Sonnet/Haiku — no Opus)\n\nPipeline:\n  Recon (2) → Breadth (2-3) → Inventory\n  → Depth (4 merged) → Chain (1)\n  → Verify Medium+ → Report ALL (2)\n\nReports all severities. PoC verification targets Medium+.\n\nSkips:\n  · RAG meta-buffer + fork ancestry\n  · Semantic invariants (state consistency\n    bugs harder to detect — use Core for\n    DeFi protocols with complex state)\n  · Niche agents\n  · Confidence scoring + RAG Sweep\n  · Invariant/Medusa fuzz\n\nBest for: Pro plan, codebases < 3000 lines"
     },
     {
       label: "Core (Recommended)",
-      description: "Standard audit — verifies all Medium+ findings",
-      preview: "~25-45 agents (requires Max plan)\n\nPipeline:\n  Breadth → Inventory → Depth (iter 1)\n  → Chains → Verify ALL Medium+\n\nSkips:\n  · Breadth re-scan (3b/3c)\n  · Depth iterations 2-3\n  · Design stress testing\n  · Invariant fuzz campaign\n  · Fuzz variants in verification\n\nScoring: 2-axis (Evidence + Analysis Quality)"
+      description: "Standard audit — reports all severities, PoC-verifies Medium+",
+      preview: "~25-45 agents (requires Max plan)\n\nPipeline:\n  Breadth → Inventory → Depth (iter 1)\n  → Chains → Verify Medium+ → Report ALL\n\nReports all severities (Low/Info included).\nPoC verification targets Medium+ findings.\n\nSkips:\n  · Breadth re-scan (3b/3c)\n  · Depth iterations 2-3\n  · Design stress testing\n  · Invariant fuzz campaign\n  · Fuzz variants in verification\n\nScoring: 2-axis (Evidence + Analysis Quality)"
     },
     {
       label: "Thorough",
@@ -297,7 +297,7 @@ Detect the target language before anything else:
 | **Phase 4a.5** | Semantic Invariant Agent | Write-sites + invariants | Skip | Pass 1 | Pass 1+2 |
 | **Phase 4b** | Depth Loop | Deep analysis | 4 merged sonnet, no scoring | 8+ agents, 2-axis scoring | 8+ agents, 4-axis scoring |
 | **Phase 4c** | Chain Analysis | Hypotheses + chains | 1 sonnet (merged) | 2 agents | 2 agents + iter 2 |
-| **Phase 5** | Verifiers | PoC tests | ALL Medium+ (sonnet) | ALL Medium+ | ALL severities + fuzz |
+| **Phase 5** | Verifiers | PoC tests (Medium+) | Medium+ (sonnet) | Medium+ | ALL severities + fuzz |
 | **Phase 5.1** | Skeptic-Judge | Adversarial re-verify | Skip | Skip | HIGH/CRIT |
 | **Phase 6** | Report pipeline | AUDIT_REPORT.md | 2 agents (sonnet+haiku) | 5 agents | 5 agents |
 

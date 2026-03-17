@@ -162,7 +162,7 @@ The workflow is fully autonomous — provide a smart contract project and option
 | RAG Sweep | Skip | 1 haiku | 1 haiku |
 | Invariant / Medusa fuzz | Skip | Skip | Yes (EVM) |
 | Chain analysis | 1 sonnet (merged) | 2 agents | 2 agents + iteration 2 |
-| Verification | ALL Medium+ (sonnet) | ALL Medium+ | ALL severities + fuzz |
+| Verification (PoC) | Medium+ (sonnet) | Medium+ | ALL severities + fuzz |
 | Skeptic-Judge | Skip | Skip | HIGH/CRIT |
 | Report | 2 agents | 5 agents | 5 agents |
 | Agent count | **~15-18** | ~25-45 | ~35-95 |
@@ -603,8 +603,8 @@ This opens an interactive UI with arrow-key menus:
 
 > Select audit mode:
     Light      15-18 agents | Pro plan  | best under 3k LOC
-    Core       25-45 agents | Max plan  | ALL Medium+
-    Thorough   35-95 agents | Max plan  | ALL severities
+    Core       25-45 agents | Max plan  | ALL severities
+    Thorough   35-95 agents | Max plan  | ALL severities + fuzz
     ──────────
     Compare    variable     | DELTA report
     Setup      install tools + build RAG DB
