@@ -738,9 +738,122 @@ def _quick_check_required() -> bool:
     return True
 
 
+def _setup_python_deps(w):
+    """Install all Python dependencies if missing. Returns True if all installed."""
+    base = os.path.expanduser("~/.claude")
+    py = _python_bin()
+    req_files = [
+        ("Plamen wrapper", "requirements.txt"),
+        ("unified-vuln-db", "custom-mcp/unified-vuln-db/requirements.txt"),
+        ("solodit-scraper", "custom-mcp/solodit-scraper/requirements.txt"),
+        ("defihacklabs-rag", "custom-mcp/defihacklabs-rag/requirements.txt"),
+        ("farofino-mcp", "custom-mcp/farofino-mcp/requirements.txt"),
+    ]
+    editable_pkgs = [
+        ("solana-fender", "custom-mcp/solana-fender"),
+        ("slither-mcp (EVM)", "custom-mcp/slither-mcp"),
+    ]
+
+    # Check if core deps already installed
+    try:
+        import rich, InquirerPy  # noqa: F401
+        core_ok = True
+    except ImportError:
+        core_ok = False
+
+    if core_ok:
+        # Quick-check: try importing a deep dep
+        try:
+            import torch, chromadb  # noqa: F401
+            deep_ok = True
+        except ImportError:
+            deep_ok = False
+    else:
+        deep_ok = False
+
+    if core_ok and deep_ok:
+        w(f"  {_C_GREEN}Python dependencies already installed{_RST}\n\n")
+        return True
+
+    w(f"  {_C_ORANGE}>{_RST} {_C_WHITE}Installing Python dependencies...{_RST}"
+      f"  {_C_DARK_GRAY}~2-5 min (PyTorch is ~2GB){_RST}\n\n")
+    sys.stdout.flush()
+
+    all_ok = True
+    for label, req in req_files:
+        path = os.path.join(base, req)
+        if not os.path.isfile(path):
+            w(f"  {_C_DARK_GRAY}  skipping {label} — {req} not found{_RST}\n")
+            continue
+        w(f"  {_C_ORANGE}>{_RST} {label}\n")
+        sys.stdout.flush()
+        user_flag = " --user" if sys.platform != "win32" else ""
+        if not _run_install_cmd(f'{py} -m pip install -r "{path}"{user_flag}', retries=1):
+            w(f"  {_C_RED}  failed{_RST}\n")
+            all_ok = False
+        else:
+            w(f"  {_C_GREEN}  done{_RST}\n")
+
+    for label, pkg in editable_pkgs:
+        path = os.path.join(base, pkg)
+        if not os.path.isdir(path):
+            w(f"  {_C_DARK_GRAY}  skipping {label} — not found{_RST}\n")
+            continue
+        w(f"  {_C_ORANGE}>{_RST} {label}\n")
+        sys.stdout.flush()
+        if not _run_install_cmd(f'{py} -m pip install -e "{path}"', retries=1):
+            w(f"  {_C_RED}  failed (non-critical){_RST}\n")
+        else:
+            w(f"  {_C_GREEN}  done{_RST}\n")
+
+    w("\n")
+    return all_ok
+
+
+def _setup_config_files(w):
+    """Copy mcp.json.example and settings.json.example if the real files don't exist."""
+    base = os.path.expanduser("~/.claude")
+    configs = [
+        ("mcp.json", "mcp.json.example"),
+        ("settings.json", "settings.json.example"),
+    ]
+    for target, source in configs:
+        target_path = os.path.join(base, target)
+        source_path = os.path.join(base, source)
+        if os.path.isfile(target_path):
+            w(f"  {_C_GREEN}{target} already exists{_RST}\n")
+        elif os.path.isfile(source_path):
+            import shutil
+            shutil.copy2(source_path, target_path)
+            w(f"  {_C_GREEN}{target} created from {source}{_RST}\n")
+            if target == "mcp.json":
+                w(f"  {_C_GRAY}  Edit ~/.claude/mcp.json to add your API keys{_RST}\n")
+                w(f"  {_C_GRAY}  Free keys: solodit.cyfrin.io, etherscan.io/apis, tavily.com{_RST}\n")
+        else:
+            w(f"  {_C_ORANGE}{source} not found — skipping {target}{_RST}\n")
+    w("\n")
+
+
 def run_setup():
-    """Full setup flow: show toolchain status → select what to install → run → re-check."""
+    """Full setup flow: Python deps → config files → toolchain → RAG → re-check."""
     w = sys.stdout.write
+
+    # ── Submodules ─────────────────────────────────────────────
+    base = os.path.expanduser("~/.claude")
+    slither_dir = os.path.join(base, "custom-mcp", "slither-mcp")
+    if os.path.isdir(slither_dir) and not os.listdir(slither_dir):
+        w(f"  {_C_ORANGE}>{_RST} Initializing git submodules...\n")
+        sys.stdout.flush()
+        _run_install_cmd(f'cd "{base}" && git submodule update --init --recursive', retries=1)
+        w("\n")
+
+    # ── Python dependencies ───────────────────────────────────
+    console.print(Rule(title="Python Dependencies", style="color(238)"))
+    _setup_python_deps(w)
+
+    # ── Config files ──────────────────────────────────────────
+    console.print(Rule(title="Configuration", style="color(238)"))
+    _setup_config_files(w)
 
     # ── Show toolchain box ──────────────────────────────────
     check_dependencies()
