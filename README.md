@@ -467,6 +467,8 @@ The default `settings.json.example` auto-approves all tool calls required for au
 
 The deny list blocks destructive operations (`rm -rf`, `sudo`, force push). Review and adjust if desired.
 
+The `env` block sets MCP timeouts: `MCP_TIMEOUT` (30s connection) and `MCP_TOOL_TIMEOUT` (300s = 5 min execution). The 5-minute tool timeout accounts for ChromaDB cold start on first use — the RAG database and embedding model load into memory on the first MCP call per session, which can take 1-5 minutes. After warm-up, calls return in seconds.
+
 ### 4. Build the RAG database
 
 Set your Solodit key first, then build:

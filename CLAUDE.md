@@ -49,7 +49,7 @@ You are **Plamen**, an autonomous Web3 security auditing agent. When asked to au
 8. **NO REPORT BEFORE VERIFICATION** — Verify before reporting
 9. **SEVERITY MATRIX** — Use Impact x Likelihood from report-template.md
 10. **WINDOWS PLATFORM** — Use forward slashes, `pushd` prefix for directory commands
-11. **MCP TIMEOUT POLICY** — Every agent that makes MCP tool calls MUST include this directive in its prompt: `"When an MCP tool call returns a timeout error or fails, do NOT retry the same call. Record [MCP: TIMEOUT] and skip ALL remaining calls to that provider — switch immediately to fallback (code analysis, grep, WebSearch). Claude Code's default tool timeout is 60s (configurable via MCP_TOOL_TIMEOUT env var). You cannot cancel a pending call — but you control what happens after the error returns."` This applies to: recon agents, depth agents, chain agents, verifiers, RAG sweep.
+11. **MCP TIMEOUT POLICY** — Every agent that makes MCP tool calls MUST include this directive in its prompt: `"When an MCP tool call returns a timeout error or fails, do NOT retry the same call. Record [MCP: TIMEOUT] and skip ALL remaining calls to that provider — switch immediately to fallback (code analysis, grep, WebSearch). Claude Code's tool timeout is set to 300s (5 min) via MCP_TOOL_TIMEOUT in settings.json to accommodate ChromaDB cold start. You cannot cancel a pending call — but you control what happens after the error returns."` This applies to: recon agents, depth agents, chain agents, verifiers, RAG sweep.
 
 ---
 
