@@ -28,10 +28,12 @@ Or paste the contents of [`SETUP.md`](SETUP.md) into Claude Code. It installs al
 ### Option B: Manual
 
 <details>
-<summary>Click to expand manual setup commands</summary>
+<summary>Click to expand manual setup commands (~5-10 min)</summary>
+
+> `plamen setup` does all of this automatically. These commands are for reference or if you prefer manual control.
 
 ```bash
-# Install Python deps (~2GB download for PyTorch embeddings)
+# 1. Python deps (~2GB download — PyTorch for embeddings)
 pip install -r requirements.txt
 pip install -r custom-mcp/unified-vuln-db/requirements.txt
 pip install -r custom-mcp/solodit-scraper/requirements.txt
@@ -40,20 +42,28 @@ pip install -e custom-mcp/solana-fender
 pip install -r custom-mcp/farofino-mcp/requirements.txt
 pip install -e custom-mcp/slither-mcp              # EVM only (needs Python 3.11+)
 
-# Configure MCP servers
+# 2. Configure MCP servers
 cp mcp.json.example mcp.json                       # edit with your API keys
 cp settings.json.example settings.json
+# Get free keys: solodit.cyfrin.io, etherscan.io/apis, tavily.com
 
-# Build RAG database (~5 min)
+# 3. Build RAG database (~5 min)
 export SOLODIT_API_KEY=your_key_here                # free at solodit.cyfrin.io
 cd custom-mcp/unified-vuln-db
 python -m unified_vuln.indexer index -s solodit --max-pages 10
 python -m unified_vuln.indexer index -s defihacklabs
 python -m unified_vuln.indexer index -s immunefi
 cd ../..
+
+# 4. Chain tools (install what you need)
+curl -L https://foundry.paradigm.xyz | bash && foundryup          # EVM
+pip install slither-analyzer                                       # EVM static analysis
+# See docs/setup.md for Solana, Aptos, Sui, Medusa, Trident
 ```
 
-See [docs/setup.md](docs/setup.md) for the full guide with per-language prerequisites.
+> **Windows + Solana**: Enable Developer Mode (Settings > System > For Developers) and install OpenSSL (`winget install ShiningLight.OpenSSL.Dev`) before building. See [docs/dependencies.md](docs/dependencies.md).
+
+See [docs/setup.md](docs/setup.md) for the full guide with all per-language prerequisites.
 
 </details>
 
