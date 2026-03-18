@@ -5,6 +5,36 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-03-19
+
+### Improved
+- **EVM fuzzing**: Invariant fuzz and Medusa campaigns now derive invariants from `design_context.md` (protocol economics) and `findings_inventory.md` (bug targets), not just structural write-site analysis
+- **No artificial caps**: Removed max 8/5 invariant limits and max 15 handler limit -- fuzz execution is zero token cost regardless of count
+- **Lifecycle sequence handlers**: Mandatory multi-step handlers (create->repay->close) that construct realistic state random individual calls cannot reach
+- **Realistic value bounds**: Handlers use protocol-actual decimals and parameter ranges from `constraint_variables.md`
+- **Campaign config**: 256 runs x depth 25 (was 64x15), 5 mandatory invariant categories with coverage table in output
+- **README restructured**: 865 lines -> 134 lines. Follows Ruff/Foundry landing page pattern
+- **Documentation**: New `docs/` directory with 7 focused guides (setup, architecture, audit modes, MCP servers, usage, internals, repository structure)
+
+## [1.0.1] - 2026-03-19
+
+### Added
+- **Rule 12**: THOROUGH MODE COMPLETENESS -- mandatory checklist of 13 non-negotiable Thorough steps with violation logging
+- **Rule 13**: NO SPEED OPTIMIZATION IN THOROUGH MODE -- blocks weasel phrases that skip steps
+- **Pre-Depth checkpoint**: Assertions for invariant fuzz and Medusa campaign completion
+- **Post-Depth checkpoint**: Assertions for confidence scores, adaptive loop log, manifest, iteration 2 enforcement
+- **Phase 4b.5 inline**: RAG Validation Sweep explicitly marked MANDATORY for Core/Thorough
+- **Skeptic-Judge enforcement**: Positive statement that Thorough HIGH/CRIT must run skeptic
+
+### Fixed
+- Design Stress Testing now unconditional (1 reserved slot, not budget-conditional)
+- AUDIT MODES table updated to match Rule 12 (DST: "1 reserved slot, UNCONDITIONAL")
+- `violations.md` and `checkpoint_postdepth.md` registered as scratchpad artifacts
+- Removed internal planning document (`RAG_OVERHAUL_STATUS.md`) from public repo
+
+### Changed
+- GitHub repo topics added: web3-security, smart-contract-audit, claude-code, solidity, solana, aptos, sui, ai-agent, security-audit, ethereum
+
 ## [1.0.0] - 2026-03-14
 
 ### Initial public release
