@@ -81,7 +81,7 @@ See [docs/setup.md](docs/setup.md) for the full guide with all per-language prer
 plamen                    # terminal wrapper with interactive wizard
 ```
 
-Or inside Claude Code: `/plamen core`
+Or inside Claude Code: `/plamen`
 
 ---
 
