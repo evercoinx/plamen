@@ -44,11 +44,13 @@ ADAPTIVE_DEPTH_LOOP(findings_inventory):
   spawn semantic_invariant_agent(model="sonnet", SCRATCHPAD, state_variables, function_list, source_files)
   await semantic_invariant_agent  // MUST complete before depth agents spawn (they consume its output)
 
-  // ═══ INVARIANT FUZZ CAMPAIGN — SKIPPED (Solana) ═══
-  // Solana uses Trident (if available) or proptest during Phase 5 verification fuzz variants.
-  // Trident requires Anchor + trident-cli + honggfuzz; availability recorded in build_status.md.
-  // No standalone fuzz agent spawned here (unlike EVM's Foundry invariant campaign).
-  // Zero budget impact. See phase5-poc-execution.md for Trident/proptest guidance.
+  // ═══ INVARIANT FUZZ CAMPAIGN (Solana/Trident) ═══
+  // Read template: ~/.claude/prompts/solana/phase4b-invariant-fuzz.md
+  // Trigger: semantic_invariants.md exists AND trident_available == true in build_status.md
+  // If trident_available == false → skip (proptest fallback handled in Phase 5)
+  if trident_available AND file_exists(SCRATCHPAD + "/semantic_invariants.md"):
+    spawn invariant_fuzz_agent(model="sonnet", SCRATCHPAD, PROJECT_ROOT)
+    await invariant_fuzz_agent  // 5-min timeout built into template
 
   // ═══ ITERATION 1: Full coverage (ALWAYS) ═══
   // Read template_recommendations.md for REQUIRED niche agents

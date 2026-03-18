@@ -483,21 +483,35 @@ impl FuzzInstruction {
 }
 ```
 
-### Step 3: Run Campaign
+### Step 3: Run Campaign (v0.11+ — no honggfuzz needed)
 ```bash
-# Short campaign (verification context — 5000 iterations, 10s timeout per case)
-HFUZZ_RUN_ARGS="-t 10 -N 5000 -Q" trident fuzz run fuzz_0
+# Windows: set OpenSSL env vars if needed (auto-detect from common install paths)
+# On Linux/macOS this is not needed (system OpenSSL is used)
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]] && [ -z "$OPENSSL_DIR" ]; then
+  for base in "/c/Program Files/OpenSSL-Win64" "/c/Program Files/OpenSSL"; do
+    if [ -d "$base/include/openssl" ]; then
+      export OPENSSL_DIR="$base" OPENSSL_LIB_DIR="$base/lib/VC/x64/MD" OPENSSL_INCLUDE_DIR="$base/include"
+      break
+    fi
+  done
+fi
+# Run from trident-tests/ directory
+cd trident-tests && trident fuzz run fuzz_0
+# With detailed logging:
+TRIDENT_LOG=1 trident fuzz run fuzz_0
 ```
 
-### Step 4: Debug Crashes
+### Step 4: Check for Violations
 ```bash
-# If a crash file is produced:
-trident fuzz run-debug fuzz_0 trident-tests/fuzz_tests/fuzzing/fuzz_0/cr1.fuzz
+# Trident v0.11+ writes violations to .fuzz-artifacts/
+ls -la trident-tests/.fuzz-artifacts/ 2>/dev/null
+# Re-run with specific seed for reproduction:
+trident fuzz run fuzz_0 <SEED>
 ```
 
 ### Evidence Tagging
-- Trident crash with reproducible sequence -> `[POC-PASS]` (mechanical proof)
-- Trident campaign completes with no crashes -> supports `[POC-FAIL]` for the fuzz variant
+- Trident violation with reproducible seed -> `[POC-PASS]` (mechanical proof)
+- Trident campaign completes with no violations -> supports `[POC-FAIL]` for the fuzz variant
 - Evidence tag: `[TRIDENT-FUZZ]` (subtype of `[CODE]`) — valid for both CONFIRMED and REFUTED
 
 ---

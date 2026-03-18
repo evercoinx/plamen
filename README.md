@@ -107,6 +107,7 @@ See [docs/setup.md](docs/setup.md) for the full prerequisite list and installati
 | Topic | Link |
 |-------|------|
 | Full setup guide | [docs/setup.md](docs/setup.md) |
+| Platform dependencies | [docs/dependencies.md](docs/dependencies.md) |
 | Audit mode comparison | [docs/audit-modes.md](docs/audit-modes.md) |
 | Pipeline architecture | [docs/architecture.md](docs/architecture.md) |
 | MCP servers & API keys | [docs/mcp-servers.md](docs/mcp-servers.md) |

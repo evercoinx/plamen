@@ -284,6 +284,11 @@ If `relay_staleness > acceptable_threshold` at worst case, price is stale. Apply
 
 ---
 
+### Denylist Enforcement Lag
+- **Denylist enforcement lag**: For cross-chain denylist/blocklist updates, check the window between message receipt and enforcement. Can transactions from denylisted addresses execute during this window? Are in-flight operations for denylisted addresses cancelled or allowed to complete?
+
+---
+
 ## Step Execution Checklist (MANDATORY)
 
 | Step | Required | Completed? | Notes |

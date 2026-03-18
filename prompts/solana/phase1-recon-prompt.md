@@ -243,12 +243,12 @@ SCRATCHPAD: {scratchpad}
    - `solana --version` — if missing, document as TOOLCHAIN WARNING
    - `anchor --version` (if Anchor.toml present) — if missing, document as TOOLCHAIN WARNING
    - `rustup target list --installed | grep -E 'bpf|sbf'` — verify BPF/SBF target installed
-   - `trident --version` (if Anchor.toml present) — record availability for Phase 5 fuzz variant selection
-   - `honggfuzz --version` or check `which honggfuzz` — required by Trident
+   - `trident --version` (if Anchor.toml present) — record availability for Phase 4b/5 fuzz campaigns. Trident v0.11+ uses built-in TridentSVM (no honggfuzz/AFL needed, works on Linux/macOS/Windows)
    If any required tool is missing, document in build_status.md and attempt build anyway (may fail gracefully).
 1c. **Dependency Recovery** (before first build attempt):
    - Run `git submodule update --init --recursive`
    - Run `cargo fetch` to pre-download crate dependencies
+1d. **Windows symlink check** (Windows only): If build fails with "A required privilege is not held by the client" (error 1314), this is a symlink privilege issue. Document in build_status.md as `windows_symlink_error: true` and add note: "Enable Windows Developer Mode (Settings > System > For Developers) or run in admin terminal, then retry." Attempt build once more after documenting.
 2. Build: Anchor (`anchor build`) or native (`cargo build-sbf`) or plain (`cargo build`)
 3. Run `cargo clippy -- -W clippy::all` for security-relevant lint warnings
 4. Run `cargo audit` for known vulnerable dependencies (if cargo-audit installed)
@@ -265,7 +265,7 @@ Write to {SCRATCHPAD}/build_status.md:
 - **overflow-checks (release)**: true/false/MISSING
 - **Clippy Warnings (security-relevant)**: {list}
 - **Cargo Audit Results**: {vulnerabilities or clean}
-- **trident_available**: true/false (Anchor + trident-cli + honggfuzz)
+- **trident_available**: true/false (Anchor + trident-cli. v0.11+ requires no honggfuzz/AFL)
 - **proptest_available**: true/false (check Cargo.toml dev-dependencies)
 - **FENDER_AVAILABLE**: {true/false} (set in TASK 2)
 ```

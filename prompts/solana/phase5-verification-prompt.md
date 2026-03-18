@@ -79,7 +79,7 @@ Before marking ANY finding FALSE_POSITIVE, check: does the same code location ha
 
 Follow `phase5-poc-execution.md`. Compile and run every PoC — a written test with no execution output is not evidence.
 
-**Solana commands**: `cargo build-sbf` or `anchor build` (compile), `cargo test test_{hypothesis_id} -- --nocapture` (run). For fuzz variants: check `build_status.md` for `trident_available`. If true (Anchor project): use Trident (`trident fuzz run fuzz_0`). If false: use proptest with bounded inputs or boundary-value parameterized tests. See `phase5-poc-execution.md` for templates and Trident commands.
+**Solana commands**: `cargo build-sbf` or `anchor build` (compile), `cargo test test_{hypothesis_id} -- --nocapture` (run). For fuzz variants: check `build_status.md` for `trident_available`. If true (Anchor project): use Trident v0.11+ (`cd trident-tests && trident fuzz run fuzz_0` — no honggfuzz needed). If false: use proptest with bounded inputs or boundary-value parameterized tests. See `phase5-poc-execution.md` for templates and Trident commands.
 
 ## ANTI-HALLUCINATION RULES
 

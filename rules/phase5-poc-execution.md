@@ -50,7 +50,7 @@ If execution was not attempted, explain why (no build environment, no test frame
 |----------|-------|------|------|
 | **EVM (Foundry)** | `forge build` | `forge test --match-test test_{ID} -vvv` | `forge test --match-test testFuzz_{ID} -vvv` (use `bound()` inputs) |
 | **EVM (Hardhat only)** | `npx hardhat compile` | `npx hardhat test --grep "{ID}"` | Skip fuzz variant (no native invariant fuzzer) |
-| **Solana (Anchor)** | `cargo build-sbf` or `anchor build` | `cargo test test_{id} -- --nocapture` | Trident (preferred): `trident fuzz run-hfuzz fuzz_0`; fallback: proptest with bounded inputs |
+| **Solana (Anchor)** | `cargo build-sbf` or `anchor build` | `cargo test test_{id} -- --nocapture` | Trident (preferred): `cd trident-tests && trident fuzz run fuzz_0`; fallback: proptest with bounded inputs |
 | **Solana (native)** | `cargo build-sbf` | `cargo test test_{id} -- --nocapture` | proptest with bounded inputs, or boundary-value parameterized tests |
 | **Aptos** | `aptos move compile` | `aptos move test --filter test_{id}` | No built-in fuzzer — write boundary-value parameterized tests (`#[test]` with multiple concrete value sets covering min/mid/max) |
 | **Sui** | `sui move build` | `sui move test --filter test_{id}` | No built-in fuzzer — write boundary-value parameterized tests (`#[test]` with multiple concrete value sets covering min/mid/max) |
@@ -91,7 +91,7 @@ If the variant passes → report the working variant. After 2+ variant failures 
 
 ### Solana — Trident (preferred) or proptest (fallback)
 
-**Trident** is a dedicated Solana fuzzing framework by Ackee Blockchain Security. It uses Honggfuzz under the hood and has found Critical bugs in Kamino, Marinade, and Wormhole.
+**Trident** is a dedicated Solana fuzzing framework by Ackee Blockchain Security. v0.11+ uses built-in TridentSVM (no honggfuzz/AFL required — works on Linux, macOS, and Windows). Has found Critical bugs in Kamino, Marinade, and Wormhole.
 
 **Detection**: Check `build_status.md` for `trident_available: true/false` (set by recon TASK 1).
 
@@ -99,12 +99,14 @@ If the variant passes → report the working variant. After 2+ variant failures 
 ```bash
 # Initialize (if not already done — creates trident-tests/ scaffolding)
 trident init
-# Run fuzz target (default: fuzz_0)
-HFUZZ_RUN_ARGS="-t 10 -N 5000 -Q" trident fuzz run-hfuzz fuzz_0
-# Debug a crash file
-trident fuzz debug-hfuzz fuzz_0 trident-tests/fuzz_tests/fuzzing/fuzz_0/cr1.fuzz
+# Run fuzz target from trident-tests/ directory (v0.11+)
+cd trident-tests && trident fuzz run fuzz_0
+# Run with specific seed for reproducibility
+trident fuzz run fuzz_0 12345
+# Enable detailed logging
+TRIDENT_LOG=1 trident fuzz run fuzz_0
 ```
-Trident generates handler scaffolding from the program IDL. The verifier customizes the generated `fuzz_instructions.rs` to target the specific finding's instruction sequence, adds invariant checks, and runs the campaign.
+Trident generates handler scaffolding from the program IDL. The verifier customizes the generated `fuzz_instructions.rs` to target the specific finding's instruction sequence, adds invariant checks, and runs the campaign. Violations are written to `.fuzz-artifacts/`.
 
 **If Trident is NOT available** (native Solana program, or `trident-cli` not installed):
 Use proptest as fallback:

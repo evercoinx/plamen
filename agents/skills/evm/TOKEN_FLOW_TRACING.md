@@ -39,6 +39,10 @@ Where can tokens leave?
 For each exit: does the tracked balance decrease BEFORE or AFTER the actual transfer?
 For each transfer call: can the source address be underfunded at execution time? (funds deployed externally, locked, or lent out → transfer reverts)
 
+### 3b. Self-Transfer Accounting
+For each transfer function: can the sender and recipient be the same address?
+If YES: does a self-transfer update accounting state (fees credited, rewards claimed, snapshots updated, share ratios changed) without net token movement? Flag as FINDING.
+
 ## 4. Token Type Separation (Multi-Token Protocols)
 
 For protocols handling multiple token types:

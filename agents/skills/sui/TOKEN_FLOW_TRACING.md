@@ -58,6 +58,10 @@ Check for:
 - `balance::split` before state update -> can the function abort between split and update?
 - State update before `balance::split` -> can state be inconsistent if split aborts?
 
+### 3b. Self-Transfer Accounting
+For each transfer function: can the sender and recipient be the same address/object?
+If YES: does a self-transfer update accounting state (fees credited, rewards claimed, snapshots updated, share ratios changed) without net token movement? Flag as FINDING.
+
 ## 4. Balance Tracking and Desync Analysis
 
 For each token in the protocol:

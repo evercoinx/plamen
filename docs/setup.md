@@ -1,5 +1,7 @@
 # Setup Guide
 
+> For detailed per-platform installation, troubleshooting, and Trident/OpenSSL/Developer Mode requirements, see **[Platform Dependencies](dependencies.md)**.
+
 ## Prerequisites
 
 ### Required
@@ -31,9 +33,12 @@
 |------|---------|---------|
 | Solana CLI | Toolchain | [docs.anza.xyz](https://docs.anza.xyz/cli/install) |
 | Anchor | Build Anchor programs | `avm install latest && avm use latest` |
-| Trident | Stateful fuzzing | `cargo install trident-cli` |
+| Trident | Stateful fuzzing (v0.11+ — all platforms) | `cargo install trident-cli` |
+| OpenSSL | Required by Trident on Windows | `winget install ShiningLight.OpenSSL.Dev` |
 
-> **Windows**: Enable Developer Mode before building. See [SETUP.md](../SETUP.md) Step 5b.
+> **Windows users**: Two prerequisites before building Solana programs:
+> 1. **Developer Mode** — required for `cargo-build-sbf` symlinks. Settings > System > For Developers > toggle ON. See [SETUP.md](../SETUP.md) Step 5b.
+> 2. **OpenSSL** — required to compile Trident fuzz harness. Install via `winget install ShiningLight.OpenSSL.Dev`. The `plamen.py` wrapper auto-detects and sets `OPENSSL_DIR`/`OPENSSL_LIB_DIR`/`OPENSSL_INCLUDE_DIR`.
 
 </details>
 

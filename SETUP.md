@@ -77,6 +77,32 @@ python ~/.claude/plamen.py setup
 
 This shows the toolchain status box. If any optional tools are missing (Foundry, Solana CLI, etc.), the Setup menu can install them automatically.
 
+## Step 5b: Windows Users — Enable Developer Mode
+
+Solana's build tools (`cargo-build-sbf`, `anchor build`) create symlinks internally. On Windows, this requires Developer Mode or an admin terminal.
+
+**Option A — Enable Developer Mode** (recommended, one-time):
+1. Open Settings > System > For Developers
+2. Toggle "Developer Mode" ON
+
+**Option B — Admin PowerShell** (alternative):
+```powershell
+reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock /v AllowDevelopmentWithoutDevLicense /t REG_DWORD /d 1 /f
+```
+
+**Option C — Run terminal as Administrator** (per-session):
+Right-click your terminal → "Run as administrator"
+
+Without this, `anchor build` and `cargo-build-sbf` will fail with "A required privilege is not held by the client" (error 1314). This affects all Solana development on Windows, not just Plamen.
+
+Trident v0.11+ does NOT require honggfuzz or AFL — it uses its own TridentSVM engine and works on all platforms (Windows, macOS, Linux).
+
+**OpenSSL** (Windows only — required to compile Trident fuzz harness):
+```
+winget install ShiningLight.OpenSSL.Dev
+```
+The `plamen.py` wrapper auto-detects OpenSSL in standard locations (`C:\Program Files\OpenSSL-Win64`) and sets `OPENSSL_DIR`/`OPENSSL_LIB_DIR`/`OPENSSL_INCLUDE_DIR` automatically. If using `/plamen` directly in Claude Code (not via `plamen.py`), the fuzz agent should set these env vars before `trident fuzz run`.
+
 ## Step 6: Add to PATH (optional)
 
 So I can just type `plamen` from any directory:

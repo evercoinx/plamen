@@ -5,6 +5,33 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-03-19
+
+### Added
+- **Solana invariant fuzz campaign**: New `phase4b-invariant-fuzz.md` for Solana/Anchor — mirrors EVM v1.1.0 structure with protocol-derived invariants, finding-derived fuzz targets, lifecycle handlers, and 5 mandatory categories. Fills the EVM/Solana parity gap (was explicitly skipped in `phase4b-loop.md`)
+- **Trident API reference**: New `TRIDENT_API_REFERENCE.md` (v0.12.0) — prevents method signature hallucination with correct CLI commands, types, and patterns
+- **Lending/Liquidation injectable skill**: 247-line methodology covering health factor boundaries, interest accrual, liquidation mechanism safety, DoS vectors, bad debt socialization, collateral factor manipulation, asymmetric pause analysis
+- **DEX/Slippage injectable skill**: 134-line methodology covering slippage parameters, deadline enforcement, return value handling, fee tier assumptions, router approval safety
+- **Self-transfer accounting check**: Added to TOKEN_FLOW_TRACING in all 4 language trees — detects `sender == recipient` manipulating fees/rewards/snapshots
+- **Timestamp unit confusion check**: Added to TEMPORAL_PARAMETER_STALENESS for Sui (`clock::timestamp_ms` vs seconds) and Aptos (`now_seconds` vs `now_microseconds`)
+- **Denylist enforcement lag check**: Added to CROSS_CHAIN_TIMING for Sui and Aptos
+- **Invariant quality self-check**: Tautological/sensitivity/testability filter before generating fuzz code
+- **Scope selector**: Foundation/Integration/Temporal campaign scope based on protocol characteristics
+- **Non-triviality guards**: Prevents false confidence from broken fuzz setups (0% success rate detection)
+- **Platform dependencies guide**: New `docs/dependencies.md` with per-platform installation, troubleshooting, and Trident version compatibility matrix
+- **Windows Developer Mode check**: `plamen.py` auto-detects and warns if Developer Mode is OFF (required for Solana symlinks)
+- **OpenSSL auto-detection**: Fuzz templates inline-detect OpenSSL on Windows for Trident compilation
+- **Cost estimation in `/plamen`**: Launch confirmation with codebase size, agent count, token estimate, API cost, and plan usage % with color-coded warnings
+
+### Fixed
+- **Trident v0.12 commands**: Replaced all `run-hfuzz`/`debug-hfuzz`/`HFUZZ_RUN_ARGS` references with v0.11+ commands (`trident fuzz run fuzz_0`). Trident v0.11+ uses TridentSVM — no honggfuzz/AFL required
+- **Cross-platform Trident**: Documented and verified working on Windows (with Developer Mode + OpenSSL), macOS, and Linux
+- **Recon probe**: No longer checks for `honggfuzz --version` — checks `trident --version` only
+
+### Changed
+- Solana skills: 19 → 20 (added TRIDENT_API_REFERENCE)
+- Injectable skills: 5 → 7 (added LENDING_PROTOCOL_SECURITY, DEX_INTEGRATION_SECURITY)
+
 ## [1.0.2] - 2026-03-19
 
 ### Improved

@@ -41,6 +41,10 @@ Where can tokens leave?
 For each exit: does the tracked balance decrease BEFORE or AFTER the CPI transfer?
 For each transfer call: can the source account be underfunded at execution time? (funds deployed externally, locked, or lent out → transfer reverts)
 
+### 3b. Self-Transfer Accounting
+For each transfer instruction: can the source and destination token accounts belong to the same owner/authority, or be the same account?
+If YES: does a self-transfer update accounting state (fees credited, rewards claimed, snapshots updated, share ratios changed) without net token movement? Flag as FINDING. Note: this check targets accounting manipulation from self-transfers, distinct from the account key uniqueness validation in ACCOUNT_VALIDATION.md's Self-Transfer Risk column.
+
 ## 4. Token Type Separation (Multi-Token Protocols)
 
 For protocols handling multiple token types:

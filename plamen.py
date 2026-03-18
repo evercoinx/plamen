@@ -280,6 +280,24 @@ def check_dependencies() -> bool:
         w(f"  {_C_DARK_GRAY}{total_found}/{total_opt} optional — "
           f"install per your target chain{_RST}\n")
 
+    # Windows Developer Mode check (required for Solana symlinks)
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock")
+            val, _ = winreg.QueryValueEx(key, "AllowDevelopmentWithoutDevLicense")
+            winreg.CloseKey(key)
+            if val != 1:
+                w(f"\n  {_C_ORANGE}Windows Developer Mode is OFF{_RST}\n")
+                w(f"  {_C_GRAY}Solana build tools require symlinks. Enable via:{_RST}\n")
+                w(f"  {_C_GRAY}  Settings > System > For Developers > Developer Mode{_RST}\n")
+                w(f"  {_C_GRAY}  Or run in admin PowerShell:{_RST}\n")
+                w(f"  {_C_GRAY}  reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\AppModelUnlock /v AllowDevelopmentWithoutDevLicense /t REG_DWORD /d 1 /f{_RST}\n")
+        except Exception:
+            w(f"\n  {_C_ORANGE}Could not check Windows Developer Mode{_RST}\n")
+            w(f"  {_C_GRAY}If Solana builds fail with 'privilege' errors, enable Developer Mode{_RST}\n")
+
     w("\n")
     sys.stdout.flush()
     return ok

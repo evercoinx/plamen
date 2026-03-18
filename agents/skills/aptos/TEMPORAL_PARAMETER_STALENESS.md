@@ -89,6 +89,7 @@ For each parameter updated from an external source:
 - Should this parameter be fixed for a period (e.g., per epoch, per cycle) rather than continuously refreshed?
 - Which functions update it? Which functions SHOULD update it? Any mismatch?
 - If external state is validated at entry point A, stored, then relied upon at entry point B without re-verification -> FINDING (R8 attack vector 4)
+- **Unit consistency**: Verify all timestamp arithmetic uses consistent units. `timestamp::now_seconds()` returns seconds; `timestamp::now_microseconds()` returns microseconds. Mixing these without ×1_000_000 conversion in comparisons, subtractions, or staleness checks → FINDING.
 
 ### Step 4: Retroactive Application Analysis
 

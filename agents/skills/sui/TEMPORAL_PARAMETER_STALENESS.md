@@ -89,6 +89,7 @@ For each parameter updated from an external source:
 - Should this parameter be fixed for a period (e.g., per epoch, per cycle) rather than continuously refreshed?
 - Which functions update it? Which functions SHOULD update it? Any mismatch?
 - **Sui-specific**: Does the parameter depend on `clock::timestamp_ms` (continuous) vs `tx_context::epoch` (discrete)? Is the choice appropriate?
+- **Unit consistency**: Verify all timestamp arithmetic uses consistent units. `clock::timestamp_ms()` returns milliseconds; external sources (Pyth `publish_time`, cross-chain timestamps) typically use seconds. Any comparison or subtraction without ×1000 conversion → FINDING.
 
 ### Step 4: Retroactive Application Analysis
 

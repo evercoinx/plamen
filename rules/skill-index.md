@@ -31,7 +31,7 @@
 
 ## Solana Skills (`~/.claude/agents/skills/solana/`)
 
-> Load these when `LANGUAGE=solana`. All 19 skills use Solana/Anchor concepts.
+> Load these when `LANGUAGE=solana`. All 20 skills use Solana/Anchor concepts.
 
 | Skill | Trigger Pattern | Used By |
 |-------|-----------------|---------|
@@ -54,6 +54,7 @@
 | TOKEN_FLOW_TRACING | BALANCE_DEPENDENT flag | depth-token-flow, breadth agents |
 | ZERO_STATE_RETURN | Vault/first-depositor | depth-edge-case |
 | FLASH_LOAN_INTERACTION | FLASH_LOAN flag | breadth agents, depth-token-flow, depth-edge-case |
+| TRIDENT_API_REFERENCE | `trident_available: true` in build_status.md | invariant fuzz generator (Phase 4b), security-verifier Template 6 |
 
 ## Aptos Skills (`~/.claude/agents/skills/aptos/`)
 
@@ -124,6 +125,8 @@
 | NFT_PROTOCOL_SECURITY | `nft` (ERC721/ERC1155 with marketplace, staking, or collateral logic) | Breadth agents, depth-token-flow, depth-edge-case |
 | GOVERNANCE_ATTACK_VECTORS | `governance` (Governor, Timelock, voting, proposal, quorum, delegate) | Breadth agents, depth-external, depth-edge-case |
 | OUTCOME_DETERMINISM | `outcome_determinism` (finite-pool selection with depletion fallback + time-gated actions with observable default/fallback outcomes). NOTE: callback selective revert and RNG consumption enumeration are now ALWAYS-ON in depth templates, not in this injectable. | Breadth agents, depth-edge-case |
+| LENDING_PROTOCOL_SECURITY | `lending` (liquidate/borrow/repay/collateral/lend/loan/LTV/healthFactor/interestRate/debtToken) | Breadth agents, depth-token-flow, depth-edge-case, depth-state-trace |
+| DEX_INTEGRATION_SECURITY | `dex_integration` (swap/addLiquidity/removeLiquidity/IUniswapV2Router/ISwapRouter/amountOutMin — AND protocol is NOT itself a DEX) | Breadth agents, depth-external, depth-edge-case |
 
 ### How Injectable Skills Work
 1. Recon Agent classifies protocol type in TASK 0 Step 1
