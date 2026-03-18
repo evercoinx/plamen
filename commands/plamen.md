@@ -15,7 +15,7 @@ description: "Launch Plamen security audit pipeline. Usage: /plamen [core|thorou
 - If it contains `scope:` followed by a file path, set `SCOPE_FILE` to that path. The file should list in-scope contracts/files.
 - If it contains `notes:` followed by text (up to end of arguments or next known prefix), set `SCOPE_NOTES` to that text. Passed to recon as additional audit context (e.g., "focus on vault module, ignore governance").
 - If it contains `proven-only:` followed by `true` (or just `proven-only: true`), set `PROVEN_ONLY = true`. When enabled, findings whose best evidence is `[CODE-TRACE]` (no executed PoC or fuzzer counterexample) are capped at Low severity in the report. Default: false.
-- If MODE, PROJECT_PATH, DOCS_PATH (or nodocs), AND `proven-only:` are all resolved, skip the entire wizard — jump directly to "Step 0d: Launch".
+- If MODE, PROJECT_PATH, DOCS_PATH (or nodocs), AND `proven-only:` are all resolved, skip the entire wizard — jump directly to "Step 0d: Cost Estimate + Launch Confirmation".
 - If MODE, PROJECT_PATH, and DOCS_PATH (or nodocs) are resolved but `scope:` and `proven-only:` are NOT specified, skip to Step 0c.5 (scope selection).
 - If MODE is set but docs status is unknown (no `docs:` and no `nodocs`), skip to Step 0c only.
 - If `$ARGUMENTS` contains "compare", jump directly to the compare flow (Step 0e). If it also contains `report:` followed by a file path, set `REPORT_PATH`. If it contains `ground_truth:` followed by a file path, set `GROUND_TRUTH_PATH`. If both are set, skip the interactive file selection in Step 0e and proceed directly.
@@ -205,21 +205,169 @@ AskUserQuestion(questions=[{
 
 If "Yes", set `PROVEN_ONLY = true`.
 
-### Step 0d: Launch
+### Step 0d: Cost Estimate + Launch Confirmation
 
-Output a confirmation summary:
+Before starting the pipeline, compute a cost estimate and show it to the user for confirmation.
 
-> **Plamen {MODE}** audit
-> **Target**: `{PROJECT_PATH}`
-> **Network**: {NETWORK or "auto-detect"} *(only if NETWORK is set)*
-> **Docs**: {docs status}
-> **Scope**: {SCOPE_FILE or "full project"} *(only if SCOPE_FILE is set)*
-> **Notes**: {SCOPE_NOTES} *(only if SCOPE_NOTES is set)*
-> **Proven-only**: {ON/OFF} *(only if PROVEN_ONLY is true — unproven findings capped at Low)*
->
-> Starting...
+#### Step 0d.1: Count Source Files
 
-Then proceed to Step 1.
+Run via Bash (single command):
+
+```bash
+find "{PROJECT_PATH}" -type f \( -name '*.sol' -o -name '*.rs' -o -name '*.move' \) \
+  -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/cache/*' \
+  -not -path '*/artifacts/*' -not -path '*/.anchor/*' -not -path '*/.aptos/*' \
+  -not -path '*/typechain/*' -not -path '*/typechain-types/*' -not -path '*/coverage/*' \
+  -not -path '*/__pycache__/*' \
+  | while read -r f; do
+    # Skip root-level dirs: lib, target, build, out, test, tests, mock, mocks,
+    # script, deploy, migrations, flatten, docs, doc
+    rel="${f#{PROJECT_PATH}/}"
+    top="${rel%%/*}"
+    case "$top" in lib|target|build|out|test|tests|mock|mocks|script|deploy|migrations|flatten|docs|doc) continue;; esac
+    echo "$f"
+  done | xargs wc -l 2>/dev/null | tail -1
+```
+
+If `SCOPE_FILE` is set, filter: only count files whose basename (or basename without extension) appears in the scope file. If `SCOPE_NOTES` is set and no scope file, extract capitalized words (e.g., "Vault", "Router") and match against basenames.
+
+Extract `TOTAL_FILES` (number of matching files) and `TOTAL_LINES` (total line count). If the project path is a home directory or system root, set both to 0 and skip the estimate.
+
+#### Step 0d.2: Compute Cost Estimate
+
+Use these formulas (matching `plamen.py`'s `estimate_cost()`):
+
+**Constants:**
+```
+SRC_TOK        = TOTAL_LINES * 4       (≈4 tokens per line of code)
+PROMPT_BASE    = 8,000                  (system prompt + CLAUDE.md)
+SKILL_AVG      = 8,000                  (average skill file tokens)
+ARTIFACT_SMALL = 5,000                  (scratchpad summaries)
+ARTIFACT_LARGE = 20,000                 (full inventory/findings)
+ORCH_BASE      = PROMPT_BASE + 15,000   (orchestrator context)
+```
+
+**Agent token model** — each agent is a multi-turn conversation where every turn re-sends full prior context:
+```
+agent_input(base, turns, growth=4000) = turns * base + turns*(turns-1)/2 * growth
+agent_output(turns) = turns * 3000
+```
+
+**Breadth agent count:**
+```
+bc = 2           if TOTAL_LINES < 2000
+bc = 4           if TOTAL_LINES < 5000
+bc = min(7, 3 + TOTAL_LINES / 3000)   otherwise
+```
+
+**Estimated findings and verifiers:**
+```
+est_findings = bc * 5
+vc = clamp(est_findings / 3, min=3, max=10)
+```
+
+**Pipeline stages by mode:**
+
+| Mode | Stages (name, count, model, base_context, turns) |
+|------|---|
+| **Light** | Recon(2,sonnet,PROMPT_BASE+SRC_TOK*0.5+ARTIFACT_SMALL,10), Breadth(min(3,bc),sonnet,PROMPT_BASE+SKILL_AVG+SRC_TOK*0.7+ARTIFACT_LARGE,10), Inventory(1,sonnet,PROMPT_BASE+ARTIFACT_LARGE*2,8), Depth_merged(2,sonnet,PROMPT_BASE+SKILL_AVG*2+SRC_TOK*0.4+ARTIFACT_LARGE,10), Scanner+Sweep(2,sonnet,PROMPT_BASE+SRC_TOK*0.3+ARTIFACT_LARGE,8), Chain(1,sonnet,PROMPT_BASE+ARTIFACT_LARGE*2,8), Verification(vc_light,sonnet,PROMPT_BASE+SKILL_AVG+SRC_TOK*0.25+ARTIFACT_SMALL,12), Report(1,sonnet,PROMPT_BASE+ARTIFACT_LARGE*2,8), Assembler(1,haiku,PROMPT_BASE+ARTIFACT_LARGE*2,6), Orchestrator(1,sonnet,ORCH_BASE,20) |
+| **Core** | Recon_opus(2,opus,...,12), Recon_sonnet(2,sonnet,...,10), Breadth(bc,opus,...,12), Inventory(1,sonnet,...,8), Sem.Invariants(1,sonnet,...,10), Depth_opus(2,opus,...,12), Depth_sonnet(2,sonnet,...,10), Scanners(3,sonnet,...,8), ValidationSweep(1,sonnet,...,8), Niche(3,sonnet,...,8), RAG+Scoring(3,haiku,...,6), ChainAnalysis(2,opus,...,8), Verification(vc,opus,...,14), Report_opus(1,opus,...,8), Report_sonnet(2,sonnet,...,8), Report_haiku(2,haiku,...,6), Orchestrator(1,opus,ORCH_BASE,25) |
+| **Thorough** | All Core stages PLUS: Re-scan(3,sonnet,...,10), Per-contract(min(8,max(2,TOTAL_LINES/500)),sonnet,...,8), Sem.Pass2(1,sonnet,...,8), DepthIter2-3(3,sonnet,...,8), Inv.Fuzz(1,sonnet,...,10), DesignStress(1,sonnet,...,8), ExtraVerify(2,sonnet,...,10), Skeptic(max(2,est_findings*0.3),sonnet,...,10), Judge(max(1,est_high_crit/3),haiku,...,4), Orch.extra(1,opus,ORCH_BASE,15) |
+
+(Use the same base_context formulas as Light/Core above — see `plamen.py` lines 1097-1163 for exact values.)
+
+**Compute totals per model:**
+```
+For each stage: compute agent_input(base, turns) and agent_output(turns), multiply by count
+Sum input/output per model (opus, sonnet, haiku)
+total_agents = sum of all stage counts
+input_mtok = total_input / 1,000,000
+output_mtok = total_output / 1,000,000
+```
+
+**API cost** (current Anthropic pricing):
+```
+Opus:   $5/M input,  $25/M output
+Sonnet: $3/M input,  $15/M output
+Haiku:  $1/M input,   $5/M output
+
+api_cost = sum over models: (model_input/1M * input_price) + (model_output/1M * output_price)
+```
+
+**Plan usage %** (calibrated from empirical data — a Thorough audit on ~5000 lines uses ~9% of Max x20):
+```
+ref_tokens = compute total input for the reference 5000-line Thorough audit (use ref_stages from plamen.py lines 1196-1217)
+pct_x20 = (total_input / ref_tokens) * 9.0
+pct_x5  = pct_x20 * 4
+pct_pro = pct_x5 * 2.5   (if Light mode)
+pct_pro = pct_x5 * 5     (if Core or Thorough)
+```
+
+#### Step 0d.3: Display Summary + Warnings
+
+Output as a formatted markdown block:
+
+```
+**Launch Summary**
+
+| | |
+|---|---|
+| **Mode** | {Light/Core/Thorough} Audit |
+| **Target** | `{PROJECT_PATH}` |
+| **Network** | {NETWORK} |  ← only if set
+| **Docs** | {docs status or "none"} |
+| **Scope** | {SCOPE_FILE basename or "full project"} |  ← only if set
+| **Notes** | {SCOPE_NOTES} |  ← only if set
+| **Proven-only** | ON — unproven findings capped at Low |  ← only if true
+| **Codebase** | ~{TOTAL_LINES} lines, {TOTAL_FILES} files{" (scoped)" if scoped} |
+| **Agents** | ~{total_agents} |
+| **Tokens** | ~{input_mtok}M in / ~{output_mtok}M out |
+| **API cost** | ~${api_cost} USD |
+| **Pro** | ~{pct_pro}% of weekly allowance |  ← with severity indicator
+| **Max x5** | ~{pct_x5}% of weekly allowance |  ← with severity indicator
+| **Max x20** | ~{pct_x20}% of weekly allowance |  ← with severity indicator
+```
+
+**Severity indicators for plan usage %:**
+- **<= 40%**: append `(ok)` — comfortable headroom
+- **41-80%**: append `(!)` — significant usage, warn the user
+- **> 80%**: append `(!!)` — may exceed weekly allowance, strongly warn
+
+**Warnings** (output after the table):
+- If `pct_pro > 80` AND MODE is not "light": `> **Warning**: This audit may exceed your Pro plan's weekly allowance. Consider using Light mode or upgrading to Max.`
+- If `pct_x5 > 80`: `> **Warning**: This audit may consume most of your Max x5 weekly allowance. Consider scoping to fewer files or using Core mode.`
+- If `pct_pro > 40` AND MODE == "light": `> **Note**: This audit will use a significant portion of your Pro weekly allowance.`
+- Always: `> *Rough estimates only. Actual usage varies with protocol complexity and findings count.*`
+
+#### Step 0d.4: Confirm
+
+Use `AskUserQuestion` to let the user confirm, go back, or cancel:
+
+```
+AskUserQuestion(questions=[{
+  question: "Proceed with the audit?",
+  header: "Confirm",
+  multiSelect: false,
+  options: [
+    {
+      label: "Yes, launch",
+      description: "Start the audit pipeline"
+    },
+    {
+      label: "Go back",
+      description: "Change settings"
+    },
+    {
+      label: "Cancel",
+      description: "Abort the audit"
+    }
+  ]
+}])
+```
+
+- If "Yes, launch" → proceed to Step 1.
+- If "Go back" → return to Step 0c.6 (Proven-Only).
+- If "Cancel" → stop, output `Cancelled.` and do not proceed.
 
 ### Step 0e: Compare Flow
 
