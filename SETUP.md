@@ -172,4 +172,10 @@ echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.zshrc && source ~/.zshrc
 
 After setup, I can start an audit by typing `plamen` in my terminal or `/plamen` inside Claude Code.
 
-To uninstall later: `plamen uninstall` (or `cd ~/.plamen && python3 plamen.py uninstall` on macOS/Linux, `python plamen.py uninstall` on Windows)
+Available commands (work from any directory after PATH is set):
+- `plamen` — interactive wizard
+- `plamen setup` — install tools + build RAG
+- `plamen rag` — rebuild RAG database only
+- `plamen uninstall` — remove Plamen from ~/.claude
+
+> **Important**: Always use `plamen` (not `python3 plamen.py`) after PATH is set up. The `python3 plamen.py` form only works from inside `~/.plamen/`.

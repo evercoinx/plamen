@@ -57,11 +57,15 @@ echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.zshrc && source ~/.zshrc
 [System.Environment]::SetEnvironmentVariable("Path", "$env:USERPROFILE\.plamen;" + [System.Environment]::GetEnvironmentVariable("Path", "User"), "User")
 ```
 
-Then use the short form everywhere:
+Then use `plamen` from anywhere:
 ```bash
+plamen                              # interactive wizard
 plamen setup                        # install tools + build RAG
+plamen rag                          # rebuild RAG database only
 plamen uninstall                    # remove Plamen from ~/.claude
 ```
+
+> **Important**: Always use `plamen` (not `python3 plamen.py`) after PATH is set. The `python3 plamen.py` form only works from inside `~/.plamen/`.
 
 The installer:
 - Creates symlinks from `~/.plamen` into `~/.claude/` so Claude Code discovers Plamen's agents, rules, prompts, and commands
