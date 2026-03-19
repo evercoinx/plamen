@@ -40,9 +40,14 @@ cd $HOME\.plamen; python plamen.py install
 
 After install, add to PATH so you can run `plamen` from anywhere:
 
-**Linux / macOS:**
+**Linux (bash):**
 ```bash
 echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.bashrc && source ~/.bashrc
+```
+
+**macOS (zsh):**
+```zsh
+echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```
 
 **Windows (PowerShell, one-time):**
@@ -111,10 +116,11 @@ pip install -e custom-mcp/slither-mcp              # EVM only (needs Python 3.11
 # 2. Build RAG database (~5 min)
 export SOLODIT_API_KEY=your_key_here                # free at solodit.cyfrin.io
 cd custom-mcp/unified-vuln-db
-python -m unified_vuln.indexer index -s solodit --max-pages 10
-python -m unified_vuln.indexer index -s defihacklabs
-python -m unified_vuln.indexer index -s immunefi
+python3 -m unified_vuln.indexer index -s solodit --max-pages 10
+python3 -m unified_vuln.indexer index -s defihacklabs
+python3 -m unified_vuln.indexer index -s immunefi
 cd ../..
+# Note: on Windows use 'python' instead of 'python3'
 
 # 3. Chain tools (install what you need)
 curl -L https://foundry.paradigm.xyz | bash && foundryup          # EVM

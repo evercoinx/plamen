@@ -133,10 +133,14 @@ Trident v0.11+ does NOT require honggfuzz or AFL — it uses its own TridentSVM 
 
 So I can just type `plamen` from any directory:
 
-**Unix/macOS** — add to shell profile:
+**Linux (bash):**
 ```bash
-echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.bashrc
-source ~/.bashrc
+echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.bashrc && source ~/.bashrc
+```
+
+**macOS (zsh):**
+```zsh
+echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```
 
 **Windows** — run in PowerShell:

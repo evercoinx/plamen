@@ -21,14 +21,19 @@ plamen setup                        # just install tools + build RAG
 **PATH setup** (to use `plamen` as a command):
 
 ```bash
-# Unix/macOS -- add to ~/.bashrc or ~/.zshrc
-export PATH="$HOME/.plamen:$PATH"
+# Linux (bash)
+echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.bashrc && source ~/.bashrc
 
-# Windows -- run once in PowerShell
+# macOS (zsh — default shell on macOS)
+echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
+
+```powershell
+# Windows (PowerShell, one-time)
 [System.Environment]::SetEnvironmentVariable("Path", "$env:USERPROFILE\.plamen;" + $env:Path, "User")
 ```
 
-Or run directly: `python ~/.plamen/plamen.py`
+Or run directly: `python3 ~/.plamen/plamen.py` (macOS/Linux) or `python ~/.plamen/plamen.py` (Windows)
 
 ### Option B: Inside Claude Code
 

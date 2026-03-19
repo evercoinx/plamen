@@ -116,21 +116,22 @@ Edit `~/.claude/mcp.json` with your API keys. See [MCP Servers](mcp-servers.md) 
 export SOLODIT_API_KEY=your_key_here   # free at solodit.cyfrin.io
 
 cd custom-mcp/unified-vuln-db
-python -m unified_vuln.indexer index -s solodit --max-pages 10
-python -m unified_vuln.indexer index -s defihacklabs
-python -m unified_vuln.indexer index -s immunefi
-python -m unified_vuln.indexer stats   # verify
+python3 -m unified_vuln.indexer index -s solodit --max-pages 10
+python3 -m unified_vuln.indexer index -s defihacklabs
+python3 -m unified_vuln.indexer index -s immunefi
+python3 -m unified_vuln.indexer stats   # verify
 cd ../..
+# Note: on Windows use 'python' instead of 'python3'
 ```
 
 <details>
 <summary><strong>Full build (~30 min, better RAG quality)</strong></summary>
 
 ```bash
-python -m unified_vuln.indexer index -s solodit --max-pages 100
+python3 -m unified_vuln.indexer index -s solodit --max-pages 100
 git clone https://github.com/SunWeb3Sec/DeFiHackLabs.git data/DeFiHackLabs
-python -m unified_vuln.indexer index -s defihacklabs
-python -m unified_vuln.indexer index -s immunefi
+python3 -m unified_vuln.indexer index -s defihacklabs
+python3 -m unified_vuln.indexer index -s immunefi
 ```
 
 </details>
