@@ -1124,19 +1124,32 @@ def estimate_cost(target: str, mode: str,
 
     if scope_file and os.path.isfile(scope_file):
         try:
+            import re as _re
             with open(scope_file, 'r', errors='ignore') as sf:
                 for line in sf:
                     line = line.strip()
                     if not line or line.startswith('#') or line.startswith('//'):
                         continue
-                    # Extract filename from paths like "src/contracts/Vault.sol"
-                    base = os.path.basename(line.strip().rstrip('/'))
-                    if base:
-                        scope_names.add(base.lower())
-                        # Also add stem without extension
-                        stem = os.path.splitext(base)[0].lower()
-                        if stem:
-                            scope_names.add(stem)
+                    # Extract .sol/.rs/.move filenames from any format:
+                    #   bare paths: "src/contracts/Vault.sol"
+                    #   markdown tables: "| GatewaySend.sol | 301 |"
+                    #   bullet lists: "- contracts/Vault.sol"
+                    matches = _re.findall(r'[\w/\\.-]+\.(?:sol|rs|move)', line)
+                    if matches:
+                        for m in matches:
+                            base = os.path.basename(m)
+                            scope_names.add(base.lower())
+                            stem = os.path.splitext(base)[0].lower()
+                            if stem:
+                                scope_names.add(stem)
+                    else:
+                        # Fallback: treat entire line as a path
+                        base = os.path.basename(line.strip().rstrip('/'))
+                        if base and '.' in base:
+                            scope_names.add(base.lower())
+                            stem = os.path.splitext(base)[0].lower()
+                            if stem:
+                                scope_names.add(stem)
         except Exception:
             pass
 
