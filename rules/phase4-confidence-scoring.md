@@ -181,6 +181,8 @@ If validate_hypothesis or search_solodit_live fails (API error, schema error, ti
 
 **IMPORTANT**: If the FIRST MCP call fails with a schema/API error, assume ALL MCP calls will fail. Switch immediately to WebSearch fallback for remaining findings instead of retrying each one. This prevents N×timeout delays.
 
+**IMPORTANT**: If MCP tools SUCCEED but return 0 supporting examples AND 0 solodit matches for the first 3 findings, treat this as 'empty database' and run WebSearch as a COMPLEMENT for all remaining findings (search '{vulnerability class} {protocol type} audit' and 'site:solodit.xyz {key term}'). MCP success with empty results is functionally equivalent to MCP failure for novel protocols.
+
 ## Output
 Write to {SCRATCHPAD}/rag_validation.md:
 | Finding ID | validate_hypothesis Score | solodit_live Matches | Final RAG Score | Notes |
