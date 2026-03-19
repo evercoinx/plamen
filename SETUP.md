@@ -44,9 +44,17 @@ Without Developer Mode, the installer will create directory junctions (which wor
 
 ## Step 1: Clone the repository
 
+**Linux / macOS / Git Bash:**
 ```bash
 git clone https://github.com/PlamenTSV/plamen.git ~/.plamen
 cd ~/.plamen
+git submodule update --init --recursive
+```
+
+**Windows (PowerShell):**
+```powershell
+git clone https://github.com/PlamenTSV/plamen.git $HOME\.plamen
+cd $HOME\.plamen
 git submodule update --init --recursive
 ```
 
@@ -55,7 +63,7 @@ git submodule update --init --recursive
 ## Step 2: Run the installer
 
 ```bash
-cd ~/.plamen && python plamen.py install
+python plamen.py install
 ```
 
 Or if `~/.plamen` is already on PATH: `plamen install`

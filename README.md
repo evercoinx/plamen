@@ -20,18 +20,32 @@ Orchestrates 15-95 AI agents across 8 phases to produce audit reports with verif
 
 ### Option A: Terminal (recommended)
 
+**Linux / macOS / Git Bash:**
 ```bash
 git clone https://github.com/PlamenTSV/plamen.git ~/.plamen
 cd ~/.plamen && python plamen.py install
 ```
 
-After install, add to PATH and use the short form:
+**Windows (PowerShell):**
+```powershell
+git clone https://github.com/PlamenTSV/plamen.git $HOME\.plamen
+cd $HOME\.plamen; python plamen.py install
+```
 
+After install, add to PATH so you can run `plamen` from anywhere:
+
+**Linux / macOS:**
 ```bash
-# Add to PATH (one-time — see Step 5 in SETUP.md for Windows)
 echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.bashrc && source ~/.bashrc
+```
 
-# Now use the short form everywhere
+**Windows (PowerShell, one-time):**
+```powershell
+[System.Environment]::SetEnvironmentVariable("Path", "$env:USERPROFILE\.plamen;" + [System.Environment]::GetEnvironmentVariable("Path", "User"), "User")
+```
+
+Then use the short form everywhere:
+```bash
 plamen setup                        # install tools + build RAG
 plamen uninstall                    # remove Plamen from ~/.claude
 ```
@@ -61,11 +75,13 @@ The Plamen repo stays at `~/.plamen`. The installer creates symlinks (shortcuts)
 
 </details>
 
-> **Migrating from v1.0.x** (installed directly in `~/.claude`): Close Claude Code first, then run both commands together in one line:
-> ```bash
-> mv ~/.claude ~/.plamen && cd ~/.plamen && python plamen.py install
-> ```
-> This moves the repo to `~/.plamen` and immediately recreates `~/.claude` with symlinks + merged config. Claude Code will not work between `mv` and `install` — run them together.
+> **Migrating from v1.0.x** (installed directly in `~/.claude`): Close Claude Code first, then run both commands together:
+>
+> Linux/macOS: `mv ~/.claude ~/.plamen && cd ~/.plamen && python plamen.py install`
+>
+> Windows (PowerShell): `Rename-Item $HOME\.claude $HOME\.plamen; cd $HOME\.plamen; python plamen.py install`
+>
+> This moves the repo to `~/.plamen` and immediately recreates `~/.claude` with symlinks + merged config. Claude Code will not work between the move and install — run them together.
 
 ### Option B: Let Claude set it up
 
