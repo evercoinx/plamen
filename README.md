@@ -18,19 +18,32 @@ Orchestrates 15-95 AI agents across 8 phases to produce audit reports with verif
 
 ## Install
 
+### Option A: Terminal (recommended)
+
 ```bash
 git clone https://github.com/PlamenTSV/plamen.git ~/.plamen
 cd ~/.plamen && python plamen.py install
 ```
 
-This clones into `~/.plamen` (not `~/.claude`) and runs the installer, which:
+After install, add to PATH and use the short form:
+
+```bash
+# Add to PATH (one-time — see Step 5 in SETUP.md for Windows)
+echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.bashrc && source ~/.bashrc
+
+# Now use the short form everywhere
+plamen setup                        # install tools + build RAG
+plamen uninstall                    # remove Plamen from ~/.claude
+```
+
+The installer:
 - Creates symlinks from `~/.plamen` into `~/.claude/` so Claude Code discovers Plamen's agents, rules, prompts, and commands
 - Merges Plamen's permissions into your existing `settings.json` (additive only — won't remove your entries)
 - Merges MCP server definitions into `mcp.json` (won't overwrite your existing servers)
 - Injects Plamen instructions into `CLAUDE.md` between `<!-- PLAMEN:START/END -->` markers (preserves your content)
 - Installs Python dependencies and builds the RAG database
 
-Your existing Claude Code configuration is preserved. To remove Plamen later: `python ~/.plamen/plamen.py uninstall`
+Your existing Claude Code configuration is preserved.
 
 <details>
 <summary>How symlinks work</summary>
@@ -54,17 +67,16 @@ The Plamen repo stays at `~/.plamen`. The installer creates symlinks (shortcuts)
 > ```
 > This moves the repo to `~/.plamen` and immediately recreates `~/.claude` with symlinks + merged config. Claude Code will not work between `mv` and `install` — run them together.
 
-<details>
-<summary>Option B: Let Claude set it up</summary>
+### Option B: Let Claude set it up
 
 Open Claude Code and paste the contents of [`SETUP.md`](SETUP.md). It handles everything including dependency installation.
 
-</details>
+### Option C: Manual dependency install
 
 <details>
-<summary>Option C: Manual dependency install (~5-10 min)</summary>
+<summary>Click to expand (~5-10 min)</summary>
 
-> The installer above handles this. These commands are for reference only.
+> Option A handles this automatically. These commands are for reference only.
 
 ```bash
 cd ~/.plamen

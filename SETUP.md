@@ -55,8 +55,10 @@ git submodule update --init --recursive
 ## Step 2: Run the installer
 
 ```bash
-python ~/.plamen/plamen.py install
+cd ~/.plamen && python plamen.py install
 ```
+
+Or if `~/.plamen` is already on PATH: `plamen install`
 
 This will:
 - Symlink Plamen's agents, rules, prompts, skills, and commands into `~/.claude/`
@@ -82,8 +84,10 @@ For the Python command path, run `which python` (Unix) or `where python` (Window
 
 Run the terminal wrapper to check everything:
 ```bash
-python ~/.plamen/plamen.py setup
+cd ~/.plamen && python plamen.py setup
 ```
+
+Or if already on PATH: `plamen setup`
 
 This shows the toolchain status box. If any optional tools are missing (Foundry, Solana CLI, etc.), the Setup menu can install them automatically.
 
@@ -119,4 +123,4 @@ source ~/.bashrc
 
 After setup, I can start an audit by typing `plamen` in my terminal or `/plamen` inside Claude Code.
 
-To uninstall later: `python ~/.plamen/plamen.py uninstall`
+To uninstall later: `plamen uninstall` (or `cd ~/.plamen && python plamen.py uninstall`)
