@@ -116,7 +116,7 @@ Edit `~/.claude/mcp.json`:
 For the Python command path, run `which python3` (macOS/Linux) or `where python` (Windows) and use that path.
 
 > If you skipped Step 2 or want to rebuild the RAG database after adding the Solodit key, run:
-> `cd ~/.plamen/custom-mcp/unified-vuln-db && python3 -m unified_vuln.indexer index -s solodit --max-pages 10` (use `python` on Windows)
+> `export SOLODIT_API_KEY=your_key_here && python3 -m unified_vuln.indexer index -s solodit --max-pages 10` (use `python` on Windows). This works from any directory after install.
 
 ## Step 5: Verify installation
 
