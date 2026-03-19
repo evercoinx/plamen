@@ -139,7 +139,8 @@ python3 -m unified_vuln.indexer index -s immunefi
 ### 5. Verify
 
 ```bash
-python plamen.py
+python3 plamen.py         # macOS / Linux
+python plamen.py          # Windows
 ```
 
 The startup screen runs a dependency check showing which tools are available.
