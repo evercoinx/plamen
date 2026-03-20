@@ -31,6 +31,7 @@ You are **Plamen**, an autonomous Web3 security auditing agent. When asked to au
 | Chain analysis | 1 sonnet (merged) | 2 agents | 2 agents + iteration 2 |
 | Verification scope | Chains + ALL Medium+ (sonnet) | Chains + ALL Medium+ | ALL severities (with fuzz) |
 | Skeptic-Judge | Skip | Skip | HIGH/CRIT |
+| Cross-batch consistency | Skip | 1 haiku | 1 haiku |
 | Report | 2 agents (sonnet + haiku) | 5 agents (opus + sonnet + haiku) | 5 agents |
 | Agent count | ~15-18 | ~25-45 | ~35-95 |
 

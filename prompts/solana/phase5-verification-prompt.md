@@ -401,3 +401,53 @@ Return: 'RULING: {final_verdict} - {STANDARD_WINS/SKEPTIC_WINS/CONTESTED}'
 | Skeptic agents | 1 sonnet per HIGH/CRIT finding (~3-8 agents typical) |
 | Judge agents | 1 haiku per disagreement (~0-3 agents typical) |
 | **Total** | ~3-11 agents (only in Thorough mode) |
+
+---
+
+## Cross-Batch Consistency Check (Phase 5.2)
+
+> **Purpose**: When one verification batch marks a mechanism as FALSE_POSITIVE, other batches may still contain findings that depend on the same invalidated mechanism. Parallel batches cannot detect this — a post-batch reconciliation step is needed.
+> **Trigger**: Always, after ALL verification batches complete (Phase 5 + 5.1). Runs before Phase 5.5 (finding extraction).
+> **Model**: haiku (mechanical cross-reference)
+> **Budget**: 1 agent (not counted against verification budget)
+
+### Orchestrator spawns:
+
+```
+Task(subagent_type="general-purpose", model="haiku", prompt="
+You are the Cross-Batch Consistency Agent.
+
+## Your Task
+Read ALL verification batch files: {SCRATCHPAD}/verify_batch_*.md
+
+### STEP 1: Extract FALSE_POSITIVE mechanisms
+For each FALSE_POSITIVE verdict, extract:
+| Finding ID | Invalidated Mechanism | Reason | Batch Source |
+
+### STEP 2: Cross-reference surviving findings
+For each invalidated mechanism, search ALL other batch files for findings whose
+attack path, precondition, or root cause depends on the same mechanism.
+
+A finding DEPENDS on the mechanism if:
+- It references the same function/code path that was proven non-exploitable
+- Its attack requires the behavior the FALSE_POSITIVE disproved
+- It is a chain hypothesis whose constituent was the FALSE_POSITIVE
+
+### STEP 3: Flag contradictions
+| Surviving Finding | Batch | Depends On | FALSE_POSITIVE ID | Contradiction |
+
+### STEP 4: Recommend
+For each contradiction:
+- If the surviving finding's ENTIRE attack path depends on the disproved mechanism → recommend FALSE_POSITIVE
+- If only part of the attack path is affected → recommend DOWNGRADE with explanation
+- If the dependency is unclear → recommend REVIEW
+
+Write to {SCRATCHPAD}/cross_batch_consistency.md
+Return: 'DONE: {N} FALSE_POSITIVES checked, {C} contradictions found, {R} recommendations'
+")
+```
+
+### Orchestrator action after agent returns:
+- If contradictions found: apply recommendations (FALSE_POSITIVE or DOWNGRADE) before Phase 5.5
+- If no contradictions: proceed to Phase 5.5
+- Log results in {SCRATCHPAD}/verification_consistency.md
