@@ -148,6 +148,19 @@ Include: `MEDUSA_AVAILABLE: true/false` (and version if available)
 
 ## TASK 2: Static Analysis Artifacts
 
+### Pre-Slither Compatibility: hardhat-dependency-compiler fix
+`hardhat-dependency-compiler` creates temp `.sol` files under `contracts/hardhat-dependency-compiler/`, compiles them, then **deletes** them. Slither's `crytic-compile` crashes with `InvalidCompilation: Unknown file` because it expects all source paths from `build-info` to exist on disk. No upstream fix exists ([slither#1283](https://github.com/crytic/slither/issues/1283), open since 2022).
+
+**Detection**: Grep `hardhat.config.js` (or `.ts`) for `dependencyCompiler` or `hardhat-dependency-compiler`.
+
+**If detected**:
+1. Check if `keep: true` is already present in the `dependencyCompiler` config block
+2. If NOT present: add `keep: true` to the config object and recompile (`npx hardhat clean && npx hardhat compile --force`)
+3. Verify `contracts/hardhat-dependency-compiler/` directory exists after recompile
+4. Log in build_status.md: `HARDHAT_DEPENDENCY_COMPILER: detected, keep: true applied`
+
+**If not detected**: skip this step.
+
 ### Slither Fail-Fast Policy
 Slither can crash on projects with namespace imports (`import X as Y`), mixed compiler versions, or unusual AST structures. Do NOT retry endlessly.
 
