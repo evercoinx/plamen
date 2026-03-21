@@ -1,6 +1,6 @@
 ---
 name: "token-flow-tracing"
-description: "Trigger Pattern transfer\|transferFrom\|safeTransfer\|mint\|burn\|balanceOf.this - Inject Into Lifecycle, External-Env agents"
+description: "Performs comprehensive token flow analysis by tracing all token entry and exit paths, verifying accounting consistency, detecting unsolicited transfer vectors, and identifying risks such as donation attacks, balance desynchronization, token type confusion, and side-effect-driven state changes."
 ---
 
 # TOKEN_FLOW_TRACING Skill
