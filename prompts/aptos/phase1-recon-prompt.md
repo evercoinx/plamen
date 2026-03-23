@@ -294,7 +294,18 @@ Append to {SCRATCHPAD}/meta_buffer.md under '## Fork Ancestry Analysis':
    - Resource/Object model: What resources are published? What objects are created?
    - Token model: Coin<T> (legacy) or FungibleAsset (new standard) or both?
 5. If no docs: note 'Inferring purpose from code'
-6. **Trust Assumption Table** (MANDATORY): From docs, README, code comments, and access control patterns, extract ALL trust assumptions into a structured table in design_context.md:
+6. **Operational Implications** (MANDATORY): Immediately after documenting Key Invariants, add a subsection to design_context.md:
+
+```
+## Operational Implications
+State what each invariant means for how the system works — not what it checks,
+but what it tells you about the system's accounting model.
+Derive these from the invariant formulas and the struct/resource definitions in the code.
+Each implication must reference specific data structure signatures or formula
+components — restating the invariant in different words is not an implication.
+```
+
+7. **Trust Assumption Table** (MANDATORY): From docs, README, code comments, and access control patterns, extract ALL trust assumptions into a structured table in design_context.md:
 
 | # | Actor | Trust Level | Assumption | Source |
 |---|-------|-------------|------------|--------|

@@ -17,6 +17,10 @@
 
 ---
 
+## Impact Premise Verification (MANDATORY)
+
+Before writing the PoC, identify the finding's claimed HARM in one sentence — not the mechanism, but the consequence. The PoC must test the harm directly. If the finding claims tokens are locked, test that withdrawal/claim fails — not that the tokens exist in a mapping. If the finding claims accounting is desynchronized, test that a user receives wrong amounts — not that a variable wasn't updated.
+
 ## Execution Protocol
 
 1. **Write** the PoC using templates from the language-specific prompt

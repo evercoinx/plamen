@@ -177,7 +177,18 @@ Read ~/.claude/agents/skills/solana/fork-ancestry/SKILL.md and execute all 4 ste
 2. Extract: protocol purpose, key invariants, trust model, external program dependencies
 3. Identify: authority model (admin/multi-sig/DAO), upgradeability (BPFLoaderUpgradeable?), external CPI targets (verified/audited?), key PDA account model, token model (SPL Token or Token-2022?)
 4. If no docs: note 'Inferring purpose from code'
-5. **Trust Assumption Table** (MANDATORY): From ASSUMPTIONS.txt, docs, README, code comments, and access control patterns, extract ALL trust assumptions into a structured table in design_context.md:
+5. **Operational Implications** (MANDATORY): Immediately after documenting Key Invariants, add a subsection to design_context.md:
+
+```
+## Operational Implications
+State what each invariant means for how the system works — not what it checks,
+but what it tells you about the system's accounting model.
+Derive these from the invariant formulas and the account/struct definitions in the code.
+Each implication must reference specific data structure signatures or formula
+components — restating the invariant in different words is not an implication.
+```
+
+6. **Trust Assumption Table** (MANDATORY): From ASSUMPTIONS.txt, docs, README, code comments, and access control patterns, extract ALL trust assumptions into a structured table in design_context.md:
 
 | # | Actor | Trust Level | Assumption | Source |
 |---|-------|-------------|------------|--------|
@@ -187,6 +198,15 @@ Read ~/.claude/agents/skills/solana/fork-ancestry/SKILL.md and execute all 4 ste
 
 Trust levels: `FULLY_TRUSTED` (will not act maliciously - e.g., multisig, governance, DAO), `SEMI_TRUSTED(bounds: ...)` (bounded by on-chain parameters), `PRECONDITION` (deployment/config state assumption), `UNTRUSTED` (default for users, external programs).
 If no explicit trust documentation exists, infer from signer checks and authority patterns and note `Source: inferred`.
+
+```
+## Operational Implications
+State what each invariant means for how the system works — not what it checks,
+but what it tells you about the system's accounting model.
+Derive these from the invariant formulas and the account/struct definitions in the code.
+Each implication must reference specific data structure signatures or formula
+components — restating the invariant in different words is not an implication.
+```
 
 Write to {SCRATCHPAD}/design_context.md
 

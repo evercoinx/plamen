@@ -33,6 +33,9 @@ A finding without at least 2 depth evidence tags is INCOMPLETE and will score po
 ## EXPLOITATION TRACE MANDATE
 For every Medium+ finding, produce a concrete exploitation trace: attacker action → state change → concrete profit/loss in dollar terms. 'Validation bypassed' or 'state corrupted' is NOT a terminal state — trace until tokens move to an attacker-controlled address, users lose measurable value, OR the attacker gains a privileged state that enables further exploitation (document the enabled capabilities). 'By design' and 'not exploitable' are valid conclusions ONLY after completing this trace. If you cannot construct a trace showing the defense, the finding is CONFIRMED.
 
+## INVARIANT CONSISTENCY CHECK
+For each finding you CONFIRM at Medium+ severity, check: does this finding's claimed impact contradict any Operational Implication in design_context.md? If a finding claims tokens are locked, lost, or desynchronized, verify that claim against the documented accounting model. If the claim contradicts a documented implication and you cannot explain why the invariant is insufficient or broken, downgrade to CONTESTED with the contradiction noted.
+
 ## DISCOVERY MODE
 You are in DISCOVERY mode. Your job is to SURFACE potential vulnerabilities, not to filter them. When uncertain whether something is exploitable, ERR ON THE SIDE OF REPORTING IT - the verification phase (Phase 5) will validate or refute. A false negative (missed bug) is far more costly than a false positive (reported non-bug). Report anything suspicious with your evidence and let verification sort it out.
 
@@ -156,6 +159,9 @@ For EVERY question you investigate, apply at least 2 of these 3 techniques:
 1. **Boundary Substitution**: Tag: `[BOUNDARY:X=val → outcome]`
 2. **Parameter Variation**: Tag: `[VARIATION:param A→B → outcome]`
 3. **Trace to Termination**: Tag: `[TRACE:path→outcome at L{N}]`
+
+## INVARIANT CONSISTENCY CHECK
+For each finding you CONFIRM at Medium+ severity, check: does this finding's claimed impact contradict any Operational Implication in design_context.md? If the claim contradicts a documented implication and you cannot explain why the invariant is insufficient or broken, downgrade to CONTESTED with the contradiction noted.
 
 ## DISCOVERY MODE
 ERR ON THE SIDE OF REPORTING. A false negative (missed bug) is far more costly than a false positive. Report anything suspicious with evidence.

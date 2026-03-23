@@ -151,15 +151,15 @@ Return: CONFIRMED/FALSE_POSITIVE/CONTESTED + evidence tag + 3-sentence justifica
 
 ---
 
-## Skeptic-Judge Verification (Thorough mode only, HIGH/CRIT)
+## Skeptic-Judge Verification (Thorough mode only, HIGH/CRIT/MEDIUM)
 
 > **Purpose**: Challenge the standard verifier's reasoning. Nobody audits the auditor - this step does.
-> **Trigger**: Thorough mode, findings with severity HIGH or CRITICAL, after standard Phase 5 verification completes.
+> **Trigger**: Thorough mode, findings with severity HIGH, CRITICAL, or MEDIUM, after standard Phase 5 verification completes.
 > **Architecture**: Standard verifier → Skeptic agent (sonnet) → Judge agent (haiku, only if disagreement)
 
 ### Step 1: Spawn Skeptic Agent (per finding)
 
-For each HIGH/CRIT finding after standard verification:
+For each HIGH/CRIT/MEDIUM finding after standard verification:
 
 ```
 Task(subagent_type="security-verifier", model="sonnet", prompt="
@@ -253,9 +253,9 @@ Return: 'RULING: {final_verdict} - {STANDARD_WINS/SKEPTIC_WINS/CONTESTED}'
 
 | Component | Cost |
 |-----------|------|
-| Skeptic agents | 1 sonnet per HIGH/CRIT finding (~3-8 agents typical) |
-| Judge agents | 1 haiku per disagreement (~0-3 agents typical) |
-| **Total** | ~3-11 agents (only in Thorough mode) |
+| Skeptic agents | 1 sonnet per HIGH/CRIT/MEDIUM finding (~8-20 agents typical) |
+| Judge agents | 1 haiku per disagreement (~0-5 agents typical) |
+| **Total** | ~8-25 agents (only in Thorough mode) |
 
 ---
 
