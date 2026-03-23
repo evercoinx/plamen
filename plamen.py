@@ -205,6 +205,9 @@ def _box_row(w, bx: str, W: int, content: str, right: str = ""):
     w(f"  {bx}│{_RST}{content}{' ' * gap}{right}{bx}│{_RST}\n")
 
 
+_RAG_MIN_ENTRIES = 500  # Below this, RAG is a partial/crashed build — flag as incomplete
+
+
 def _probe_rag_db() -> int:
     """Return the number of entries in the RAG vulnerability database, or -1 if not found."""
     db_path = os.path.join(PLAMEN_HOME, "unified-vuln-db", "data", "chroma_db", "chroma.sqlite3")
@@ -217,6 +220,122 @@ def _probe_rag_db() -> int:
         return count
     except Exception:
         return -1
+
+
+def _probe_mcp_server(name: str, cmd: str, args: list, cwd: str = None,
+                      env: dict = None, timeout: float = 10) -> bool:
+    """Start an MCP server, send JSON-RPC initialize, check for a response, then kill it.
+    Returns True if the server responds to init within timeout."""
+    import json as _json
+    full_env = {**os.environ, **(env or {})}
+    try:
+        proc = subprocess.Popen(
+            [cmd] + args,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            cwd=cwd, env=full_env)
+        # JSON-RPC initialize request (MCP protocol)
+        init_msg = _json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05",
+                       "capabilities": {},
+                       "clientInfo": {"name": "plamen-probe", "version": "1"}}
+        })
+        # MCP uses content-length framed messages on stdio
+        header = f"Content-Length: {len(init_msg)}\r\n\r\n"
+        proc.stdin.write(header.encode() + init_msg.encode())
+        proc.stdin.flush()
+        # Wait for any stdout response (just check it writes back something)
+        import select
+        if sys.platform == "win32":
+            # Windows: can't select on pipes, just do a timed read
+            import threading
+            result = [False]
+            def _read():
+                data = proc.stdout.read(1)
+                if data:
+                    result[0] = True
+            t = threading.Thread(target=_read, daemon=True)
+            t.start()
+            t.join(timeout)
+        else:
+            ready, _, _ = select.select([proc.stdout], [], [], timeout)
+            result = [len(ready) > 0]
+        # Clean up: kill process and reap to avoid resource leaks
+        proc.kill()
+        proc.wait(timeout=3)
+        return result[0]
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=3)
+        except Exception:
+            pass
+        return False
+
+
+def _npx_package_cached(pkg: str) -> bool:
+    """Check if an npx package is in the local npm cache.
+    npx caches packages in <npm_cache>/_npx/<hash>/package.json with a dependencies dict."""
+    try:
+        npm_bin = shutil.which("npm") or "npm"
+        r = subprocess.run([npm_bin, "config", "get", "cache"],
+                           capture_output=True, text=True, timeout=5)
+        cache_dir = r.stdout.strip()
+        if not cache_dir or not os.path.isdir(cache_dir):
+            return False
+        npx_dir = os.path.join(cache_dir, "_npx")
+        if not os.path.isdir(npx_dir):
+            return False
+        import json as _json
+        for entry in os.listdir(npx_dir):
+            pj = os.path.join(npx_dir, entry, "package.json")
+            if os.path.isfile(pj):
+                try:
+                    with open(pj) as f:
+                        data = _json.load(f)
+                    if pkg in data.get("dependencies", {}):
+                        return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return False
+
+
+def _probe_mcp_servers() -> list:
+    """Probe configured MCP servers for health. Returns list of (name, ok) tuples.
+    npx-based servers are skipped if the package isn't cached (download would exceed timeout)."""
+    import json as _json
+    mcp_path = os.path.join(CLAUDE_HOME, "mcp.json")
+    if not os.path.isfile(mcp_path):
+        return []
+    try:
+        with open(mcp_path) as f:
+            mcp = _json.load(f)
+    except Exception:
+        return []
+
+    results = []
+    for name, config in mcp.get("mcpServers", {}).items():
+        cmd = config.get("command", "")
+        args = config.get("args", [])
+        cwd = config.get("cwd")
+        env = config.get("env")
+        # Only probe if the command binary exists
+        if not shutil.which(cmd) and not os.path.isfile(cmd):
+            results.append((name, False))
+            continue
+        # npx-based servers: skip probe if package isn't cached yet
+        # (npx would download the package first, easily exceeding the timeout)
+        cmd_base = os.path.basename(cmd).lower().replace(".cmd", "")
+        if cmd_base == "npx" and len(args) >= 2 and args[0] == "-y":
+            pkg = args[1].rsplit("@", 1)[0] if "@" in args[1] else args[1]
+            if not _npx_package_cached(pkg):
+                results.append((name, None))  # None = not cached, skip probe
+                continue
+        ok = _probe_mcp_server(name, cmd, args, cwd=cwd, env=env)
+        results.append((name, ok))
+    return results
 
 
 def check_dependencies() -> bool:
@@ -303,8 +422,10 @@ def check_dependencies() -> bool:
     # RAG database status
     w(f"  {bx}├{'─' * W}┤{_RST}\n")
     rag_count = _probe_rag_db()
-    if rag_count > 0:
+    if rag_count >= _RAG_MIN_ENTRIES:
         rag_status = f"{_C_GREEN}{rag_count:,} entries{_RST}"
+    elif rag_count > 0:
+        rag_status = f"{_C_ORANGE}{rag_count:,} (incomplete){_RST}"
     elif rag_count == 0:
         rag_status = f"{_C_RED}empty{_RST}"
     else:
@@ -312,6 +433,55 @@ def check_dependencies() -> bool:
     _box_row(w, bx, W,
              f"  {_C_GRAY}RAG DB{_RST}   vulnerability knowledge base",
              rag_status)
+
+    # MCP server health probes
+    w(f"  {bx}├{'─' * W}┤{_RST}\n")
+    mcp_results = _probe_mcp_servers()
+    if mcp_results:
+        mcp_probed = [(n, s) for n, s in mcp_results if s is not None]
+        mcp_ok = sum(1 for _, s in mcp_probed if s)
+        mcp_total = len(mcp_results)
+        mcp_skipped = sum(1 for _, s in mcp_results if s is None)
+        if mcp_ok == len(mcp_probed) and mcp_skipped == 0:
+            mcp_tag = f"{_C_GREEN}{mcp_ok}/{mcp_total}{_RST}"
+        elif mcp_ok == 0 and mcp_skipped == 0:
+            mcp_tag = f"{_C_RED}{mcp_ok}/{mcp_total}{_RST}"
+        else:
+            label = f"{mcp_ok}/{mcp_total}"
+            if mcp_skipped:
+                label += f" ({mcp_skipped} skip)"
+            mcp_tag = f"{_C_ORANGE}{label}{_RST}"
+        # Split into rows of ~4-5 servers to fit box width
+        _box_row(w, bx, W, f"  {_BOLD}{_C_WHITE}MCP Servers{_RST}", mcp_tag)
+        row_items = []
+        row_vis = 2  # leading indent
+        for name, status in mcp_results:
+            # Use short names: drop common suffixes
+            short = name.replace("-analyzer", "").replace("-search", "") \
+                        .replace("-suite", "").replace("-chain-data", "")
+            if status is None:
+                # Not cached / skipped — show with dim marker
+                item = f"{_C_DARK_GRAY}~{short}{_RST}"
+            else:
+                item = _check_tool(short, status)
+            item_vis = len(short) + 1  # icon + name
+            if row_vis + item_vis + 1 > W - 2 and row_items:
+                _box_row(w, bx, W, "  " + " ".join(row_items))
+                row_items = []
+                row_vis = 2
+            row_items.append(item)
+            row_vis += item_vis + 1
+        if row_items:
+            _box_row(w, bx, W, "  " + " ".join(row_items))
+        # Show names of failed servers (not skipped ones)
+        failed = [n for n, s in mcp_results if s is False]
+        if failed:
+            for n in failed:
+                _box_row(w, bx, W, f"    {_C_RED}✗ {n}: not responding{_RST}")
+    else:
+        _box_row(w, bx, W,
+                 f"  {_C_GRAY}MCP{_RST}      no servers configured",
+                 f"{_C_DARK_GRAY}--{_RST}")
 
     w(f"  {bx}╰{'─' * W}╯{_RST}\n")
 
@@ -378,8 +548,8 @@ def _go_install_cmds():
     return []  # manual — show link
 
 
-def _openssl_check():
-    """Check if OpenSSL dev libs are available for cargo builds."""
+def _ensure_openssl_env():
+    """Check if OpenSSL dev libs are available; sets OPENSSL_* env vars if found."""
     if sys.platform != "win32":
         return True  # usually available via system packages on Unix
     if os.environ.get("OPENSSL_LIB_DIR") and os.environ.get("OPENSSL_INCLUDE_DIR"):
@@ -438,7 +608,7 @@ _PREREQ_INSTALLERS = {
         "url": "https://go.dev/doc/install",
     },
     "openssl": {
-        "check": _openssl_check,
+        "check": _ensure_openssl_env,
         "cmds_fn": _openssl_install_cmds,
         "paths": [],
         "label": "OpenSSL (dev)",
@@ -484,7 +654,7 @@ def _ensure_prereq(prereq_name: str, w) -> bool:
         return True
     # For OpenSSL on Windows, re-run the full check which sets env vars correctly
     if prereq_name == "openssl" and sys.platform == "win32":
-        if _openssl_check():
+        if _ensure_openssl_env():
             lib_dir = os.environ.get("OPENSSL_LIB_DIR", "")
             w(f"  {_C_GREEN}  {label} configured (LIB_DIR={lib_dir}){_RST}\n")
             return True
@@ -725,8 +895,97 @@ def _refresh_system_path():
 
 
 def _rag_needs_build() -> bool:
-    """Check if the RAG database needs building (empty or missing)."""
-    return _probe_rag_db() <= 0
+    """Check if the RAG database needs building or is incomplete from a crashed build."""
+    return _probe_rag_db() < _RAG_MIN_ENTRIES
+
+
+# ── RAG thermal/resource detection ────────────────────────
+
+def _get_total_ram_gb() -> float:
+    """Get total physical RAM in GB. Returns 0 on failure."""
+    try:
+        if sys.platform == "darwin":
+            r = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                               capture_output=True, text=True, timeout=3)
+            return int(r.stdout.strip()) / (1024 ** 3)
+        elif sys.platform == "linux":
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        return int(line.split()[1]) / (1024 ** 2)
+        elif sys.platform == "win32":
+            import ctypes
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            stat = MEMORYSTATUSEX(dwLength=ctypes.sizeof(MEMORYSTATUSEX))
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            return stat.ullTotalPhys / (1024 ** 3)
+    except Exception:
+        pass
+    return 0
+
+
+def _is_fanless_mac() -> bool:
+    """Detect fanless Macs (MacBook Air, etc.) that throttle under sustained ML load."""
+    if sys.platform != "darwin":
+        return False
+    # Primary: IORegistry contains the hardware model (e.g. "MacBookAir15,1")
+    try:
+        r = subprocess.run(
+            ["ioreg", "-c", "IOPlatformExpertDevice", "-d", "2"],
+            capture_output=True, text=True, timeout=3)
+        if "macbookair" in r.stdout.lower():
+            return True
+    except Exception:
+        pass
+    # Fallback: default macOS hostnames contain the model name
+    try:
+        import socket
+        hostname = socket.gethostname().lower().replace(" ", "-")
+        if "macbook-air" in hostname or "macbookair" in hostname:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _should_use_fast_rag() -> bool:
+    """Detect if machine should use lightweight embedding model for RAG build.
+
+    Nomic Embed v1.5 (~500MB) + PyTorch runs sustained CPU inference during
+    indexing. On fanless machines (all MacBook Airs) this causes thermal
+    throttling and potential crashes. On low-RAM machines (<16GB) it causes
+    heavy swapping. MiniLM (~90MB) is ~5x faster and perfectly adequate.
+
+    Override: set VULN_DB_FAST_MODE=0 to force Nomic, =1 to force MiniLM.
+    """
+    val = os.environ.get("VULN_DB_FAST_MODE", "").lower()
+    if val in ("0", "false", "no"):
+        return False
+    if val in ("1", "true", "yes"):
+        return True
+
+    # Fanless Macs throttle regardless of RAM — sustained PyTorch load
+    # on M1/M2/M3 Air causes 100%+ CPU with no thermal headroom
+    if _is_fanless_mac():
+        return True
+
+    # Low RAM: Nomic + PyTorch + ChromaDB needs ~4-6GB working memory
+    ram_gb = _get_total_ram_gb()
+    if 0 < ram_gb < 16:
+        return True
+
+    return False
 
 
 def _build_rag_db(w):
@@ -737,6 +996,14 @@ def _build_rag_db(w):
         return False
 
     py = _python_bin()
+
+    # Auto-detect thermal/memory constraints and switch to lightweight model
+    if _should_use_fast_rag():
+        os.environ["VULN_DB_FAST_MODE"] = "1"
+        ram = _get_total_ram_gb()
+        reason = "fanless Mac detected" if _is_fanless_mac() else f"{ram:.0f}GB RAM"
+        w(f"  {_C_BLUE}Using lightweight embeddings ({reason}){_RST}\n")
+        w(f"  {_C_DARK_GRAY}Override: VULN_DB_FAST_MODE=0 to use full model{_RST}\n\n")
 
     # Check for Solodit API key — needed for the largest data source
     if not os.environ.get("SOLODIT_API_KEY", "").strip():
