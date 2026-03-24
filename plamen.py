@@ -634,8 +634,13 @@ def _needs_bash(cmd: str) -> bool:
     return any(ind in cmd for ind in bash_indicators)
 
 
-def _run_install_cmd(cmd: str, retries: int = 1) -> bool:
-    """Run a single install command with visible output. Returns True on success."""
+def _run_install_cmd(cmd: str, retries: int = 1, timeout: int = None) -> bool:
+    """Run a single install command with visible output. Returns True on success.
+
+    Args:
+        timeout: Max seconds per attempt. None = no limit. On timeout, the subprocess
+                 is killed and the attempt counts as a failure.
+    """
     w = sys.stdout.write
     w(f"  {_C_GRAY}$ {cmd}{_RST}\n")
     sys.stdout.flush()
@@ -650,9 +655,13 @@ def _run_install_cmd(cmd: str, retries: int = 1) -> bool:
         run_kwargs = {"shell": True}
 
     for attempt in range(1 + retries):
-        result = subprocess.run(cmd, **run_kwargs)
-        if result.returncode == 0:
-            return True
+        try:
+            result = subprocess.run(cmd, timeout=timeout, **run_kwargs)
+            if result.returncode == 0:
+                return True
+        except subprocess.TimeoutExpired:
+            w(f"  {_C_RED}  timed out after {timeout}s{_RST}\n")
+            sys.stdout.flush()
         if attempt < retries:
             w(f"  {_C_ORANGE}  retry {attempt + 1}/{retries}...{_RST}\n")
             sys.stdout.flush()
@@ -835,11 +844,22 @@ def _build_rag_db(w):
         w(f"  {_C_BLUE}Using lightweight embeddings ({reason}){_RST}\n")
         w(f"  {_C_DARK_GRAY}Override: VULN_DB_FAST_MODE=0 to use full model{_RST}\n\n")
 
+    # Wipe existing ChromaDB — rebuild means fresh start.
+    # A stale DB from a previous crashed/partial build with a different embedding model
+    # (e.g., Nomic 768-dim vs MiniLM 384-dim) causes ChromaDB to hang on collection open.
+    chroma_dir = os.path.join(vuln_db_dir, "data", "chroma_db")
+    if os.path.isdir(chroma_dir):
+        import shutil as _shutil
+        _shutil.rmtree(chroma_dir, ignore_errors=True)
+        w(f"  {_C_GRAY}Cleared stale RAG database for clean rebuild{_RST}\n")
+
     # Check for Solodit API key — needed for the largest data source
     if not os.environ.get("SOLODIT_API_KEY", "").strip():
         w(f"  {_C_ORANGE}Note: SOLODIT_API_KEY not set — Solodit indexing will be skipped{_RST}\n")
         w(f"  {_C_GRAY}Get a free key at https://solodit.cyfrin.io{_RST}\n")
         w(f"  {_C_GRAY}Set it: export SOLODIT_API_KEY=your_key_here{_RST}\n\n")
+
+    rag_timeout = 600  # 10 minutes per step — generous for slow machines
 
     steps = [
         ("Solodit — live API",       "~2 min",
@@ -854,7 +874,7 @@ def _build_rag_db(w):
         w(f"  {_C_ORANGE}>{_RST} {_C_WHITE}{label}{_RST}"
           f"  {_C_DARK_GRAY}{est}{_RST}\n")
         sys.stdout.flush()
-        if not _run_install_cmd(cmd, retries=1):
+        if not _run_install_cmd(cmd, retries=1, timeout=rag_timeout):
             w(f"  {_C_RED}  failed — continuing with partial data{_RST}\n")
         else:
             w(f"  {_C_GREEN}  done{_RST}\n")

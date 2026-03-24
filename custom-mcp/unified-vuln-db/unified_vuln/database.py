@@ -402,7 +402,7 @@ class VulnerabilityDB:
     """
     
     def __init__(
-        self, 
+        self,
         persist_dir: Optional[Path] = None,
         embedding_model: str = "auto",
         embedding_dimensions: int = 768,
@@ -410,25 +410,85 @@ class VulnerabilityDB:
     ):
         self.persist_dir = persist_dir or CHROMA_DIR
         self.persist_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Initialize ChromaDB
-        self.client = chromadb.PersistentClient(
-            path=str(self.persist_dir),
-            settings=Settings(anonymized_telemetry=False)
-        )
-        
-        # Initialize embedding function
+
+        # Initialize embedding function FIRST (needed for dimension check)
         self.embedding_fn = CodeAwareEmbeddingFunction(
             model_name=embedding_model,
             dimensions=embedding_dimensions,
             voyage_api_key=voyage_api_key,
         )
-        
+
+        # Check for dimension mismatch with existing DB before opening.
+        # A stale DB from a crashed build with a different model (e.g., Nomic 768-dim
+        # vs MiniLM 384-dim) causes ChromaDB to hang on get_or_create_collection.
+        self._wipe_if_dimension_mismatch()
+
+        # Initialize ChromaDB
+        console.print("[dim]Initializing ChromaDB...[/dim]")
+        self.client = chromadb.PersistentClient(
+            path=str(self.persist_dir),
+            settings=Settings(anonymized_telemetry=False)
+        )
+
         # Get or create collection
+        console.print("[dim]Opening collection...[/dim]")
         self.collection = self._get_or_create_collection()
-        
+        console.print("[dim]Database ready.[/dim]")
+
         # Initialize graph layer
         self.graph = GraphLiteLayer(self.collection)
+
+    def _wipe_if_dimension_mismatch(self):
+        """Detect and wipe a stale ChromaDB whose embedding dimensions don't match the current model.
+
+        ChromaDB's HNSW index is built for a fixed dimension. Opening an existing collection
+        with a different-dimension embedding function can hang or silently corrupt. This checks
+        the stored dimension metadata and wipes the DB if it doesn't match.
+        """
+        import sqlite3
+        db_file = self.persist_dir / "chroma.sqlite3"
+        if not db_file.exists():
+            return  # No existing DB — nothing to check
+
+        try:
+            conn = sqlite3.connect(str(db_file), timeout=5)
+            cursor = conn.execute(
+                "SELECT str_value FROM collection_metadata "
+                "WHERE key = 'hnsw:space' LIMIT 1"
+            )
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return  # No collection metadata — let ChromaDB handle creation
+
+            # Check dimension from HNSW segment metadata
+            cursor = conn.execute(
+                "SELECT int_value FROM segment_metadata "
+                "WHERE key = 'hnsw:dimension' LIMIT 1"
+            )
+            dim_row = cursor.fetchone()
+            conn.close()
+
+            if not dim_row:
+                return  # No dimension stored yet — fresh or pre-insert collection
+
+            stored_dim = dim_row[0]
+            current_dim = self.embedding_fn.dimensions
+
+            if stored_dim != current_dim:
+                import shutil
+                console.print(
+                    f"[yellow]Embedding dimension mismatch: DB has {stored_dim}-dim, "
+                    f"current model produces {current_dim}-dim. Wiping stale DB...[/yellow]"
+                )
+                shutil.rmtree(str(self.persist_dir), ignore_errors=True)
+                self.persist_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            # SQLite locked, corrupt, or schema differs — wipe to be safe
+            import shutil
+            console.print(f"[yellow]Cannot read existing DB ({e}), wiping for clean start...[/yellow]")
+            shutil.rmtree(str(self.persist_dir), ignore_errors=True)
+            self.persist_dir.mkdir(parents=True, exist_ok=True)
     
     def _get_or_create_collection(self):
         """Get existing collection or create new one."""
