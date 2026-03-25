@@ -26,25 +26,28 @@ def cli():
 @click.option('--incremental', '-i', is_flag=True, help='Skip existing entries')
 @click.option('--max-pages', default=5, help='Max pages for Solodit scraping')
 @click.option('--max-entries', default=None, type=int, help='Max entries for Immunefi indexing (None = all)')
-def index(source: str, incremental: bool, max_pages: int, max_entries: int):
+@click.option('--skip-fetch', is_flag=True, default=False,
+              help='Immunefi: reuse cached HTTP responses (immunefi_fetched.json) instead of re-fetching URLs. '
+                   'Use on retry after a timeout to skip the ~100s URL-fetch phase and go straight to embedding.')
+def index(source: str, incremental: bool, max_pages: int, max_entries: int, skip_fetch: bool):
     """Index vulnerabilities from data sources."""
     console.print("[bold]Unified Vulnerability Database Indexer[/bold]\n")
-    
+
     total = 0
-    
+
     if source in ['all', 'defihacklabs']:
         console.print("\n[bold cyan]═══ DeFiHackLabs ═══[/bold cyan]")
         count = index_defihacklabs(incremental=incremental)
         total += count
-    
+
     if source in ['all', 'solodit']:
         console.print("\n[bold cyan]═══ Solodit ═══[/bold cyan]")
         count = index_solodit(max_pages_per_query=max_pages, incremental=incremental)
         total += count
-    
+
     if source in ['all', 'immunefi']:
         console.print("\n[bold cyan]═══ Immunefi Bug Bounty Writeups ═══[/bold cyan]")
-        count = index_immunefi(max_entries=max_entries, incremental=incremental)
+        count = index_immunefi(max_entries=max_entries, incremental=incremental, skip_fetch=skip_fetch)
         total += count
     
     console.print(f"\n[bold green]Total indexed: {total} vulnerabilities[/bold green]")

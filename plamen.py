@@ -847,7 +847,9 @@ def _build_rag_db(w):
     # Wipe existing ChromaDB — rebuild means fresh start.
     # A stale DB from a previous crashed/partial build with a different embedding model
     # (e.g., Nomic 768-dim vs MiniLM 384-dim) causes ChromaDB to hang on collection open.
-    chroma_dir = os.path.join(vuln_db_dir, "data", "chroma_db")
+    # NOTE: database.py resolves DATA_DIR via Path(__file__).parents[3] / "unified-vuln-db" / "data",
+    # which puts chroma_db at PLAMEN_HOME/unified-vuln-db/data/chroma_db — NOT under custom-mcp/.
+    chroma_dir = os.path.join(PLAMEN_HOME, "unified-vuln-db", "data", "chroma_db")
     if os.path.isdir(chroma_dir):
         import shutil as _shutil
         _shutil.rmtree(chroma_dir, ignore_errors=True)
@@ -859,25 +861,50 @@ def _build_rag_db(w):
         w(f"  {_C_GRAY}Get a free key at https://solodit.cyfrin.io{_RST}\n")
         w(f"  {_C_GRAY}Set it: export SOLODIT_API_KEY=your_key_here{_RST}\n\n")
 
-    rag_timeout = 600  # 10 minutes per step — generous for slow machines
+    # Per-source timeouts and page limits.
+    # Fanless Macs / low-RAM machines need more time (thermal throttling slows embedding)
+    # and fewer Solodit pages (29 tags × pages × 3.5s delay easily blows 600s on slow networks).
+    fast = _should_use_fast_rag()
+    solodit_timeout  = 1800 if fast else 1200  # 30 min / 20 min
+    indexing_timeout =  900 if fast else  600  # 15 min / 10 min
+    max_pages        =    5 if fast else   10
 
     steps = [
-        ("Solodit — live API",       "~2 min",
-         f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s solodit --max-pages 10'),
-        ("DeFiHackLabs — local",     "~1 min",
-         f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s defihacklabs'),
-        ("Immunefi — writeups",      "~30s",
-         f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s immunefi'),
+        # (label, est, cmd, retry_cmd, timeout)
+        # Solodit: no retry — a hanging API call won't improve on the same request
+        ("Solodit — live API",
+         f"~{'10' if fast else '5'} min",
+         f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s solodit --max-pages {max_pages}',
+         None,
+         solodit_timeout),
+        # DeFiHackLabs: local parsing + embedding; retry with same command is safe
+        ("DeFiHackLabs — local",
+         "~1 min",
+         f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s defihacklabs',
+         f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s defihacklabs',
+         indexing_timeout),
+        # Immunefi: first attempt fetches 139 URLs + embeds; retry skips the HTTP fetch
+        # phase (uses cached immunefi_fetched.json) and goes straight to embedding
+        ("Immunefi — writeups",
+         "~2 min",
+         f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s immunefi',
+         f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s immunefi --skip-fetch',
+         indexing_timeout),
     ]
 
-    for label, est, cmd in steps:
+    for label, est, cmd, retry_cmd, timeout in steps:
         w(f"  {_C_ORANGE}>{_RST} {_C_WHITE}{label}{_RST}"
           f"  {_C_DARK_GRAY}{est}{_RST}\n")
         sys.stdout.flush()
-        if not _run_install_cmd(cmd, retries=1, timeout=rag_timeout):
-            w(f"  {_C_RED}  failed — continuing with partial data{_RST}\n")
-        else:
+        ok = _run_install_cmd(cmd, retries=0, timeout=timeout)
+        if not ok and retry_cmd:
+            w(f"  {_C_ORANGE}  retry 1/1 (cached)...{_RST}\n")
+            sys.stdout.flush()
+            ok = _run_install_cmd(retry_cmd, retries=0, timeout=timeout)
+        if ok:
             w(f"  {_C_GREEN}  done{_RST}\n")
+        else:
+            w(f"  {_C_RED}  failed — continuing with partial data{_RST}\n")
         w("\n")
 
     count = _probe_rag_db()
