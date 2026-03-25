@@ -5,6 +5,13 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.12] - 2026-03-25
+
+### Added
+- **RAG indexing resource warning**: `_build_rag_db()` now prints a caution banner before indexing starts — warns that the process is CPU/RAM intensive, the machine may feel sluggish, and the terminal should not be closed.
+- **`nice -n 10` on Unix indexer commands**: On macOS/Linux, all indexer subprocesses run at reduced CPU priority (`nice -n 10`), yielding CPU to other applications. No effect on indexing quality, ~10-20% slower on idle machines. Silently skipped on Windows.
+- **First-time RAG hint in status box**: When RAG DB is not yet built (`-1`), the status box now shows `run 'plamen rag' (5-20 min, CPU intensive)` instead of bare `not built`, guiding new users.
+
 ## [1.0.11] - 2026-03-25
 
 ### Fixed
