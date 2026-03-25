@@ -5,6 +5,37 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.11] - 2026-03-25
+
+### Fixed
+- **RAG build wipes wrong ChromaDB path**: `_build_rag_db()` wiped `custom-mcp/unified-vuln-db/data/chroma_db` instead of the actual database location `unified-vuln-db/data/chroma_db` (per `database.py` `parents[3]` resolution). The nuke was a silent no-op, leaving stale DBs from crashed builds untouched and causing rebuilds to fail with partial data.
+- **Per-source RAG timeouts**: Replace flat 600s timeout with per-source limits — Solodit 1200s (20 min) / 1800s on fanless Macs (30 min), indexing 600s / 900s. Solodit retries removed (hanging API call doesn't improve on retry). Immunefi retry uses `--skip-fetch` to reuse cached HTTP responses instead of re-fetching 139 URLs.
+- **`--skip-fetch` CLI flag**: Expose existing `skip_fetch` parameter in `index_immunefi()` as a `--skip-fetch` CLI flag in the indexer, enabling cache-only retry after a timeout without re-fetching all Immunefi URLs.
+- **Solodit page count on constrained machines**: Reduce `--max-pages` from 10 to 5 on fanless Macs / low-RAM machines (29 tags × 10 pages × 3.5s delay exceeds timeout on slow networks).
+
+## [1.0.10] - 2026-03-24
+
+### Fixed
+- **RAG build hang on fanless Macs**: Stale ChromaDB with Nomic 768-dim HNSW index caused `get_or_create_collection()` to hang indefinitely when MiniLM 384-dim embeddings were used. Added `_wipe_if_dimension_mismatch()` to detect and clear dimension-mismatched databases before opening.
+
+## [1.0.9] - 2026-03-23
+
+### Added
+- **Thermal constraint auto-detection**: `_is_fanless_mac()` detects MacBook Air and other fanless Macs via IORegistry. `_should_use_fast_rag()` switches to MiniLM (`all-MiniLM-L6-v2`, 384-dim, ~90MB) instead of Nomic Embed v1.5 (768-dim, ~500MB) on fanless Macs or machines with <16GB RAM, preventing thermal throttling during RAG indexing. Override with `VULN_DB_FAST_MODE=0/1`.
+
+## [1.0.8] - 2026-03-22
+
+### Added
+- **Cross-batch verification consistency check (Phase 5.2)**: Haiku agent checks for contradictions between verification batches before final report assembly.
+
+### Fixed
+- **Slither/Hardhat dependency failure**: Resolved installation conflict between slither-analyzer and hardhat dev dependencies.
+
+## [1.0.7] - 2026-03-21
+
+### Fixed
+- **Invariant generation bypass**: Agents could shortcut Phase 4b-invariant-fuzz template by summarizing properties inline rather than reading the full methodology file. Enforced agent-read requirement for fuzz templates (Rule 3 hardening).
+
 ## [1.0.6] - 2026-03-19
 
 ### Changed
