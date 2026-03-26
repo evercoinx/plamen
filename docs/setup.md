@@ -121,6 +121,15 @@ cp settings.json.example ~/.claude/settings.json  # if ~/.claude/settings.json d
 
 Edit `~/.claude/mcp.json` with your API keys. See [MCP Servers](mcp-servers.md) for details.
 
+**macOS/Linux — fix the Python command:** The Python-based MCP servers use `"command": "python"` by default. If your system only has `python3` (check: `which python`), update mcp.json:
+
+```bash
+sed -i '' 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json  # macOS
+sed -i 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json    # Linux
+```
+
+Windows users: keep `"command": "python"` as-is.
+
 ### 4. Build the RAG database
 
 First, add `SOLODIT_API_KEY` to `~/.claude/settings.json` → `"env"` section:
@@ -151,6 +160,8 @@ python3 plamen.py rag   # macOS / Linux
 python plamen.py rag    # Windows
 ```
 
+If deps aren't installed yet, `plamen rag` installs them automatically before indexing. If the build fails partway through (network error, timeout), re-run the same command — it wipes the partial database and rebuilds from scratch.
+
 ### 5. Verify
 
 ```bash
@@ -179,4 +190,4 @@ The deny list blocks destructive operations (`rm -rf`, `sudo`, force push).
 
 ## Cold Start
 
-The first MCP tool call per Claude Code session loads ChromaDB and the embedding model into memory (1-5 minutes). Subsequent calls are instant. The pipeline handles this automatically with probe-first patterns and WebSearch fallback.
+The first MCP tool call per Claude Code session loads ChromaDB and the all-MiniLM-L6-v2 embedding model (~5s). Subsequent calls are instant. The pipeline handles this automatically with probe-first patterns and WebSearch fallback.

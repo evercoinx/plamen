@@ -200,8 +200,19 @@ You don't need honggfuzz. Trident v0.11+ uses TridentSVM. Just `cargo install tr
 ### `Failed to list installed solana versions`
 This occurs when Anchor CLI encounters Agave v3 (Solana CLI 3.x). Use Solana CLI 2.x for Anchor projects that specify `solana_version = "2.x"` in Anchor.toml.
 
+### MCP server won't start (`spawn python ENOENT` or server shows as failed)
+The Python-based MCP servers use `"command": "python"` in mcp.json. On macOS/Linux, change to `"command": "python3"`:
+```bash
+sed -i '' 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json  # macOS
+sed -i 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json    # Linux
+```
+Restart Claude Code after editing. On Windows, keep `"command": "python"`.
+
 ### MCP server timeout on first call
-ChromaDB loads the embedding model on first use (1-5 minutes). This is normal. The pipeline handles it with probe-first patterns and WebSearch fallback. The tool timeout is set to 300s in `settings.json` to accommodate this.
+ChromaDB and all-MiniLM-L6-v2 load on first use (~5s cold start). This is normal. The pipeline handles it with probe-first patterns and WebSearch fallback. The tool timeout is set to 300s in `settings.json`.
+
+### RAG database build failed or entries count is too low
+Run `plamen rag` again — it wipes the existing database and rebuilds from scratch. Ensure `SOLODIT_API_KEY` is set in `~/.claude/settings.json` → `"env"` section first. Safe to re-run as many times as needed.
 
 ### `No IDL files found`
 Run `anchor build` or `cargo build-sbf` first to generate IDL files before `trident init`.

@@ -1099,9 +1099,11 @@ def _setup_python_deps(w):
         core_ok = False
 
     if core_ok:
-        # Quick-check: try importing a deep dep
+        # Quick-check: try importing the core RAG deps (what the indexer actually needs).
+        # Deliberately avoid `import torch` here — torch cold-start takes 2-3s and would
+        # make every `plamen setup` feel sluggish even when deps are already installed.
         try:
-            import torch, chromadb  # noqa: F401
+            import sentence_transformers, chromadb  # noqa: F401
             deep_ok = True
         except ImportError:
             deep_ok = False

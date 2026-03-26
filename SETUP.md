@@ -69,7 +69,7 @@ git submodule update --init --recursive
 
 ## Step 2: Set API keys BEFORE installing
 
-The installer builds the RAG vulnerability database during setup. The Solodit source (3400+ audit findings — the largest and most important source) requires an API key. **Set this before running the installer**, otherwise Solodit indexing will fail silently and you'll get a weaker RAG database.
+The installer builds the RAG vulnerability database during setup. The Solodit source (3400+ audit findings — the largest and most important source) requires an API key. **Set this before running the installer**, otherwise Solodit indexing will be skipped and you'll get a weaker RAG database.
 
 **Add `SOLODIT_API_KEY` to `~/.claude/settings.json`** (the recommended approach — makes the key available to both `plamen rag` and all audit agents):
 
@@ -82,6 +82,8 @@ The installer builds the RAG vulnerability database during setup. The Solodit so
   }
 }
 ```
+
+> **If `~/.claude/settings.json` doesn't exist** (common on a fresh Claude Code install): create it with exactly the content above. The installer in Step 3 will merge Plamen's permissions into this file additively — your API key will not be overwritten.
 
 Get a free key at https://solodit.cyfrin.io.
 
@@ -120,13 +122,31 @@ Edit `~/.claude/mcp.json`:
 - Replace `YOUR_ETHERSCAN_API_KEY` with a free key from https://etherscan.io/apis (optional)
 - Replace `YOUR_TAVILY_API_KEY` with a free key from https://tavily.com (optional, used as RAG fallback)
 - Replace `YOUR_HELIUS_API_KEY` with a free key from https://helius.dev (optional, Solana only)
-- Update the `command` paths for Python and slither-mcp to match my system
 
-For the Python command path, run `which python3` (macOS/Linux) or `where python` (Windows) and use that path.
+**Fix the Python command for MCP servers (macOS/Linux only):**
 
-> If you skipped Step 2 or want to rebuild the RAG database after adding the Solodit key:
-> 1. Add `SOLODIT_API_KEY` to `~/.claude/settings.json` `"env"` section (see Step 2 above)
-> 2. Run `plamen rag` — this rebuilds all sources using the key from settings.json
+The Python-based MCP servers (unified-vuln-db, solana-fender, farofino) use `"command": "python"` by default. On macOS and most Linux systems the executable is `python3`, not `python`. Check which exists:
+
+```bash
+which python || which python3
+```
+
+If only `python3` exists, update mcp.json:
+
+```bash
+# macOS:
+sed -i '' 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json
+# Linux:
+sed -i 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json
+```
+
+On Windows, keep `"command": "python"` — that is the correct command.
+
+**slither-mcp:** If `slither-mcp` is not found after `pip install slither-analyzer`, replace `"slither-mcp"` in mcp.json with the full path from `which slither-mcp` (macOS/Linux) or `where slither-mcp` (Windows).
+
+> **If you skipped Step 2 or want to rebuild the RAG database after adding the Solodit key:**
+> 1. Add `SOLODIT_API_KEY` to `~/.claude/settings.json` → `"env"` section (see Step 2 above)
+> 2. Run `plamen rag` — rebuilds all sources from scratch. Safe to re-run as many times as needed.
 
 ## Step 5: Verify installation
 
@@ -180,12 +200,38 @@ echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.zshrc && source ~/.zshrc
 
 ## Troubleshooting
 
-If any step fails, check [docs/dependencies.md](docs/dependencies.md) for platform-specific fixes:
-- **macOS**: `hnswlib` build fail → run `xcode-select --install` first
-- **macOS/Linux**: `externally-managed-environment` → handled automatically, but see docs if manual pip fails
-- **Linux**: ChromaDB SQLite version error → `pip install pysqlite3-binary`
-- **Python 3.13+**: PyTorch/sentence-transformers may not work → use Python 3.11 or 3.12
-- **Windows**: symlink permission error → enable Developer Mode (Step 0b)
+If any step fails, check [docs/dependencies.md](docs/dependencies.md) for platform-specific fixes.
+
+### MCP server fails to start (`spawn python ENOENT` or server shows red in Claude Code)
+The Python-based MCP servers use `"command": "python"` in mcp.json. On macOS/Linux, change to `"command": "python3"`:
+```bash
+sed -i '' 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json  # macOS
+sed -i 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json    # Linux
+```
+Then restart Claude Code.
+
+### RAG database build failed partway through (network error, timeout, or partial entries)
+Run `plamen rag` again — it wipes the existing database and rebuilds from scratch every time. Safe to re-run as many times as needed. Add `SOLODIT_API_KEY` to `~/.claude/settings.json` first if you haven't already.
+
+### Solodit indexing was skipped (no API key during install)
+1. Get a free key at https://solodit.cyfrin.io
+2. Add it to `~/.claude/settings.json` → `"env"` section: `"SOLODIT_API_KEY": "your_key_here"`
+3. Run `plamen rag` to rebuild with the key
+
+### `macOS`: `hnswlib` build fail
+Run `xcode-select --install` first, then retry.
+
+### `macOS/Linux`: `externally-managed-environment`
+Handled automatically by the installer. If running pip manually, add `--break-system-packages`.
+
+### `Linux`: ChromaDB SQLite version error
+`pip install pysqlite3-binary`
+
+### `Python 3.13+`: PyTorch/sentence-transformers compatibility issues
+Use Python 3.11 or 3.12. See [docs/dependencies.md](docs/dependencies.md) for venv setup.
+
+### `Windows`: symlink permission error
+Enable Developer Mode (Step 0b).
 
 ## Done
 
