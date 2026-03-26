@@ -1,6 +1,6 @@
 # Platform Dependencies
 
-> Complete dependency guide for all platforms. The `plamen setup` command auto-installs chain toolchains, and `plamen rag` installs RAG deps + builds the vulnerability database separately. This page documents manual installation and troubleshooting.
+> Complete dependency guide for all platforms. The `plamen setup` command auto-installs chain toolchains, and `plamen rag` builds/rebuilds the RAG vulnerability database separately. This page documents manual installation and troubleshooting.
 
 ## Quick Start
 

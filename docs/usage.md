@@ -16,7 +16,7 @@ Interactive UI with dependency checking, tool installation, cost estimation, and
 plamen core /path/to/project --docs whitepaper.pdf
 plamen thorough /path/to/project --scope scope.txt --network ethereum --proven-only
 plamen setup                        # install chain toolchains
-plamen rag                          # install RAG deps + build DB
+plamen rag                          # build/rebuild RAG database
 plamen uninstall                    # remove Plamen from ~/.claude
 ```
 

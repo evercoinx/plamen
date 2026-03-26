@@ -769,6 +769,8 @@ Spawn sonnet RAG sweep agent. This is NOT optional.
 If MCP tools fail → agent falls back to WebSearch → if that fails → floor scores (0.3).
 The sweep MUST be attempted. Writing floor scores without attempting is a VIOLATION.
 
+> **If RAG is not built**: The unified-vuln-db MCP server may not be running. The sweep agent will detect this on the first tool call and fall back to WebSearch automatically. The pipeline continues with reduced historical context. To enable RAG, the user should run `plamen rag` in their terminal before the next audit.
+
 ### Phase 5.1: Skeptic-Judge Verification (Thorough mode only, HIGH/CRIT)
 
 > **Read templates from**: `~/.claude/prompts/{LANGUAGE}/phase5-verification-prompt.md` → "Skeptic-Judge Verification" section

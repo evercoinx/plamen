@@ -307,12 +307,14 @@ def check_dependencies() -> bool:
     if rag_count >= _RAG_MIN_ENTRIES:
         rag_status = f"{_C_GREEN}{rag_count:,} entries{_RST}  {_C_DARK_GRAY}(cold-start ~30s on first query){_RST}"
     elif rag_count > 0:
-        rag_status = f"{_C_ORANGE}{rag_count:,} (incomplete){_RST}"
+        rag_status = (f"{_C_ORANGE}{rag_count:,} (incomplete){_RST}"
+                      f"  {_C_DARK_GRAY}run 'plamen rag' to rebuild{_RST}")
     elif rag_count == 0:
-        rag_status = f"{_C_RED}empty{_RST}"
+        rag_status = (f"{_C_RED}empty{_RST}"
+                      f"  {_C_DARK_GRAY}run 'plamen rag' to build{_RST}")
     else:
         rag_status = (f"{_C_RED}not built{_RST}"
-                      f"  {_C_DARK_GRAY}run 'plamen rag' (5-20 min, CPU intensive){_RST}")
+                      f"  {_C_DARK_GRAY}run 'plamen rag' to build (~10-20 min){_RST}")
     _box_row(w, bx, W,
              f"  {_C_GRAY}RAG DB{_RST}   vulnerability knowledge base",
              rag_status)
@@ -2434,7 +2436,7 @@ def main():
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}light{_RST} /path/to/project       Audit in Light mode\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}compare{_RST}                      Diff reports\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}setup{_RST}                        Install chain toolchains\n")
-            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}rag{_RST}                          Install RAG deps + build DB\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}rag{_RST}                          Build/rebuild RAG database\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}uninstall{_RST}                    Remove from ~/.claude\n")
             w(f"\n  {_C_WHITE}Options (for audit modes):{_RST}\n")
             w(f"    {_C_GRAY}--docs{_RST} PATH              Whitepaper or spec file\n")

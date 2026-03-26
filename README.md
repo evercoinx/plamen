@@ -63,7 +63,7 @@ Then use `plamen` from anywhere:
 ```bash
 plamen                              # interactive wizard
 plamen setup                        # install chain toolchains
-plamen rag                          # install RAG deps + build DB (~10-20 min)
+plamen rag                          # build/rebuild RAG database (~10-20 min)
 plamen uninstall                    # remove Plamen from ~/.claude
 ```
 
@@ -161,7 +161,7 @@ plamen                                              # interactive wizard
 plamen core /path/to/project                        # skip wizard
 plamen thorough /path/to/project --proven-only      # strict evidence mode
 plamen setup                                        # install chain toolchains
-plamen rag                                          # install RAG deps + build (~10-20 min)
+plamen rag                                          # build/rebuild RAG database (~10-20 min)
 ```
 
 **Inside Claude Code**:

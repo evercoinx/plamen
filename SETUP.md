@@ -191,7 +191,7 @@ After setup, I can start an audit by typing `plamen` in my terminal or `/plamen`
 Available commands (work from any directory after PATH is set):
 - `plamen` — interactive wizard
 - `plamen setup` — install chain toolchains
-- `plamen rag` — install RAG deps + build DB (~10-20 min)
+- `plamen rag` — build/rebuild RAG database (~10-20 min)
 - `plamen uninstall` — remove Plamen from ~/.claude
 
 > **Important**: Always use `plamen` (not `python3 plamen.py`) after PATH is set up. The `python3 plamen.py` form only works from inside `~/.plamen/`.
