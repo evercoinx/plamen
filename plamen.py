@@ -979,6 +979,19 @@ def _build_rag_db(w):
         w(f"  {_C_RED}unified-vuln-db not found at {vuln_db_dir}{_RST}\n")
         return False
 
+    # Ensure RAG dependencies are installed before attempting to run the indexer.
+    # This makes `plamen rag` self-healing: if deps are missing (e.g. after a fresh clone
+    # or a failed previous install) it installs them here before proceeding.
+    try:
+        import chromadb, sentence_transformers  # noqa: F401
+    except ImportError:
+        w(f"  {_C_ORANGE}RAG dependencies not installed — installing now...{_RST}\n\n")
+        sys.stdout.flush()
+        if not _setup_python_deps(w):
+            w(f"  {_C_RED}Dependency installation failed. "
+              f"Run 'plamen setup' to retry.{_RST}\n")
+            return False
+
     py = _python_bin()
 
     # Wipe existing ChromaDB — rebuild means fresh start.
