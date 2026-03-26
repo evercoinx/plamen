@@ -188,6 +188,8 @@ If any step fails, check [docs/dependencies.md](docs/dependencies.md) for platfo
 
 After setup, I can start an audit by typing `plamen` in my terminal or `/plamen` inside Claude Code.
 
+> **What's next?** See [docs/getting-started.md](docs/getting-started.md) for what's required vs optional, which API keys to set, and how to run your first audit.
+
 Available commands (work from any directory after PATH is set):
 - `plamen` — interactive wizard
 - `plamen setup` — install chain toolchains

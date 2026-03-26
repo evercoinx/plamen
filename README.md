@@ -138,6 +138,8 @@ plamen                    # terminal wrapper with interactive wizard
 
 Or inside Claude Code: `/plamen`
 
+> **New to Plamen?** See [docs/getting-started.md](docs/getting-started.md) — explains what's required vs optional, which chain tools to install, and how to run your first audit.
+
 ---
 
 ## Audit Modes
