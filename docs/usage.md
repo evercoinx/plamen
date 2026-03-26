@@ -1,5 +1,7 @@
 # Usage
 
+> **Just installed?** See [getting-started.md](getting-started.md) first — what's required, what's optional, and how to run your first audit.
+
 ## Two Ways to Run
 
 ### Option A: Terminal Wrapper (recommended)

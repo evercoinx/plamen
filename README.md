@@ -194,6 +194,7 @@ Language detection is automatic based on config files.
 
 | Topic | Link |
 |-------|------|
+| **Getting started** | **[docs/getting-started.md](docs/getting-started.md)** |
 | Full setup guide | [docs/setup.md](docs/setup.md) |
 | Platform dependencies | [docs/dependencies.md](docs/dependencies.md) |
 | Audit mode comparison | [docs/audit-modes.md](docs/audit-modes.md) |

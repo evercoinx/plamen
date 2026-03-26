@@ -1,6 +1,8 @@
 # Setup Guide
 
-> For detailed per-platform installation, troubleshooting, and Trident/OpenSSL/Developer Mode requirements, see **[Platform Dependencies](dependencies.md)**.
+> **Just installed?** See [getting-started.md](getting-started.md) for the short version — what's required, what's optional, first audit walkthrough.
+>
+> For per-platform troubleshooting (Developer Mode, OpenSSL, Trident), see [dependencies.md](dependencies.md).
 
 ## Prerequisites
 
