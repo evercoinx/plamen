@@ -834,13 +834,12 @@ def _build_rag_db(w):
 
     py = _python_bin()
 
-    # Auto-detect thermal/memory constraints and switch to lightweight model
+    # Default to MiniLM (fast, ~90MB) for all platforms.
+    # Nomic (~500MB) is opt-in via VULN_DB_FAST_MODE=0.
     if _should_use_fast_rag():
         os.environ["VULN_DB_FAST_MODE"] = "1"
-        ram = _get_total_ram_gb()
-        reason = "fanless Mac detected" if _is_fanless_mac() else f"{ram:.0f}GB RAM"
-        w(f"  {_C_BLUE}Using lightweight embeddings ({reason}){_RST}\n")
-        w(f"  {_C_DARK_GRAY}Override: VULN_DB_FAST_MODE=0 to use full model{_RST}\n\n")
+        w(f"  {_C_BLUE}Using MiniLM embeddings (fast, ~90MB){_RST}\n")
+        w(f"  {_C_DARK_GRAY}Override: VULN_DB_FAST_MODE=0 to use Nomic (~500MB){_RST}\n\n")
 
     # Wipe existing ChromaDB — rebuild means fresh start.
     # A stale DB from a previous crashed/partial build with a different embedding model
@@ -1286,10 +1285,20 @@ def _merge_mcp_json(w):
             existing = _json.load(f)
         existing.setdefault("mcpServers", {})
 
-    added, skipped = [], []
+    added, skipped, patched_env = [], [], []
     for name, config in plamen.get("mcpServers", {}).items():
         if name in existing["mcpServers"]:
             skipped.append(name)
+            # Backfill missing env vars into existing servers (e.g., VULN_DB_FAST_MODE
+            # was not in earlier mcp.json.example — existing installs need it to prevent
+            # model mismatch between plamen rag (MiniLM 384-dim) and MCP runtime (Nomic 768-dim))
+            template_env = config.get("env", {})
+            if template_env:
+                existing_env = existing["mcpServers"][name].setdefault("env", {})
+                for k, v in template_env.items():
+                    if k not in existing_env and not v.startswith("YOUR_"):
+                        existing_env[k] = v
+                        patched_env.append(f"{name}.{k}")
         else:
             existing["mcpServers"][name] = config
             added.append(name)
@@ -1300,9 +1309,11 @@ def _merge_mcp_json(w):
 
     if added:
         w(f"  {_C_GREEN}mcp.json: added {', '.join(added)}{_RST}\n")
+    if patched_env:
+        w(f"  {_C_GREEN}mcp.json: backfilled env vars: {', '.join(patched_env)}{_RST}\n")
     if skipped:
         w(f"  {_C_GRAY}mcp.json: kept existing {', '.join(skipped)}{_RST}\n")
-    if not added and not skipped:
+    if not added and not skipped and not patched_env:
         w(f"  {_C_GREEN}mcp.json: up to date{_RST}\n")
 
     # Remind about API keys for newly added servers

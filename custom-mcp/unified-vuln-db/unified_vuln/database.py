@@ -48,12 +48,14 @@ COLLECTION_NAME = "vulnerabilities_v2"
 class CodeAwareEmbeddingFunction:
     """
     Code-aware embedding function with Matryoshka dimension support.
-    
-    Priority:
+
+    Priority (with VULN_DB_FAST_MODE=true, which is the default):
+    1. all-MiniLM-L6-v2 (~90MB, fast, adequate for vuln pattern matching)
+
+    Priority (with VULN_DB_FAST_MODE=false, opt-in):
     1. Voyage Code 2 (best for code, requires API key)
-    2. Nomic Embed Text v1.5 (good local alternative with Matryoshka)
-    3. CodeBERT (fallback)
-    4. all-MiniLM-L6-v2 (last resort)
+    2. Nomic Embed Text v1.5 (good local alternative with Matryoshka, ~500MB)
+    3. all-MiniLM-L6-v2 (fallback)
     """
     
     def __init__(
@@ -76,17 +78,26 @@ class CodeAwareEmbeddingFunction:
         return self._model_name_str
     
     def _initialize(self):
-        """Initialize the best available model."""
+        """Initialize the best available model.
+
+        MiniLM is the default for all platforms (VULN_DB_FAST_MODE defaults to true).
+        Nomic/Voyage are only used when VULN_DB_FAST_MODE is explicitly set to false/0/no.
+        This prevents a model mismatch between build (which sets VULN_DB_FAST_MODE=1)
+        and MCP runtime (which previously defaulted to Nomic), causing ChromaDB to
+        wipe a 384-dim DB when opened with a 768-dim model.
+        """
         import os
-        
-        # Check for fast mode (skip heavy models, use MiniLM)
-        fast_mode = os.environ.get("VULN_DB_FAST_MODE", "").lower() in ("1", "true", "yes")
-        if fast_mode:
-            console.print("[yellow]Fast mode enabled - using lightweight model[/yellow]")
+
+        # VULN_DB_FAST_MODE defaults to true — MiniLM for everyone.
+        # Only explicit "0"/"false"/"no" opts into heavy models.
+        fast_mode_val = os.environ.get("VULN_DB_FAST_MODE", "true").lower()
+        use_heavy = fast_mode_val in ("0", "false", "no")
+
+        if not use_heavy:
             self.model_name = "minilm"
-        
-        # Try Voyage Code 2 (best for code)
-        if self.voyage_api_key and self.model_name in ["auto", "voyage"]:
+
+        # Try Voyage Code 2 (best for code, only when heavy models enabled)
+        if use_heavy and self.voyage_api_key and self.model_name in ["auto", "voyage"]:
             try:
                 import voyageai
                 self.model = voyageai.Client(api_key=self.voyage_api_key)
@@ -96,8 +107,8 @@ class CodeAwareEmbeddingFunction:
                 return
             except ImportError:
                 console.print("[yellow]voyageai not installed, trying alternatives...[/yellow]")
-        
-        # Try MiniLM first if not auto (fastest loading, ~90MB)
+
+        # Try MiniLM (default — fastest loading, ~90MB, 384-dim)
         if self.model_name == "minilm":
             try:
                 from sentence_transformers import SentenceTransformer
@@ -105,13 +116,13 @@ class CodeAwareEmbeddingFunction:
                 self.model_type = "minilm"
                 self._model_name_str = "all-MiniLM-L6-v2"
                 self.dimensions = 384  # MiniLM output dimension
-                console.print("[green]Using all-MiniLM-L6-v2 (fast)[/green]")
+                console.print("[green]Using all-MiniLM-L6-v2[/green]")
                 return
             except Exception as e:
                 console.print(f"[yellow]MiniLM failed: {e}[/yellow]")
-        
-        # Try Nomic Embed (local, Matryoshka support, ~500MB)
-        if self.model_name in ["auto", "nomic"]:
+
+        # Try Nomic Embed (only when heavy models enabled, ~500MB)
+        if use_heavy and self.model_name in ["auto", "nomic"]:
             try:
                 from sentence_transformers import SentenceTransformer
                 self.model = SentenceTransformer(
@@ -124,8 +135,8 @@ class CodeAwareEmbeddingFunction:
                 return
             except Exception as e:
                 console.print(f"[yellow]Nomic failed: {e}, trying MiniLM...[/yellow]")
-        
-        # Fallback to MiniLM (smallest, fastest)
+
+        # Fallback to MiniLM (always available as last resort)
         try:
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -152,32 +163,40 @@ class CodeAwareEmbeddingFunction:
         return self._embed(input)
     
     def _embed(self, input: List[str]) -> List[List[float]]:
-        """Internal embedding function."""
+        """Internal embedding function.
+
+        Shows per-document progress bar for batches >= 50 docs so users see
+        activity during long embedding runs instead of a frozen terminal.
+        """
         if self.model is None:
             return [[0.0] * self.dimensions for _ in input]
-        
+
+        # Show progress for large batches (50+). Small batches (query-time
+        # calls from MCP tools) stay silent to avoid noise.
+        show_progress = len(input) >= 50
+
         if self.model_type == "voyage":
             # Voyage API
             result = self.model.embed(
-                input, 
+                input,
                 model="voyage-code-2",
                 input_type="document"
             )
             return result.embeddings
-        
+
         elif self.model_type == "nomic":
             # Nomic with Matryoshka dimension truncation
             embeddings = self.model.encode(
-                input, 
-                show_progress_bar=False,
+                input,
+                show_progress_bar=show_progress,
                 convert_to_numpy=True
             )
             # Truncate to desired dimensions (Matryoshka)
             return embeddings[:, :self.dimensions].tolist()
-        
+
         else:
-            # Standard sentence-transformers
-            embeddings = self.model.encode(input, show_progress_bar=False)
+            # Standard sentence-transformers (MiniLM)
+            embeddings = self.model.encode(input, show_progress_bar=show_progress)
             return embeddings.tolist()
 
 
@@ -544,30 +563,35 @@ class VulnerabilityDB:
             console.print(f"[red]Error adding {vuln.id}: {e}[/red]")
             return False
     
-    def add_vulnerabilities(self, vulns: List[Vulnerability], batch_size: int = 100) -> int:
-        """Add multiple vulnerabilities in batches with progress."""
-        from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
-        
+    def add_vulnerabilities(self, vulns: List[Vulnerability], batch_size: int = 50) -> int:
+        """Add multiple vulnerabilities in batches with progress.
+
+        Default batch_size=50 (not 100) gives more frequent progress updates
+        during embedding — users see ~14 updates for 700 docs instead of 7.
+        """
+        from rich.progress import (Progress, SpinnerColumn, BarColumn,
+                                   TextColumn, TimeElapsedColumn)
+
         added = 0
-        total_batches = (len(vulns) + batch_size - 1) // batch_size
-        
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
             TextColumn("({task.completed}/{task.total})"),
+            TimeElapsedColumn(),
             console=console,
         ) as progress:
             task = progress.add_task("[cyan]Embedding & indexing...", total=len(vulns))
-            
+
             for i in range(0, len(vulns), batch_size):
                 batch = vulns[i:i + batch_size]
-                
+
                 documents = [v.to_document() for v in batch]
                 metadatas = [v.to_metadata() for v in batch]
                 ids = [v.id for v in batch]
-                
+
                 try:
                     self.collection.add(
                         documents=documents,
@@ -580,7 +604,7 @@ class VulnerabilityDB:
                     for v in batch:
                         if self.add_vulnerability(v):
                             added += 1
-                
+
                 progress.update(task, advance=len(batch))
         
         return added

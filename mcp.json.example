@@ -15,7 +15,10 @@
       "command": "python",
       "args": ["-m", "unified_vuln.server"],
       "cwd": "./custom-mcp/unified-vuln-db",
-      "_comment": "Required: RAG vulnerability database. Run 'python -m unified_vuln.indexer index' to populate"
+      "env": {
+        "VULN_DB_FAST_MODE": "true"
+      },
+      "_comment": "Required: RAG vulnerability database. Run 'plamen rag' to populate. VULN_DB_FAST_MODE=true uses MiniLM (fast); set to 'false' for Nomic (slower, higher quality)"
     },
     "farofino": {
       "command": "python",
