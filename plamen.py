@@ -78,7 +78,6 @@ VERSION = _read_version()
 # ── Constants ────────────────────────────────────────────────
 _BACK = "__back__"
 _MAX_LINE = 48  # max visible chars for any prompt line (W - 4)
-_RAG_MIN_ENTRIES = 500  # below this the DB is considered incomplete
 
 _STYLE = InquirerPyStyle({
     "questionmark": "#ff7800 bold",
@@ -151,12 +150,16 @@ MODES = {
 # ── Dependency check ─────────────────────────────────────────
 
 def _python_bin() -> str:
-    """Return the name of the Python binary available on this system."""
-    if shutil.which("python"):
-        return "python"
-    if shutil.which("python3"):
-        return "python3"
-    return "python"  # fallback — will fail with a clear error
+    """Return the Python interpreter command for use in shell strings.
+
+    Uses sys.executable (the interpreter running plamen.py itself) so subprocess
+    commands always use the same venv or system Python that launched plamen.
+    Path is quoted if it contains spaces.
+    """
+    exe = sys.executable
+    if " " in exe:
+        return f'"{exe}"'
+    return exe
 
 
 def _python_extra_paths() -> list:
@@ -206,6 +209,9 @@ def _box_row(w, bx: str, W: int, content: str, right: str = ""):
     w(f"  {bx}│{_RST}{content}{' ' * gap}{right}{bx}│{_RST}\n")
 
 
+_RAG_MIN_ENTRIES = 500  # Below this, RAG is a partial/crashed build — flag as incomplete
+
+
 def _probe_rag_db() -> int:
     """Return the number of entries in the RAG vulnerability database, or -1 if not found."""
     db_path = os.path.join(PLAMEN_HOME, "unified-vuln-db", "data", "chroma_db", "chroma.sqlite3")
@@ -218,6 +224,122 @@ def _probe_rag_db() -> int:
         return count
     except Exception:
         return -1
+
+
+def _probe_mcp_server(name: str, cmd: str, args: list, cwd: str = None,
+                      env: dict = None, timeout: float = 10) -> bool:
+    """Start an MCP server, send JSON-RPC initialize, check for a response, then kill it.
+    Returns True if the server responds to init within timeout."""
+    import json as _json
+    full_env = {**os.environ, **(env or {})}
+    try:
+        proc = subprocess.Popen(
+            [cmd] + args,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            cwd=cwd, env=full_env)
+        # JSON-RPC initialize request (MCP protocol)
+        init_msg = _json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05",
+                       "capabilities": {},
+                       "clientInfo": {"name": "plamen-probe", "version": "1"}}
+        })
+        # MCP uses content-length framed messages on stdio
+        header = f"Content-Length: {len(init_msg)}\r\n\r\n"
+        proc.stdin.write(header.encode() + init_msg.encode())
+        proc.stdin.flush()
+        # Wait for any stdout response (just check it writes back something)
+        import select
+        if sys.platform == "win32":
+            # Windows: can't select on pipes, just do a timed read
+            import threading
+            result = [False]
+            def _read():
+                data = proc.stdout.read(1)
+                if data:
+                    result[0] = True
+            t = threading.Thread(target=_read, daemon=True)
+            t.start()
+            t.join(timeout)
+        else:
+            ready, _, _ = select.select([proc.stdout], [], [], timeout)
+            result = [len(ready) > 0]
+        # Clean up: kill process and reap to avoid resource leaks
+        proc.kill()
+        proc.wait(timeout=3)
+        return result[0]
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=3)
+        except Exception:
+            pass
+        return False
+
+
+def _npx_package_cached(pkg: str) -> bool:
+    """Check if an npx package is in the local npm cache.
+    npx caches packages in <npm_cache>/_npx/<hash>/package.json with a dependencies dict."""
+    try:
+        npm_bin = shutil.which("npm") or "npm"
+        r = subprocess.run([npm_bin, "config", "get", "cache"],
+                           capture_output=True, text=True, timeout=5)
+        cache_dir = r.stdout.strip()
+        if not cache_dir or not os.path.isdir(cache_dir):
+            return False
+        npx_dir = os.path.join(cache_dir, "_npx")
+        if not os.path.isdir(npx_dir):
+            return False
+        import json as _json
+        for entry in os.listdir(npx_dir):
+            pj = os.path.join(npx_dir, entry, "package.json")
+            if os.path.isfile(pj):
+                try:
+                    with open(pj) as f:
+                        data = _json.load(f)
+                    if pkg in data.get("dependencies", {}):
+                        return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return False
+
+
+def _probe_mcp_servers() -> list:
+    """Probe configured MCP servers for health. Returns list of (name, ok) tuples.
+    npx-based servers are skipped if the package isn't cached (download would exceed timeout)."""
+    import json as _json
+    mcp_path = os.path.join(CLAUDE_HOME, "mcp.json")
+    if not os.path.isfile(mcp_path):
+        return []
+    try:
+        with open(mcp_path) as f:
+            mcp = _json.load(f)
+    except Exception:
+        return []
+
+    results = []
+    for name, config in mcp.get("mcpServers", {}).items():
+        cmd = config.get("command", "")
+        args = config.get("args", [])
+        cwd = config.get("cwd")
+        env = config.get("env")
+        # Only probe if the command binary exists
+        if not shutil.which(cmd) and not os.path.isfile(cmd):
+            results.append((name, False))
+            continue
+        # npx-based servers: skip probe if package isn't cached yet
+        # (npx would download the package first, easily exceeding the timeout)
+        cmd_base = os.path.basename(cmd).lower().replace(".cmd", "")
+        if cmd_base == "npx" and len(args) >= 2 and args[0] == "-y":
+            pkg = args[1].rsplit("@", 1)[0] if "@" in args[1] else args[1]
+            if not _npx_package_cached(pkg):
+                results.append((name, None))  # None = not cached, skip probe
+                continue
+        ok = _probe_mcp_server(name, cmd, args, cwd=cwd, env=env)
+        results.append((name, ok))
+    return results
 
 
 def check_dependencies() -> bool:
@@ -305,19 +427,65 @@ def check_dependencies() -> bool:
     w(f"  {bx}├{'─' * W}┤{_RST}\n")
     rag_count = _probe_rag_db()
     if rag_count >= _RAG_MIN_ENTRIES:
-        rag_status = f"{_C_GREEN}{rag_count:,} entries{_RST}  {_C_DARK_GRAY}(cold-start ~30s on first query){_RST}"
+        rag_status = f"{_C_GREEN}{rag_count:,} entries{_RST}  {_C_DARK_GRAY}(cold-start ~5s on first query){_RST}"
     elif rag_count > 0:
-        rag_status = (f"{_C_ORANGE}{rag_count:,} (incomplete){_RST}"
-                      f"  {_C_DARK_GRAY}run 'plamen rag' to rebuild{_RST}")
+        rag_status = f"{_C_ORANGE}{rag_count:,} (incomplete){_RST}"
     elif rag_count == 0:
-        rag_status = (f"{_C_RED}empty{_RST}"
-                      f"  {_C_DARK_GRAY}run 'plamen rag' to build{_RST}")
+        rag_status = f"{_C_RED}empty{_RST}"
     else:
-        rag_status = (f"{_C_RED}not built{_RST}"
-                      f"  {_C_DARK_GRAY}run 'plamen rag' to build (~10-20 min){_RST}")
+        rag_status = f"{_C_RED}not built{_RST}"
     _box_row(w, bx, W,
              f"  {_C_GRAY}RAG DB{_RST}   vulnerability knowledge base",
              rag_status)
+
+    # MCP server health probes
+    w(f"  {bx}├{'─' * W}┤{_RST}\n")
+    mcp_results = _probe_mcp_servers()
+    if mcp_results:
+        mcp_probed = [(n, s) for n, s in mcp_results if s is not None]
+        mcp_ok = sum(1 for _, s in mcp_probed if s)
+        mcp_total = len(mcp_results)
+        mcp_skipped = sum(1 for _, s in mcp_results if s is None)
+        if mcp_ok == len(mcp_probed) and mcp_skipped == 0:
+            mcp_tag = f"{_C_GREEN}{mcp_ok}/{mcp_total}{_RST}"
+        elif mcp_ok == 0 and mcp_skipped == 0:
+            mcp_tag = f"{_C_RED}{mcp_ok}/{mcp_total}{_RST}"
+        else:
+            label = f"{mcp_ok}/{mcp_total}"
+            if mcp_skipped:
+                label += f" ({mcp_skipped} skip)"
+            mcp_tag = f"{_C_ORANGE}{label}{_RST}"
+        # Split into rows of ~4-5 servers to fit box width
+        _box_row(w, bx, W, f"  {_BOLD}{_C_WHITE}MCP Servers{_RST}", mcp_tag)
+        row_items = []
+        row_vis = 2  # leading indent
+        for name, status in mcp_results:
+            # Use short names: drop common suffixes
+            short = name.replace("-analyzer", "").replace("-search", "") \
+                        .replace("-suite", "").replace("-chain-data", "")
+            if status is None:
+                # Not cached / skipped — show with dim marker
+                item = f"{_C_DARK_GRAY}~{short}{_RST}"
+            else:
+                item = _check_tool(short, status)
+            item_vis = len(short) + 1  # icon + name
+            if row_vis + item_vis + 1 > W - 2 and row_items:
+                _box_row(w, bx, W, "  " + " ".join(row_items))
+                row_items = []
+                row_vis = 2
+            row_items.append(item)
+            row_vis += item_vis + 1
+        if row_items:
+            _box_row(w, bx, W, "  " + " ".join(row_items))
+        # Show names of failed servers (not skipped ones)
+        failed = [n for n, s in mcp_results if s is False]
+        if failed:
+            for n in failed:
+                _box_row(w, bx, W, f"    {_C_RED}✗ {n}: not responding{_RST}")
+    else:
+        _box_row(w, bx, W,
+                 f"  {_C_GRAY}MCP{_RST}      no servers configured",
+                 f"{_C_DARK_GRAY}--{_RST}")
 
     w(f"  {bx}╰{'─' * W}╯{_RST}\n")
 
@@ -384,8 +552,8 @@ def _go_install_cmds():
     return []  # manual — show link
 
 
-def _openssl_check():
-    """Check if OpenSSL dev libs are available for cargo builds."""
+def _ensure_openssl_env():
+    """Check if OpenSSL dev libs are available; sets OPENSSL_* env vars if found."""
     if sys.platform != "win32":
         return True  # usually available via system packages on Unix
     if os.environ.get("OPENSSL_LIB_DIR") and os.environ.get("OPENSSL_INCLUDE_DIR"):
@@ -444,7 +612,7 @@ _PREREQ_INSTALLERS = {
         "url": "https://go.dev/doc/install",
     },
     "openssl": {
-        "check": _openssl_check,
+        "check": _ensure_openssl_env,
         "cmds_fn": _openssl_install_cmds,
         "paths": [],
         "label": "OpenSSL (dev)",
@@ -490,7 +658,7 @@ def _ensure_prereq(prereq_name: str, w) -> bool:
         return True
     # For OpenSSL on Windows, re-run the full check which sets env vars correctly
     if prereq_name == "openssl" and sys.platform == "win32":
-        if _openssl_check():
+        if _ensure_openssl_env():
             lib_dir = os.environ.get("OPENSSL_LIB_DIR", "")
             w(f"  {_C_GREEN}  {label} configured (LIB_DIR={lib_dir}){_RST}\n")
             return True
@@ -740,8 +908,8 @@ def _refresh_system_path():
 
 
 def _rag_needs_build() -> bool:
-    """Check if the RAG database needs building (empty or missing)."""
-    return _probe_rag_db() <= 0
+    """Check if the RAG database needs building or is incomplete from a crashed build."""
+    return _probe_rag_db() < _RAG_MIN_ENTRIES
 
 
 # ── RAG thermal/resource detection ────────────────────────
@@ -804,46 +972,16 @@ def _is_fanless_mac() -> bool:
     return False
 
 
-def _should_use_fast_rag() -> bool:
-    """Return True to use MiniLM (~90MB, 5x faster) instead of Nomic (~500MB).
-
-    MiniLM is the default for all platforms. It is perfectly adequate for
-    vulnerability pattern matching and eliminates crashes on constrained
-    machines (M1 Pro 16GB, MacBook Air, etc.).
-
-    Override: set VULN_DB_FAST_MODE=0 to force Nomic (power users only).
-    """
-    val = os.environ.get("VULN_DB_FAST_MODE", "").lower()
-    if val in ("0", "false", "no"):
-        return False
-    # Default: use MiniLM for everyone. Nomic is opt-in via VULN_DB_FAST_MODE=0.
-    return True
-
-
 def _build_rag_db(w):
-    """Run the RAG indexer pipeline. Installs deps first if needed. Returns True on success."""
+    """Run the RAG indexer pipeline. Returns True on success."""
     vuln_db_dir = os.path.join(PLAMEN_HOME, "custom-mcp", "unified-vuln-db")
     if not os.path.isdir(vuln_db_dir):
         w(f"  {_C_RED}unified-vuln-db not found at {vuln_db_dir}{_RST}\n")
         return False
 
-    # Install RAG deps (PyTorch, chromadb, etc.) if not already present
-    if not _install_rag_deps(w):
-        w(f"  {_C_RED}RAG dependency installation failed — cannot build database{_RST}\n")
-        return False
-
     py = _python_bin()
 
-    # Default to MiniLM (fast, ~90MB) for all platforms.
-    # Nomic (~500MB) is opt-in via VULN_DB_FAST_MODE=0.
-    if _should_use_fast_rag():
-        os.environ["VULN_DB_FAST_MODE"] = "1"
-        w(f"  {_C_BLUE}Using MiniLM embeddings (fast, ~90MB){_RST}\n")
-        w(f"  {_C_DARK_GRAY}Override: VULN_DB_FAST_MODE=0 to use Nomic (~500MB){_RST}\n\n")
-
     # Wipe existing ChromaDB — rebuild means fresh start.
-    # A stale DB from a previous crashed/partial build with a different embedding model
-    # (e.g., Nomic 768-dim vs MiniLM 384-dim) causes ChromaDB to hang on collection open.
     # NOTE: database.py resolves DATA_DIR via Path(__file__).parents[3] / "unified-vuln-db" / "data",
     # which puts chroma_db at PLAMEN_HOME/unified-vuln-db/data/chroma_db — NOT under custom-mcp/.
     chroma_dir = os.path.join(PLAMEN_HOME, "unified-vuln-db", "data", "chroma_db")
@@ -852,52 +990,43 @@ def _build_rag_db(w):
         _shutil.rmtree(chroma_dir, ignore_errors=True)
         w(f"  {_C_GRAY}Cleared stale RAG database for clean rebuild{_RST}\n")
 
-    # Check for Solodit API key — needed for the largest data source
+    # Check for Solodit API key — needed for the largest data source.
+    # The key must be available in the environment when this process runs.
+    # Recommended: add SOLODIT_API_KEY to ~/.claude/settings.json "env" section
+    # so it is always available to plamen and audit agents alike.
     if not os.environ.get("SOLODIT_API_KEY", "").strip():
         w(f"  {_C_ORANGE}Note: SOLODIT_API_KEY not set — Solodit indexing will be skipped{_RST}\n")
         w(f"  {_C_GRAY}Get a free key at https://solodit.cyfrin.io{_RST}\n")
-        w(f"  {_C_GRAY}Set it: export SOLODIT_API_KEY=your_key_here{_RST}\n\n")
+        w(f"  {_C_GRAY}Add to ~/.claude/settings.json → \"env\": {{\"SOLODIT_API_KEY\": \"your_key\"}}{_RST}\n\n")
 
-    # Per-source timeouts and page limits.
-    # Fanless Macs / low-RAM machines need more time (thermal throttling slows embedding)
-    # and fewer Solodit pages (29 tags × pages × 3.5s delay easily blows 600s on slow networks).
-    fast = _should_use_fast_rag()
-    solodit_timeout  = 1800 if fast else 1200  # 30 min / 20 min
-    indexing_timeout =  900 if fast else  600  # 15 min / 10 min
-    max_pages        =    5 if fast else   10
-
-    # On macOS/Linux, run the indexer at reduced priority so it doesn't hog the CPU.
-    # nice -n 10 makes the process "polite" — yields CPU to other apps without
-    # affecting indexing quality, just ~10-20% slower on an otherwise idle machine.
-    nice = "nice -n 10 " if sys.platform != "win32" else ""
+    # Fixed timeouts. Solodit is network-bound (29 tags × rate-limit delay);
+    # DeFiHackLabs and Immunefi are fast with MiniLM (~2-3 min each).
+    solodit_timeout  = 1200  # 20 min — generous for slow networks + rate limiting
+    indexing_timeout =  600  # 10 min — more than enough for MiniLM on any hardware
+    max_pages        =    5  # 29 tags × 5 pages × 3.5s ≈ 8 min API time
 
     steps = [
         # (label, est, cmd, retry_cmd, timeout)
-        # Solodit: no retry — a hanging API call won't improve on the same request
+        # Solodit: no retry — a hanging API call won't improve on retry
         ("Solodit — live API",
-         f"~{'10' if fast else '5'} min",
-         f'cd "{vuln_db_dir}" && {nice}{py} -m unified_vuln.indexer index -s solodit --max-pages {max_pages}',
+         "~10 min",
+         f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s solodit --max-pages {max_pages}',
          None,
          solodit_timeout),
         # DeFiHackLabs: local parsing + embedding; retry with same command is safe
         ("DeFiHackLabs — local",
          "~1 min",
-         f'cd "{vuln_db_dir}" && {nice}{py} -m unified_vuln.indexer index -s defihacklabs',
-         f'cd "{vuln_db_dir}" && {nice}{py} -m unified_vuln.indexer index -s defihacklabs',
+         f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s defihacklabs',
+         f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s defihacklabs',
          indexing_timeout),
         # Immunefi: first attempt fetches 139 URLs + embeds; retry skips the HTTP fetch
         # phase (uses cached immunefi_fetched.json) and goes straight to embedding
         ("Immunefi — writeups",
          "~2 min",
-         f'cd "{vuln_db_dir}" && {nice}{py} -m unified_vuln.indexer index -s immunefi',
-         f'cd "{vuln_db_dir}" && {nice}{py} -m unified_vuln.indexer index -s immunefi --skip-fetch',
+         f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s immunefi',
+         f'cd "{vuln_db_dir}" && {py} -m unified_vuln.indexer index -s immunefi --skip-fetch',
          indexing_timeout),
     ]
-
-    # Warn the user before heavy CPU/RAM work begins
-    w(f"  {_C_ORANGE}{_BOLD}NOTE:{_RST} {_C_ORANGE}RAG indexing is CPU and RAM intensive.{_RST}\n")
-    w(f"  {_C_GRAY}Your machine may feel sluggish for several minutes — this is normal.{_RST}\n")
-    w(f"  {_C_GRAY}Do not close this terminal or press Ctrl+C during indexing.{_RST}\n\n")
 
     for label, est, cmd, retry_cmd, timeout in steps:
         w(f"  {_C_ORANGE}>{_RST} {_C_WHITE}{label}{_RST}"
@@ -933,21 +1062,18 @@ def _quick_check_required() -> bool:
 
 
 def _setup_python_deps(w):
-    """Install core Python dependencies (NOT RAG). Returns True if all installed.
-
-    RAG deps (PyTorch ~2GB, chromadb, sentence-transformers) are installed
-    separately via `plamen rag` to avoid 1+ hour installs and crashes on
-    constrained machines (fanless Macs, <16GB RAM).
-    """
+    """Install all Python dependencies if missing. Returns True if all installed."""
     base = PLAMEN_HOME
     py = _python_bin()
-
-    # Core: wrapper UI + lightweight MCP servers (no PyTorch/chromadb)
     req_files = [
         ("Plamen wrapper", "requirements.txt"),
+        ("unified-vuln-db", "custom-mcp/unified-vuln-db/requirements.txt"),
+        ("solodit-scraper", "custom-mcp/solodit-scraper/requirements.txt"),
+        ("defihacklabs-rag", "custom-mcp/defihacklabs-rag/requirements.txt"),
         ("farofino-mcp", "custom-mcp/farofino-mcp/requirements.txt"),
     ]
     editable_pkgs = [
+        ("unified-vuln-db", "custom-mcp/unified-vuln-db"),
         ("solana-fender", "custom-mcp/solana-fender"),
         ("slither-mcp (EVM)", "custom-mcp/slither-mcp"),
     ]
@@ -960,86 +1086,28 @@ def _setup_python_deps(w):
         core_ok = False
 
     if core_ok:
-        w(f"  {_C_GREEN}Python dependencies already installed{_RST}\n")
-        # Hint about RAG if not built
-        if _probe_rag_db() <= 0:
-            w(f"  {_C_GRAY}RAG not installed — run 'plamen rag' separately (~10-20 min){_RST}\n")
-        w("\n")
+        # Quick-check: try importing a deep dep
+        try:
+            import torch, chromadb  # noqa: F401
+            deep_ok = True
+        except ImportError:
+            deep_ok = False
+    else:
+        deep_ok = False
+
+    if core_ok and deep_ok:
+        w(f"  {_C_GREEN}Python dependencies already installed{_RST}\n\n")
         return True
 
     w(f"  {_C_ORANGE}>{_RST} {_C_WHITE}Installing Python dependencies...{_RST}"
-      f"  {_C_DARK_GRAY}~30s{_RST}\n\n")
+      f"  {_C_DARK_GRAY}~2-5 min (PyTorch is ~2GB){_RST}\n\n")
     sys.stdout.flush()
 
-    # Build pip flags that work on PEP 668 systems (macOS Homebrew, Ubuntu 23.04+)
-    pip_flags = " ".join(a for a in _pip_install_args()[3:])  # skip "python -m pip install"
+    # Build pip flags that work on PEP 668 systems (macOS Homebrew, Ubuntu 23.04+).
+    # _pip_install_args() = [sys.executable, "-m", "pip", "install", <flags...>]
+    # Skip indices 0-3 (the base command) to get only the flags: --user, --break-system-packages
+    pip_flags = " ".join(a for a in _pip_install_args()[4:])  # skip "python -m pip install"
     pip_base = f'{py} -m pip install {pip_flags}'.rstrip()
-
-    all_ok = True
-    for label, req in req_files:
-        path = os.path.join(base, req)
-        if not os.path.isfile(path):
-            w(f"  {_C_DARK_GRAY}  skipping {label} — {req} not found{_RST}\n")
-            continue
-        w(f"  {_C_ORANGE}>{_RST} {label}\n")
-        sys.stdout.flush()
-        if not _run_install_cmd(f'{pip_base} -r "{path}"', retries=1):
-            w(f"  {_C_RED}  failed{_RST}\n")
-            all_ok = False
-        else:
-            w(f"  {_C_GREEN}  done{_RST}\n")
-
-    for label, pkg in editable_pkgs:
-        path = os.path.join(base, pkg)
-        if not os.path.isdir(path):
-            w(f"  {_C_DARK_GRAY}  skipping {label} — not found{_RST}\n")
-            continue
-        w(f"  {_C_ORANGE}>{_RST} {label}\n")
-        sys.stdout.flush()
-        if not _run_install_cmd(f'{pip_base} -e "{path}"', retries=1):
-            w(f"  {_C_RED}  failed (non-critical){_RST}\n")
-        else:
-            w(f"  {_C_GREEN}  done{_RST}\n")
-
-    w("\n")
-    return all_ok
-
-
-def _install_rag_deps(w) -> bool:
-    """Install RAG-specific Python dependencies (PyTorch, chromadb, sentence-transformers).
-
-    These are heavy (~2GB+ download, sustained CPU during install) and separated
-    from core setup to avoid crashing constrained machines.
-    Returns True if deps are available.
-    """
-    # Quick check: already installed?
-    try:
-        import chromadb  # noqa: F401
-        import sentence_transformers  # noqa: F401
-        w(f"  {_C_GREEN}RAG dependencies already installed{_RST}\n\n")
-        return True
-    except ImportError:
-        pass
-
-    base = PLAMEN_HOME
-    py = _python_bin()
-    pip_flags = " ".join(a for a in _pip_install_args()[3:])
-    pip_base = f'{py} -m pip install {pip_flags}'.rstrip()
-
-    # Warn about the download size and time
-    w(f"  {_C_ORANGE}{_BOLD}Installing RAG dependencies{_RST}\n")
-    w(f"  {_C_GRAY}This downloads PyTorch (~2GB) and embedding models.{_RST}\n")
-    w(f"  {_C_GRAY}Expected time: 5-15 minutes depending on connection speed.{_RST}\n\n")
-    sys.stdout.flush()
-
-    req_files = [
-        ("unified-vuln-db", "custom-mcp/unified-vuln-db/requirements.txt"),
-        ("solodit-scraper", "custom-mcp/solodit-scraper/requirements.txt"),
-        ("defihacklabs-rag", "custom-mcp/defihacklabs-rag/requirements.txt"),
-    ]
-    editable_pkgs = [
-        ("unified-vuln-db", "custom-mcp/unified-vuln-db"),
-    ]
 
     all_ok = True
     for label, req in req_files:
@@ -1289,9 +1357,8 @@ def _merge_mcp_json(w):
     for name, config in plamen.get("mcpServers", {}).items():
         if name in existing["mcpServers"]:
             skipped.append(name)
-            # Backfill missing env vars into existing servers (e.g., VULN_DB_FAST_MODE
-            # was not in earlier mcp.json.example — existing installs need it to prevent
-            # model mismatch between plamen rag (MiniLM 384-dim) and MCP runtime (Nomic 768-dim))
+            # Backfill missing env vars into existing servers (e.g., new keys added
+            # to mcp.json.example after initial install — propagate to existing config)
             template_env = config.get("env", {})
             if template_env:
                 existing_env = existing["mcpServers"][name].setdefault("env", {})
@@ -1478,7 +1545,7 @@ def run_uninstall():
 
 
 def run_setup():
-    """Full setup flow: Python deps → config files → toolchain → re-check. RAG is separate (plamen rag)."""
+    """Full setup flow: Python deps → config files → toolchain → RAG → re-check."""
     w = sys.stdout.write
 
     # ── Symlink install (if repo is not directly in ~/.claude) ─
@@ -1516,15 +1583,12 @@ def run_setup():
         if group_missing:
             missing[group] = group_missing
 
+    rag_empty = _rag_needs_build()
     rag_count = _probe_rag_db()
 
-    if not missing:
-        w(f"  {_C_GREEN}All chain toolchains installed.{_RST}\n")
-        if rag_count <= 0:
-            w(f"  {_C_GRAY}RAG not built — run 'plamen rag' separately (~10-20 min){_RST}\n")
-        elif rag_count > 0:
-            w(f"  {_C_GREEN}RAG database: {rag_count:,} entries{_RST}\n")
-        w("\n")
+    if not missing and rag_count > 0 and not rag_empty:
+        w(f"  {_C_GREEN}Everything is set up ({rag_count:,} RAG entries).{_RST}\n")
+        w(f"  {_C_GRAY}To rebuild RAG: plamen rag{_RST}\n\n")
         return
 
     # ── Build checkbox choices with time estimates ───────────
@@ -1532,6 +1596,13 @@ def run_setup():
     for group, entries in missing.items():
         names = ", ".join(d for d, _, _, _, _, _, _ in entries)
         item_choices.append({"name": f"{group:8s} {names}", "value": group})
+
+    if rag_empty:
+        item_choices.append({"name": "RAG DB   vulnerability knowledge base",
+                             "value": "__rag__"})
+    elif rag_count > 0:
+        item_choices.append({"name": f"RAG DB   rebuild/extend ({rag_count:,} entries currently)",
+                             "value": "__rag__"})
 
     all_values = [c["value"] for c in item_choices]
 
@@ -1555,6 +1626,8 @@ def run_setup():
                     if not prereq.get("check", lambda: True)():
                         prereq_note += f" + {prereq.get('label', pname)}"
             w(f"    {_C_DARK_GRAY}{display}: {est}{prereq_note}{_RST}\n")
+    if rag_empty:
+        w(f"    {_C_DARK_GRAY}RAG DB: ~3-5 min (downloads + indexes){_RST}\n")
     w(f"\n  {_C_GRAY}Press Enter to begin installation{_RST}\n\n")
     sys.stdout.flush()
 
@@ -1583,6 +1656,13 @@ def run_setup():
 
     for group in selected:
         if group == "__skip__":
+            continue
+
+        if group == "__rag__":
+            w(f"\n  {_BOLD}{_C_WHITE}Building RAG vulnerability database...{_RST}"
+              f"  {_C_DARK_GRAY}~3-5 min{_RST}\n\n")
+            sys.stdout.flush()
+            _build_rag_db(w)
             continue
 
         w(f"\n  {_BOLD}{_C_WHITE}Installing {group} toolchain...{_RST}\n")
@@ -1633,8 +1713,6 @@ def run_setup():
     w(f"  {_C_GRAY}Re-checking...{_RST}\n\n")
     sys.stdout.flush()
     check_dependencies()
-    if _probe_rag_db() <= 0:
-        w(f"  {_C_GRAY}Next step: run 'plamen rag' to build the vulnerability knowledge base (~10-20 min){_RST}\n")
     w("\n")
 
 
@@ -2058,7 +2136,7 @@ def select_mode() -> str:
             {"name": "Thorough   35-95 agents | Max plan  | ALL severities + fuzz", "value": "thorough"},
             Separator(),
             {"name": "Compare    variable     | DELTA report",               "value": "compare"},
-            {"name": "Setup      install chain toolchains",                  "value": "setup"},
+            {"name": "Setup      install tools + build RAG DB",              "value": "setup"},
         ],
         default="light",
         pointer="  >",
@@ -2433,8 +2511,8 @@ def main():
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}thorough{_RST} /path/to/project    Audit in Thorough mode\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}light{_RST} /path/to/project       Audit in Light mode\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}compare{_RST}                      Diff reports\n")
-            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}setup{_RST}                        Install chain toolchains\n")
-            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}rag{_RST}                          Build/rebuild RAG database\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}setup{_RST}                        Install tools + build RAG\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}rag{_RST}                          Rebuild RAG database only\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}uninstall{_RST}                    Remove from ~/.claude\n")
             w(f"\n  {_C_WHITE}Options (for audit modes):{_RST}\n")
             w(f"    {_C_GRAY}--docs{_RST} PATH              Whitepaper or spec file\n")

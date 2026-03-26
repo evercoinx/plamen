@@ -1,8 +1,7 @@
 """
 Unified Vulnerability Database v2.0 - Graph-Enhanced Engine
 
-Key upgrades:
-- Code-aware embeddings (Nomic/Voyage with Matryoshka support)
+- all-MiniLM-L6-v2 embeddings (384-dim, ~90MB, fast CPU inference)
 - Graph-lite layer for relationship traversal
 - Structured JSON output for Claude Code
 """
@@ -14,10 +13,8 @@ from typing import List, Dict, Any, Optional, Union, Callable
 try:
     import chromadb
     from chromadb.config import Settings
-    _CHROMADB_AVAILABLE = True
 except ImportError:
-    _CHROMADB_AVAILABLE = False
-    chromadb = None
+    chromadb = None  # RAG deps not installed — server starts but DB unavailable
     Settings = None
 from rich.console import Console
 
@@ -47,157 +44,55 @@ COLLECTION_NAME = "vulnerabilities_v2"
 
 class CodeAwareEmbeddingFunction:
     """
-    Code-aware embedding function with Matryoshka dimension support.
-
-    Priority (with VULN_DB_FAST_MODE=true, which is the default):
-    1. all-MiniLM-L6-v2 (~90MB, fast, adequate for vuln pattern matching)
-
-    Priority (with VULN_DB_FAST_MODE=false, opt-in):
-    1. Voyage Code 2 (best for code, requires API key)
-    2. Nomic Embed Text v1.5 (good local alternative with Matryoshka, ~500MB)
-    3. all-MiniLM-L6-v2 (fallback)
+    Embedding function using all-MiniLM-L6-v2 (384-dim, ~90MB, fast CPU inference).
+    This is the only supported model — no Nomic, no Voyage, no alternatives.
     """
-    
-    def __init__(
-        self, 
-        model_name: str = "auto",
-        dimensions: int = 768,  # Matryoshka: can be 64, 128, 256, 512, 768
-        voyage_api_key: Optional[str] = None,
-    ):
-        self.model_name = model_name
-        self.dimensions = dimensions
-        self.voyage_api_key = voyage_api_key or os.environ.get("VOYAGE_API_KEY")
+
+    def __init__(self):
         self.model = None
         self.model_type = None
-        self._model_name_str = "code-aware-embeddings"
-        
+        self._model_name_str = "all-MiniLM-L6-v2"
+        self.dimensions = 384
         self._initialize()
-    
+
     def name(self) -> str:
         """Return embedding function name (required by ChromaDB)."""
         return self._model_name_str
-    
+
     def _initialize(self):
-        """Initialize the best available model.
-
-        MiniLM is the default for all platforms (VULN_DB_FAST_MODE defaults to true).
-        Nomic/Voyage are only used when VULN_DB_FAST_MODE is explicitly set to false/0/no.
-        This prevents a model mismatch between build (which sets VULN_DB_FAST_MODE=1)
-        and MCP runtime (which previously defaulted to Nomic), causing ChromaDB to
-        wipe a 384-dim DB when opened with a 768-dim model.
-        """
-        import os
-
-        # VULN_DB_FAST_MODE defaults to true — MiniLM for everyone.
-        # Only explicit "0"/"false"/"no" opts into heavy models.
-        fast_mode_val = os.environ.get("VULN_DB_FAST_MODE", "true").lower()
-        use_heavy = fast_mode_val in ("0", "false", "no")
-
-        if not use_heavy:
-            self.model_name = "minilm"
-
-        # Try Voyage Code 2 (best for code, only when heavy models enabled)
-        if use_heavy and self.voyage_api_key and self.model_name in ["auto", "voyage"]:
-            try:
-                import voyageai
-                self.model = voyageai.Client(api_key=self.voyage_api_key)
-                self.model_type = "voyage"
-                self._model_name_str = "voyage-code-2"
-                console.print("[green]Using Voyage Code 2 embeddings (API)[/green]")
-                return
-            except ImportError:
-                console.print("[yellow]voyageai not installed, trying alternatives...[/yellow]")
-
-        # Try MiniLM (default — fastest loading, ~90MB, 384-dim)
-        if self.model_name == "minilm":
-            try:
-                from sentence_transformers import SentenceTransformer
-                self.model = SentenceTransformer("all-MiniLM-L6-v2")
-                self.model_type = "minilm"
-                self._model_name_str = "all-MiniLM-L6-v2"
-                self.dimensions = 384  # MiniLM output dimension
-                console.print("[green]Using all-MiniLM-L6-v2[/green]")
-                return
-            except Exception as e:
-                console.print(f"[yellow]MiniLM failed: {e}[/yellow]")
-
-        # Try Nomic Embed (only when heavy models enabled, ~500MB)
-        if use_heavy and self.model_name in ["auto", "nomic"]:
-            try:
-                from sentence_transformers import SentenceTransformer
-                self.model = SentenceTransformer(
-                    "nomic-ai/nomic-embed-text-v1.5",
-                    trust_remote_code=True
-                )
-                self.model_type = "nomic"
-                self._model_name_str = "nomic-embed-v1.5"
-                console.print(f"[green]Using Nomic Embed v1.5 (local, dim={self.dimensions})[/green]")
-                return
-            except Exception as e:
-                console.print(f"[yellow]Nomic failed: {e}, trying MiniLM...[/yellow]")
-
-        # Fallback to MiniLM (always available as last resort)
+        """Load all-MiniLM-L6-v2. Raises ImportError if sentence-transformers is missing."""
         try:
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer("all-MiniLM-L6-v2")
             self.model_type = "minilm"
-            self._model_name_str = "all-MiniLM-L6-v2"
-            self.dimensions = 384
-            console.print("[yellow]Using all-MiniLM-L6-v2 (fallback)[/yellow]")
         except ImportError:
-            console.print("[red]No embedding model available![/red]")
+            console.print(
+                "[red]sentence-transformers not installed. "
+                "Run 'plamen rag' to set up.[/red]"
+            )
             self.model = None
             self.model_type = None
-            self._model_name_str = "none"
     
     def __call__(self, input: List[str]) -> List[List[float]]:
         """Generate embeddings for input texts (ChromaDB interface)."""
         return self._embed(input)
-    
+
     def embed_documents(self, input: List[str]) -> List[List[float]]:
         """Embed documents (ChromaDB interface)."""
         return self._embed(input)
-    
+
     def embed_query(self, input: List[str]) -> List[List[float]]:
         """Embed query (ChromaDB interface)."""
         return self._embed(input)
-    
-    def _embed(self, input: List[str]) -> List[List[float]]:
-        """Internal embedding function.
 
-        Shows per-document progress bar for batches >= 50 docs so users see
-        activity during long embedding runs instead of a frozen terminal.
-        """
+    def _embed(self, input: List[str]) -> List[List[float]]:
+        """Embed with MiniLM. Shows progress bar for batches >= 50 (indexing)."""
         if self.model is None:
             return [[0.0] * self.dimensions for _ in input]
-
-        # Show progress for large batches (50+). Small batches (query-time
-        # calls from MCP tools) stay silent to avoid noise.
+        # Show progress for large batches; stay silent at query time.
         show_progress = len(input) >= 50
-
-        if self.model_type == "voyage":
-            # Voyage API
-            result = self.model.embed(
-                input,
-                model="voyage-code-2",
-                input_type="document"
-            )
-            return result.embeddings
-
-        elif self.model_type == "nomic":
-            # Nomic with Matryoshka dimension truncation
-            embeddings = self.model.encode(
-                input,
-                show_progress_bar=show_progress,
-                convert_to_numpy=True
-            )
-            # Truncate to desired dimensions (Matryoshka)
-            return embeddings[:, :self.dimensions].tolist()
-
-        else:
-            # Standard sentence-transformers (MiniLM)
-            embeddings = self.model.encode(input, show_progress_bar=show_progress)
-            return embeddings.tolist()
+        embeddings = self.model.encode(input, show_progress_bar=show_progress)
+        return embeddings.tolist()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -418,33 +313,27 @@ class GraphLiteLayer:
 class VulnerabilityDB:
     """
     Unified vulnerability database with graph-enhanced search.
-    
-    Features:
-    - Code-aware embeddings (Nomic/Voyage)
-    - Matryoshka dimension support
-    - Graph-lite relationship traversal
-    - Structured JSON outputs for Claude Code
+
+    Uses all-MiniLM-L6-v2 (384-dim) for all embeddings.
+    Graph-lite layer for relationship traversal.
+    Structured JSON outputs for Claude Code.
     """
-    
-    def __init__(
-        self,
-        persist_dir: Optional[Path] = None,
-        embedding_model: str = "auto",
-        embedding_dimensions: int = 768,
-        voyage_api_key: Optional[str] = None,
-    ):
+
+    def __init__(self, persist_dir: Optional[Path] = None):
+        if chromadb is None:
+            raise ImportError(
+                "RAG dependencies not installed (chromadb, sentence-transformers). "
+                "Run 'plamen rag' to install them and build the database."
+            )
+
         self.persist_dir = persist_dir or CHROMA_DIR
         self.persist_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize embedding function FIRST (needed for dimension check)
-        self.embedding_fn = CodeAwareEmbeddingFunction(
-            model_name=embedding_model,
-            dimensions=embedding_dimensions,
-            voyage_api_key=voyage_api_key,
-        )
+        self.embedding_fn = CodeAwareEmbeddingFunction()
 
         # Check for dimension mismatch with existing DB before opening.
-        # A stale DB from a crashed build with a different model (e.g., Nomic 768-dim
+        # A stale DB from a crashed build with a different model (e.g., an old 768-dim
         # vs MiniLM 384-dim) causes ChromaDB to hang on get_or_create_collection.
         self._wipe_if_dimension_mismatch()
 
@@ -514,7 +403,7 @@ class VulnerabilityDB:
             console.print(f"[yellow]Cannot read existing DB ({e}), wiping for clean start...[/yellow]")
             shutil.rmtree(str(self.persist_dir), ignore_errors=True)
             self.persist_dir.mkdir(parents=True, exist_ok=True)
-    
+
     def _get_or_create_collection(self):
         """Get existing collection or create new one."""
         try:
@@ -606,7 +495,7 @@ class VulnerabilityDB:
                             added += 1
 
                 progress.update(task, advance=len(batch))
-        
+
         return added
     
     def update_vulnerability(self, vuln: Vulnerability) -> bool:
@@ -927,20 +816,9 @@ class VulnerabilityDB:
 _db_instance: Optional[VulnerabilityDB] = None
 
 
-def get_db(
-    embedding_model: str = "auto",
-    embedding_dimensions: int = 768,
-) -> VulnerabilityDB:
+def get_db() -> VulnerabilityDB:
     """Get the database singleton."""
-    if not _CHROMADB_AVAILABLE:
-        raise ImportError(
-            "RAG dependencies not installed (chromadb, sentence-transformers). "
-            "Run 'plamen rag' to install them and build the vulnerability database."
-        )
     global _db_instance
     if _db_instance is None:
-        _db_instance = VulnerabilityDB(
-            embedding_model=embedding_model,
-            embedding_dimensions=embedding_dimensions,
-        )
+        _db_instance = VulnerabilityDB()
     return _db_instance
