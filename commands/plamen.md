@@ -383,6 +383,7 @@ Detect the target language before anything else:
 | **Phase 4c** | Chain Analysis | Hypotheses + chains | 1 sonnet (merged) | 2 agents | 2 agents + iter 2 |
 | **Phase 5** | Verifiers | PoC tests (Medium+) | Medium+ (sonnet) | Medium+ | ALL severities + fuzz |
 | **Phase 5.1** | Skeptic-Judge | Adversarial re-verify | Skip | Skip | HIGH/CRIT |
+| **Phase 5.2** | Cross-batch consistency | Contradiction check | Skip | 1 haiku | 1 haiku |
 | **Phase 6** | Report pipeline | AUDIT_REPORT.md | 2 agents (sonnet+haiku) | 5 agents | 5 agents |
 
 ### Light Mode Orchestration
@@ -426,6 +427,7 @@ Replace placeholders: `{path}`, `{scratchpad}`, `{docs_path_or_url_if_provided}`
 ### After Agents 1B, 2, 3 Return
 1. Verify artifacts exist: `ls {scratchpad}/`
 2. Read: `recon_summary.md`, `template_recommendations.md`, `attack_surface.md`
+2b. **Operational Implications quality gate (Rule 14)**: Read `{scratchpad}/design_context.md`. Verify it contains an `## Operational Implications` section with at least one implication per documented Key Invariant. If the section is missing or contains fewer implications than invariants, re-prompt Agent 1B: `"The Operational Implications section in design_context.md is incomplete. For each Key Invariant, state what it means for how the system's accounting works — not what it checks, but what it tells you about the system's model. Derive from invariant formulas and data structure signatures."` This gate prevents downstream agents from analyzing a protocol they don't understand.
 3. **RAG resilience check**: If `meta_buffer.md` does not exist or is empty (Agent 1A still running or failed):
    - Spawn lightweight RAG-retry agent (haiku, <2 min, 3 queries only):
      1. get_common_vulnerabilities(protocol_type)
@@ -511,7 +513,17 @@ Instead, for each vulnerability class in your methodology:
 ## Output Requirements
 Write to {SCRATCHPAD}/analysis_{focus_area}.md
 Use finding IDs: [{PREFIX}-1], [{PREFIX}-2]...
+
+SCOPE: Write ONLY to your assigned output file. Do NOT read or write other agents' output files. Do NOT proceed to subsequent pipeline phases (chain analysis, verification, report). Return your findings and stop.
 ```
+
+### Step 2c.1: MCP Timeout Directive (MANDATORY — Rule 11)
+
+Every agent prompt that makes MCP tool calls (recon agents, depth agents, chain agents, verifiers, RAG sweep) MUST include this directive at the end of its prompt:
+
+*"When an MCP tool call returns a timeout error or fails, do NOT retry the same call. Record [MCP: TIMEOUT] and skip ALL remaining calls to that provider — switch immediately to fallback (code analysis, grep, WebSearch). Claude Code's tool timeout is set to 300s (5 min) via MCP_TOOL_TIMEOUT in settings.json to accommodate ChromaDB cold start. You cannot cancel a pending call — but you control what happens after the error returns."*
+
+The orchestrator MUST append this text when composing prompts for MCP-calling agents. Agents that do not make MCP calls (pure code analysis breadth agents, report writers) do not need it.
 
 ### Step 2d: Spawn Verification Gate (MANDATORY)
 
@@ -843,6 +855,33 @@ After ALL standard Phase 5 verifiers complete:
 
 **Skip in Light and Core mode.**
 **Thorough mode**: This step MUST execute for every HIGH and CRITICAL finding. "All PoCs passed so skeptic is unnecessary" is not a valid skip reason.
+
+### Phase 5.2: Cross-Batch Consistency Check (Core/Thorough)
+
+> **Skip in Light mode.**
+
+After ALL verification batches complete (including Skeptic-Judge in Thorough mode), spawn a haiku agent to check for contradictions between verifier outputs:
+
+```
+Task(subagent_type="general-purpose", model="haiku", prompt="
+You are the Cross-Batch Consistency Agent. Check for contradictions across verification batches.
+
+Read ALL verify_*.md files in {SCRATCHPAD}/.
+
+For EACH finding that was verified by multiple agents or referenced across batches:
+1. Check: do any two verifiers reach OPPOSITE conclusions about the same finding?
+2. Check: does any verifier's PoC contradict another verifier's assumptions?
+3. Check: are there severity inconsistencies for findings with the same root cause?
+
+Write to {SCRATCHPAD}/cross_batch_consistency.md:
+| Finding | Verifier A | Verdict A | Verifier B | Verdict B | Contradiction? | Resolution |
+
+If contradictions found: flag them for the report index agent to resolve (higher-evidence verdict wins).
+If no contradictions: write 'No cross-batch contradictions detected.'
+
+Return: 'DONE: {N} findings checked, {C} contradictions found'
+")
+```
 
 ### Phase 5.5: Post-Verification Finding Extraction
 
