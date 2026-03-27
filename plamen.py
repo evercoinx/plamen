@@ -75,6 +75,36 @@ def _read_version() -> str:
 
 VERSION = _read_version()
 
+
+def _check_claude_md_version():
+    """Warn if ~/.claude/CLAUDE.md has a stale Plamen injection (different version)."""
+    claude_md = os.path.join(CLAUDE_HOME, "CLAUDE.md")
+    if not os.path.isfile(claude_md):
+        return  # not installed yet
+    try:
+        with open(claude_md, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return
+    # Look for version in the injected Plamen section
+    marker = "<!-- PLAMEN:START"
+    if marker not in content:
+        return  # no injection found
+    injected = content[content.index(marker):]
+    # Extract version from "# Plamen - Web3 Security Auditor (vX.Y.Z)"
+    import re
+    m = re.search(r"Web3 Security Auditor \(v([0-9]+\.[0-9]+\.[0-9]+)\)", injected)
+    if not m:
+        return
+    injected_ver = m.group(1)
+    if injected_ver != VERSION:
+        w = sys.stdout.write
+        w(f"\n  \033[33m⚠ Version mismatch: repo is v{VERSION} but "
+          f"~/.claude/CLAUDE.md has v{injected_ver}\033[0m\n")
+        w(f"  \033[90m  Run 'plamen install' to update. Pipeline may behave "
+          f"incorrectly until then.\033[0m\n\n")
+
+
 # ── Constants ────────────────────────────────────────────────
 _BACK = "__back__"
 _MAX_LINE = 48  # max visible chars for any prompt line (W - 4)
@@ -2609,6 +2639,7 @@ def main():
             return
 
         if arg in ("light", "core", "thorough", "compare"):
+            _check_claude_md_version()
             target = sys.argv[2] if len(sys.argv) > 2 else ""
             docs = ""
             network = ""
@@ -2635,6 +2666,7 @@ def main():
 
     # ── Interactive flow (state machine) ─────────────────────
     show_banner()
+    _check_claude_md_version()
     show_hint_panel()
 
     if not _quick_check_required():
