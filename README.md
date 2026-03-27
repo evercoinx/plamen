@@ -144,6 +144,18 @@ See [docs/setup.md](docs/setup.md) for the full guide with all per-language prer
 
 </details>
 
+### Updating
+
+```bash
+cd ~/.plamen && git pull && plamen install
+```
+
+That's it. `plamen install` is idempotent — it re-links symlinks, re-injects the updated CLAUDE.md, and merges any new config entries. It does **not** wipe your RAG database, re-install toolchains, or overwrite your API keys.
+
+> **Why `plamen install` after pull?** Most files auto-update via symlinks, but `~/.claude/CLAUDE.md` (the orchestrator's rules) is injected between markers — not symlinked. Without re-install, the orchestrator follows stale rules while everything else is updated. `plamen` will warn you if it detects a version mismatch.
+
+See [docs/updating.md](docs/updating.md) for details on what updates automatically and what doesn't.
+
 ### Run your first audit
 
 ```bash
@@ -206,6 +218,7 @@ Language detection is automatic based on config files.
 | Topic | Link |
 |-------|------|
 | Full setup guide | [docs/setup.md](docs/setup.md) |
+| Updating after git pull | [docs/updating.md](docs/updating.md) |
 | Platform dependencies | [docs/dependencies.md](docs/dependencies.md) |
 | Audit mode comparison | [docs/audit-modes.md](docs/audit-modes.md) |
 | Pipeline architecture | [docs/architecture.md](docs/architecture.md) |
