@@ -36,7 +36,7 @@ First, output the banner as text (no tool calls):
 ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═══╝
 ```
 
-**Web3 Security Auditor** v1.0.6
+**Web3 Security Auditor** v1.1.3
 
 Then run a quick toolchain probe (via Bash, all in one command):
 

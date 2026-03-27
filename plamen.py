@@ -140,9 +140,9 @@ NETWORKS = {
 }
 
 MODES = {
-    "light":    {"label": "Light Audit",    "agents": "15-18",    "scope": "ALL severities"},
-    "core":     {"label": "Core Audit",     "agents": "25-45",    "scope": "ALL severities"},
-    "thorough": {"label": "Thorough Audit", "agents": "35-95",    "scope": "ALL severities"},
+    "light":    {"label": "Light Audit",    "agents": "18-22",    "scope": "ALL severities"},
+    "core":     {"label": "Core Audit",     "agents": "30-50",    "scope": "ALL severities"},
+    "thorough": {"label": "Thorough Audit", "agents": "40-100",   "scope": "ALL severities"},
     "compare":  {"label": "Compare",        "agents": "variable", "scope": "DELTA report"},
 }
 
@@ -2178,9 +2178,9 @@ def select_mode() -> str:
     return inquirer.select(
         message="Select audit mode:",
         choices=[
-            {"name": "Light      15-18 agents | Pro plan  | best under 3k LOC", "value": "light"},
-            {"name": "Core       25-45 agents | Max plan  | ALL severities",  "value": "core"},
-            {"name": "Thorough   35-95 agents | Max plan  | ALL severities + fuzz", "value": "thorough"},
+            {"name": "Light      18-22 agents  | Pro plan  | best under 3k LOC", "value": "light"},
+            {"name": "Core       30-50 agents  | Max plan  | ALL severities",  "value": "core"},
+            {"name": "Thorough   40-100 agents | Max plan  | ALL severities + fuzz", "value": "thorough"},
             Separator(),
             {"name": "Compare    variable     | DELTA report",               "value": "compare"},
             {"name": "Setup      install tools + build RAG DB",              "value": "setup"},
