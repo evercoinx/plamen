@@ -119,6 +119,18 @@ Run `plamen setup` at any time to see your toolchain status:
 - **○** = not installed (optional — install only what you need)
 - **RAG DB** = run `plamen rag` to build
 
+## Updating
+
+After pulling new versions:
+
+```bash
+cd ~/.plamen && git pull && plamen install
+```
+
+`git pull` alone updates symlinked files (agents, rules, skills, prompts), but `CLAUDE.md` (the orchestrator's rules) is an injected copy — not a symlink. Without `plamen install`, the orchestrator follows stale rules while everything else is updated. `plamen` will warn you if it detects a version mismatch.
+
+See [updating.md](updating.md) for details on what auto-updates and what doesn't.
+
 ## Troubleshooting
 
 See [dependencies.md](dependencies.md) for platform-specific fixes (Windows Developer Mode, macOS hnswlib, Python version issues, etc.).

@@ -84,7 +84,8 @@ Your existing Claude Code configuration is preserved.
 <summary>How symlinks work</summary>
 
 The Plamen repo stays at `~/.plamen`. The installer creates symlinks (shortcuts) in `~/.claude/` that point back to `~/.plamen/`. When Claude Code reads `~/.claude/agents/depth-edge-case.md`, the OS transparently reads `~/.plamen/agents/depth-edge-case.md`. This means:
-- `git pull` in `~/.plamen` updates everything automatically — no re-install needed
+- `git pull` in `~/.plamen` updates symlinked files (agents, rules, skills, prompts) automatically
+- **You still need `plamen install` after pull** — `CLAUDE.md`, `settings.json`, and `mcp.json` are injected/merged copies, not symlinks. Without re-install, the orchestrator follows stale rules. See [docs/updating.md](docs/updating.md).
 - Your own Claude Code files in `~/.claude/` (custom agents, commands, hooks) are untouched
 - Deleting `~/.plamen` would break the symlinks — don't delete it while Plamen is installed
 

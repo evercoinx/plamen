@@ -74,6 +74,9 @@ The unified-vuln-db MCP server (`custom-mcp/unified-vuln-db/`) powers RAG search
 # Clone the repo
 git clone https://github.com/PlamenTSV/plamen.git ~/.plamen
 
+# Install and link into ~/.claude/
+cd ~/.plamen && python3 plamen.py install  # or 'python' on Windows
+
 # Install CLI wrapper dependencies
 pip install rich InquirerPy
 
@@ -85,6 +88,8 @@ pip install -e .
 plamen.bat  # Windows
 ./plamen.sh # Linux/macOS
 ```
+
+> **After `git pull`**: Always run `plamen install` to refresh `CLAUDE.md`, `settings.json`, and `mcp.json` — these are injected/merged copies, not symlinks, and go stale without re-install. See [docs/updating.md](docs/updating.md).
 
 ### Testing Your Changes
 

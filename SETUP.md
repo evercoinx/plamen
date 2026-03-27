@@ -244,3 +244,13 @@ Available commands (work from any directory after PATH is set):
 - `plamen uninstall` — remove Plamen from ~/.claude
 
 > **Important**: Always use `plamen` (not `python3 plamen.py`) after PATH is set up. The `python3 plamen.py` form only works from inside `~/.plamen/`.
+
+## Updating
+
+When new versions are released, update with:
+
+```bash
+cd ~/.plamen && git pull && plamen install
+```
+
+**`plamen install` is required after every `git pull`.** Most files auto-update via symlinks, but `CLAUDE.md` (the orchestrator's rules) is an injected copy — not a symlink. Without re-install, the orchestrator follows stale rules while skills and prompts are already updated. `plamen` will warn you if it detects a version mismatch.

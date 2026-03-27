@@ -182,3 +182,23 @@ The deny list blocks destructive operations (`rm -rf`, `sudo`, force push).
 ## Cold Start
 
 The first MCP tool call per Claude Code session loads ChromaDB and the all-MiniLM-L6-v2 embedding model (~5s). Subsequent calls are instant. The pipeline handles this automatically with probe-first patterns and WebSearch fallback.
+
+---
+
+## Updating
+
+After pulling new versions, always re-run the installer:
+
+```bash
+cd ~/.plamen && git pull && plamen install
+```
+
+`git pull` updates symlinked files (agents, rules, skills, prompts) automatically, but three files are injected/merged copies — not symlinks — and require `plamen install` to refresh:
+
+- **`CLAUDE.md`** — orchestrator rules (agent counts, critical rules, phase references)
+- **`settings.json`** — new permissions or env vars added in a release
+- **`mcp.json`** — new MCP server definitions added in a release
+
+Without re-install, the orchestrator follows stale rules while skills and prompts are already updated. `plamen` will warn you on next launch if it detects a version mismatch.
+
+See [updating.md](updating.md) for the full breakdown of what auto-updates and what doesn't.
