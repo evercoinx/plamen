@@ -5,6 +5,15 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-03-27
+
+### Added
+- **EVM Compilation Weight Check (Step 3c)**: Recon TASK 1 now counts `.sol` files and checks `via-ir`/`auto_detect_solc` settings before `forge build`. Heavy projects (>500 files, via-ir + >200 files, or multi-version pragmas) get `threads = 2` in foundry.toml and solc version pinning. Prevents parallel solc instances from exhausting system RAM and crashing Claude Code.
+- **Solana Compilation Weight Check (Step 1e)**: Recon TASK 1 now counts `.rs` files and workspace members before `anchor build`/`cargo build-sbf`. Heavy projects (>300 files, >3 workspace members) get `CARGO_BUILD_JOBS=2` prefix. Prevents parallel rustc instances from causing OOM.
+
+### Why
+Observed repeated crashes on large projects (e.g., Umia: 5,699 .sol files with `via-ir = true`). Foundry spawns 5-6 solc instances at 4-8GB each, exhausting RAM. Cargo does the same with rustc. Aptos/Sui Move compilers are single-threaded and lightweight — no mitigation needed.
+
 ## [1.1.2] - 2026-03-27
 
 ### Added

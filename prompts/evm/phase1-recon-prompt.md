@@ -132,6 +132,15 @@ Use this output format:
    - Run `git submodule update --init --recursive` (resolves lib/ dependencies)
    - If lib/ directory is missing or empty after submodule update: run `forge install`
    - Install forge-std if not present: `forge install foundry-rs/forge-std --no-git`
+3c. **Compilation Weight Check** (before first build attempt):
+   Count total `.sol` files: `find {path} -name "*.sol" | wc -l`
+   Read `foundry.toml` for `via-ir` and `auto_detect_solc` settings.
+   Assess compilation weight:
+   - **HEAVY** (any of: >500 `.sol` files, `via-ir = true` + >200 files, `auto_detect_solc = true` + multiple pragma versions in src/): Add `threads = 2` to `[profile.default]` in foundry.toml if not already set. Record `COMPILE_WEIGHT: heavy (threads capped at 2)` in build_status.md.
+   - **MODERATE** (200-500 `.sol` files without via-ir): Add `threads = 3` if not already set. Record `COMPILE_WEIGHT: moderate`.
+   - **LIGHT** (<200 files): No change needed. Record `COMPILE_WEIGHT: light`.
+   If `auto_detect_solc = true` and all src/ pragmas use the same minor version (e.g., all `^0.8.x`): pin `solc_version` to the highest patch and set `auto_detect_solc = false`. This prevents Foundry from spawning multiple solc versions.
+   **Do NOT modify** profiles other than `[profile.default]` — specialized profiles (medusa, invariant) may have intentional settings.
 4. Run `forge build`
 5. If build fails: read error output, apply targeted fix from this recovery ladder:
    - **Missing import/dependency** → `forge install {dep} --no-git` (extract dep name from error)

@@ -1,4 +1,4 @@
-# Plamen - Web3 Security Auditor (v1.1.2)
+# Plamen - Web3 Security Auditor (v1.1.3)
 
 You are **Plamen**, an autonomous Web3 security auditing agent. When asked to audit a codebase, use the `/plamen` command to start the audit pipeline.
 
@@ -90,7 +90,7 @@ You are **Plamen**, an autonomous Web3 security auditing agent. When asked to au
 | Skill templates | `~/.claude/agents/skills/{LANGUAGE}/**/SKILL.md` |
 
 <!-- PLAMEN:START — managed by plamen install, do not edit -->
-# Plamen - Web3 Security Auditor (v1.1.2)
+# Plamen - Web3 Security Auditor (v1.1.3)
 
 You are **Plamen**, an autonomous Web3 security auditing agent. When asked to audit a codebase, use the `/plamen` command to start the audit pipeline.
 

@@ -260,7 +260,15 @@ SCRATCHPAD: {scratchpad}
    - Run `git submodule update --init --recursive`
    - Run `cargo fetch` to pre-download crate dependencies
 1d. **Windows symlink check** (Windows only): If build fails with "A required privilege is not held by the client" (error 1314), this is a symlink privilege issue. Document in build_status.md as `windows_symlink_error: true` and add note: "Enable Windows Developer Mode (Settings > System > For Developers) or run in admin terminal, then retry." Attempt build once more after documenting.
-2. Build: Anchor (`anchor build`) or native (`cargo build-sbf`) or plain (`cargo build`)
+1e. **Compilation Weight Check** (before first build attempt):
+   Count total `.rs` files (excluding target/): `find {path} -name "*.rs" -not -path "*/target/*" | wc -l`
+   Count workspace members: check `[workspace] members` in root Cargo.toml.
+   Assess compilation weight:
+   - **HEAVY** (any of: >300 `.rs` files, >3 workspace members, multiple programs/ subdirs): Prefix ALL build commands with `CARGO_BUILD_JOBS=2` to cap parallel rustc instances. Record `COMPILE_WEIGHT: heavy (jobs capped at 2)` in build_status.md.
+   - **MODERATE** (100-300 `.rs` files): Prefix build commands with `CARGO_BUILD_JOBS=3`. Record `COMPILE_WEIGHT: moderate`.
+   - **LIGHT** (<100 files): No change needed. Record `COMPILE_WEIGHT: light`.
+   This prevents `cargo build-sbf` / `anchor build` from spawning unbounded `rustc` instances that exhaust system RAM.
+2. Build: Anchor (`anchor build`) or native (`cargo build-sbf`) or plain (`cargo build`). If COMPILE_WEIGHT is heavy or moderate, prefix with `CARGO_BUILD_JOBS=N` as determined above (e.g., `CARGO_BUILD_JOBS=2 anchor build`).
 3. Run `cargo clippy -- -W clippy::all` for security-relevant lint warnings
 4. Run `cargo audit` for known vulnerable dependencies (if cargo-audit installed)
 5. Check Cargo.toml for:
