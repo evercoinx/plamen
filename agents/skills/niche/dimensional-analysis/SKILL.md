@@ -11,7 +11,7 @@ description: "Trigger MIXED_DECIMALS flag (mulDiv/mulWad/rayMul + mixed scale fa
 > **Language**: EVM only (Solidity fixed-point arithmetic)
 > **Finding prefix**: `[DA-N]`
 > **Added in**: v1.1.0 (injectable), v1.1.1 (converted to niche agent)
-> **Attribution**: The concept of dimensional analysis for smart contract arithmetic is inspired by Trail of Bits' dimensional-analysis plugin (github.com/trailofbits/skills, CC BY-SA 4.0). This is an independent security auditing methodology using Plamen's finding/trace format.
+> **Attribution**: The 4-phase dimensional analysis approach (vocabulary discovery, expression annotation, propagation tracing, validation) is adapted from Trail of Bits' dimensional-analysis plugin (https://github.com/trailofbits/skills, licensed CC BY-SA 4.0: https://creativecommons.org/licenses/by-sa/4.0/). Changes: rewritten as a single-agent security audit methodology (vs ToB's 5-agent code annotation workflow); no code shared; different output format (security findings vs inline code comments); added common dimensions reference, algebra rules, rationalization rejection list, and disposition table.
 
 ## Why Niche Agent (Not Injectable)
 
