@@ -291,6 +291,7 @@ Grep for these patterns (exclude lib/, test/, mocks/):
 | `flashLoan\|flash\|callback.*amount` | FLASH_LOAN |
 | `IUniswapV2Router\|IUniswapV3Pool\|IBalancerVault\|swap.*token\|addLiquidity\|removeLiquidity\|getReserves\|IVault.*swap\|IPool.*swap` | FLASH_LOAN_EXTERNAL |
 | `ERC4626\|vault\|deposit.*shares` | ERC4626 |
+| `delegation\|staking.*receipt\|liquid.*staking\|getLiquidRewards\|unbond\|stake.*share\|validator\|deposit.*voucher\|withdraw.*voucher\|claimReward` | STAKING_RECEIPT |
 | `balanceOf.*this\|address.*balance` | BALANCE_DEPENDENT |
 | `bridge\|L1\|L2\|tunnel\|messenger\|crossChain` | CROSS_CHAIN |
 | `onlyBot\|onlyOperator\|onlyKeeper\|BOT_ROLE` | SEMI_TRUSTED_ROLE |
@@ -409,6 +410,7 @@ After listing all recommended templates, output this binding manifest:
 ### Binding Rules
 - SEMI_TRUSTED_ROLE flag detected → SEMI_TRUSTED_ROLES **REQUIRED**
 - BALANCE_DEPENDENT flag detected → TOKEN_FLOW_TRACING **REQUIRED**
+- STAKING_RECEIPT flag detected → STAKING_RECEIPT_TOKENS **REQUIRED**
 - MIGRATION flag detected → MIGRATION_ANALYSIS **REQUIRED**
 - CROSS_CHAIN flag detected → CROSS_CHAIN_TIMING **REQUIRED**
 - TEMPORAL flag detected → TEMPORAL_PARAMETER_STALENESS **REQUIRED**
