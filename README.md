@@ -2,7 +2,8 @@
 
 Autonomous smart contract security auditor for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
-Orchestrates 18-100 AI agents across 8 phases to produce audit reports with verified PoC exploits. Supports **EVM/Solidity**, **Solana/Anchor**, **Aptos Move**, and **Sui Move**.
+Orchestrates 18-100 AI agents across 8 phases to produce audit reports with verified PoC exploits. 
+Supports **EVM/Solidity**, **Solana/Anchor**, **Aptos Move**, and **Sui Move**.
 
 ---
 
