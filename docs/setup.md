@@ -11,7 +11,7 @@
 | Tool | Purpose | Install |
 |------|---------|---------|
 | **Claude Code CLI** | AI runtime | [docs.anthropic.com](https://docs.anthropic.com/en/docs/claude-code) |
-| **Python 3.11+** | MCP servers, wrapper | [python.org](https://python.org) |
+| **Python 3.11-3.12** | MCP servers, wrapper | [python.org](https://python.org) |
 | **Node.js 18+** / **npx** | npm MCP servers | [nodejs.org](https://nodejs.org) |
 | **Git** | Submodules, deps | [git-scm.com](https://git-scm.com) |
 

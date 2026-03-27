@@ -1,4 +1,4 @@
-# Plamen (v1.1.3)
+# Plamen (v1.1.4)
 
 Autonomous smart contract security auditor for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
@@ -118,8 +118,6 @@ cd ~/.plamen
 # 1. Python deps (~2GB download — PyTorch for embeddings)
 pip install -r requirements.txt
 pip install -r custom-mcp/unified-vuln-db/requirements.txt
-pip install -r custom-mcp/solodit-scraper/requirements.txt
-pip install -r custom-mcp/defihacklabs-rag/requirements.txt
 pip install -e custom-mcp/solana-fender
 pip install -r custom-mcp/farofino-mcp/requirements.txt
 pip install -e custom-mcp/slither-mcp              # EVM only (needs Python 3.11+)

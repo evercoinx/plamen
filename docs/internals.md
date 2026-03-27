@@ -12,8 +12,8 @@ Always-available, triggered by pattern flags from recon. Examples: `ORACLE_ANALY
 |----------|--------|
 | EVM | 18 |
 | Solana | 20 |
-| Aptos | 21 |
-| Sui | 21 |
+| Aptos | 22 (21 + core directives) |
+| Sui | 22 (21 + core directives) |
 
 ### Injectable Skills (protocol-type-specific)
 

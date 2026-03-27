@@ -5,6 +5,25 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-03-27
+
+### Fixed
+- **EVM recon: STORAGE_LAYOUT flag detection** — added grep pattern for `proxy|upgradeable|delegatecall|sstore|sload|assembly` and BINDING MANIFEST entry. STORAGE_LAYOUT_SAFETY skill was previously unreachable.
+- **EVM recon: CROSS_CHAIN_MSG flag detection** — added grep pattern for `lzReceive|ccipReceive|receiveWormholeMessages|setPeer|setTrustedRemote` and BINDING MANIFEST entry. CROSS_CHAIN_MESSAGE_INTEGRITY skill was previously unreachable.
+- **EVM recon: SPEC_COMPLIANCE_AUDIT niche agent** — added to niche agent binding rules and table. Was present in Solana/Aptos/Sui but missing from EVM.
+- **EVM recon: ZERO_STATE_RETURN binding rule** — added `ERC4626 flag → ZERO_STATE_RETURN REQUIRED`. Flag was grepped but no binding rule enforced skill loading.
+- **EVM/Solana recon: Injectable Skills section** — added full Injectable Skills section listing all 7 (EVM) / 6 (Solana) protocol-type-specific injectables. Previously missing entirely.
+- **Aptos/Sui recon: Injectable Skills section** — expanded from VAULT_ACCOUNTING-only to full injectable list (6 injectables per language) plus ZERO_STATE_RETURN binding for vault protocols.
+- **Uninstall crash** — `plamen uninstall` no longer crashes with KeyError if `settings.json` lacks a `permissions` key.
+- **Stale doc references** — removed deprecated `solodit-scraper` and `defihacklabs-rag` from README, mcp-servers.md, dependencies.md, and repository-structure.md.
+
+### Changed
+- **Skill counts** — Aptos and Sui skill counts updated from 21 to 22 (21 standard + 1 core directive) in skill-index.md, internals.md, and repository-structure.md. Added MOVE_SAFETY_CORE_DIRECTIVES to skill-index.md.
+- **Solana prompt count** — repository-structure.md corrected from 9 to 10 files (includes phase4b-invariant-fuzz.md).
+- **Python version** — docs/setup.md corrected from "3.11+" to "3.11-3.12" (3.13+ has known issues).
+- **Rust scope** — docs/dependencies.md corrected from "Required (All Platforms)" to "Solana only".
+- **Audit modes table** — docs/audit-modes.md added missing "Orchestrator model" row.
+
 ## [1.1.3] - 2026-03-27
 
 ### Added

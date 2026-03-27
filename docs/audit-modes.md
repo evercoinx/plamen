@@ -5,6 +5,7 @@
 | Dimension | Light | Core | Thorough |
 |-----------|-------|------|----------|
 | **Target plan** | **Pro** | Max | Max |
+| Orchestrator model | Session model (Sonnet default) | Opus | Opus |
 | Agent models | All Sonnet/Haiku | Opus + Sonnet | Opus + Sonnet |
 | Recon | 2 sonnet (no RAG, no fork) | 4 agents (RAG fire-and-forget) | 4 agents (full RAG) |
 | Breadth | 3-4 sonnet | 5-9 opus | 5-9 opus |

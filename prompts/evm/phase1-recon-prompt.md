@@ -300,6 +300,8 @@ Grep for these patterns (exclude lib/, test/, mocks/):
 | `mulDiv\|mulWad\|divWad\|rayMul\|rayDiv\|FullMath\.mulDiv` (AND codebase also contains `1e6\|1e8\|decimals()\|10 \*\*\|feed\.decimals`) | MIXED_DECIMALS |
 | `IERC6909\|ERC6909\|IERC1155\|ERC1155\|onERC1155Received` | MULTI_TOKEN_STANDARD |
 | `ecrecover\|ECDSA.recover\|SignatureChecker\|isValidSignature\|EIP712\|domainSeparator\|_domainSeparatorV4\|permit(` | HAS_SIGNATURES |
+| `proxy\|upgradeable\|diamond\|delegatecall\|sstore\|sload\|assembly\s*{` | STORAGE_LAYOUT |
+| `lzReceive\|ccipReceive\|receiveWormholeMessages\|_nonblockingLzReceive\|setPeer\|setTrustedRemote\|setTrustedRemoteAddress\|onOFTReceived` | CROSS_CHAIN_MSG |
 | `_safeMint\|safeTransfer\|onERC721Received\|onERC1155Received\|tokensReceived\|onTransferReceived\|onFlashLoan\|executeOperation\|FlashCallback\|beforeSwap\|afterSwap` | OUTCOME_CALLBACK |
 | `depositFor\(\|stakeFor\(\|delegateTo\(\|mintFor\(\|withdrawFor\(\|OnBehalf\(\|claimFor\(\|harvestFor\(\|compoundFor\(` OR (`approve\(\|safeApprove\(\|increaseAllowance\(\|permit\(.*deadline` AND `multicall\|batch\|aggregate\|loop.*approve\|for.*approve`) | MULTI_STEP_OPS |
 | `.call{value\|.call(\|.delegatecall(` targeting non-hardcoded address after state change | OUTCOME_CALLBACK_LOW_LEVEL |
@@ -401,6 +403,8 @@ After listing all recommended templates, output this binding manifest:
 | ORACLE_ANALYSIS | ORACLE flag | {YES/NO} | {if YES: oracle patterns found} |
 | ECONOMIC_DESIGN_AUDIT | MONETARY_PARAMETER flag | {YES/NO} | {if YES: monetary parameter setters found} |
 | EXTERNAL_PRECONDITION_AUDIT | External interactions detected | {YES/NO} | {if YES: external contract count} |
+| STORAGE_LAYOUT_SAFETY | STORAGE_LAYOUT flag | {YES/NO} | {if YES: proxy/delegatecall/assembly patterns found} |
+| CROSS_CHAIN_MESSAGE_INTEGRITY | CROSS_CHAIN_MSG flag | {YES/NO} | {if YES: lzReceive/ccipReceive/setPeer patterns found} |
 
 ### Binding Rules
 - SEMI_TRUSTED_ROLE flag detected → SEMI_TRUSTED_ROLES **REQUIRED**
@@ -414,11 +418,26 @@ After listing all recommended templates, output this binding manifest:
 - ORACLE flag detected → ORACLE_ANALYSIS **REQUIRED**
 - MONETARY_PARAMETER flag detected → ECONOMIC_DESIGN_AUDIT **REQUIRED**
 - External interactions detected in attack_surface.md → EXTERNAL_PRECONDITION_AUDIT **REQUIRED**
+- ERC4626 flag detected → ZERO_STATE_RETURN **REQUIRED**
+- STORAGE_LAYOUT flag detected → STORAGE_LAYOUT_SAFETY **REQUIRED**
+- CROSS_CHAIN_MSG flag detected → CROSS_CHAIN_MESSAGE_INTEGRITY **REQUIRED**
 - MIXED_DECIMALS flag detected → DIMENSIONAL_ANALYSIS **niche agent** RECOMMENDED (standalone agent, 1 budget slot)
+
+### Injectable Skills
+{List any injectable skills recommended based on protocol type classification}
+- If protocol_type == 'vault': Recommend VAULT_ACCOUNTING injectable (from ~/.claude/agents/skills/injectable/vault-accounting/SKILL.md)
+- If protocol_type == 'lending': Recommend LENDING_PROTOCOL_SECURITY injectable (from ~/.claude/agents/skills/injectable/lending-protocol-security/SKILL.md)
+- If protocol_type == 'dex_integration': Recommend DEX_INTEGRATION_SECURITY injectable (from ~/.claude/agents/skills/injectable/dex-integration-security/SKILL.md)
+- If protocol_type == 'governance': Recommend GOVERNANCE_ATTACK_VECTORS injectable (from ~/.claude/agents/skills/injectable/governance-attack-vectors/SKILL.md)
+- If protocol_type == 'nft': Recommend NFT_PROTOCOL_SECURITY injectable (from ~/.claude/agents/skills/injectable/nft-protocol-security/SKILL.md)
+- If protocol_type == 'account_abstraction': Recommend ACCOUNT_ABSTRACTION_SECURITY injectable (from ~/.claude/agents/skills/injectable/account-abstraction-security/SKILL.md)
+- If protocol_type == 'outcome_determinism': Recommend OUTCOME_DETERMINISM injectable (from ~/.claude/agents/skills/injectable/outcome-determinism/SKILL.md)
+- Inject Into: See skill-index.md for merge target per injectable
 
 ### Niche Agent Binding Rules
 - MISSING_EVENT flag detected (setter_list.md has MISSING EVENT entries OR emit_list.md shows state-changing functions without events) → EVENT_COMPLETENESS **niche agent** REQUIRED
 - HAS_SIGNATURES flag detected (ecrecover/ECDSA.recover/permit/EIP712/domainSeparator/nonces/isValidSignature patterns found) → SIGNATURE_VERIFICATION_AUDIT **niche agent** REQUIRED
+- DOCUMENTATION is non-empty AND contains testable protocol claims (fee structures, thresholds, permissions, distribution logic) → SPEC_COMPLIANCE_AUDIT **niche agent** REQUIRED (set `HAS_DOCS` flag)
 - HAS_MULTI_CONTRACT flag detected (2+ in-scope contracts AND constraint_variables.md shows shared parameters/formulas across contracts) → SEMANTIC_CONSISTENCY_AUDIT **niche agent** REQUIRED
 - MULTI_STEP_OPS flag detected (approve/safeApprove/increaseAllowance/permit or depositFor/stakeFor/delegateTo/mintFor/withdrawFor/OnBehalf/claimFor/harvestFor/compoundFor patterns found) → MULTI_STEP_OPERATION_SAFETY **niche agent** REQUIRED
 - OUTCOME_CALLBACK flag detected (onERC721Received/onERC1155Received/tokensReceived/onTransferReceived/onFlashLoan/executeOperation patterns found) → CALLBACK_RECEIVER_SAFETY **niche agent** REQUIRED
@@ -432,6 +451,7 @@ After listing all recommended templates, output this binding manifest:
 | SEMANTIC_CONSISTENCY_AUDIT | HAS_MULTI_CONTRACT flag (contract_inventory.md + constraint_variables.md) | {YES/NO} | {if YES: N shared parameters/formulas across M contracts} |
 | MULTI_STEP_OPERATION_SAFETY | MULTI_STEP_OPS flag (detected_patterns.md) | {YES/NO} | {if YES: approve/safeApprove/increaseAllowance/permit or depositFor/stakeFor/delegateTo/OnBehalf patterns found} |
 | CALLBACK_RECEIVER_SAFETY | OUTCOME_CALLBACK flag (detected_patterns.md) | {YES/NO} | {if YES: callback handler patterns found - onERC721Received/tokensReceived/etc.} |
+| SPEC_COMPLIANCE_AUDIT | HAS_DOCS flag (non-empty DOCUMENTATION with testable claims) | {YES/NO} | {if YES: docs contain testable claims} |
 | DIMENSIONAL_ANALYSIS | MIXED_DECIMALS flag (mulDiv/mulWad + 1e6/1e8/decimals()/10** in scope) | {YES/NO} | {if YES: mixed-decimal fixed-point arithmetic detected — standalone DA agent} |
 
 ### Manifest Summary

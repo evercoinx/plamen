@@ -31,22 +31,20 @@
 |
 +-- prompts/                           # Language-specific prompts
 |   +-- evm/                           # 10 files (includes invariant-fuzz)
-|   +-- solana/                        # 9 files
+|   +-- solana/                        # 10 files (includes invariant-fuzz)
 |   +-- aptos/                         # 9 files
 |   +-- sui/                           # 9 files
 |
 +-- agents/skills/
 |   +-- evm/                           # 18 EVM skill templates
 |   +-- solana/                        # 20 Solana skill templates
-|   +-- aptos/                         # 21 Aptos skill templates
-|   +-- sui/                           # 21 Sui skill templates
+|   +-- aptos/                         # 22 Aptos skill templates (21 + core directives)
+|   +-- sui/                           # 22 Sui skill templates (21 + core directives)
 |   +-- injectable/                    # 7 protocol-type-specific skills
 |   +-- niche/                         # 8 flag-triggered niche agents
 |
 +-- custom-mcp/                        # MCP servers
 |   +-- unified-vuln-db/               # RAG database (code only, data/ gitignored)
-|   +-- solodit-scraper/               # Solodit API scraper
-|   +-- defihacklabs-rag/              # DeFiHackLabs embeddings
 |   +-- solana-fender/                 # Solana static analysis
 |   +-- farofino-mcp/                  # [submodule] Aderyn integration
 |   +-- slither-mcp/                   # [submodule] Trail of Bits Slither

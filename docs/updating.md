@@ -11,7 +11,7 @@ cd ~/.plamen && git pull && plamen install
 If you skip `plamen install` after pulling, `plamen` will warn you on next launch:
 
 ```
-⚠ Version mismatch: repo is v1.1.3 but ~/.claude/CLAUDE.md has v1.0.6
+⚠ Version mismatch: repo is v1.1.4 but ~/.claude/CLAUDE.md has v1.0.6
   Run 'plamen install' to update. Pipeline may behave incorrectly until then.
 ```
 

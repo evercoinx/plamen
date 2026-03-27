@@ -2,7 +2,7 @@
 
 > Skills are methodology files read by agents via `Read ~/.claude/agents/skills/{LANGUAGE}/{name}/SKILL.md`.
 > The orchestrator resolves `{LANGUAGE}` to `evm`, `solana`, `aptos`, or `sui` based on Step 0 detection.
-> EVM has 18 skills, Solana has 20 skills, Aptos has 21 skills, Sui has 21 skills - no shared skills directory exists.
+> EVM has 18 skills, Solana has 20 skills, Aptos has 22 skills (21 + core directives), Sui has 22 skills (21 + core directives) - no shared skills directory exists.
 
 ## EVM Skills (`~/.claude/agents/skills/evm/`)
 
@@ -58,10 +58,11 @@
 
 ## Aptos Skills (`~/.claude/agents/skills/aptos/`)
 
-> Load these when `LANGUAGE=aptos`. All 21 skills use Aptos Move concepts.
+> Load these when `LANGUAGE=aptos`. 21 standard skills + 1 core directive (22 total). All use Aptos Move concepts.
 
 | Skill | Trigger Pattern | Used By |
 |-------|-----------------|---------|
+| MOVE_SAFETY_CORE_DIRECTIVES | Always (Aptos) — condensed inventory+flag directives from 4 always-required skills | breadth agents (loaded by orchestrator via commands/plamen.md) |
 | ABILITY_ANALYSIS | Always (Aptos) | breadth agents, depth agents |
 | BIT_SHIFT_SAFETY | Always (Aptos) | breadth agents, depth-edge-case |
 | TYPE_SAFETY | Always (Aptos) | breadth agents, depth-state-trace |
@@ -86,10 +87,11 @@
 
 ## Sui Skills (`~/.claude/agents/skills/sui/`)
 
-> Load these when `LANGUAGE=sui`. All 21 skills use Sui Move concepts.
+> Load these when `LANGUAGE=sui`. 21 standard skills + 1 core directive (22 total). All use Sui Move concepts.
 
 | Skill | Trigger Pattern | Used By |
 |-------|-----------------|---------|
+| MOVE_SAFETY_CORE_DIRECTIVES | Always (Sui) — condensed inventory+flag directives from 4 always-required skills | breadth agents (loaded by orchestrator via commands/plamen.md) |
 | ABILITY_ANALYSIS | Always (Sui) | breadth agents, depth agents |
 | BIT_SHIFT_SAFETY | Always (Sui) | breadth agents, depth-edge-case |
 | TYPE_SAFETY | Always (Sui) | breadth agents, depth-state-trace |

@@ -536,6 +536,17 @@ For EACH recommended template provide: Trigger, Relevance, Instantiation Paramet
 - CROSS_CHAIN flag -> CROSS_CHAIN_TIMING **REQUIRED**
 - MIGRATION flag -> MIGRATION_ANALYSIS **REQUIRED**
 
+### Injectable Skills
+{List any injectable skills recommended based on protocol type classification}
+- If protocol_type == 'vault': Recommend VAULT_ACCOUNTING injectable (from ~/.claude/agents/skills/injectable/vault-accounting/SKILL.md)
+- If protocol_type == 'lending': Recommend LENDING_PROTOCOL_SECURITY injectable (from ~/.claude/agents/skills/injectable/lending-protocol-security/SKILL.md)
+- If protocol_type == 'dex_integration': Recommend DEX_INTEGRATION_SECURITY injectable (from ~/.claude/agents/skills/injectable/dex-integration-security/SKILL.md)
+- If protocol_type == 'governance': Recommend GOVERNANCE_ATTACK_VECTORS injectable (from ~/.claude/agents/skills/injectable/governance-attack-vectors/SKILL.md)
+- If protocol_type == 'nft': Recommend NFT_PROTOCOL_SECURITY injectable (from ~/.claude/agents/skills/injectable/nft-protocol-security/SKILL.md)
+- If protocol_type == 'outcome_determinism': Recommend OUTCOME_DETERMINISM injectable (from ~/.claude/agents/skills/injectable/outcome-determinism/SKILL.md)
+- Inject Into: See skill-index.md for merge target per injectable
+- If vault detected → ZERO_STATE_RETURN **REQUIRED** (first-depositor analysis)
+
 ### Niche Agent Binding Rules
 - MISSING_EVENT flag detected (setter_list.md has MISSING EVENT entries OR emit_list.md shows state-changing functions without events) → EVENT_COMPLETENESS **niche agent** REQUIRED
 - HAS_SIGNATURES flag detected (ed25519_program/Secp256k1/verify_signature patterns found) → SIGNATURE_VERIFICATION_AUDIT **niche agent** REQUIRED

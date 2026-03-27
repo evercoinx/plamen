@@ -1590,7 +1590,8 @@ def run_uninstall():
             for key in ("allow", "deny"):
                 plamen_list = plamen_settings.get("permissions", {}).get(key, [])
                 current = settings.get("permissions", {}).get(key, [])
-                settings["permissions"][key] = [x for x in current if x not in plamen_list]
+                if "permissions" in settings and key in settings["permissions"]:
+                    settings["permissions"][key] = [x for x in current if x not in plamen_list]
             # Remove Plamen env vars
             for k in plamen_settings.get("env", {}):
                 settings.get("env", {}).pop(k, None)

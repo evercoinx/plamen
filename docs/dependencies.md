@@ -25,7 +25,7 @@ The setup wizard detects your OS and installed tools, then offers to install mis
 | Python | 3.11-3.12 (recommended) | MCP servers, wrapper | [python.org](https://python.org) |
 | Node.js | 18+ | npm-based MCP servers | [nodejs.org](https://nodejs.org) |
 | Git | any | Submodules, version control | [git-scm.com](https://git-scm.com) |
-| Rust | stable | Compiling security tools | [rustup.rs](https://rustup.rs) |
+| Rust | stable | Solana toolchain (Trident fuzzer) | [rustup.rs](https://rustup.rs) — Solana only |
 
 ### Windows: Developer Mode (required)
 
@@ -167,8 +167,6 @@ Works on all platforms. The setup wizard installs via `suiup` (the official Sui 
 | slither-mcp | Slither static analyzer bridge | `pip install -e custom-mcp/slither-mcp` | EVM only |
 | farofino-mcp | Aderyn/Slither fallback | `pip install -r custom-mcp/farofino-mcp/requirements.txt` | EVM only |
 | solana-fender | Solana security checks | `pip install -e custom-mcp/solana-fender` | Solana only |
-| solodit-scraper | Solodit.xyz data | `pip install -r custom-mcp/solodit-scraper/requirements.txt` | Optional |
-| defihacklabs-rag | DeFiHackLabs data | `pip install -r custom-mcp/defihacklabs-rag/requirements.txt` | Optional |
 
 > **Note**: The unified-vuln-db install pulls ~2GB (includes PyTorch for sentence-transformers). First MCP call per session loads ChromaDB and the all-MiniLM-L6-v2 model (~5s cold start). Subsequent calls are instant.
 

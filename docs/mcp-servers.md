@@ -7,8 +7,6 @@ Plamen uses 9 MCP servers configured in `mcp.json`. All keys are optional -- the
 | Server | Purpose | Required? |
 |--------|---------|-----------|
 | **unified-vuln-db** | RAG vulnerability database (Solodit, DeFiHackLabs, Immunefi) | **Required** |
-| **solodit-scraper** | Solodit API scraper with SQLite cache | Required by unified-vuln-db |
-| **defihacklabs-rag** | DeFiHackLabs exploit analysis with ChromaDB | Optional |
 | **solana-fender** | Solana program static security analysis | Optional (Solana only) |
 
 ## Submodules (custom-mcp/)
