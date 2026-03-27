@@ -5,6 +5,14 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-03-27
+
+### Added
+- **Scanner CHECK 5 extension**: Untrusted call target validation — when code decodes an address from calldata and calls interface functions on it, the return values are untrusted unless the address is verified against a registry or factory. Fills a gap between "untrusted parameters in calls to known contracts" (existing) and "calls to untrusted contracts whose return values are trusted" (new). RC-METHOD fix from dHEDGE post-mortem (2 High misses).
+- **Niche agent Processing Protocol**: All 8 niche agents now enforce enumerate-first processing — ENUMERATE targets → PROCESS exhaustively → COVERAGE GATE. Based on CheckEval (EMNLP 2025) and Plan-and-Act (ICML 2025) research showing binary per-item decomposition and plan/execute separation improve checklist adherence. ~100 extra tokens per agent, zero additional API calls. Applies to Core and Thorough modes.
+- **Niche agent Coverage Assertion**: Pre-return reminder in all 8 niche agents requiring explicit verification that every enumerated item was processed. Based on Lost-in-the-Middle research — repeating key instructions at prompt end provides recency attention boost.
+- **Niche Agent Coverage Judge (Thorough only)**: Post-iteration-1 haiku agent that mechanically cross-references niche output files against function_list.md to detect skipped entities. If gaps found, spawns targeted sonnet gap-fillers for missed items only. Added to all 4 language trees (EVM, Solana, Aptos, Sui).
+
 ## [1.1.0] - 2026-03-27
 
 ### Added

@@ -35,6 +35,13 @@ Read:
 - {SCRATCHPAD}/state_variables.md (all state variables)
 - Source files in scope
 
+## Processing Protocol (MANDATORY)
+
+For each analysis step below, execute in order:
+1. **ENUMERATE targets**: List every entity the step applies to (claims, functions, parameters) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next step.
+
 ## STEP 1: Extract Spec Claims
 
 Read the documentation thoroughly. Extract every CONCRETE, TESTABLE claim into a structured list:
@@ -87,6 +94,8 @@ Scan function_list.md for significant functions that the documentation does NOT 
 - Emergency/admin functions not in the trust model
 
 These are not vulnerabilities per se, but document them as INFO findings - undocumented behavior is a trust risk.
+
+**Coverage assertion**: Before returning, verify every entity enumerated under each step has been processed. Report enumerated vs analyzed counts in your return message.
 
 ## Output Requirements
 Write to {SCRATCHPAD}/niche_spec_compliance_findings.md

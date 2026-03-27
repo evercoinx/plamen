@@ -48,6 +48,13 @@ After reading function_list.md and source files, if you find 0 multi-step operat
 'DONE: 0 findings - no applicable multi-step or on-behalf-of patterns found'
 Do NOT proceed to CHECK 1 or CHECK 2 if there is nothing to analyze.
 
+## Processing Protocol (MANDATORY — applies to every CHECK below)
+
+For each CHECK, execute three steps in order:
+1. **ENUMERATE targets**: List every entity the CHECK applies to (functions, handlers, collections, call sites) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
+
 ## CHECK 1: Authorization Sequence Conflicts
 
 ### Step 1: Enumerate Multi-Step Operations
@@ -138,6 +145,8 @@ For each confirmed impact:
 - **Persistence**: Is the damage permanent, temporary (time-based), or fixable by admin?
 
 Tag: [TRACE:attacker calls deposit_for(pool_pda, amount) → pool.cooldown = now + 7d → pool operations revert for 7d → all users affected]
+
+**Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
 ## Output
 Write to {SCRATCHPAD}/niche_multi_step_safety_findings.md

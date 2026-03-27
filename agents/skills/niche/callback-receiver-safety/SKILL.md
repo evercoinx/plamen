@@ -30,6 +30,13 @@ Read:
 - {SCRATCHPAD}/findings_inventory.md (avoid duplicates)
 - Source files in scope
 
+## Processing Protocol (MANDATORY — applies to every CHECK below)
+
+For each CHECK, execute three steps in order:
+1. **ENUMERATE targets**: List every entity the CHECK applies to (functions, handlers, collections, call sites) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
+
 ## CHECK 1: Callback Handler Access Control
 
 ### Step 1: Enumerate All Callback Handlers
@@ -121,6 +128,8 @@ For each confirmed selective revert vector:
 Formula: `gas_per_retry * E[retries] < value_of_desired_outcome` -> economically rational attack. Note: this is NOT reentrancy - `nonReentrant` does NOT prevent it. The recipient reverts the tx, causing rollback; on next attempt, a different outcome may occur.
 
 Tag: [TRACE:_safeMint(recipient) → onERC721Received → revert if unfavorable → retry → cost=gas/retry × E[retries] vs value_of_outcome]
+
+**Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
 ## Output
 Write to {SCRATCHPAD}/niche_callback_safety_findings.md

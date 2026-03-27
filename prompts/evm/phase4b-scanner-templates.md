@@ -369,6 +369,11 @@ For EVERY external call that passes user-supplied or caller-controlled parameter
 **Common missed pattern**: `swap(FundManagement memory funds)` where `funds.recipient`
 or `funds.sender` is caller-supplied and passed directly to external DEX without validation.
 
+**Untrusted call target check**: For every `InterfaceName(addr).function()` call where `addr` is decoded from calldata, function parameters, or user-supplied structs:
+1. Is `addr` validated against a registry, factory, or known-good set BEFORE being called?
+2. If NOT validated: the call target is attacker-deployable. All return values from the call are UNTRUSTED — an attacker can deploy a contract implementing the expected interface that returns arbitrary values to bypass validation logic.
+3. For each untrusted return value: trace how it is used downstream. If it gates access control, token movement, or accounting → FINDING (High if funds at risk, Medium if DoS only).
+
 ## CHECK 6: Helper Function Call-Site Parity
 
 For EVERY internal helper that transforms values (normalization, scaling, encoding, formatting):

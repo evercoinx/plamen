@@ -29,6 +29,13 @@ Read:
 - {SCRATCHPAD}/function_list.md (all functions)
 - Source files referenced in the gap annotations
 
+## Processing Protocol (MANDATORY)
+
+For each analysis step below, execute in order:
+1. **ENUMERATE targets**: List every entity the step applies to (gaps, variables, functions) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next step.
+
 ## Your Task
 
 ### STEP 1: Extract Investigation Targets
@@ -84,6 +91,8 @@ For each function identified in STEP 2 as creating a sync gap:
 - Does ANY caller of this function assume the gap does NOT exist?
 - Specifically: if function F creates a sync gap when condition C is false, does any caller of F (e.g., `distributeYield`/`recordLoss` (vesting vaults), `reportProfit`/`reportLoss` (Yearn-style), `notifyRewardAmount`/`getReward` (staking)) rely on the variable being updated regardless of C?
 - If yes: trace the caller's subsequent logic with the stale value to find the impact
+
+**Coverage assertion**: Before returning, verify every entity enumerated under each step has been processed. Report enumerated vs analyzed counts in your return message.
 
 ## Output Format
 

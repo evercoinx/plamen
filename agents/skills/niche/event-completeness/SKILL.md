@@ -32,6 +32,13 @@ Read:
 - {SCRATCHPAD}/function_list.md (all functions)
 - Source files in scope
 
+## Processing Protocol (MANDATORY)
+
+For each analysis step below, execute in order:
+1. **ENUMERATE targets**: List every entity the step applies to (functions, variables, call sites) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next step.
+
 ## Your Task
 
 ### STEP 1: Build Event Coverage Matrix
@@ -66,6 +73,8 @@ For each gap in the matrix:
 For multi-contract protocols:
 - Does Contract A emit events for state changes that Contract B depends on?
 - Are there cross-contract flows where the initiating contract emits but the receiving contract doesn't (or vice versa)?
+
+**Coverage assertion**: Before returning, verify every entity enumerated under each step has been processed. Report enumerated vs analyzed counts in your return message.
 
 ## Output Format
 

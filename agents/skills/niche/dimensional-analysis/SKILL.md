@@ -55,6 +55,13 @@ Dimensions compose under arithmetic:
 - Dimensionless ({1}): ratios, percentages, multipliers. `{A} * {1} = {A}`.
 - Cancellation: `{A} / {A} = {1}`.
 
+## Processing Protocol (MANDATORY)
+
+For each PHASE below, execute in order:
+1. **ENUMERATE targets**: List every entity the phase applies to (expressions, variables, functions) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next phase.
+
 ## PHASE 1: Dimension Vocabulary Discovery
 
 ### 1.1 Scale Constant Inventory
@@ -149,6 +156,8 @@ Populate from Phase 1 inventory. Update each row as you annotate (Phase 2), prop
 |---|-----------|----------|---------------|-------------|------------------------|-----------|-------------|-----------|
 
 Dispositions: PENDING -> SAFE (scales match at all consumers) | MISMATCH (finding created) | N/A (not arithmetic)
+
+**Coverage assertion**: Before returning, verify every entity enumerated under each phase has been processed. Report enumerated vs analyzed counts in your return message.
 
 ## Output Format
 

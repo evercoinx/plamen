@@ -38,6 +38,13 @@ Read:
 - {SCRATCHPAD}/state_variables.md (nonce/replay-protection-related state)
 - Source files containing signature operations
 
+## Processing Protocol (MANDATORY — applies to every CHECK below)
+
+For each CHECK, execute three steps in order:
+1. **ENUMERATE targets**: List every entity the CHECK applies to (functions, handlers, collections, call sites) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
+
 ## CHECK 1: Signature Validation Completeness
 
 For EACH signature verification call site:
@@ -141,6 +148,8 @@ For EACH signature verification:
   - **EVM**: `isValidSignature` (ERC-1271) calls an external contract - reentrancy vector if state is modified before the call
   - **Solana**: CPI to ed25519 program is safe (system program), but CPI to a custom verification program could be malicious
   - **Aptos/Sui**: External module calls for verification - check if the called module can re-enter the calling module via friend functions or public entry points
+
+**Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
 ## Output Requirements
 Write to {SCRATCHPAD}/niche_signature_findings.md

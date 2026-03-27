@@ -157,6 +157,43 @@ ADAPTIVE_DEPTH_LOOP(findings_inventory):
       depth_spawns_used += 1
   if any_respawned: await respawned results; re-merge
 
+  // ═══ NICHE AGENT COVERAGE VERIFICATION (Thorough only) ═══
+  // Post-hoc mechanical check: did each niche agent process every in-scope entity?
+  // Haiku judge compares function_list.md against each niche output.
+  // Cost: 1 haiku call. Only re-prompts if gaps found.
+  if MODE == THOROUGH AND len(niche_agents) > 0:
+    spawn coverage_judge(model="haiku", prompt="
+      You are the Niche Agent Coverage Judge. For each niche agent output file, mechanically
+      verify that every in-scope entity was processed.
+
+      Read {SCRATCHPAD}/function_list.md (master function list).
+      Read {SCRATCHPAD}/contract_inventory.md (in-scope contracts).
+
+      For EACH niche output file (niche_*_findings.md):
+      1. Determine which functions/entities fall within that agent's scope
+      2. Check: is each in-scope entity mentioned in the output (by name or location)?
+      3. If an entity is missing: record as GAP
+
+      Write to {SCRATCHPAD}/niche_coverage_gaps.md:
+      | Niche Agent | In-Scope Entities | Analyzed | Gaps | Missing Entities |
+
+      If 0 gaps across all agents: write 'COVERAGE: COMPLETE' and return.
+      If gaps found: list each (agent, missing_entity) pair.
+
+      Return: 'COVERAGE: {COMPLETE or N gaps across M agents}'
+    ")
+    await coverage_judge
+    if coverage_judge.gaps > 0 AND depth_spawns_used < max_depth_spawns:
+      for (agent_name, missing_entities) in coverage_gaps:
+        spawn niche_gap_filler(model="sonnet", prompt="
+          You are a targeted gap-filler for {agent_name}. Analyze ONLY these entities
+          that the original agent missed: {missing_entities}.
+          Apply the same methodology from ~/.claude/agents/skills/niche/{agent_name}/SKILL.md.
+          Write to {SCRATCHPAD}/niche_{agent_name}_gaps.md
+        ")
+        depth_spawns_used += 1
+      await gap_fillers; re-merge
+
   // ═══ SCORE all findings ═══
   // NOTE: Sibling Propagation is a standalone agent (scanner-tier, parallel with Validation Sweep).
   // It reads findings_inventory.md and writes sibling_propagation_findings.md.

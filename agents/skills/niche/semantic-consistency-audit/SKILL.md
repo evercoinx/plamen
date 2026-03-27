@@ -32,6 +32,13 @@ Read:
 - {SCRATCHPAD}/function_list.md (all functions)
 - Source files in scope
 
+## Processing Protocol (MANDATORY — applies to every CHECK below)
+
+For each CHECK, execute three steps in order:
+1. **ENUMERATE targets**: List every entity the CHECK applies to (functions, handlers, collections, call sites) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
+
 ## Your Task
 
 ### CHECK 1: Config Variable Unit Consistency
@@ -73,6 +80,8 @@ For EVERY magic number (literal constant not assigned to a named constant - e.g.
 |-------------|--------------|-----------|-------------|----------|
 
 **Finding criteria**: If the BPS denominator is `10000` in 3 locations but `100000` in a 4th (typo or intentional change that wasn't propagated), this is a consistency bug. Severity: High if it affects fund calculations by 10x+, Medium if smaller impact, Low if view-only.
+
+**Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
 ## Output Format
 
