@@ -5,6 +5,12 @@
 
 ---
 
+## Investigation Coverage Gate
+
+Before returning, verify each finding card from your investigation list has been addressed in your output (CONFIRMED, REFUTED, PARTIAL, or SKIPPED with reason). Report: "Coverage: {addressed}/{total} finding cards."
+
+---
+
 ## Depth Agent Template (Iteration 1)
 
 Spawn ALL 4 depth agents + 3 Blind Spot Scanners + Validation Sweep Agent in parallel (8 total):

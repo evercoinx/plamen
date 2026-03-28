@@ -5,6 +5,15 @@
 
 ---
 
+## Processing Protocol (ALL Scanner & Sweep Agents)
+
+Every agent spawned from this file MUST follow this protocol for each CHECK/step in their section:
+1. **ENUMERATE targets**: List every entity the CHECK applies to as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
+
+---
+
 ## Blind Spot Scanner A: Tokens & Parameters
 
 > **Trigger**: Always runs IN PARALLEL with depth agents (iteration 1 only).
@@ -19,6 +28,13 @@ Read:
 - {SCRATCHPAD}/attack_surface.md (Token/Coin Mapping, Object Inventory Matrix)
 - {SCRATCHPAD}/findings_inventory.md (what WAS analyzed)
 - {SCRATCHPAD}/constraint_variables.md (admin-settable parameters)
+
+## Processing Protocol (MANDATORY — applies to every CHECK below)
+
+For each CHECK, execute three steps in order:
+1. **ENUMERATE targets**: List every entity the CHECK applies to (objects, coins, parameters, call sites) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
 
 ## CHECK 1: External Coin<T> / Object with `store` Coverage
 Cross-reference attack_surface.md Token/Coin Mapping against findings_inventory.md:
@@ -51,6 +67,12 @@ From constraint_variables.md, for each parameter with a setter function:
 - Parameter DECREASES: who is harmed?
 - If either direction harms users AND no finding covers it -> BLIND SPOT
 
+**Apply Rule 14**: For each parameter:
+- Does its setter enforce bounds? (min/max checks before writing to object fields)
+- Can the new value be set below accumulated state? (setter regression)
+- Is there a related parameter that must maintain coherence? (constraint coherence)
+- **Silent misconfiguration**: If the setter has NO bounds check, trace downstream math with an accepted-but-extreme value. Does the function abort, or does it silently produce wrong results? A setter that accepts any value AND downstream math silently breaks for part of the accepted range is a finding — even without an attacker.
+
 ## CHECK 2e: Approval/Delegate Sequence Conflicts (IF approve/delegate patterns detected in scope)
 Skip this check if no `approve`, `delegate`, `allowance`, or consent patterns are detected in the scoped modules. If `{SCRATCHPAD}/niche_multi_step_safety_findings.md` exists and is non-empty, limit this to listing affected functions in a table [Function | Pattern | Note] — do NOT trace execution, compute impacts, or construct exploitation scenarios. The niche agent handles deep analysis.
 For each multi-step operation (PTB composed calls, batch operations over coins/objects), enumerate all consent/delegate/approve operations. If the same (spender, coin_type) pair is authorized more than once, verify amounts are additive or the second accounts for the first. Sequential overwrites → FINDING.
@@ -58,6 +80,8 @@ For each multi-step operation (PTB composed calls, batch operations over coins/o
 ## CHECK 2f: Infrastructure Address Targeting (IF on-behalf-of patterns detected in scope)
 Skip this check if no `deposit_for`, `stake_for`, `delegate_to`, or similar on-behalf-of function patterns are detected. If `{SCRATCHPAD}/niche_multi_step_safety_findings.md` exists and is non-empty, limit this to listing affected functions in a table [Function | Target Param | Note] — do NOT trace execution or compute impacts.
 For each public entry function that writes state keyed by an address parameter (e.g., `deposit_for(target)`, `stake_for(target)`, `delegate_to(target)`): can any protocol shared object or singleton be used as the target? If yes, what state is imposed on it, and does it break protocol operations? → FINDING.
+
+**Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
 ## Output
 - Maximum 5 findings [BLIND-A1] through [BLIND-A5]
@@ -91,6 +115,13 @@ Read:
 - {SCRATCHPAD}/function_list.md (complete function inventory)
 - {SCRATCHPAD}/state_variables.md (all structs and their abilities)
 - {SCRATCHPAD}/modifiers.md (access control / guard map)
+
+## Processing Protocol (MANDATORY — applies to every CHECK below)
+
+For each CHECK, execute three steps in order:
+1. **ENUMERATE targets**: List every entity the CHECK applies to (guards, modifiers, overrides, functions) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
 
 ## CHECK 3: Capability-Gated Function Griefability (Rule 2)
 From function_list.md, for each function requiring a capability reference (&AdminCap, &OwnerCap, &TreasuryCap, etc.) or sender-address check (`tx_context::sender(ctx) == ...`):
@@ -180,6 +211,8 @@ For each object type in the protocol:
 
 Misclassified ownership is a Sui-specific blind spot that breadth agents typically miss because they focus on function logic, not object model design.
 
+**Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
+
 ## Output
 - Maximum 5 findings [BLIND-B1] through [BLIND-B5]
 - Use standard finding format
@@ -213,6 +246,13 @@ Read:
 - {SCRATCHPAD}/modifiers.md (access control / guard map)
 - {SCRATCHPAD}/state_variables.md (all structs and abilities)
 - Source files for all in-scope modules
+
+## Processing Protocol (MANDATORY — applies to every CHECK below)
+
+For each CHECK, execute three steps in order:
+1. **ENUMERATE targets**: List every entity the CHECK applies to (roles, capabilities, functions, call paths) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
 
 ## CHECK 6: Capability Lifecycle Completeness
 
@@ -265,6 +305,8 @@ For each public and entry function in all in-scope modules:
 - Flag: `entry` functions that appear to be for testing only (references to test scenarios, test addresses, `#[test_only]` logic patterns) but are NOT marked `#[test_only]` and are included in production code
 - Flag: `public` functions that should be `entry` only -- functions that are meant to be called directly by users but not composed within PTBs. If a function's security relies on being the sole operation (e.g., it checks balances before and after), making it `public` allows PTB composition that may break this assumption.
 
+**Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
+
 ## Output
 - Maximum 8 findings [BLIND-C1] through [BLIND-C8]
 - Use standard finding format
@@ -300,6 +342,13 @@ Read:
 - {SCRATCHPAD}/findings_inventory.md (what was already found -- avoid duplicates)
 - {SCRATCHPAD}/modifiers.md (access control / guard map)
 - Source files for all in-scope modules
+
+## Processing Protocol (MANDATORY — applies to every CHECK below)
+
+For each CHECK, execute three steps in order:
+1. **ENUMERATE targets**: List every entity the CHECK applies to (validations, operators, guards, functions) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
 
 ## CHECK 1: Boundary Operator Precision
 
@@ -448,6 +497,22 @@ For EVERY state-modifying function that contains an if/else or early abort:
 **Concrete test**: If `function_a` writes `last_update = now` inside an `if (amount > 0)` block, what value does `last_update` retain when `amount == 0`? Trace all consumers of `last_update` -- do they produce correct results with the stale value?
 
 Tag: [TRACE:branch=false → stateVar={old_value} → consumer computes {wrong_result}]
+
+## CHECK 9: Validation Semantic Adequacy
+
+For EVERY validation that protects against value loss (slippage checks, balance thresholds, minimum output assertions):
+
+| Validation | What It Measures | What It Should Measure | Match? |
+|-----------|-----------------|----------------------|--------|
+
+**Classification** — for each validation, determine:
+- Does it check ABSOLUTE state (total balance) or RELATIVE change (delta per operation)?
+- Does it check AGGREGATE result (batch total) or PER-ITEM result (individual operation)?
+- Does it check a PROXY metric (correlated value) or the DIRECT metric (actual value at risk)?
+
+If the validation uses absolute/aggregate/proxy AND the protected operation is per-item or requires delta measurement → FINDING: validation measures the wrong granularity. A batch of operations where each individually loses value but the aggregate stays flat (cross-subsidized by profitable operations or prior balance) passes an aggregate check but fails a per-item check.
+
+**Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
 ## SELF-CONSISTENCY CHECK (MANDATORY before output)
 

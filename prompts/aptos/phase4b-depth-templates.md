@@ -6,6 +6,12 @@
 
 ---
 
+## Investigation Coverage Gate
+
+Before returning, verify each finding card from your investigation list has been addressed in your output (CONFIRMED, REFUTED, PARTIAL, or SKIPPED with reason). Report: "Coverage: {addressed}/{total} finding cards."
+
+---
+
 ## Depth Agent Template (Iteration 1)
 
 This is the standalone Aptos Move depth agent template. It contains the complete prompt for Aptos depth analysis -- no EVM or Solana template dependency.

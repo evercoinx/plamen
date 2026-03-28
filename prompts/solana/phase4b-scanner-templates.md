@@ -5,6 +5,15 @@
 
 ---
 
+## Processing Protocol (ALL Scanner & Sweep Agents)
+
+Every agent spawned from this file MUST follow this protocol for each CHECK/step in their section:
+1. **ENUMERATE targets**: List every entity the CHECK applies to as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
+
+---
+
 ## Blind Spot Scanner A: Tokens & Parameters (Solana)
 
 ```
@@ -16,6 +25,13 @@ Read:
 - {SCRATCHPAD}/attack_surface.md (Account Inventory Matrix)
 - {SCRATCHPAD}/findings_inventory.md (what WAS analyzed)
 - {SCRATCHPAD}/constraint_variables.md (admin-changeable parameters)
+
+## Processing Protocol (MANDATORY — applies to every CHECK below)
+
+For each CHECK, execute three steps in order:
+1. **ENUMERATE targets**: List every entity the CHECK applies to (accounts, tokens, parameters, call sites) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
 
 ## CHECK 1: Account & Token Coverage
 Cross-reference attack_surface.md Account Inventory Matrix against findings_inventory.md:
@@ -48,6 +64,12 @@ For each parameter with an admin setter instruction in constraint_variables.md:
 If EITHER direction is unanalyzed → create analysis.
 Apply Rule 13: Model who is harmed in each direction. An admin decreasing a threshold may harm users differently than increasing it.
 
+**Apply Rule 14**: For each parameter:
+- Does its setter enforce bounds? (min/max checks before writing to account data)
+- Can the new value be set below accumulated state? (setter regression)
+- Is there a related parameter that must maintain coherence? (constraint coherence)
+- **Silent misconfiguration**: If the setter has NO bounds check, trace downstream math with an accepted-but-extreme value. Does the instruction revert, or does it silently produce wrong results? A setter that accepts any value AND downstream math silently breaks for part of the accepted range is a finding — even without an attacker.
+
 ## CHECK 2e: Approval/Delegate Sequence Conflicts (IF approve/delegate patterns detected in scope)
 Skip this check if no `approve`, `delegate`, or `authorized_amount` patterns are detected in the scoped programs. If `{SCRATCHPAD}/niche_multi_step_safety_findings.md` exists and is non-empty, limit this to listing affected functions in a table [Function | Pattern | Note] — do NOT trace execution, compute impacts, or construct exploitation scenarios. The niche agent handles deep analysis.
 For each multi-instruction transaction (composed CPIs, batch operations), enumerate all approve/delegate/authorize calls. If the same (delegate, token_account) pair is authorized more than once, verify amounts are additive or the second accounts for the first. Sequential overwrites → FINDING.
@@ -55,6 +77,8 @@ For each multi-instruction transaction (composed CPIs, batch operations), enumer
 ## CHECK 2f: Infrastructure Address Targeting (IF on-behalf-of patterns detected in scope)
 Skip this check if no `deposit_for`, `stake_for`, `delegate_to`, or similar on-behalf-of instruction patterns are detected. If `{SCRATCHPAD}/niche_multi_step_safety_findings.md` exists and is non-empty, limit this to listing affected functions in a table [Function | Target Param | Note] — do NOT trace execution or compute impacts.
 For each public instruction that writes state keyed by an address/pubkey parameter (e.g., deposit_for(target), stake_for(target), delegate_to(target)): can any protocol PDA or singleton account be used as the target? If yes, what state is imposed on it, and does it break protocol operations? → FINDING.
+
+**Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
 ## Output
 - Maximum 5 findings [BLIND-A1] through [BLIND-A5]
@@ -84,6 +108,13 @@ Read:
 - {SCRATCHPAD}/function_list.md (instruction inventory)
 - {SCRATCHPAD}/state_variables.md (account structures)
 - Source files for all in-scope programs
+
+## Processing Protocol (MANDATORY — applies to every CHECK below)
+
+For each CHECK, execute three steps in order:
+1. **ENUMERATE targets**: List every entity the CHECK applies to (guards, modifiers, overrides, functions) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
 
 ## CHECK 3: Access Control Gaps
 For each instruction handler with signer checks:
@@ -131,6 +162,8 @@ Grep source for:
 
 If any initialization instruction uses non-idempotent ATA creation → BLIND SPOT (front-running DoS).
 
+**Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
+
 ## Output
 - Maximum 5 findings [BLIND-B1] through [BLIND-B5]
 - Use standard finding format
@@ -158,6 +191,13 @@ Read:
 - {SCRATCHPAD}/function_list.md (instruction inventory)
 - {SCRATCHPAD}/state_variables.md
 - Source files for all in-scope programs
+
+## Processing Protocol (MANDATORY — applies to every CHECK below)
+
+For each CHECK, execute three steps in order:
+1. **ENUMERATE targets**: List every entity the CHECK applies to (roles, capabilities, functions, call paths) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
 
 ## CHECK 6: Upgrade Authority Lifecycle
 For the program's upgrade authority:
@@ -193,8 +233,22 @@ For each instruction handler:
 - Could dead instructions be called by anyone if discovered?
 - Do dead instructions modify critical state?
 
+## CHECK 8b: Anchor Hidden IDL Instructions (IF Anchor program)
+Skip if the program does not use Anchor (no `declare_id!` macro, no `#[program]` attribute).
+Check Cargo.toml: if the `idl-build` feature is present OR `no-idl` is absent (IDL feature is ON by default):
+
+| Check | Status | Finding? |
+|-------|--------|----------|
+| IDL feature enabled in Cargo.toml? | YES/NO | If YES: 7 hidden permissionless instructions exist on-chain (IdlCreateAccount, IdlCreateBuffer, etc.) — note for developers |
+| `IdlCreateAccount` authority claimable by anyone? | YES (always, by design) | If program is deployed and IDL PDA unclaimed: LOW — attacker can claim IDL authority, upload fake IDL to explorers, block legitimate IDL upload |
+| `IdlCreateBuffer` available as cosplay primitive? | YES (if IDL enabled) | Cross-reference with Section 3 of account-validation: any discriminator bypass finding is amplified (see account-validation skill) |
+
+If IDL feature enabled → recommend developers either: (a) disable IDL feature (`no-idl` in Cargo.toml), (b) claim IDL PDA immediately after deployment, or (c) upgrade to Anchor >= v0.31.0 which restricts `IdlCreateAccount` to program authority.
+
+**Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
+
 ## Output
-- Maximum 8 findings [BLIND-C1] through [BLIND-C8]
+- Maximum 9 findings [BLIND-C1] through [BLIND-C9]
 - Use standard finding format
 
 ## Chain Summary (MANDATORY)
@@ -202,7 +256,7 @@ For each instruction handler:
 
 Write to {SCRATCHPAD}/blind_spot_C_findings.md
 
-Return: 'DONE: {N} blind spots - Check6: {A} authority lifecycle gaps, Check7: {B} CPI validation gaps, Check8: {C} reachability gaps'
+Return: 'DONE: {N} blind spots - Check6: {A} authority lifecycle gaps, Check7: {B} CPI validation gaps, Check8: {C} reachability gaps, Check8b: {D} IDL instruction gaps'
 ")
 ```
 
@@ -223,6 +277,13 @@ Read:
 - {SCRATCHPAD}/findings_inventory.md (avoid duplicates)
 - {SCRATCHPAD}/state_variables.md
 - Source files for all in-scope programs
+
+## Processing Protocol (MANDATORY — applies to every CHECK below)
+
+For each CHECK, execute three steps in order:
+1. **ENUMERATE targets**: List every entity the CHECK applies to (validations, operators, guards, functions) as a numbered list before analysis begins.
+2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
+3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
 
 ## CHECK 1: Boundary Operator Precision
 For every comparison operator in validation logic (`>`, `<`, `>=`, `<=`, `==`, `!=`):
@@ -310,6 +371,22 @@ For EVERY state-modifying instruction that contains an if/else, match arms, or e
 **Concrete test**: If `instruction_a` writes `last_update = now` inside an `if amount > 0` block, what value does `last_update` retain when `amount == 0`? Trace all consumers of `last_update` - do they produce correct results with the stale value?
 
 Tag: [TRACE:branch=false → stateVar={old_value} → consumer computes {wrong_result}]
+
+## CHECK 9: Validation Semantic Adequacy
+
+For EVERY validation that protects against value loss (slippage checks, balance thresholds, minimum output assertions):
+
+| Validation | What It Measures | What It Should Measure | Match? |
+|-----------|-----------------|----------------------|--------|
+
+**Classification** — for each validation, determine:
+- Does it check ABSOLUTE state (total balance) or RELATIVE change (delta per operation)?
+- Does it check AGGREGATE result (batch total) or PER-ITEM result (individual operation)?
+- Does it check a PROXY metric (correlated value) or the DIRECT metric (actual value at risk)?
+
+If the validation uses absolute/aggregate/proxy AND the protected operation is per-item or requires delta measurement → FINDING: validation measures the wrong granularity. A batch of operations where each individually loses value but the aggregate stays flat (cross-subsidized by profitable operations or prior balance) passes an aggregate check but fails a per-item check.
+
+**Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
 ## SELF-CONSISTENCY CHECK (MANDATORY before output)
 
