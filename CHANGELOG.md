@@ -5,6 +5,12 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6] - 2026-03-29
+
+### Fixed
+- **MCP path resolution**: All MCP server commands (`slither-mcp`, `npx`, `python`) now resolve to absolute platform-correct paths during install — not just `python`/`python3`. Searches pip script directories (`~/Library/Python/X.Y/bin/`, `~/.local/bin/`, `%APPDATA%/Python/Scripts/`) via `sysconfig` when `shutil.which` fails.
+- **Cross-platform migration**: Installer detects wrong-OS paths in existing `mcp.json` (e.g., `C:/` paths on macOS) and auto-fixes them to resolved local paths while preserving user env vars and API keys.
+
 ## [1.1.5] - 2026-03-28
 
 ### Added
