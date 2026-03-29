@@ -11,7 +11,7 @@ cd ~/.plamen && git pull && plamen install
 If you skip `plamen install` after pulling, `plamen` will warn you on next launch:
 
 ```
-⚠ Version mismatch: repo is v1.1.5 but ~/.claude/CLAUDE.md has v1.0.6
+⚠ Version mismatch: repo is v1.1.6 but ~/.claude/CLAUDE.md has v1.0.6
   Run 'plamen install' to update. Pipeline may behave incorrectly until then.
 ```
 
@@ -47,7 +47,7 @@ These are **not symlinked** — they are merged/injected at install time:
 |-----------|-------------------|-------------------|
 | **CLAUDE.md** | User may have their own content | Strips old `<!-- PLAMEN:START -->...<!-- PLAMEN:END -->` section, re-injects current version. User content outside markers is preserved. |
 | **settings.json** | User has their own API keys and permissions | Additive merge: adds new env vars and permissions that don't exist. Never overwrites existing keys. |
-| **mcp.json** | User has their own MCP servers and API keys | Additive merge: adds new server entries that don't exist. Never overwrites existing servers or keys. |
+| **mcp.json** | User has their own MCP servers and API keys | Additive merge: adds new server entries that don't exist. Fixes wrong-platform paths (e.g., Windows `C:/` on macOS) in existing servers while preserving env vars and API keys. |
 
 **CLAUDE.md is the critical one.** It contains the orchestrator's rules — agent counts, mode table, critical rules, and phase references. If it is stale, the orchestrator follows old rules while skills and prompts are already updated. This can cause wrong agent counts, skipped mandatory steps, or mismatched phase references.
 
@@ -73,7 +73,7 @@ Running `plamen install` multiple times is safe. Here's what each step does on r
 | Symlinks | Creates new links | Removes old links, recreates (same result) |
 | User file backup | Backs up to `.pre-plamen` | Skips if backup already exists |
 | settings.json | Merges Plamen entries | Skips entries that already exist |
-| mcp.json | Merges Plamen servers | Skips servers that already exist |
+| mcp.json | Merges Plamen servers | Skips existing servers, but fixes wrong-platform paths and backfills new env vars |
 | CLAUDE.md | Injects between markers | Strips old injection, re-injects current |
 | Python deps | Installs packages | `pip` skips already-installed packages |
 | Toolchains | Shows missing as checkboxes | Already-installed tools don't appear in list |
