@@ -1415,16 +1415,23 @@ def _merge_mcp_json(w):
     with open(example) as f:
         plamen = _json.load(f)
 
-    # Resolve relative cwd paths to absolute (pointing to real repo location).
-    # Also replace generic "python"/"python3" with sys.executable so the MCP servers
-    # use the exact interpreter that ran this install — and therefore have the right
-    # site-packages. This prevents the "spawn python ENOENT" error on macOS/Linux where
-    # only python3 exists, and ensures venv-installed deps are visible to the servers.
+    # Resolve all command/cwd paths to platform-correct absolute paths.
+    # - python/python3 → sys.executable (correct site-packages + venv)
+    # - npx → absolute path via shutil.which (prevents ENOENT on systems
+    #   where npx is not in the MCP server's PATH)
+    # - slither-mcp → absolute path via _find_bin (checks pip script dirs)
+    # - relative cwd (./...) → absolute path under PLAMEN_HOME
+    def _resolve_command(cmd: str) -> str:
+        """Resolve a generic command name to an absolute platform path."""
+        if cmd in ("python", "python3"):
+            return sys.executable
+        resolved = _find_bin(cmd)
+        return resolved if resolved else cmd  # keep original if not found
+
     for _name, config in plamen.get("mcpServers", {}).items():
         if "cwd" in config and config["cwd"].startswith("./"):
             config["cwd"] = os.path.join(PLAMEN_HOME, config["cwd"][2:])
-        if config.get("command") in ("python", "python3"):
-            config["command"] = sys.executable
+        config["command"] = _resolve_command(config["command"])
 
     existing = {"mcpServers": {}}
     if os.path.isfile(target):
@@ -1438,15 +1445,35 @@ def _merge_mcp_json(w):
             return
         existing.setdefault("mcpServers", {})
 
-    added, skipped, patched_env = [], [], []
+    def _is_wrong_platform_path(path: str) -> bool:
+        """Detect paths from a different OS (e.g., Windows paths on macOS/Linux)."""
+        if not path:
+            return False
+        if sys.platform == "win32":
+            return path.startswith("/") and not path.startswith("//")
+        return bool(re.match(r'^[A-Za-z]:[/\\]', path))
+
+    added, skipped, patched_env, patched_paths = [], [], [], []
     for name, config in plamen.get("mcpServers", {}).items():
         if name in existing["mcpServers"]:
             skipped.append(name)
+            ex = existing["mcpServers"][name]
+
+            # Fix stale command/cwd paths from a different platform.
+            # Preserves user's env vars and any other customizations —
+            # only overwrites command and cwd with the resolved template values.
+            if _is_wrong_platform_path(ex.get("command", "")):
+                ex["command"] = config["command"]
+                patched_paths.append(f"{name}.command")
+            if _is_wrong_platform_path(ex.get("cwd", "")):
+                ex["cwd"] = config["cwd"]
+                patched_paths.append(f"{name}.cwd")
+
             # Backfill missing env vars into existing servers (e.g., new keys added
             # to mcp.json.example after initial install — propagate to existing config)
             template_env = config.get("env", {})
             if template_env:
-                existing_env = existing["mcpServers"][name].setdefault("env", {})
+                existing_env = ex.setdefault("env", {})
                 for k, v in template_env.items():
                     if k not in existing_env and not v.startswith("YOUR_"):
                         existing_env[k] = v
@@ -1461,11 +1488,13 @@ def _merge_mcp_json(w):
 
     if added:
         w(f"  {_C_GREEN}mcp.json: added {', '.join(added)}{_RST}\n")
+    if patched_paths:
+        w(f"  {_C_GREEN}mcp.json: fixed platform paths: {', '.join(patched_paths)}{_RST}\n")
     if patched_env:
         w(f"  {_C_GREEN}mcp.json: backfilled env vars: {', '.join(patched_env)}{_RST}\n")
     if skipped:
         w(f"  {_C_GRAY}mcp.json: kept existing {', '.join(skipped)}{_RST}\n")
-    if not added and not skipped and not patched_env:
+    if not added and not skipped and not patched_env and not patched_paths:
         w(f"  {_C_GREEN}mcp.json: up to date{_RST}\n")
 
     # Remind about API keys for newly added servers
