@@ -27,6 +27,7 @@ Recon Agent 3 (Patterns + Surface + Templates) greps for multi-step operation pa
 | **Solana** | `approve\|delegate\|authorized_amount` | `deposit_for\|stake_for\|delegate_to\|_on_behalf\|_for_user` + public instructions with target pubkey |
 | **Aptos** | `approve\|delegate\|allowance` | `deposit_for\|stake_for\|delegate_to\|_on_behalf\|_for(.*address` |
 | **Sui** | `approve\|delegate\|allowance` | `deposit_for\|stake_for\|delegate_to\|_on_behalf\|_for_user` |
+| **Soroban** | `approve\|allowance\|require_auth\|require_auth_for_args` | `deposit_for\|stake_for\|transfer_from\|_on_behalf\|_for_user` + functions with Address param + require_auth on different Address |
 
 ## Agent Prompt Template
 

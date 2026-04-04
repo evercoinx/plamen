@@ -408,6 +408,10 @@ def check_dependencies() -> bool:
             ("aptos",   _find_bin("aptos", ["~/.aptoscli/bin"])),
             ("sui",     _find_bin("sui", ["~/AppData/Local/bin", "~/.local/bin"])),
         ]),
+        ("Soroban", [
+            ("stellar", _find_bin("stellar", ["~/.cargo/bin"])),
+            ("scout",   _find_bin("cargo-scout-audit", ["~/.cargo/bin"])),
+        ]),
     ]
 
     # ── Draw box ────────────────────────────────────────────
@@ -765,6 +769,18 @@ def _sui_cmds():
             'suiup default set sui']
 
 
+def _stellar_cmds():
+    if sys.platform == "win32":
+        return ['winget install --id Stellar.StellarCLI --accept-source-agreements --accept-package-agreements']
+    if sys.platform == "darwin" and _has_brew():
+        return ['brew install stellar-cli']
+    return ['cargo install --locked stellar-cli']
+
+
+def _scout_soroban_cmds():
+    return ['cargo install cargo-scout-audit']
+
+
 _INSTALL_RECIPES = {
     "EVM": [
         ("Foundry (forge+anvil+cast)",
@@ -816,6 +832,20 @@ _INSTALL_RECIPES = {
          _sui_cmds,
          ["sui"], "~1-2 min",
          ["~/AppData/Local/bin", "~/.local/bin"], None),
+    ],
+
+    "Soroban": [
+        ("Stellar CLI",
+         lambda: _find_bin("stellar", _CARGO_PATHS),
+         _stellar_cmds,
+         ["stellar"], "~2-3 min",
+         ["~/.cargo/bin"], "rust"),
+
+        ("Scout (Soroban static analyzer)",
+         lambda: _find_bin("cargo-scout-audit", _CARGO_PATHS),
+         _scout_soroban_cmds,
+         ["cargo-scout-audit"], "~2-3 min",
+         ["~/.cargo/bin"], "rust"),
     ],
 }
 
@@ -1923,7 +1953,7 @@ def show_hint_panel():
 # ── Helpers ──────────────────────────────────────────────────
 
 # Dirs skipped at ANY depth (build artifacts, tooling, never contain source)
-_SKIP_ALWAYS = {'node_modules', '.git', 'cache', 'artifacts', '.anchor', '.aptos',
+_SKIP_ALWAYS = {'node_modules', '.git', 'cache', 'artifacts', '.anchor', '.aptos', '.stellar',
                 'typechain', 'typechain-types', 'coverage', '__pycache__'}
 # Dirs skipped only at project ROOT level (contain deps/tests/scripts, not source)
 _SKIP_ROOT = {'lib', 'target', 'build', 'out', 'test', 'tests', 'mock', 'mocks',
@@ -1963,7 +1993,7 @@ def _detect_project_hint(d: str) -> str:
     indicators = {
         "foundry.toml": "Foundry", "hardhat.config.js": "Hardhat",
         "hardhat.config.ts": "Hardhat", "truffle-config.js": "Truffle",
-        "Anchor.toml": "Anchor", "Move.toml": "Move",
+        "Anchor.toml": "Anchor", "Move.toml": "Move", "stellar.toml": "Soroban",
     }
     for fname, label in indicators.items():
         if os.path.exists(os.path.join(d, fname)):

@@ -20,6 +20,7 @@ Chain-specific trigger patterns:
 - **Solana**: `ed25519_program`, `Secp256k1`, `verify_signature`, `Signature`, `ed25519_instruction`, `Secp256k1Program`
 - **Aptos**: `ed25519::verify`, `multi_ed25519`, `account::rotate_authentication_key`, `SignedMessage`, `signature::verify`
 - **Sui**: `ecdsa_k1::secp256k1_verify`, `ed25519::ed25519_verify`, `hash::blake2b256`, `ecdsa_r1`
+- **Soroban**: `env.crypto().ed25519_verify`, `env.crypto().secp256k1_recover`, `env.crypto().keccak256`, `env.crypto().sha256`, `__check_auth`
 
 ## Why a Dedicated Agent
 

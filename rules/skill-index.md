@@ -114,6 +114,32 @@
 | CENTRALIZATION_RISK | 3+ privileged roles (optional) | breadth agents |
 | SHARE_ALLOCATION_FAIRNESS | SHARE_ALLOCATION flag | breadth agents, depth-edge-case |
 
+## Soroban Skills (`~/.claude/agents/skills/soroban/`)
+
+> Load these when `LANGUAGE=soroban`. 19 skills total (13 cross-language + 6 Soroban-specific). All use Soroban/Stellar Rust concepts.
+
+| Skill | Trigger Pattern | Used By |
+|-------|-----------------|---------|
+| AUTH_VALIDATION | Always (Soroban) | breadth agents, depth agents |
+| STORAGE_LIFECYCLE | Always (Soroban) | breadth agents, depth-state-trace, depth-edge-case |
+| OVERFLOW_SAFETY | Always (Soroban) | breadth agents, depth-edge-case |
+| CONTRACT_UPGRADEABILITY | `update_current_contract_wasm` detected | breadth agents, depth-state-trace |
+| SEP41_TOKEN_SAFETY | SEP-41 token patterns detected | breadth agents, depth-token-flow |
+| CUSTOM_TYPE_SAFETY | `contractimport!` or `contracttype` detected | breadth agents, depth-external |
+| FORK_ANCESTRY | Always (recon TASK 0) | recon agent |
+| VERIFICATION_PROTOCOL | Always (verifiers) | security-verifier |
+| TOKEN_FLOW_TRACING | BALANCE_DEPENDENT flag | depth-token-flow, breadth agents |
+| ZERO_STATE_RETURN | Vault/first-depositor | depth-edge-case |
+| SEMI_TRUSTED_ROLES | SEMI_TRUSTED_ROLE flag | breadth agents, depth-state-trace |
+| TEMPORAL_PARAMETER_STALENESS | TEMPORAL flag | breadth agents, depth-state-trace |
+| ECONOMIC_DESIGN_AUDIT | MONETARY_PARAMETER flag | breadth agents |
+| EXTERNAL_PRECONDITION_AUDIT | External contract interactions | breadth agents |
+| FLASH_LOAN_INTERACTION | FLASH_LOAN flag | breadth agents, depth-token-flow, depth-edge-case |
+| MIGRATION_ANALYSIS | MIGRATION flag (update_current_contract_wasm + storage migration) | breadth agents |
+| CROSS_CHAIN_TIMING | CROSS_CHAIN flag | depth-external |
+| CENTRALIZATION_RISK | 3+ privileged roles (optional) | breadth agents |
+| SHARE_ALLOCATION_FAIRNESS | SHARE_ALLOCATION flag | breadth agents, depth-edge-case |
+
 ## Injectable Skills (`~/.claude/agents/skills/injectable/`)
 
 > Injectable skills are protocol-type-specific. They load ONLY when recon classifies the protocol as the matching type.

@@ -85,6 +85,7 @@ If execution was not attempted, explain why (no build environment, no test frame
 |----------|-------|------|------|
 | **EVM (Foundry)** | `forge build` | `forge test --match-test test_{ID} -vvv` | `forge test --match-test testFuzz_{ID} -vvv` (use `bound()` inputs) |
 | **EVM (Hardhat only)** | `npx hardhat compile` | `npx hardhat test --grep "{ID}"` | Skip fuzz variant (no native invariant fuzzer) |
+| **Soroban** | `stellar contract build` | `cargo test --features testutils test_{id}` | `cargo +nightly fuzz run fuzz_{id}` (if nightly); proptest fallback |
 | **Solana (Anchor)** | `cargo build-sbf` or `anchor build` | `cargo test test_{id} -- --nocapture` | Trident (preferred): `cd trident-tests && trident fuzz run fuzz_0`; fallback: proptest with bounded inputs |
 | **Solana (native)** | `cargo build-sbf` | `cargo test test_{id} -- --nocapture` | proptest with bounded inputs, or boundary-value parameterized tests |
 | **Aptos** | `aptos move compile` | `aptos move test --filter test_{id}` | No built-in fuzzer - write boundary-value parameterized tests (`#[test]` with multiple concrete value sets covering min/mid/max) |
@@ -155,6 +156,38 @@ proptest! {
 }
 ```
 If proptest is also not available, fall back to boundary-value parameterized tests (3-5 concrete values covering min, typical, max).
+
+### Soroban - cargo-fuzz (preferred) or proptest (fallback)
+
+**cargo-fuzz** is the standard Rust fuzzing tool using libFuzzer. Requires nightly Rust. Soroban contracts need `crate-type = ["cdylib", "rlib"]` in Cargo.toml for fuzz crate linking.
+
+**Detection**: Check `build_status.md` for `cargo_fuzz_available: true/false` (set by recon TASK 1 — tests `cargo +nightly fuzz --version`).
+
+**If cargo-fuzz is available** (nightly Rust installed):
+```bash
+# Initialize (if not already done - creates fuzz/ directory)
+cargo fuzz init
+# Run fuzz target
+cargo +nightly fuzz run fuzz_target_1
+# Run with timeout
+cargo +nightly fuzz run fuzz_target_1 -- -max_total_time=300
+```
+The verifier writes a fuzz harness using `soroban-sdk` testutils with `Env::default()`, registers the contract, and fuzzes the key parameters. Use `#[derive(Arbitrary)]` or `SorobanArbitrary` for input generation. NEVER use `panic!()` in fuzzable code — use `panic_with_error!` or return errors.
+
+**If cargo-fuzz is NOT available** (no nightly, or Windows issues):
+Use proptest as fallback (works on stable Rust, all platforms):
+```rust
+use proptest::prelude::*;
+use proptest_arbitrary_interop::arb;
+proptest! {
+    #[test]
+    fn test_fuzz_hypothesis(amount in 1i128..1_000_000_000i128, timestamp in 0u64..86400u64) {
+        let env = Env::default();
+        // setup, execute, assert invariant
+    }
+}
+```
+If proptest is also not available, fall back to boundary-value parameterized tests (3-5 concrete values covering 0, 1, typical, i128::MAX).
 
 ### Aptos / Sui - parameterized boundary tests
 Move lacks a fuzzer. Write multiple `#[test]` functions with concrete boundary values:

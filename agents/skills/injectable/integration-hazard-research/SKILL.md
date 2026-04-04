@@ -28,6 +28,7 @@ Recon Agent 3 detects named external protocol imports during TASK 6 pattern scan
 - Solana: CPI targets to known program IDs (Jupiter, Marinade, Raydium, Orca, Drift)
 - Sui: external package calls to known protocols (Cetus, DeepBook, Suilend, NAVI)
 - Aptos: external module calls to known protocols (Thala, Echelon, Liquidswap, PancakeSwap)
+- Soroban: cross-contract calls to known protocols (SoroSwap, Blend Protocol, Phoenix DEX, Aqua Network, OrbitCDP)
 
 The flag records which protocols were detected: `NAMED_EXTERNAL_PROTOCOL: [Uniswap V3, Chainlink]`
 

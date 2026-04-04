@@ -74,7 +74,10 @@ echo -n "  Solana:   " && \
 (command -v trident >/dev/null 2>&1 && echo -n "✓trident" || echo -n "○trident") && echo "" && \
 echo -n "  Move:     " && \
 (command -v aptos >/dev/null 2>&1 && echo -n "✓aptos " || echo -n "○aptos ") && \
-(command -v sui >/dev/null 2>&1 && echo -n "✓sui" || echo -n "○sui") && echo ""
+(command -v sui >/dev/null 2>&1 && echo -n "✓sui" || echo -n "○sui") && echo "" && \
+echo -n "  Soroban:  " && \
+(command -v stellar >/dev/null 2>&1 && echo -n "✓stellar " || echo -n "○stellar ") && \
+(cargo scout-audit --version >/dev/null 2>&1 && echo -n "✓scout" || echo -n "○scout") && echo ""
 ```
 
 Display the output to the user. If any required tools (claude, python, npx, git) show ✗, warn:
@@ -363,15 +366,17 @@ Detect the target language before anything else:
 | `*.rs` files + `Cargo.toml` WITHOUT `solana-program`/`anchor-lang` | **Native Solana (no Anchor)** | `solana` (with `ANCHOR=false` flag) |
 | `*.move` files + `Move.toml` with `aptos_framework`/`aptos_std`/`aptos_token`/`fungible_asset` | **Aptos Move** | `aptos` |
 | `*.move` files + `Move.toml` with `sui::object`/`sui::transfer`/`sui::tx_context`/`sui::coin` | **Sui Move** | `sui` |
+| `*.rs` files + `Cargo.toml` with `soroban-sdk` | **Soroban/Stellar** | `soroban` |
 
 **Detection procedure**:
-1. `ls` project root for `foundry.toml`, `hardhat.config.*`, `Anchor.toml`, `Move.toml`
+1. `ls` project root for `foundry.toml`, `hardhat.config.*`, `Anchor.toml`, `Move.toml`, `Cargo.toml`
 2. If `Move.toml` found: grep dependencies for Aptos indicators (`AptosFramework`, `aptos_framework`, `AptosStdlib`, `aptos_std`, `AptosToken`, `aptos_token`) or Sui indicators (`Sui`, `sui::object`, `sui::transfer`, `sui::tx_context`, `sui::coin`)
 3. If ambiguous Move: grep `*.move` for `use aptos_framework::` (Aptos) or `use sui::` (Sui)
-4. If `*.rs` files: grep `Cargo.toml` for `anchor-lang` or `solana-program`
-5. If still ambiguous Rust: grep `*.rs` for `#[program]` or `#[derive(Accounts)]` (Anchor markers)
-6. Set `LANGUAGE` variable: `evm`, `solana`, `aptos`, or `sui`
-7. Set `ANCHOR` variable: `true` or `false` (Solana only)
+4. If `*.rs` files + `Cargo.toml`: grep `Cargo.toml` for `soroban-sdk` → if found, set `LANGUAGE=soroban`
+5. If `*.rs` files + NOT soroban: grep `Cargo.toml` for `anchor-lang` or `solana-program`
+6. If still ambiguous Rust: grep `*.rs` for `#[program]` or `#[derive(Accounts)]` (Anchor markers)
+7. Set `LANGUAGE` variable: `evm`, `solana`, `aptos`, `sui`, or `soroban`
+8. Set `ANCHOR` variable: `true` or `false` (Solana only)
 
 **Tree architecture — path resolution**:
 - **Language-specific prompts**: `~/.claude/prompts/{LANGUAGE}/`

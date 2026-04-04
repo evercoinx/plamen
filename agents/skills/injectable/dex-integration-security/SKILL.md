@@ -7,7 +7,7 @@ description: "Protocol Type Trigger dex_integration (detected when recon finds s
 
 > **Protocol Type Trigger**: `dex_integration` (detected when recon finds: swap|addLiquidity|removeLiquidity|IUniswapV2Router|ISwapRouter|amountOutMin|amountOutMinimum|slippage - AND the protocol is NOT itself a DEX implementation)
 > **Inject Into**: Breadth agents, depth-external, depth-edge-case
-> **Language**: Primarily EVM; applicable to Sui PTB-based DEX interactions
+> **Language**: Primarily EVM; applicable to Sui PTB-based DEX interactions and Soroban DEX integrations (SoroSwap, Phoenix Protocol)
 > **Finding prefix**: `[DEX-N]`
 
 ## Orchestrator Decomposition Guide
