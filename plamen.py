@@ -362,7 +362,7 @@ def _probe_mcp_servers() -> list:
             continue
         # npx-based servers: skip probe if package isn't cached yet
         # (npx would download the package first, easily exceeding the timeout)
-        cmd_base = os.path.basename(cmd).lower().replace(".cmd", "")
+        cmd_base = os.path.basename(cmd).lower().replace(".cmd", "").replace(".exe", "")
         if cmd_base == "npx" and len(args) >= 2 and args[0] == "-y":
             # Strip version suffix (@latest, @1.2.3) but preserve scoped package prefix (@org/pkg)
             raw = args[1]
