@@ -364,7 +364,17 @@ def _probe_mcp_servers() -> list:
         # (npx would download the package first, easily exceeding the timeout)
         cmd_base = os.path.basename(cmd).lower().replace(".cmd", "")
         if cmd_base == "npx" and len(args) >= 2 and args[0] == "-y":
-            pkg = args[1].rsplit("@", 1)[0] if "@" in args[1] else args[1]
+            # Strip version suffix (@latest, @1.2.3) but preserve scoped package prefix (@org/pkg)
+            raw = args[1]
+            if raw.startswith("@") and "@" in raw[1:]:
+                # Scoped package with version: @org/pkg@latest -> @org/pkg
+                pkg = raw[:raw.rindex("@")]
+            elif not raw.startswith("@") and "@" in raw:
+                # Unscoped package with version: pkg@latest -> pkg
+                pkg = raw.rsplit("@", 1)[0]
+            else:
+                # No version suffix (scoped or unscoped)
+                pkg = raw
             if not _npx_package_cached(pkg):
                 results.append((name, None))  # None = not cached, skip probe
                 continue
