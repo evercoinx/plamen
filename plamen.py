@@ -422,7 +422,9 @@ def check_dependencies() -> bool:
             ("sui",     _find_bin("sui", ["~/AppData/Local/bin", "~/.local/bin"])),
         ]),
         ("Soroban", [
-            ("stellar", _find_bin("stellar", ["~/.cargo/bin"])),
+            ("stellar", _find_bin("stellar", ["~/.cargo/bin",
+                                              "C:/Program Files (x86)/Stellar CLI",
+                                              "C:/Program Files/Stellar CLI"])),
             ("scout",   _find_bin("cargo-scout-audit", ["~/.cargo/bin"])),
         ]),
     ]
@@ -849,10 +851,12 @@ _INSTALL_RECIPES = {
 
     "Soroban": [
         ("Stellar CLI",
-         lambda: _find_bin("stellar", _CARGO_PATHS),
+         lambda: _find_bin("stellar", _CARGO_PATHS +
+                           ["C:/Program Files (x86)/Stellar CLI",
+                            "C:/Program Files/Stellar CLI"]),
          _stellar_cmds,
          ["stellar"], "~2-3 min",
-         ["~/.cargo/bin"], "rust"),
+         ["~/.cargo/bin", "C:/Program Files (x86)/Stellar CLI"], "rust" if sys.platform != "win32" else None),
 
         ("Scout (Soroban static analyzer)",
          lambda: _find_bin("cargo-scout-audit", _CARGO_PATHS),
@@ -906,6 +910,11 @@ def _run_install_cmd(cmd: str, retries: int = 1, timeout: int = None) -> bool:
         try:
             result = subprocess.run(cmd, timeout=timeout, **run_kwargs)
             if result.returncode == 0:
+                return True
+            # winget exit codes: 0x8A150019 (-1978335207) = no applicable upgrade,
+            # 0x8A15002B (-1978335189) = package already installed. Both mean the
+            # tool is present on the system — treat as success.
+            if "winget" in cmd and result.returncode in (-1978335207, -1978335189):
                 return True
         except subprocess.TimeoutExpired:
             w(f"  {_C_RED}  timed out after {timeout}s{_RST}\n")
