@@ -367,7 +367,9 @@ def _probe_mcp_servers() -> list:
             if not _npx_package_cached(pkg):
                 results.append((name, None))  # None = not cached, skip probe
                 continue
-        ok = _probe_mcp_server(name, cmd, args, cwd=cwd, env=env)
+        # npx-based servers need longer to boot on Windows (Node.js cold start + package init)
+        probe_timeout = 20 if cmd_base == "npx" else 10
+        ok = _probe_mcp_server(name, cmd, args, cwd=cwd, env=env, timeout=probe_timeout)
         results.append((name, ok))
     return results
 
