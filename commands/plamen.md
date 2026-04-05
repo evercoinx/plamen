@@ -511,6 +511,27 @@ For each template in `template_recommendations.md`:
 4. **Depth agents (Phase 4b)**: Generate specific investigation questions per depth domain. Spawn **dedicated Injectable Investigation Agents** (sonnet, 1 per domain) IN PARALLEL with main depth agents
 5. Injectable skills spawn up to 4 dedicated sonnet agents (1 per domain), each costing 1 depth budget slot
 
+### Step 2b.2: Merge Cap Enforcement Gate (MANDATORY)
+
+**BEFORE composing any agent prompt**, the orchestrator MUST verify the 300-line cap mechanically:
+
+```
+For each planned breadth agent:
+  combined_lines = 0
+  For each SKILL.md assigned to this agent:
+    line_count = wc -l ~/.claude/agents/skills/{LANGUAGE}/{skill-name}/SKILL.md
+    combined_lines += line_count
+  ASSERT: combined_lines <= 300
+  If FAIL:
+    Log: "MERGE CAP VIOLATED: Agent {N} has {combined_lines} lines ({skill_list}). Splitting."
+    Split the largest skill into its own dedicated agent.
+    Re-run this gate.
+```
+
+**This is a mechanical check — run `wc -l` on actual files, do not estimate.** The 300-line cap was validated by multi-agent audit research (LLMBugScanner, iAudit): agents reliably execute ~300 lines of skill payload but degrade on larger prompts. Violations of this cap directly cause RC-AGENT misses where methodology exists but agents don't execute it.
+
+**Soroban note**: Soroban skills average 30% larger than Solana equivalents. Merges that fit at Solana sizes often exceed 300 lines at Soroban sizes. Always check — never assume a merge that works for one language works for another.
+
 ### Step 2c: Agent Prompt Structure
 ```
 You are Analysis Agent #{N}: {FOCUS_AREA}

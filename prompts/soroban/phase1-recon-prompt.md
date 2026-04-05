@@ -583,6 +583,7 @@ For EACH recommended template provide: Trigger, Relevance, Instantiation Paramet
 - HAS_MULTI_CONTRACT flag detected (2+ in-scope contracts AND constraint_variables.md shows shared parameters/formulas across contracts) → SEMANTIC_CONSISTENCY_AUDIT **niche agent** REQUIRED
 - MULTI_STEP_OPS flag detected (deposit_for/stake_for/delegate_to or on-behalf-of patterns found) → MULTI_STEP_OPERATION_SAFETY **niche agent** REQUIRED
 - SOROBAN_OVERFLOW_UNSAFE flag set (overflow-checks missing or false) AND arithmetic-heavy contract → flag for depth-edge-case priority; this is a HIGH severity base issue regardless of niche agent
+- Fork-ancestry detects Curve/StableSwap as parent (get_d|get_y|ramp_a|StableSwap|stableswap|calc_withdraw_one_coin|remove_liquidity_imbalance patterns with confidence MEDIUM+) → STABLESWAP_COMPLIANCE **niche agent** REQUIRED (set `STABLESWAP_FORK` flag)
 
 ### Niche Agents (Phase 4b - standalone focused agents, 1 budget slot each)
 
@@ -593,6 +594,7 @@ For EACH recommended template provide: Trigger, Relevance, Instantiation Paramet
 | SPEC_COMPLIANCE_AUDIT | HAS_DOCS flag (non-empty DOCUMENTATION with testable claims) | {YES/NO} | {if YES: docs contain testable claims} |
 | SEMANTIC_CONSISTENCY_AUDIT | HAS_MULTI_CONTRACT flag (contract_inventory.md + constraint_variables.md) | {YES/NO} | {if YES: N shared parameters/formulas across M contracts} |
 | MULTI_STEP_OPERATION_SAFETY | MULTI_STEP_OPS flag (detected_patterns.md) | {YES/NO} | {if YES: on-behalf-of or multi-step auth patterns found} |
+| STABLESWAP_COMPLIANCE | STABLESWAP_FORK flag (fork-ancestry detects Curve/StableSwap parent) | {YES/NO} | {if YES: get_d/get_y/ramp_a patterns detected with MEDIUM+ confidence} |
 
 ### Manifest Summary
 - **Total Required Breadth Agents**: {count of YES in skill templates}

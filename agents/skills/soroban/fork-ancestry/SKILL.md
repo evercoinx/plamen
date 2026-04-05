@@ -24,6 +24,7 @@ Grep the codebase for known parent Soroban/Stellar project signatures:
 | Aquarius | `aquarius\|AquariusPool\|aqua_token\|aquarius_amm\|reward_token\|voting_escrow` | Liquidity incentive / vote-escrow forks |
 | Reflector (oracle) | `reflector\|oracle_asset\|TimeWeightedAverage\|PriceData\|reflector_oracle\|get_price\|get_twap` | Price oracle forks |
 | Stellar Asset Contract (SAC) | `token::Client\|stellar_asset_contract\|soroban_token_interface\|TokenInterface\|token_contract` | Any SAC-compatible token implementation |
+| Curve StableSwap | `get_d\|get_y\|get_y_d\|ramp_a\|stop_ramp_a\|stableswap\|StableSwap\|A_PRECISION\|RATE_MULTIPLIER\|calc_withdraw_one_coin\|remove_liquidity_imbalance\|get_virtual_price\|admin_fee\|commit_new_fee\|apply_new_fee` | StableSwap AMM forks — **set STABLESWAP_FORK flag if MEDIUM+ confidence** |
 | Comet Protocol | `comet\|CometPool\|comet_amm\|weighted_pool\|join_pool\|exit_pool` | Balancer-style weighted pool forks |
 | soroban-examples | `soroban_examples\|soroban-examples\|soroban_sdk::contract\|soroban_sdk::contractimpl` | Contracts directly derived from official examples |
 | Stellar Turrets | `turret\|TxFunction\|fee_bump\|turret_contract` | Legacy function-as-a-service pattern (now deprecated) |
@@ -151,6 +152,7 @@ Soroban uses a capability-based auth model (`env.require_auth(&address)`). Unlik
 - Modified interest rate formulas, fee calculations, exchange rates, reward distributions
 - Even small arithmetic changes (different rounding direction, different precision) can cause systematic economic attacks over time
 - Check: are constants (basis points, precision factors, time units) consistent between the fork and parent?
+- **Parameter semantic verification**: When the parent has a mathematical specification, verify that each core parameter carries the same mathematical meaning in the fork — not just the same name and numeric range. Forks may store a raw value where the parent stores a derived form (e.g., raw coefficient vs. coefficient scaled by a function of pool dimensions). Compare the fork's formula usage against the parent's specification to confirm the encoding convention matches.
 
 #### Other Divergence Areas
 - Changed access control (added/removed admin roles, modified role hierarchy)

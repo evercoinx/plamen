@@ -14,28 +14,22 @@ description: "Trigger Pattern operator/keeper/crank require_auth checks, authori
 operator|keeper|crank|authority|admin|require_auth|guardian|relayer|updater|manager
 ```
 
-**Soroban role context**: Soroban has no role-based modifiers (no EVM `onlyOwner`). Access control is entirely custom: a stored `Address` value is retrieved from Instance/Persistent storage, then `.require_auth()` is called on it. The `Address` type is opaque — it may resolve to a user keypair, a Stellar multisig account, or another Soroban contract. This ambiguity means the "role" may itself have complex authority semantics.
+**Soroban role context**: No role-based modifiers. Access control is custom: stored `Address` from Instance/Persistent storage + `.require_auth()`. Address is opaque — may be keypair, Stellar multisig, or contract.
 
 ---
 
 ## Step 1: Inventory Role Permissions
 
-In `{CONTRACTS}`, find all functions callable by `{ROLE_NAME}`.
-
-For each function at `{ROLE_FUNCTIONS}`:
-- What storage keys does it read or write (Instance/Persistent/Temporary)?
-- What cross-contract calls (`invoke_contract` / `TokenClient`) does it make?
-- What function parameters does it accept from the caller?
-- How is the signer validated? (stored Address + `require_auth()` vs inline parameter vs direct signer check)
+In `{CONTRACTS}`, find all functions callable by `{ROLE_NAME}`. For each at `{ROLE_FUNCTIONS}`:
+- Storage keys read/written (Instance/Persistent/Temporary)?
+- Cross-contract calls (`invoke_contract` / `TokenClient`)?
+- Parameters accepted from caller?
+- Auth validation method? (stored Address + `require_auth()` vs inline vs direct check)
 
 | Function | Auth Check | Storage Mutations | Cross-Contract Calls | Parameters |
 |----------|-----------|-------------------|---------------------|------------|
 
-**Soroban auth patterns to scan for**:
-- `let admin: Address = e.storage().instance().get(&DataKey::Admin).unwrap(); admin.require_auth();`
-- `let operator: Address = e.storage().persistent().get(&DataKey::Operator).unwrap(); operator.require_auth();`
-- `e.current_contract_address().require_auth()` — contract authorizing itself (sub-invocation pattern)
-- Functions with no auth check at all that modify privileged state (missing auth bug)
+**Auth patterns**: stored Address + `require_auth()`, `e.current_contract_address().require_auth()` (sub-invocation), NO auth on privileged state mutation (missing auth bug).
 
 ---
 
@@ -43,23 +37,23 @@ For each function at `{ROLE_FUNCTIONS}`:
 
 For each permitted action, ask:
 
-**Timing Abuse** (~5-second ledger close, no mempool):
-- Can `{ROLE_NAME}` execute at harmful times? (Soroban has no public mempool, so front-running is limited to cases where the operator controls transaction submission order, e.g., as a validator or transaction fee bump)
-- Can `{ROLE_NAME}` delay execution to harm users? (skip oracle updates, withhold distribution cranks)
-- What is the maximum harm window from delayed execution?
+**Timing Abuse** (~5s ledger close, no mempool):
+- Execute at harmful times? (front-running limited to validator/fee-bump ordering)
+- Delay execution to harm users? (skip oracle updates, withhold cranks)
+- Maximum harm window?
 
 **Parameter Abuse**:
-- Can `{ROLE_NAME}` pass harmful values as function arguments? (inflated amounts, wrong recipient address, max slippage)
-- Are function parameters validated on-chain, or accepted from the caller implicitly?
-- Can `{ROLE_NAME}` supply an attacker-controlled contract address in a `cross_contract_address` parameter?
+- Pass harmful values? (inflated amounts, wrong recipient, max slippage)
+- Parameters validated on-chain or accepted implicitly?
+- Supply attacker-controlled contract address?
 
 **Sequence Abuse**:
-- Can `{ROLE_NAME}` execute functions out of intended order? (claim before distribute, settle before finalize)
-- Can `{ROLE_NAME}` skip required functions? (skip epoch advancement, skip price update)
+- Execute functions out of order? (claim before distribute, settle before finalize)
+- Skip required functions? (skip epoch advancement, skip price update)
 
 **Omission Abuse**:
-- Can `{ROLE_NAME}` harm users by NOT executing? (skip reward distribution, delay settlement indefinitely)
-- What is the protocol degradation timeline if the role stops acting?
+- Harm users by NOT executing? (skip reward distribution, delay settlement)
+- Protocol degradation timeline if role stops?
 
 ---
 
@@ -67,14 +61,11 @@ For each permitted action, ask:
 
 ```
 Scenario A: Timing Attack (Transaction Ordering)
-1. {ROLE_NAME} controls or observes pending user transaction
+1. {ROLE_NAME} observes pending user transaction
 2. {ROLE_NAME} submits role_function() in same or prior ledger
-3. Role function executes, changing state
-4. User transaction executes with worse conditions
-5. Impact: {TIMING_IMPACT}
-
-Note: Soroban has no public mempool. Timing attacks require role to be a validator,
-fee-bumper, or to front-run in separate ledgers. Assess likelihood accordingly.
+3. State changes before user transaction executes
+4. Impact: {TIMING_IMPACT}
+Note: No public mempool. Requires role to be validator or fee-bumper.
 
 Scenario B: Parameter Attack
 1. {ROLE_NAME} calls {ROLE_FUNCTION} with {MALICIOUS_PARAMS}
@@ -82,79 +73,52 @@ Scenario B: Parameter Attack
 3. Impact: {PARAM_IMPACT}
 
 Scenario C: Key Compromise
-1. {ROLE_NAME} Address keypair is compromised
-   (or: {ROLE_NAME} Address is a contract that itself gets compromised)
+1. {ROLE_NAME} Address keypair compromised (or: Address is a contract that gets compromised)
 2. Attacker can call: {ROLE_FUNCTIONS}
 3. Maximum extractable value: {MAX_DAMAGE}
-4. Recovery: {RECOVERY_PATH} — is there an admin function to rotate the role?
-   If Address is a contract: is the contract upgradeable? Who holds its upgrade key?
+4. Recovery: {RECOVERY_PATH} — rotation function exists? If Address is upgradeable contract, who holds upgrade key?
 ```
 
 ---
 
 ## Step 4: Assess Mitigations
 
-- Is there a timelock on `{ROLE_NAME}` actions? (multi-ledger proposal+execute pattern)
-- Is `{ROLE_NAME}` a Stellar multisig account (M-of-N threshold)?
-- Is `{ROLE_NAME}` a Soroban governance contract with timelock?
-- **Does a rotation/removal function for `{ROLE_NAME}` EXIST?** If NO → FINDING: authority is irrevocable without contract upgrade. Severity: minimum Medium if role can modify user-facing state.
-- Can admin rotate `{ROLE_NAME}` authority quickly enough to respond to a compromise?
-- Are there rate limits encoded in the contract (per-ledger caps, cooldown periods in ledger numbers)?
-- If the contract is immutable (no `update_current_contract_wasm`): can a compromised role be replaced at all?
+- Timelock on `{ROLE_NAME}` actions? (multi-ledger proposal+execute)
+- `{ROLE_NAME}` a Stellar multisig (M-of-N) or governance contract?
+- **Does a rotation/removal function EXIST?** If NO → FINDING: authority irrevocable. Min Medium if role modifies user state.
+- Can admin rotate authority quickly for compromise response?
+- Rate limits (per-ledger caps, cooldowns)?
+- If immutable (no `update_current_contract_wasm`): can compromised role be replaced?
 
-**Soroban-specific mitigation patterns**:
-- `Address` pointing to a Stellar multisig (M-of-N signers, timelock): check threshold
-- `Address` pointing to a governance contract: check governance contract's own security
-- Two-step role transfer: `propose_new_admin(new_addr)` + `accept_admin()` called by `new_addr` — prevents accidental transfer to wrong address
-- Role stored in Instance storage: changes take effect immediately on next call (no delay)
-- Role stored in Persistent storage: same immediate effect — no built-in delay
+**Soroban patterns**: Two-step transfer (`propose_new_admin` + `accept_admin`), multisig Address. Role in Instance/Persistent storage takes effect immediately (no built-in delay).
 
 ---
 
 ## Step 5: Model User-Side Exploitation (Direction 2 — MANDATORY)
 
 **Predictability Analysis**:
-- Is the role's behavior predictable? (executes on schedule, on price triggers, on queue length)
-- Can users observe when the role will act? (on-chain state reveals when conditions are met)
-- Can users front-run or back-run the role's action via higher-fee transactions?
+- Is the role's behavior predictable? (schedule, price triggers, queue length)
+- Can users observe when the role will act? (on-chain state)
+- Can users front-run/back-run via higher-fee transactions?
 
-**Scenario D: User Exploits Role Timing**
 ```
-1. User observes that {ROLE_NAME} executes {ROLE_FUNCTION} when {CONDITION} is met
-2. User submits transaction with higher fee to land in same or prior ledger
-3. {ROLE_FUNCTION} executes, changing state
-4. User benefits from known state change
-5. Impact: {USER_EXPLOIT_IMPACT}
+Scenario D: User Exploits Role Timing
+1. User observes {ROLE_NAME} executes {ROLE_FUNCTION} when {CONDITION} met
+2. User submits higher-fee tx to land before role in same ledger
+3. User benefits from known state change. Impact: {USER_EXPLOIT_IMPACT}
 
-Note: Soroban transaction ordering within a ledger is determined by fee priority.
-Users can bid higher fees to order before the role's transaction.
-```
-
-**Scenario E: User Griefs Role Preconditions**
-```
+Scenario E: User Griefs Role Preconditions
 1. {ROLE_FUNCTION} requires state: {PRECONDITION}
 2. User manipulates state to violate {PRECONDITION}
-3. {ROLE_NAME} submits transaction; function panics or reverts
-4. Protocol enters degraded state (role functions blocked)
-5. Impact: {GRIEF_IMPACT}
-```
+3. Role tx panics; protocol enters degraded state. Impact: {GRIEF_IMPACT}
 
-**Scenario F: User Forces Suboptimal Role Action**
-```
-1. {ROLE_NAME} must choose between options based on on-chain state
-2. User manipulates state (deposits/withdrawals) to make worst option appear best
-3. {ROLE_NAME} (following honest policy) chooses suboptimal path
-4. User profits from forced suboptimal execution
-5. Impact: {SUBOPTIMAL_IMPACT}
-```
+Scenario F: User Forces Suboptimal Role Action
+1. User manipulates on-chain state to make worst option appear best
+2. {ROLE_NAME} (honest policy) chooses suboptimal path. Impact: {SUBOPTIMAL_IMPACT}
 
-**Scenario G: Stale Rate via Discrete Updates**
-```
-1. Protocol's exchange rate only updates when {ROLE_NAME} calls {UPDATE_FUNCTION}
-2. Between calls, rate is stale (does not reflect accumulated value)
-3. User detects stale rate via on-chain state observation
-4. User enters at stale rate (favorable), role updates, user exits at updated rate
-5. Impact: {RATE_ARBIT_IMPACT}
+Scenario G: Stale Rate via Discrete Updates
+1. Exchange rate only updates when {ROLE_NAME} calls {UPDATE_FUNCTION}
+2. User enters at stale rate, role updates, user exits. Impact: {RATE_ARBIT_IMPACT}
 ```
 
 ---
@@ -165,44 +129,35 @@ For each function callable by `{ROLE_NAME}`:
 
 | Function | Preconditions | User Can Manipulate? | Grief Impact |
 |----------|--------------|---------------------|--------------|
-| {fn} | balance > 0 | YES — drain balance | Role function panics |
-| {fn} | ledger_timestamp > last_update + interval | NO — time-based | N/A |
-| {fn} | threshold met | YES — partial withdraw | Delayed execution |
 
-**Resource metering griefing**: Can a user create enough state entries (Persistent storage records) that iterating over them during a role function exceeds the transaction resource budget? This prices out or DoSes the role function.
-
-**TTL griefing**: Can a user let their Persistent storage entry expire, causing `unwrap()` to panic in a role function that iterates over all users?
+**Soroban griefing**: Persistent storage record proliferation exceeding resource budget during role iteration? TTL expiry on user entries causing `unwrap()` panics in role functions?
 
 ---
 
 ## Step 6b: Admin/Privileged Function Griefability (EXHAUSTIVE)
 
-Enumerate ALL authority-gated functions across the contract:
+Enumerate ALL authority-gated functions:
 
 | Function | Authority Type | Preconditions | User Can Manipulate? | Grief Impact |
 |----------|---------------|--------------|---------------------|--------------|
-| {admin_fn} | {admin/operator/keeper} | {preconditions} | YES/NO | {impact} |
 
-**Enumeration completeness check**:
-- [ ] Total authority-gated functions in contract: {N}
-- [ ] Functions analyzed in this table: {M}
-- [ ] If M < N → INCOMPLETE — analyze missing functions before proceeding
+**Completeness check**: Total authority-gated: {N}, analyzed: {M}. If M < N → analyze missing.
 
 **Soroban-specific checks**:
-- Can users create Persistent storage entries (e.g., per-user positions) that block admin cleanup/migration functions? (entries must be read/written to be closed; N entries = N resource units consumed)
-- Can users initiate multi-ledger operations (pending withdrawal, partial unstake) whose in-flight state blocks admin actions?
-- Can a user set an allowance to a contract-controlled address and then revoke it just before the contract attempts `transfer_from`, causing the admin crank to fail?
-- Can users donate tokens to the contract (unsolicited `transfer`) that bloat the tracked balance and exceed an admin's expected operating range?
+- Can users create Persistent entries that block admin cleanup/migration? (N entries = N resource units)
+- Can in-flight multi-ledger operations (pending withdrawal, partial unstake) block admin actions?
+- Can users revoke allowances just before contract `transfer_from`, causing admin crank to fail?
+- Can unsolicited token `transfer` to contract bloat tracked balance beyond admin's expected range?
 
 ---
 
 ## Common False Positives
 
-- **Read-only functions**: If role only reads state, no abuse vector
-- **Idempotent functions**: If calling twice has same effect as once, timing abuse is limited
-- **User-initiated dependency**: If role action requires user to initiate first (two-phase), front-running may not apply
-- **Economic alignment**: If role is economically aligned (staked collateral, fee-funded), malicious action has cost
-- **Immutable address**: If the role `Address` is stored as a constant in contract code (not settable), key-rotation finding does not apply — but compromise risk is permanent
+- **Read-only functions**: no abuse vector
+- **Idempotent functions**: timing abuse limited
+- **User-initiated dependency**: role requires user to initiate first — front-running may not apply
+- **Economic alignment**: staked collateral / fee-funded role has cost for malicious action
+- **Immutable address**: hardcoded Address — rotation N/A, but compromise risk permanent
 
 ---
 
@@ -236,11 +191,8 @@ Enumerate ALL authority-gated functions across the contract:
 ### Cross-Reference Markers
 
 **After Step 4**: DO NOT STOP HERE — Steps 5-6 analyze the reverse direction.
-
 **After Step 5**: Cross-reference with TOKEN_FLOW_TRACING for token-related griefing vectors. IF role actions are time-predictable → document ledger-ordering (fee-bump) vectors.
-
 **After Step 6**: IF any precondition is user-griefable → severity >= MEDIUM. Document protocol degradation timeline if role is blocked indefinitely.
-
 **After Step 6b**: IF admin iterates over user-created Persistent entries → check for unbounded iteration / resource exhaustion.
 
 ### Output Format for Step Execution

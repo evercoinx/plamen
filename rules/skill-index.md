@@ -180,6 +180,7 @@
 | MULTI_STEP_OPERATION_SAFETY | `MULTI_STEP_OPS` flag (approve/delegate/authorize patterns + on-behalf-of functions: depositFor/stakeFor/delegateTo/mintFor/withdrawFor) | 1 slot | Authorization sequence conflicts in batch/multi-step operations, infrastructure address targeting via public on-behalf-of functions |
 | CALLBACK_RECEIVER_SAFETY | `OUTCOME_CALLBACK` flag (onERC721Received/onERC1155Received/tokensReceived/onTransferReceived/onFlashLoan/executeOperation/receive()/fallback()) | 1 slot | (EVM only) Callback handler access control, permissionless state inflation via callbacks, selective revert exploitation |
 | DIMENSIONAL_ANALYSIS | `MIXED_DECIMALS` flag (mulDiv/mulWad/rayMul + 1e6/1e8/decimals()/10** in scope) | 1 slot | (EVM only) Unit/scale mismatch detection: vocabulary discovery, expression annotation, cross-function propagation, boundary substitution. Sequential 4-phase methodology requires single agent context. |
+| STABLESWAP_COMPLIANCE | `STABLESWAP_FORK` flag (fork-ancestry detects Curve/StableSwap parent via get_d/get_y/ramp_a patterns) | 1 slot | Curve spec compliance: Newton-Raphson convergence, A parameter encoding (A vs A*N^(N-1)), reserve decimal normalization, fee consistency, known Curve vulnerability patterns. All languages. |
 
 ### How Niche Agents Work
 1. Recon Agent 3 detects trigger flag (e.g., `MISSING_EVENT` from setter_list.md/emit_list.md)
