@@ -40,7 +40,8 @@ ADAPTIVE_DEPTH_LOOP(findings_inventory):
   effective_floor = max(depth_floor, iter1_fixed + iter23_reserve)
   max_depth_spawns = min(max(effective_floor, ceil(total_findings / 5) + 7), hard_cap)
   dst_reserved = 1  // Design Stress Testing always gets 1 slot
-  depth_available = max_depth_spawns - dst_reserved  // depth agents share the rest
+  perturbation_reserved = 1 if MODE == THOROUGH else 0  // Finding Perturbation Agent (Thorough only)
+  depth_available = max_depth_spawns - dst_reserved - perturbation_reserved  // depth agents share the rest
   max_findings_per_agent = 5  // anti-dilution rule AD-3
   depth_spawns_used = 0
 
@@ -103,6 +104,24 @@ ADAPTIVE_DEPTH_LOOP(findings_inventory):
   //   depth-external: findings tagged external, oracle, invoke_contract, bridge, cross-contract
   // Write domain-filtered views to {SCRATCHPAD}/depth_input_{domain}.md (max 15 findings each)
   // Depth agents read their filtered view instead of full findings_inventory.md
+
+  // ═══ SYMMETRIC OPERATION PAIRING (Thorough only) ═══
+  // Pre-compute symmetric operation pairs from function_list.md and inject into
+  // depth agent prompts. Removes discovery burden — agents verify both sides of
+  // each pair mechanically instead of reasoning about which pairs exist.
+  // Evidence: AdverTest (2026), Meta mutation-guided test gen (FSE 2025).
+  if MODE == THOROUGH:
+    // Orchestrator or haiku agent reads function_list.md, identifies pairs:
+    // deposit/withdraw, borrow/repay, mint/burn, stake/unstake, lock/unlock,
+    // approve/revoke, enable/disable, pause/unpause, add/remove
+    // Writes compact table (~10-15 lines) to {SCRATCHPAD}/symmetric_pairs.md:
+    //   | Pair # | Positive Op | Negative Op | Shared State Variables |
+    // This table is injected at the END of each depth agent's prompt with directive:
+    //   "For EACH pair, you MUST analyze BOTH operations. A finding about one side
+    //    WITHOUT analysis of the other is INCOMPLETE. Include in your output:
+    //    | Pair # | Positive Analyzed? | Negative Analyzed? | Both Rounding? | Both Boundary? |"
+    symmetric_pairs = extract_symmetric_pairs(SCRATCHPAD + "/function_list.md")
+    write(SCRATCHPAD + "/symmetric_pairs.md", symmetric_pairs)
 
   // ═══ INJECTABLE INVESTIGATION AGENTS ═══
   // If an injectable skill was loaded, spawn dedicated sonnet agents for each domain
@@ -202,6 +221,93 @@ ADAPTIVE_DEPTH_LOOP(findings_inventory):
         ")
         depth_spawns_used += 1
       await gap_fillers; re-merge
+
+  // ═══ FINDING PERTURBATION AGENT (Thorough only) ═══
+  // Reads depth findings and applies 5 structured mutation operators to test adjacent
+  // vulnerability space. Catches "single-hit satisfaction" where agents find one variant
+  // of a bug class then stop (e.g., deposit rounding found but not withdrawal rounding).
+  // Evidence: AdverTest (Feb 2026, +8.56% FDR), Meta mutation-guided test gen (FSE 2025).
+  // Cost: 1 sonnet agent, 1 depth budget slot. Runs parallel with checklist agent.
+  if MODE == THOROUGH AND depth_spawns_used < max_depth_spawns:
+    spawn perturbation_agent(model="sonnet", prompt="
+      You are the Finding Perturbation Agent. You systematically test whether
+      ADJACENT vulnerabilities exist near each confirmed depth finding.
+
+      Read all depth_*_findings.md and blind_spot_*_findings.md in {SCRATCHPAD}/.
+
+      For EACH CONFIRMED or PARTIAL finding (max 15, prioritize by severity):
+
+      Step 1: Classify the finding's dimensions:
+        - Operation direction (deposit/withdraw/borrow/repay/mint/burn)
+        - Boundary value tested (0, MAX, specific threshold)
+        - Condition checked/missing (zero, negative, staleness, bounds)
+        - Rounding direction (floor/ceil, favors user/protocol)
+
+      Step 2: Apply ALL applicable perturbation operators:
+        | Operator | Action |
+        |----------|--------|
+        | DIRECTION_FLIP | Finding about op X → read inverse op, check same class |
+        | BOUNDARY_SHIFT | Finding at value V → check region between 0 and V |
+        | CONDITION_NEGATE | Missing check for C → also check !C and related conditions |
+        | OPERAND_SWAP | A op B → check B op A (different rounding/precision) |
+        | TEMPORAL_INVERT | Pre-action state bug → check post-action state |
+
+      Step 3: For each probe, read the actual source code and determine:
+        - Is the perturbation a real vulnerability? (YES → write finding)
+        - Is there a defense? (YES → note briefly, move on)
+
+      Step 4: Coverage table (MANDATORY):
+        | Source Finding | Perturbation | Operator | Source File Checked | Result | New Finding? |
+
+      Write to {SCRATCHPAD}/perturbation_findings.md
+      Use finding IDs [PERT-1], [PERT-2]... Max 8 new findings.
+      Use standard finding format from ~/.claude/rules/finding-output-format.md.
+
+      SCOPE: Write ONLY to your assigned output file. Return your findings and stop.
+      Return: 'DONE: {P} perturbations tested, {N} new findings'
+    ")
+    depth_spawns_used += 1
+
+  // ═══ DEPTH SKILL EXECUTION CHECKLIST (Thorough only) ═══
+  // Cheap post-hoc verification: did each depth agent execute each step of its skill?
+  // Gaps become investigation questions for DA iteration 2.
+  // Evidence: Verifiable Checklist Module pattern (2026). Extends Processing Protocol
+  // (0 misses for scanners) to depth agents via post-hoc checking.
+  // Cost: 1 haiku agent (~0.1x sonnet). Runs parallel with perturbation agent.
+  if MODE == THOROUGH:
+    spawn checklist_agent(model="haiku", prompt="
+      You are the Depth Skill Execution Checklist Agent.
+
+      For each depth agent, verify that it executed each step of its assigned skill.
+
+      Depth Agent → Skill Mapping:
+        depth-token-flow → ~/.claude/agents/skills/soroban/token-flow-tracing/SKILL.md
+        depth-state-trace → ~/.claude/agents/skills/soroban/storage-lifecycle/SKILL.md
+        depth-edge-case → ~/.claude/agents/skills/soroban/overflow-safety/SKILL.md
+        depth-external → ~/.claude/agents/skills/soroban/external-precondition-audit/SKILL.md
+
+      For EACH depth agent:
+      1. Read the skill file. Extract each numbered step, section, or CHECK.
+      2. Read the depth agent output ({SCRATCHPAD}/depth_{domain}_findings.md).
+      3. For each skill step: is there evidence the agent performed it?
+         Evidence = specific code location analyzed + result stated.
+      4. Produce a coverage table:
+         | Agent | Skill Step | Description | Evidence in Output? | Gap? |
+
+      5. For each GAP, generate an investigation question:
+         'Skill step {N} ({description}) not evidenced. Check: {what to verify}'
+
+      Also check the MANDATORY DEPTH DIRECTIVE for each finding:
+         | Finding ID | Depth Tags Count (>=2?) | Dual-Extreme Applied? | Gap? |
+
+      Write to {SCRATCHPAD}/skill_execution_gaps.md
+      Return: 'DONE: {N} skill step gaps, {M} depth directive gaps across {K} agents'
+    ")
+    // Await both perturbation and checklist agents
+    await perturbation_agent, checklist_agent
+    // Merge perturbation findings into all_findings
+    if perturbation_findings exist: merge into all_findings
+    // Feed checklist gaps into iteration 2 targeting (read by DA agents)
 
   // ═══ SCORE all findings ═══
   // NOTE: Sibling Propagation is a standalone agent (scanner-tier, parallel with Validation Sweep).
