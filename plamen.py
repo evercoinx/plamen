@@ -1270,8 +1270,11 @@ def _setup_mcp_packages(w):
     """Install pinned MCP npm packages and update config to use them.
 
     This only activates when mcp-packages/node_modules already exists (user opted in)
-    or when ~/.claude.json has bare 'npx -y @pkg' without version pins (legacy config).
+    or when ~/.claude/mcp.json has bare 'npx -y @pkg' without version pins (legacy config).
     New users get correctly pinned npx commands from mcp.json.example and don't need this.
+
+    Target: ~/.claude/mcp.json (the MCP-specific config).
+    NEVER writes to ~/.claude.json (global Claude config — not our file to touch).
     """
     mcp_dir = os.path.join(PLAMEN_HOME, "mcp-packages")
     pkg_json = os.path.join(mcp_dir, "package.json")
@@ -1282,23 +1285,35 @@ def _setup_mcp_packages(w):
         return  # mcp-packages not part of this install — skip silently
 
     # Only activate if: (a) node_modules already exists (user previously opted in), or
-    # (b) ~/.claude.json has bare npx -y without version pins (legacy config needing fix)
+    # (b) ~/.claude/mcp.json has bare npx -y without version pins (legacy config needing fix)
     has_local_install = os.path.isdir(nm_dir)
     has_legacy_config = False
-    claude_json = os.path.join(os.path.expanduser("~"), ".claude.json")
-    if os.path.isfile(claude_json):
+    mcp_json_path = os.path.join(CLAUDE_HOME, "mcp.json")
+    if os.path.isfile(mcp_json_path):
         try:
-            with open(claude_json) as f:
-                cj = _json.load(f)
-            for _name, srv in cj.get("mcpServers", {}).items():
-                args_str = " ".join(srv.get("args", []))
-                # Bare "npx -y @pkg" without @version is legacy
-                if "npx" in args_str and "-y" in args_str and "@" in args_str:
-                    import re
-                    if re.search(r"@[\w./-]+(?!@)", args_str):
-                        # Has package name but no @version suffix
+            with open(mcp_json_path) as f:
+                mj = _json.load(f)
+            for _name, srv in mj.get("mcpServers", {}).items():
+                cmd = str(srv.get("command", ""))
+                if "npx" not in cmd:
+                    continue
+                # Check if any arg is an npm package without @version pin
+                for arg in srv.get("args", []):
+                    a = str(arg)
+                    if a.startswith("-"):
+                        continue
+                    # Scoped: @scope/name (unpinned) vs @scope/name@ver (pinned)
+                    if a.startswith("@") and "/" in a:
+                        after_slash = a.split("/", 1)[1]
+                        if "@" not in after_slash:
+                            has_legacy_config = True
+                            break
+                    # Unscoped: name (unpinned) vs name@ver (pinned)
+                    elif not a.startswith("@") and a != "npx" and "@" not in a:
                         has_legacy_config = True
                         break
+                if has_legacy_config:
+                    break
         except Exception:
             pass
 
@@ -1331,8 +1346,8 @@ def _setup_mcp_packages(w):
     else:
         w(f"  {_C_GREEN}✓{_RST} MCP packages up to date\n")
 
-    # Step 2: Update ~/.claude.json to use pinned paths + schema sanitizer
-    if os.path.isfile(update_script) and has_local_install:
+    # Step 2: Update ~/.claude/mcp.json to use pinned local paths + schema sanitizer
+    if os.path.isfile(update_script) and os.path.isdir(nm_dir):
         r = subprocess.run([sys.executable, update_script],
                            capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
