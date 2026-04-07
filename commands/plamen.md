@@ -821,6 +821,14 @@ The orchestrator runs the full loop autonomously:
 **Do NOT write checkpoint assertions from memory.** Read the static manifest and verify against it:
 
 ```
+// STEP 0: Mode gate — this check is Thorough-only
+if MODE != THOROUGH:
+    // Core/Light: only assert confidence_scores.md + adaptive_loop_log.md exist, then proceed
+    ASSERT: confidence_scores.md exists (Core) OR skip scoring (Light)
+    ASSERT: adaptive_loop_log.md exists
+    LOG to {SCRATCHPAD}/checkpoint_postdepth.md
+    goto Phase 4c
+
 // STEP 1: Read the static manifest (orchestrator MUST NOT modify this file)
 manifest = Read("~/.claude/prompts/{LANGUAGE}/phase4b-required-artifacts.md")
 

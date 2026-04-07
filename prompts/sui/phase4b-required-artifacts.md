@@ -1,11 +1,11 @@
-# Phase 4b Required Artifacts — Soroban (Thorough Mode)
+# Phase 4b Required Artifacts (Thorough Mode Only)
 
 > **Purpose**: Static manifest of files that MUST exist in {SCRATCHPAD}/ before Phase 4b exits.
+> **Mode gate**: This manifest applies ONLY when `MODE == THOROUGH`. Core and Light skip this check.
 > **Enforcement**: The orchestrator runs `ls {SCRATCHPAD}/` and checks EVERY line below.
-> **This file is READ-ONLY** — the orchestrator MUST NOT modify it. If an artifact is missing,
-> spawn the responsible agent. Do NOT mark it as "skipped" or "N/A" in the checkpoint.
+> **This file is READ-ONLY** — the orchestrator MUST NOT modify it.
 
-## Required Artifacts (Thorough Mode)
+## Required Artifacts
 
 | File | Producer | Phase |
 |------|----------|-------|
@@ -27,33 +27,39 @@
 | `phase4b_manifest.md` | Orchestrator | 4b exit |
 | `rag_validation.md` | RAG Sweep agent | 4b.5 |
 
-## Niche Agent Artifacts (if triggered)
+## Niche Agent Artifacts (conditional — check template_recommendations.md)
 
-Check `template_recommendations.md` → Niche Agents section. For each `Required: YES`:
-| Flag | File |
-|------|------|
-| MISSING_EVENT | `niche_event_completeness_findings.md` |
+For each niche agent marked `Required: YES` in `{SCRATCHPAD}/template_recommendations.md`:
+
+| Flag | Expected File |
+|------|---------------|
+| MISSING_EVENT | `niche_event_findings.md` |
 | sync_gaps >= 1 from Phase 4a.5 | `niche_semantic_gap_findings.md` |
 | HAS_MULTI_CONTRACT | `niche_semantic_consistency_findings.md` |
-| HAS_SIGNATURES | `niche_signature_audit_findings.md` |
+| HAS_SIGNATURES | `niche_signature_findings.md` |
 | HAS_DOCS | `niche_spec_compliance_findings.md` |
+| MULTI_STEP_OPS | `niche_multi_step_findings.md` |
+| STABLESWAP_FORK | `niche_stableswap_findings.md` |
+| MIXED_DECIMALS | `niche_dimensional_findings.md` |
+| OUTCOME_CALLBACK (EVM only) | `niche_callback_findings.md` |
 
 ## Checkpoint Protocol
 
-The orchestrator MUST execute this BEFORE writing `checkpoint_postdepth.md`:
-
 ```
-missing = []
-for each file in Required Artifacts table:
-    if not exists({SCRATCHPAD}/{file}):
-        missing.append(file)
+if MODE != THOROUGH:
+    skip this entire check — Core/Light have different artifact sets
 
-for each niche agent marked Required: YES in template_recommendations.md:
-    if not exists({SCRATCHPAD}/{niche_file}):
-        missing.append(niche_file)
+missing = []
+for each row in Required Artifacts table:
+    if not exists({SCRATCHPAD}/{file}):
+        missing.append({file, producer})
+
+for each niche agent marked Required: YES in {SCRATCHPAD}/template_recommendations.md:
+    if not exists({SCRATCHPAD}/{expected_file}):
+        missing.append({expected_file, niche_agent})
 
 if len(missing) > 0:
-    log("PHASE 4b INCOMPLETE: missing {missing}")
+    log to {SCRATCHPAD}/violations.md: "PHASE 4b INCOMPLETE: {missing}"
     for each missing file:
         spawn the responsible agent (see Producer column)
     re-check after agents complete
