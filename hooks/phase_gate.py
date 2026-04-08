@@ -638,6 +638,20 @@ def cmd_stop():
     state_path = os.path.join(scratchpad, STATE_FILENAME).replace("\\", "/")
     mode = state.get("mode", "core")
 
+    # Project mismatch guard: if the current working directory is NOT under
+    # the project that initialized the watchdog, go dormant. This prevents
+    # a stale .active_audit breadcrumb from one project blocking work in
+    # a completely different project/session.
+    project_root = state.get("project_root", "").replace("\\", "/").rstrip("/").lower()
+    cwd = os.getcwd().replace("\\", "/").rstrip("/").lower()
+    if project_root and cwd and not cwd.startswith(project_root):
+        # Different project — clean up stale breadcrumb and go dormant
+        try:
+            os.remove(ACTIVE_AUDIT_PATH)
+        except (IOError, OSError):
+            pass
+        sys.exit(0)
+
     # Anti-loop protection: if stop_hook_active flag is set, this is the
     # response AFTER a block. Give the orchestrator a free pass.
     if state.get("stop_hook_active", False):
