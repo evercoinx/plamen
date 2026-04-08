@@ -184,15 +184,16 @@ def generate_config_toml(out_dir: Path) -> None:
         env = srv.get("env", {})
         comment = srv.get("_comment", "")
 
-        # Normalize command: python -> python3 for Codex (macOS/Linux)
-        if command == "python":
-            command = "python3"
+        # Normalize command: resolve python for current platform
+        if command in ("python", "python3"):
+            command = "python" if sys.platform == "win32" else "python3"
 
-        # Normalize cwd: ./custom-mcp/X -> ~/.codex/plamen/custom-mcp/X
+        # Normalize cwd: use ABSOLUTE path (~ doesn't expand on Windows Codex)
+        plamen_abs = str(PLAMEN_HOME).replace("\\", "/")
         if cwd.startswith("./"):
-            cwd = "~/.codex/plamen/" + cwd[2:]
+            cwd = plamen_abs + "/" + cwd[2:]
         elif cwd.startswith("custom-mcp/"):
-            cwd = "~/.codex/plamen/" + cwd
+            cwd = plamen_abs + "/" + cwd
 
         lines.append(f'[mcp_servers.{name}]')
         if comment:
