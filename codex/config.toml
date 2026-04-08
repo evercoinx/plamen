@@ -11,7 +11,7 @@ approval_mode = "full-auto"
 # Sandbox: "full-access" needed for audits — reads methodology from ~/.codex/,
 # runs toolchain commands (forge, cargo, stellar), writes to .scratchpad/.
 # Our command_guard.py PreToolUse hook handles dangerous command blocking.
-sandbox_mode = "full-access"
+sandbox_mode = "danger-full-access"
 
 [agents]
 max_threads = 8

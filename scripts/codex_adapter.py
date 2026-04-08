@@ -169,7 +169,7 @@ def generate_config_toml(out_dir: Path) -> None:
         'model = "o3"',
         'model_context_window = 200000',
         'approval_mode = "full-auto"',
-        'sandbox_mode = "full-access"',
+        'sandbox_mode = "danger-full-access"',
         '',
         '[agents]',
         'max_threads = 8',
