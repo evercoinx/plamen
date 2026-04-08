@@ -114,7 +114,15 @@
       },
       "niche_artifacts_source": "template_recommendations.md",
       "min_file_bytes": 50,
-      "gate_message": "Depth loop incomplete. Missing required depth/scanner/validation artifacts. Check adaptive_loop_log.md for iteration status."
+      "gate_message": "Depth loop incomplete. Missing required depth/scanner/validation artifacts.",
+      "recovery_hints": {
+        "depth_*_findings.md": "Spawn depth agents (token-flow, state-trace, edge-case, external) per phase4b-depth-templates.md. Each writes depth_{type}_findings.md.",
+        "design_stress_findings.md": "Spawn Design Stress Testing agent (sonnet, 1 slot, UNCONDITIONAL in Thorough). Read phase4b-scanner-templates.md Design Stress section.",
+        "perturbation_findings.md": "Spawn Finding Perturbation agent (sonnet). Read phase4b-loop.md Perturbation section. Applies DIRECTION_FLIP and other operators to existing findings.",
+        "skill_execution_gaps.md": "Spawn Skill Execution Checklist agent (haiku). Read phase4b-loop.md Skill Checklist section. Verifies depth agents executed all skill steps.",
+        "confidence_scores.md": "Spawn confidence scoring agent (haiku). Read rules/phase4-confidence-scoring.md for the 4-axis model.",
+        "rag_validation.md": "Spawn RAG Validation Sweep agent (sonnet). Read rules/phase4-confidence-scoring.md Phase 4b.5 section. If MCP fails, write floor scores (0.3)."
+      }
     },
     "chain": {
       "order": 8,

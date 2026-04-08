@@ -146,6 +146,25 @@ def find_state_file(explicit_scratchpad=None):
     return None
 
 
+def format_missing_with_hints(missing, phase):
+    """Format missing artifacts list with recovery hints from the manifest."""
+    hints = phase.get("recovery_hints", {})
+    lines = []
+    for name, reason in missing:
+        line = "  - {} ({})".format(name, reason)
+        # Check for exact match or glob match in recovery hints
+        hint = hints.get(name, "")
+        if not hint:
+            for pattern, h in hints.items():
+                if "*" in pattern and name.startswith(pattern.split("*")[0]):
+                    hint = h
+                    break
+        if hint:
+            line += "\n    RECOVERY: " + hint
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def get_file_size(path):
     """Get file size in bytes. Return 0 if file doesn't exist."""
     try:
@@ -621,9 +640,7 @@ def cmd_stop():
 
     if leaked_phase:
         # BLOCK: orchestrator is skipping ahead
-        missing_str = "\n".join(
-            "  - {} ({})".format(name, reason) for name, reason in missing
-        )
+        missing_str = format_missing_with_hints(missing, current_phase)
         block_msg = (
             "[Watchdog BLOCK] Phase skip detected!\n"
             "Current phase: {} (order {})\n"
@@ -631,7 +648,7 @@ def cmd_stop():
             "Missing artifacts in current phase:\n{}\n\n"
             "{}\n\n"
             "ACTION REQUIRED: Complete the current phase before proceeding. "
-            "Spawn the agents that produce the missing artifacts."
+            "Spawn the agents listed in RECOVERY hints above."
         ).format(
             current_phase.get("display_name", current_phase_name),
             current_phase["order"],
@@ -658,15 +675,13 @@ def cmd_stop():
 
     if prev_stall_phase == current_phase_name and prev_stall_missing == missing_names:
         # Second consecutive stop with same missing artifacts -> BLOCK
-        missing_str = "\n".join(
-            "  - {} ({})".format(name, reason) for name, reason in missing
-        )
+        missing_str = format_missing_with_hints(missing, current_phase)
         block_msg = (
             "[Watchdog BLOCK] Stalled on phase: {}\n"
             "Two consecutive stops with no progress on missing artifacts:\n{}\n\n"
             "{}\n\n"
             "ACTION REQUIRED: You must produce these artifacts before doing anything else. "
-            "Spawn the appropriate agents now."
+            "Follow the RECOVERY instructions above for each missing artifact."
         ).format(
             current_phase.get("display_name", current_phase_name),
             missing_str,
@@ -686,13 +701,11 @@ def cmd_stop():
 
     else:
         # First strike - warn, don't block
-        missing_str = "\n".join(
-            "  - {} ({})".format(name, reason) for name, reason in missing
-        )
+        missing_str = format_missing_with_hints(missing, current_phase)
         warn_msg = (
             "[Watchdog] Phase {} has missing artifacts:\n{}\n"
             "Next stop without progress will BLOCK. "
-            "Ensure these artifacts are produced before proceeding."
+            "Follow RECOVERY instructions for each missing artifact."
         ).format(
             current_phase.get("display_name", current_phase_name),
             missing_str
