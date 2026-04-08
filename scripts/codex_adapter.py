@@ -489,7 +489,22 @@ AGENT_ROLES = [
             Write findings using the standard finding output format from:
             ~/.codex/plamen/rules/finding-output-format.md
 
-            Write to {SCRATCHPAD}/niche_{SKILL_NAME_LOWER}_findings.md
+            Write to the EXACT output filename provided by the orchestrator.
+            The orchestrator MUST pass you the mapped filename using this table:
+
+            | Skill | Output Filename |
+            |-------|----------------|
+            | EVENT_COMPLETENESS | niche_event_findings.md |
+            | SEMANTIC_GAP_INVESTIGATOR | niche_semantic_gap_findings.md |
+            | SEMANTIC_CONSISTENCY_AUDIT | niche_semantic_consistency_findings.md |
+            | SIGNATURE_VERIFICATION_AUDIT | niche_signature_findings.md |
+            | SPEC_COMPLIANCE_AUDIT | niche_spec_compliance_findings.md |
+            | MULTI_STEP_OPERATION_SAFETY | niche_multi_step_safety_findings.md |
+            | CALLBACK_RECEIVER_SAFETY | niche_callback_safety_findings.md |
+            | DIMENSIONAL_ANALYSIS | niche_dimensional_analysis_findings.md |
+            | STABLESWAP_COMPLIANCE | niche_stableswap_compliance_findings.md |
+
+            If no mapped filename is provided, use: {SCRATCHPAD}/niche_{SKILL_NAME_LOWER}_findings.md
 
             SCOPE: Write ONLY to your assigned output file. Do NOT proceed to
             subsequent pipeline phases. Return your findings and stop."""),
