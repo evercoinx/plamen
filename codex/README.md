@@ -17,8 +17,16 @@ python scripts/codex_adapter.py
 The installer:
 1. Generates Codex config files into this `codex/` directory
 2. Creates `~/.codex/` if it does not exist
-3. Symlinks `~/.codex/plamen/` to the Plamen repo (shared methodology files)
+3. Symlinks `~/.codex/plamen/` → the Plamen repo (`~/.plamen/`)
 4. Copies Codex-specific files (`config.toml`, agent TOMLs, `AGENTS.md`) into `~/.codex/`
+
+**Codex-only users** (no Claude Code): this works without `~/.claude/`. The symlink
+points to `~/.plamen/` (the repo), not to `~/.claude/`. All methodology references
+in AGENTS.md and skill files use `~/.codex/plamen/` paths which resolve through the
+symlink to the repo directly.
+
+**After any update** (`git pull` + changes to codex/ files): re-run `plamen install --codex`
+to redeploy updated config files to `~/.codex/`.
 
 ## Usage
 
