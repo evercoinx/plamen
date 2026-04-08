@@ -647,6 +647,15 @@ def cmd_stop():
         save_json_file(state_path, state)
         sys.exit(0)
 
+    # Startup grace period: if no artifacts have been written yet (write_count == 0)
+    # and we're within 120 seconds of init, only warn — never block.
+    # This prevents blocking during the planning phase (language detection,
+    # prompt reading, agent composition) before recon agents are even spawned.
+    init_time = state.get("initialized_at", 0)
+    write_count = state.get("write_count", 0)
+    elapsed_since_init = time.time() - init_time if init_time else 999
+    in_grace_period = write_count == 0 and elapsed_since_init < 120
+
     # Load manifest
     manifest = load_json_file(MANIFEST_PATH)
     if not manifest:
@@ -707,7 +716,26 @@ def cmd_stop():
     prev_stall_missing = sorted(state.get("stall_missing", []))
 
     if prev_stall_phase == current_phase_name and prev_stall_missing == missing_names:
-        # Second consecutive stop with same missing artifacts -> BLOCK
+        # Second consecutive stop with same missing artifacts
+
+        if in_grace_period:
+            # During startup grace period: warn only, never block.
+            # The orchestrator is still planning (reading prompts, detecting
+            # language, composing agent prompts) before spawning recon agents.
+            warn_msg = (
+                "[Watchdog] Startup grace period ({:.0f}s/{:.0f}s). "
+                "Phase {} has {} missing artifacts. "
+                "Waiting for first artifact write before enforcing."
+            ).format(elapsed_since_init, 120,
+                     current_phase.get("display_name", current_phase_name),
+                     len(missing))
+            state["warnings_issued"] = state.get("warnings_issued", 0) + 1
+            save_json_file(state_path, state)
+            print(warn_msg, file=sys.stderr)
+            output_json({"systemMessage": warn_msg})
+            sys.exit(0)
+
+        # Past grace period -> BLOCK
         missing_str = format_missing_with_hints(missing, current_phase)
         block_msg = (
             "[Watchdog BLOCK] Stalled on phase: {}\n"
