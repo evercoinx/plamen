@@ -1,0 +1,142 @@
+{
+  "version": "1.0.0",
+  "description": "Plamen pipeline watchdog - artifact requirements per phase",
+  "phases": {
+    "recon": {
+      "order": 1,
+      "display_name": "Phase 1: Reconnaissance",
+      "required_artifacts": [
+        "design_context.md",
+        "attack_surface.md",
+        "build_status.md",
+        "function_list.md",
+        "state_variables.md",
+        "contract_inventory.md",
+        "template_recommendations.md",
+        "detected_patterns.md",
+        "setter_list.md",
+        "emit_list.md",
+        "recon_summary.md"
+      ],
+      "optional_artifacts": [
+        "meta_buffer.md",
+        "call_graph.md",
+        "modifiers.md",
+        "event_definitions.md",
+        "external_interfaces.md",
+        "static_analysis.md",
+        "test_results.md",
+        "constraint_variables.md",
+        "external_production_behavior.md"
+      ],
+      "min_file_bytes": 100,
+      "gate_message": "Recon incomplete. Missing artifacts block Phase 2 instantiation. Ensure all 4 recon agents have completed."
+    },
+    "breadth": {
+      "order": 2,
+      "display_name": "Phase 3: Breadth Analysis",
+      "required_artifacts": [
+        "analysis_*.md"
+      ],
+      "min_required_glob_matches": 3,
+      "min_file_bytes": 200,
+      "gate_message": "Breadth analysis incomplete. At least 3 analysis_*.md files required before proceeding to inventory."
+    },
+    "inventory": {
+      "order": 3,
+      "display_name": "Phase 4a: Findings Inventory",
+      "required_artifacts": [
+        "findings_inventory.md"
+      ],
+      "min_file_bytes": 100,
+      "gate_message": "Findings inventory not created. Cannot proceed to re-scan, semantic invariants, or depth without findings_inventory.md."
+    },
+    "rescan": {
+      "order": 4,
+      "display_name": "Phase 3b: Breadth Re-Scan",
+      "mode_required": ["thorough"],
+      "required_artifacts": [
+        "analysis_rescan_*.md"
+      ],
+      "min_required_glob_matches": 1,
+      "min_file_bytes": 100,
+      "gate_message": "Breadth re-scan required in Thorough mode. At least 1 analysis_rescan_*.md file needed."
+    },
+    "per_contract": {
+      "order": 5,
+      "display_name": "Phase 3c: Per-Contract Analysis",
+      "mode_required": ["thorough"],
+      "required_artifacts": [
+        "analysis_percontract_*.md"
+      ],
+      "min_required_glob_matches": 1,
+      "min_file_bytes": 100,
+      "gate_message": "Per-contract analysis required in Thorough mode. At least 1 analysis_percontract_*.md file needed."
+    },
+    "semantic_invariants": {
+      "order": 6,
+      "display_name": "Phase 4a.5: Semantic Invariants",
+      "mode_required": ["core", "thorough"],
+      "required_artifacts": [
+        "semantic_invariants.md"
+      ],
+      "min_file_bytes": 100,
+      "gate_message": "Semantic invariants analysis not complete. Required in Core/Thorough mode before depth loop."
+    },
+    "depth": {
+      "order": 7,
+      "display_name": "Phase 4b: Depth Loop",
+      "required_artifacts": [
+        "depth_*_findings.md",
+        "blind_spot_*_findings.md",
+        "validation_sweep_findings.md",
+        "adaptive_loop_log.md"
+      ],
+      "min_required_glob_matches_map": {
+        "depth_*_findings.md": 2,
+        "blind_spot_*_findings.md": 1
+      },
+      "conditional_artifacts": {
+        "design_stress_findings.md": "MODE == thorough",
+        "perturbation_findings.md": "MODE == thorough",
+        "skill_execution_gaps.md": "MODE == thorough",
+        "confidence_scores.md": "MODE != light",
+        "rag_validation.md": "MODE != light"
+      },
+      "niche_artifacts_source": "template_recommendations.md",
+      "min_file_bytes": 50,
+      "gate_message": "Depth loop incomplete. Missing required depth/scanner/validation artifacts. Check adaptive_loop_log.md for iteration status."
+    },
+    "chain": {
+      "order": 8,
+      "display_name": "Phase 4c: Chain Analysis",
+      "required_artifacts": [
+        "hypotheses.md",
+        "finding_mapping.md",
+        "synthesis_full.md",
+        "chain_hypotheses.md"
+      ],
+      "min_file_bytes": 100,
+      "gate_message": "Chain analysis incomplete. Missing hypothesis grouping or chain matching artifacts."
+    },
+    "verification": {
+      "order": 9,
+      "display_name": "Phase 5: Verification",
+      "required_artifacts": [
+        "verify_*.md"
+      ],
+      "min_required_glob_matches": 1,
+      "min_file_bytes": 100,
+      "gate_message": "Verification incomplete. At least 1 verify_*.md file required before report generation."
+    },
+    "report": {
+      "order": 10,
+      "display_name": "Phase 6: Report Generation",
+      "required_artifacts": [
+        "report_index.md"
+      ],
+      "min_file_bytes": 200,
+      "gate_message": "Report index not created. Report tier writers cannot proceed without report_index.md."
+    }
+  }
+}
