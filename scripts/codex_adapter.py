@@ -157,23 +157,30 @@ def generate_agents_md(out_dir: Path) -> None:
 
 def generate_config_toml(out_dir: Path) -> None:
     """Generate codex/config.toml -- Codex main config with MCP server mappings."""
-    # Try user's actual mcp.json first (has real API keys), fall back to example
-    claude_home = Path(os.path.expanduser("~/.claude"))
-    user_mcp = load_json(claude_home / "mcp.json")
+    # Try to inherit real API keys from existing configs (host-neutral search).
+    # Check multiple locations — works for Claude users, Codex-only users, or hybrid.
     example_mcp = load_json(PLAMEN_HOME / "mcp.json.example")
-    # Merge: example provides structure, user provides real keys
     servers = example_mcp.get("mcpServers", {})
-    if user_mcp:
+    key_sources = [
+        Path(os.path.expanduser("~/.claude/mcp.json")),   # Claude Code users
+        Path(os.path.expanduser("~/.codex/mcp.json")),    # Codex-only users (manual)
+        PLAMEN_HOME / "mcp.json",                         # Repo-local config
+    ]
+    for src_path in key_sources:
+        user_mcp = load_json(src_path)
+        if not user_mcp:
+            continue
         user_servers = user_mcp.get("mcpServers", {})
         for name, srv in servers.items():
             if name in user_servers:
-                # Inherit env vars (API keys) from user's actual config
                 user_env = user_servers[name].get("env", {})
                 srv_env = srv.get("env", {})
                 for key, val in user_env.items():
-                    if val and not val.startswith("YOUR_"):
+                    # Only inherit real keys, not placeholders
+                    if val and not val.startswith("YOUR_") and key not in srv_env:
                         srv_env[key] = val
                 srv["env"] = srv_env
+        break  # Use first found source
 
     lines = [
         '# Model for the orchestrator and agents that inherit from global config.',
