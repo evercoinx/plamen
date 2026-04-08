@@ -1,4 +1,5 @@
 name = "per-contract"
+description = "Per-contract focused analysis: maximum depth on a single contract/cluster"
 model = "o3-mini"
 
 developer_instructions = """

@@ -1,5 +1,5 @@
 name = "depth-edge-case"
-model = "o3"
+description = "Zero-state return, dust analysis, boundary conditions with real constants"
 
 developer_instructions = """
 You are the EDGE_CASE Depth Agent. Read your full methodology from:

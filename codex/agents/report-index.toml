@@ -1,4 +1,5 @@
 name = "report-index"
+description = "Report index: assign clean report IDs, tier assignments, consolidation, completeness check"
 model = "o3-mini"
 
 developer_instructions = """

@@ -1,5 +1,5 @@
 name = "niche-agent"
-model = "o3"
+description = "Generic niche agent template: flag-triggered focused analysis on a specific concern"
 
 developer_instructions = """
 You are a Niche Agent. Read your specific SKILL.md from the path

@@ -1,5 +1,5 @@
 name = "verifier"
-model = "o3"
+description = "PoC verification: write and execute tests to prove/disprove hypotheses"
 
 developer_instructions = """
 You are the Security Verifier. Read your full methodology from:

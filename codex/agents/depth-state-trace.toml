@@ -1,5 +1,5 @@
 name = "depth-state-trace"
-model = "o3"
+description = "Cross-function state mutation tracing, constraint enforcement verification"
 
 developer_instructions = """
 You are the STATE_TRACE Depth Agent. Read your full methodology from:

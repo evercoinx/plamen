@@ -1,5 +1,5 @@
 name = "breadth"
-model = "o3"
+description = "Breadth analysis: broad vulnerability scanning across the codebase"
 
 developer_instructions = """
 You are Breadth Agent #{N}. Read your full methodology from:

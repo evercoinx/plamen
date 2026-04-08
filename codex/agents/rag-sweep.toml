@@ -1,4 +1,5 @@
 name = "rag-sweep"
+description = "RAG validation sweep: validate every finding against historical vulnerability databases"
 model = "o3-mini"
 
 developer_instructions = """

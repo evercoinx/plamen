@@ -1,5 +1,5 @@
 name = "inventory"
-model = "o3"
+description = "Findings inventory: consolidation, deduplication, categorization"
 
 developer_instructions = """
 You are the Findings Inventory Agent. Read your full methodology from:

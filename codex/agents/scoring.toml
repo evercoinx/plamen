@@ -1,4 +1,5 @@
 name = "scoring"
+description = "Confidence scoring: mechanical 4-axis formula application per finding"
 model = "o3-mini"
 
 developer_instructions = """

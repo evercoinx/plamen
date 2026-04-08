@@ -1,5 +1,5 @@
 name = "scanner"
-model = "o3"
+description = "Blind spot scanning and validation sweep"
 
 developer_instructions = """
 You are the Scanner Agent. Read your full methodology from:

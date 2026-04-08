@@ -1,5 +1,5 @@
 name = "depth-token-flow"
-model = "o3"
+description = "Deep analysis of token entry/exit paths, donation attacks, type separation"
 
 developer_instructions = """
 You are the TOKEN_FLOW Depth Agent. Read your full methodology from:

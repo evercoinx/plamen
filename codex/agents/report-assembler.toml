@@ -1,4 +1,5 @@
 name = "report-assembler"
+description = "Report assembler: merge tier sections into final AUDIT_REPORT.md with quality checks"
 model = "o3-mini"
 
 developer_instructions = """

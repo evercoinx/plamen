@@ -1,4 +1,5 @@
 name = "rescan"
+description = "Breadth re-scan: second-pass analysis with exclusion list to counter attention saturation"
 model = "o3-mini"
 
 developer_instructions = """

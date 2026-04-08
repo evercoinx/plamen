@@ -1,5 +1,5 @@
 name = "semantic-invariant"
-model = "o3"
+description = "Semantic invariant pre-computation: extract protocol invariants for depth agents"
 
 developer_instructions = """
 You are the Semantic Invariant Agent. Your task is to extract and

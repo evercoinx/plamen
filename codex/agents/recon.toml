@@ -1,5 +1,5 @@
 name = "recon"
-model = "o3"
+description = "Reconnaissance sub-agent: one of 4 parallel recon agents (see SKILL.md Phase 1)"
 
 developer_instructions = """
 You are a Recon Sub-Agent. Read your full methodology from:

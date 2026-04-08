@@ -161,6 +161,11 @@ def generate_config_toml(out_dir: Path) -> None:
     servers = mcp_json.get("mcpServers", {})
 
     lines = [
+        '# Model for the orchestrator and agents that inherit from global config.',
+        '# Change to match your Codex account:',
+        '#   API accounts:       "o3", "o4-mini"',
+        '#   ChatGPT Plus/Pro:   run `codex --available-models` for supported models',
+        '#   Common alternatives: "gpt-4.1", "o4-mini"',
         'model = "o3"',
         'model_context_window = 200000',
         'approval_mode = "full-auto"',
@@ -223,7 +228,7 @@ AGENT_ROLES = [
     {
         "filename": "recon.toml",
         "name": "recon",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "Reconnaissance sub-agent: one of 4 parallel recon agents (see SKILL.md Phase 1)",
         "instructions": textwrap.dedent("""\
             You are a Recon Sub-Agent. Read your full methodology from:
@@ -247,7 +252,7 @@ AGENT_ROLES = [
     {
         "filename": "breadth.toml",
         "name": "breadth",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "Breadth analysis: broad vulnerability scanning across the codebase",
         "instructions": textwrap.dedent("""\
             You are Breadth Agent #{N}. Read your full methodology from:
@@ -266,7 +271,7 @@ AGENT_ROLES = [
     {
         "filename": "depth-token-flow.toml",
         "name": "depth-token-flow",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "Deep analysis of token entry/exit paths, donation attacks, type separation",
         "instructions": textwrap.dedent("""\
             You are the TOKEN_FLOW Depth Agent. Read your full methodology from:
@@ -279,7 +284,7 @@ AGENT_ROLES = [
     {
         "filename": "depth-state-trace.toml",
         "name": "depth-state-trace",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "Cross-function state mutation tracing, constraint enforcement verification",
         "instructions": textwrap.dedent("""\
             You are the STATE_TRACE Depth Agent. Read your full methodology from:
@@ -291,7 +296,7 @@ AGENT_ROLES = [
     {
         "filename": "depth-edge-case.toml",
         "name": "depth-edge-case",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "Zero-state return, dust analysis, boundary conditions with real constants",
         "instructions": textwrap.dedent("""\
             You are the EDGE_CASE Depth Agent. Read your full methodology from:
@@ -304,7 +309,7 @@ AGENT_ROLES = [
     {
         "filename": "depth-external.toml",
         "name": "depth-external",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "External call side effects, cross-chain timing windows, MEV analysis",
         "instructions": textwrap.dedent("""\
             You are the EXTERNAL Depth Agent. Read your full methodology from:
@@ -316,7 +321,7 @@ AGENT_ROLES = [
     {
         "filename": "scanner.toml",
         "name": "scanner",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "Blind spot scanning and validation sweep",
         "instructions": textwrap.dedent("""\
             You are the Scanner Agent. Read your full methodology from:
@@ -332,7 +337,7 @@ AGENT_ROLES = [
     {
         "filename": "inventory.toml",
         "name": "inventory",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "Findings inventory: consolidation, deduplication, categorization",
         "instructions": textwrap.dedent("""\
             You are the Findings Inventory Agent. Read your full methodology from:
@@ -347,7 +352,7 @@ AGENT_ROLES = [
     {
         "filename": "chain-analyzer.toml",
         "name": "chain-analyzer",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "Chain analysis: enabler enumeration, grouping, postcondition-precondition matching",
         "instructions": textwrap.dedent("""\
             You are the Chain Analysis Agent. Read your full methodology from:
@@ -363,7 +368,7 @@ AGENT_ROLES = [
     {
         "filename": "verifier.toml",
         "name": "verifier",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "PoC verification: write and execute tests to prove/disprove hypotheses",
         "instructions": textwrap.dedent("""\
             You are the Security Verifier. Read your full methodology from:
@@ -420,7 +425,7 @@ AGENT_ROLES = [
     {
         "filename": "semantic-invariant.toml",
         "name": "semantic-invariant",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "Semantic invariant pre-computation: extract protocol invariants for depth agents",
         "instructions": textwrap.dedent("""\
             You are the Semantic Invariant Agent. Your task is to extract and
@@ -479,7 +484,7 @@ AGENT_ROLES = [
     {
         "filename": "niche-agent.toml",
         "name": "niche-agent",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "Generic niche agent template: flag-triggered focused analysis on a specific concern",
         "instructions": textwrap.dedent("""\
             You are a Niche Agent. Read your specific SKILL.md from the path
@@ -533,7 +538,7 @@ AGENT_ROLES = [
     {
         "filename": "report-tier-writer.toml",
         "name": "report-tier-writer",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "Report tier writer: write full finding sections for an assigned severity tier",
         "instructions": textwrap.dedent("""\
             You are a Report Tier Writer. Read your full methodology from:
@@ -572,7 +577,7 @@ AGENT_ROLES = [
     {
         "filename": "report-writer.toml",
         "name": "report-writer",
-        "model": "o3",
+        "model": None,  # inherits from config.toml
         "description": "Report generation: index, tier writing, assembly (legacy single-agent fallback)",
         "instructions": textwrap.dedent("""\
             You are the Report Writer. Read your full methodology from:
@@ -599,7 +604,15 @@ def generate_agent_tomls(out_dir: Path) -> None:
     for role in AGENT_ROLES:
         lines = [
             f'name = "{role["name"]}"',
-            f'model = "{role["model"]}"',
+            f'description = "{role["description"]}"',
+        ]
+
+        # Only emit model if the role overrides the global default.
+        # Roles without an explicit model inherit from config.toml.
+        if role.get("model"):
+            lines.append(f'model = "{role["model"]}"')
+
+        lines += [
             '',
             f'developer_instructions = """',
             role["instructions"].rstrip(),

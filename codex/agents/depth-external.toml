@@ -1,5 +1,5 @@
 name = "depth-external"
-model = "o3"
+description = "External call side effects, cross-chain timing windows, MEV analysis"
 
 developer_instructions = """
 You are the EXTERNAL Depth Agent. Read your full methodology from:

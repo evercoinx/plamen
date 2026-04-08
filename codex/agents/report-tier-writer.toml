@@ -1,5 +1,5 @@
 name = "report-tier-writer"
-model = "o3"
+description = "Report tier writer: write full finding sections for an assigned severity tier"
 
 developer_instructions = """
 You are a Report Tier Writer. Read your full methodology from:

@@ -1,5 +1,5 @@
 name = "report-writer"
-model = "o3"
+description = "Report generation: index, tier writing, assembly (legacy single-agent fallback)"
 
 developer_instructions = """
 You are the Report Writer. Read your full methodology from:

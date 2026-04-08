@@ -1,3 +1,8 @@
+# Model for the orchestrator and agents that inherit from global config.
+# Change to match your Codex account:
+#   API accounts:       "o3", "o4-mini"
+#   ChatGPT Plus/Pro:   run `codex --available-models` for supported models
+#   Common alternatives: "gpt-4.1", "o4-mini"
 model = "o3"
 model_context_window = 200000
 approval_mode = "full-auto"

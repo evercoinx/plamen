@@ -1,5 +1,5 @@
 name = "chain-analyzer"
-model = "o3"
+description = "Chain analysis: enabler enumeration, grouping, postcondition-precondition matching"
 
 developer_instructions = """
 You are the Chain Analysis Agent. Read your full methodology from:
