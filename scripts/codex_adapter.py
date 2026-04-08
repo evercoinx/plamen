@@ -157,30 +157,11 @@ def generate_agents_md(out_dir: Path) -> None:
 
 def generate_config_toml(out_dir: Path) -> None:
     """Generate codex/config.toml -- Codex main config with MCP server mappings."""
-    # Try to inherit real API keys from existing configs (host-neutral search).
-    # Check multiple locations — works for Claude users, Codex-only users, or hybrid.
+    # SECURITY: NEVER write real API keys into generated files.
+    # Generated config.toml uses PLACEHOLDERS only. Users fill in their own keys
+    # after install. This file is gitignored to prevent accidental key leaks.
     example_mcp = load_json(PLAMEN_HOME / "mcp.json.example")
     servers = example_mcp.get("mcpServers", {})
-    key_sources = [
-        Path(os.path.expanduser("~/.claude/mcp.json")),   # Claude Code users
-        Path(os.path.expanduser("~/.codex/mcp.json")),    # Codex-only users (manual)
-        PLAMEN_HOME / "mcp.json",                         # Repo-local config
-    ]
-    for src_path in key_sources:
-        user_mcp = load_json(src_path)
-        if not user_mcp:
-            continue
-        user_servers = user_mcp.get("mcpServers", {})
-        for name, srv in servers.items():
-            if name in user_servers:
-                user_env = user_servers[name].get("env", {})
-                srv_env = srv.get("env", {})
-                for key, val in user_env.items():
-                    # Only inherit real keys, not placeholders
-                    if val and not val.startswith("YOUR_") and key not in srv_env:
-                        srv_env[key] = val
-                srv["env"] = srv_env
-        break  # Use first found source
 
     lines = [
         '# Model for the orchestrator and agents that inherit from global config.',
@@ -957,20 +938,21 @@ def generate_skill_md(out_dir: Path) -> None:
 
 def generate_hooks_json(out_dir: Path) -> None:
     """Generate codex/hooks.json -- Codex hook format for phase_gate.py + command_guard.py."""
+    py = "python" if sys.platform == "win32" else "python3"
     hooks = [
         {
             "event": "PreToolUse",
             "matcher": "Bash",
-            "script": "python3 ~/.codex/plamen/hooks/command_guard.py"
+            "script": f"{py} ~/.codex/plamen/hooks/command_guard.py"
         },
         {
             "event": "Stop",
-            "script": "python3 ~/.codex/plamen/hooks/phase_gate.py --stop"
+            "script": f"{py} ~/.codex/plamen/hooks/phase_gate.py --stop"
         },
         {
             "event": "PostToolUse",
             "matcher": "Write|Edit",
-            "script": "python3 ~/.codex/plamen/hooks/phase_gate.py --track-write"
+            "script": f"{py} ~/.codex/plamen/hooks/phase_gate.py --track-write"
         },
     ]
 
