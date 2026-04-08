@@ -1,0 +1,71 @@
+model = "o3"
+model_context_window = 200000
+
+[agents]
+max_threads = 8
+max_depth = 1
+
+[mcp_servers.slither-analyzer]
+# EVM static analysis. Installed from custom-mcp/slither-mcp via plamen install. If not in PATH, replace with full path from: which slither-mcp (macOS/Linux) or where slither-mcp (Windows)
+type = "stdio"
+command = "slither-mcp"
+args = []
+
+[mcp_servers.solana-fender]
+# Optional: Solana program security analysis
+type = "stdio"
+command = "python3"
+args = ["-m", "solana_fender_mcp"]
+cwd = "~/.codex/plamen/custom-mcp/solana-fender"
+
+[mcp_servers.unified-vuln-db]
+# MCP server for vulnerability research. RAG database is optional — run 'plamen rag' to populate (pipeline works without it)
+type = "stdio"
+command = "python3"
+args = ["-m", "unified_vuln.server"]
+cwd = "~/.codex/plamen/custom-mcp/unified-vuln-db"
+
+[mcp_servers.farofino]
+# Optional: Solidity static analysis fallback
+type = "stdio"
+command = "python3"
+args = ["-m", "farofino_mcp"]
+cwd = "~/.codex/plamen/custom-mcp/farofino-mcp"
+
+[mcp_servers.foundry-suite]
+# Optional: EVM fork testing. Get RPC from Alchemy/Infura/public endpoints
+type = "stdio"
+command = "npx"
+args = ["-y", "@pranesh.asp/foundry-mcp-server@0.1.5"]
+[mcp_servers.foundry-suite.env]
+RPC_URL = "YOUR_RPC_URL"
+
+[mcp_servers.evm-chain-data]
+# Optional: On-chain contract verification. Free key: https://etherscan.io/apis
+type = "stdio"
+command = "npx"
+args = ["-y", "@mcpdotdirect/evm-mcp-server@2.0.4"]
+[mcp_servers.evm-chain-data.env]
+ETHERSCAN_API_KEY = "YOUR_ETHERSCAN_API_KEY"
+
+[mcp_servers.tavily-search]
+# Optional: Web search for fork ancestry + doc lookup. Key: https://tavily.com
+type = "stdio"
+command = "npx"
+args = ["-y", "tavily-mcp@0.2.18"]
+[mcp_servers.tavily-search.env]
+TAVILY_API_KEY = "YOUR_TAVILY_API_KEY"
+
+[mcp_servers.memory]
+# Optional: Persistent memory across sessions
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory@2026.1.26"]
+
+[mcp_servers.helius]
+# Optional: Solana on-chain data. Free key: https://helius.dev
+type = "stdio"
+command = "npx"
+args = ["-y", "helius-mcp@1.3.0"]
+[mcp_servers.helius.env]
+HELIUS_API_KEY = "YOUR_HELIUS_API_KEY"

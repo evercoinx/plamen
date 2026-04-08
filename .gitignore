@@ -66,7 +66,8 @@ Thumbs.db
 .git_old/
 
 # ── Scripts (dev-only banner experiments) ─────────
-scripts/
+scripts/*
+!scripts/codex_adapter.py
 
 # ── Local-only working files (proposals, notes) ──
 local/

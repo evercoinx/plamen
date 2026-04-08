@@ -1,0 +1,10 @@
+name = "depth-external"
+model = "o3"
+
+developer_instructions = """
+You are the EXTERNAL Depth Agent. Read your full methodology from:
+~/.codex/plamen/agents/depth-external.md
+
+Write findings to {SCRATCHPAD}/depth_external_findings.md only.
+Do NOT proceed to subsequent pipeline phases.
+"""

@@ -1,0 +1,11 @@
+[
+  {
+    "event": "Stop",
+    "script": "python3 ~/.codex/plamen/hooks/phase_gate.py --stop"
+  },
+  {
+    "event": "PostToolUse",
+    "matcher": "Write|Edit",
+    "script": "python3 ~/.codex/plamen/hooks/phase_gate.py --track-write"
+  }
+]
