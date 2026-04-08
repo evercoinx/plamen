@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **MCP path resolution**: All MCP server commands (`slither-mcp`, `npx`, `python`) now resolve to absolute platform-correct paths during install — not just `python`/`python3`. Searches pip script directories (`~/Library/Python/X.Y/bin/`, `~/.local/bin/`, `%APPDATA%/Python/Scripts/`) via `sysconfig` when `shutil.which` fails.
 - **Cross-platform migration**: Installer detects wrong-OS paths in existing `mcp.json` (e.g., `C:/` paths on macOS) and auto-fixes them to resolved local paths while preserving user env vars and API keys.
+## [1.1.7] - 2026-04-07
+
+### Added
+- **Perturbation Agent** (Thorough only): Post-depth agent that applies structured mutation operators (DIRECTION_FLIP, BOUNDARY_SHIFT, ACTOR_SWAP, ORDERING_REVERSE, AGGREGATION_SPLIT) to existing findings, testing adjacent vulnerability space. Targets single-hit satisfaction pattern where agents find one variant but miss symmetric counterparts.
+- **Skill Execution Checklist** (Thorough only): Haiku agent that mechanically verifies depth agents executed all steps of their assigned skills. Execution gaps feed Devil's Advocate iteration 2 input.
+- **Symmetric Operation Pairing** (Thorough only): Pre-computed pairs table (deposit/withdraw, borrow/repay, mint/burn, approve/revoke, pause/unpause) injected into depth prompts with mandatory both-sides coverage gate.
+- **Static Artifact Manifest**: `phase4b-required-artifacts.md` per language tree — READ-ONLY manifest checked by orchestrator post-depth. Missing artifacts trigger agent spawns, not silent passes. Prevents orchestrator from skipping committed mechanisms.
+- **Soroban Rule SB17**: Transaction resource budget exhaustion detection. Computes `max_reads = reserves_in_position × reads_per_reserve` and compares against Stellar's ~40 read ledger entry limit.
+- **External data ordering check**: Sub-check added to `external-precondition-audit/SKILL.md` across all 5 language trees: "For each external data structure received: what ordering/uniqueness does the consuming code assume? Does the spec guarantee it?"
+
+### Changed
+- **Lending injectable sharpened**: Replaced 5 vague reasoning questions with mechanical grep-and-compare actions. Produces named output tags (NO_MINIMUM_POSITION, LIQUIDATION_RESOURCE_DOS, NO_UNPAUSE_GRACE, NO_FALLBACK_ORACLE). Net -4 lines.
+- **MCP package management**: Pinned npm MCP server versions, added schema sanitizer proxy for unified-vuln-db, gated MCP install for legacy/existing configs only.
+
+### Fixed
+- 5 regressions in static artifact manifest (generic title, niche file names, EVM-specific fuzz artifacts, MODE gate, non-EVM fuzz requirement).
+- MCP config now correctly targets `~/.claude/mcp.json` (not `~/.claude.json`).
 
 ## [1.1.5] - 2026-03-28
 

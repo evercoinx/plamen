@@ -1,4 +1,4 @@
-# Plamen (v1.1.4)
+# Plamen (v1.1.7)
 
 Autonomous smart contract security auditor for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
