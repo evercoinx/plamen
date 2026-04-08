@@ -56,7 +56,8 @@
             "command": "python3 ~/.claude/hooks/phase_gate.py --stop",
             "timeout": 10
           }
-        ]
+        ],
+        "statusMessage": "Watchdog: checking phase artifacts..."
       }
     ],
     "PostToolUse": [
@@ -68,7 +69,8 @@
             "command": "python3 ~/.claude/hooks/phase_gate.py --track-write",
             "timeout": 5
           }
-        ]
+        ],
+        "async": true
       }
     ]
   }

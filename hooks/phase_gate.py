@@ -34,6 +34,32 @@ STATE_FILENAME = "watchdog_state.json"
 FINDING_ID_PATTERN = re.compile(r"\[[A-Z]{1,6}-\d+\]")
 ZERO_FINDINGS_PATTERN = re.compile(r"(0 findings|0 new findings|DONE:\s*0)", re.IGNORECASE)
 
+# Mapping from template_recommendations.md flag/agent names to actual niche output filenames.
+# The SKILL.md files use shorter names than the raw flag names.
+NICHE_NAME_MAP = {
+    "MISSING_EVENT": "niche_event_findings.md",
+    "EVENT_COMPLETENESS": "niche_event_findings.md",
+    "sync_gaps": "niche_semantic_gap_findings.md",
+    "SEMANTIC_GAP_INVESTIGATOR": "niche_semantic_gap_findings.md",
+    "accumulation_exposures": "niche_semantic_gap_findings.md",
+    "conditional_writes": "niche_semantic_gap_findings.md",
+    "cluster_gaps": "niche_semantic_gap_findings.md",
+    "HAS_MULTI_CONTRACT": "niche_semantic_consistency_findings.md",
+    "SEMANTIC_CONSISTENCY_AUDIT": "niche_semantic_consistency_findings.md",
+    "HAS_SIGNATURES": "niche_signature_findings.md",
+    "SIGNATURE_VERIFICATION_AUDIT": "niche_signature_findings.md",
+    "HAS_DOCS": "niche_spec_compliance_findings.md",
+    "SPEC_COMPLIANCE_AUDIT": "niche_spec_compliance_findings.md",
+    "MULTI_STEP_OPS": "niche_multi_step_safety_findings.md",
+    "MULTI_STEP_OPERATION_SAFETY": "niche_multi_step_safety_findings.md",
+    "OUTCOME_CALLBACK": "niche_callback_safety_findings.md",
+    "CALLBACK_RECEIVER_SAFETY": "niche_callback_safety_findings.md",
+    "MIXED_DECIMALS": "niche_dimensional_analysis_findings.md",
+    "DIMENSIONAL_ANALYSIS": "niche_dimensional_analysis_findings.md",
+    "STABLESWAP_FORK": "niche_stableswap_compliance_findings.md",
+    "STABLESWAP_COMPLIANCE": "niche_stableswap_compliance_findings.md",
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -185,13 +211,15 @@ def validate_findings_file(path):
 def extract_niche_agents(scratchpad):
     """
     Read template_recommendations.md to find which niche agents were recommended.
-    Returns list of expected niche output filenames.
+    Returns list of expected niche output filenames (deduplicated).
+    Uses NICHE_NAME_MAP to resolve flag/agent names to actual SKILL.md output filenames.
     """
     rec_path = os.path.join(scratchpad, "template_recommendations.md").replace("\\", "/")
     if not os.path.isfile(rec_path):
         return []
 
     niche_files = []
+    seen = set()
     try:
         with open(rec_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -208,7 +236,11 @@ def extract_niche_agents(scratchpad):
                 # Extract niche agent name from lines like "- EVENT_COMPLETENESS"
                 name = line.strip().lstrip("-").strip().split()[0] if line.strip().lstrip("-").strip() else ""
                 if name:
-                    niche_files.append("niche_{}_findings.md".format(name.lower()))
+                    # Use the mapping if available, fall back to generated name
+                    filename = NICHE_NAME_MAP.get(name, "niche_{}_findings.md".format(name.lower()))
+                    if filename not in seen:
+                        seen.add(filename)
+                        niche_files.append(filename)
     except (IOError, OSError):
         pass
 
@@ -295,6 +327,17 @@ def detect_current_phase(scratchpad, manifest, mode):
         if not all_present:
             return phase_name, phase
 
+        # Check scanner_artifacts (flexible multi-pattern with min_matches)
+        scanner_cfg = phase.get("scanner_artifacts")
+        if scanner_cfg:
+            scanner_min = scanner_cfg.get("min_matches", 1)
+            scanner_total = 0
+            for pattern in scanner_cfg.get("patterns", []):
+                matches = glob_match(scratchpad, pattern)
+                scanner_total += len([m for m in matches if get_file_size(m) >= min_bytes])
+            if scanner_total < scanner_min:
+                return phase_name, phase
+
         # Check conditional artifacts
         for artifact, condition in phase.get("conditional_artifacts", {}).items():
             if evaluate_condition(condition, mode):
@@ -338,6 +381,21 @@ def get_missing_artifacts(scratchpad, phase, mode):
             present, reason = check_artifact_present(scratchpad, artifact, min_bytes)
             if not present:
                 missing.append((artifact, reason))
+
+    # Check scanner_artifacts (flexible multi-pattern with min_matches)
+    scanner_cfg = phase.get("scanner_artifacts")
+    if scanner_cfg:
+        scanner_min = scanner_cfg.get("min_matches", 1)
+        scanner_total = 0
+        for pattern in scanner_cfg.get("patterns", []):
+            matches = glob_match(scratchpad, pattern)
+            scanner_total += len([m for m in matches if get_file_size(m) >= min_bytes])
+        if scanner_total < scanner_min:
+            patterns_str = ", ".join(scanner_cfg.get("patterns", []))
+            missing.append(
+                ("scanner/validation artifacts",
+                 "need {} matches across [{}], found {}".format(scanner_min, patterns_str, scanner_total))
+            )
 
     for artifact, condition in phase.get("conditional_artifacts", {}).items():
         if evaluate_condition(condition, mode):

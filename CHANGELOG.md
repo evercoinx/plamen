@@ -10,9 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **MCP path resolution**: All MCP server commands (`slither-mcp`, `npx`, `python`) now resolve to absolute platform-correct paths during install — not just `python`/`python3`. Searches pip script directories (`~/Library/Python/X.Y/bin/`, `~/.local/bin/`, `%APPDATA%/Python/Scripts/`) via `sysconfig` when `shutil.which` fails.
 - **Cross-platform migration**: Installer detects wrong-OS paths in existing `mcp.json` (e.g., `C:/` paths on macOS) and auto-fixes them to resolved local paths while preserving user env vars and API keys.
+
 ## [1.1.7] - 2026-04-07
 
 ### Added
+- **Pipeline Watchdog Hooks**: Stop + PostToolUse hooks (`phase_gate.py`) enforce artifact existence at phase transitions. Two-strike stall model, forward leak detection, mode-aware conditional checking. Dormant for non-audit sessions. Auto-installed via `plamen install`.
 - **Perturbation Agent** (Thorough only): Post-depth agent that applies structured mutation operators (DIRECTION_FLIP, BOUNDARY_SHIFT, ACTOR_SWAP, ORDERING_REVERSE, AGGREGATION_SPLIT) to existing findings, testing adjacent vulnerability space. Targets single-hit satisfaction pattern where agents find one variant but miss symmetric counterparts.
 - **Skill Execution Checklist** (Thorough only): Haiku agent that mechanically verifies depth agents executed all steps of their assigned skills. Execution gaps feed Devil's Advocate iteration 2 input.
 - **Symmetric Operation Pairing** (Thorough only): Pre-computed pairs table (deposit/withdraw, borrow/repay, mint/burn, approve/revoke, pause/unpause) injected into depth prompts with mandatory both-sides coverage gate.

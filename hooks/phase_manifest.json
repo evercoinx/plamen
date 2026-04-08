@@ -87,14 +87,23 @@
       "order": 7,
       "display_name": "Phase 4b: Depth Loop",
       "required_artifacts": [
-        "depth_*_findings.md",
-        "blind_spot_*_findings.md",
-        "validation_sweep_findings.md",
-        "adaptive_loop_log.md"
+        "depth_*_findings.md"
       ],
       "min_required_glob_matches_map": {
-        "depth_*_findings.md": 2,
-        "blind_spot_*_findings.md": 1
+        "depth_*_findings.md": 2
+      },
+      "optional_artifacts": [
+        "adaptive_loop_log.md"
+      ],
+      "scanner_artifacts": {
+        "description": "At least 1 scanner/validation output must exist (any naming convention)",
+        "patterns": [
+          "blind_spot_*_findings.md",
+          "scanner_*_findings.md",
+          "validation_sweep_findings.md",
+          "scanner_validation_findings.md"
+        ],
+        "min_matches": 1
       },
       "conditional_artifacts": {
         "design_stress_findings.md": "MODE == thorough",

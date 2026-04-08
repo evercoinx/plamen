@@ -107,7 +107,7 @@ cd ~/.plamen && python3 plamen.py install
 cd $HOME\.plamen; python plamen.py install
 ```
 
-> Python dependencies (`rich`, `InquirerPy`, PyTorch, etc.) are installed automatically on first run. On macOS/Linux use `python3`, on Windows use `python`.
+> Python dependencies (`rich`, `InquirerPy`, MCP packages, etc.) are installed automatically on first run. On macOS/Linux use `python3`, on Windows use `python`.
 
 This will:
 - Symlink Plamen's agents, rules, prompts, skills, and commands into `~/.claude/`

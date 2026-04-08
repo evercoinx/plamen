@@ -47,7 +47,7 @@ These are **not symlinked** — they are merged/injected at install time:
 | Component | Why Not Symlinked | What Install Does |
 |-----------|-------------------|-------------------|
 | **CLAUDE.md** | User may have their own content | Strips old `<!-- PLAMEN:START -->...<!-- PLAMEN:END -->` section, re-injects current version. User content outside markers is preserved. |
-| **settings.json** | User has their own API keys and permissions | Additive merge: adds new env vars and permissions that don't exist. Never overwrites existing keys. |
+| **settings.json** | User has their own API keys and permissions | Additive merge: adds new env vars, permissions, and hooks that don't exist. Never overwrites existing keys. |
 | **mcp.json** | User has their own MCP servers and API keys | Additive merge: adds new server entries that don't exist. Fixes wrong-platform paths (e.g., Windows `C:/` on macOS) in existing servers while preserving env vars and API keys. |
 | **MCP packages** (legacy only) | Only if `~/.claude.json` has bare `npx -y @pkg` without version pins | Installs pinned npm packages locally, updates config to use schema sanitizer. Skipped for fresh installs. |
 

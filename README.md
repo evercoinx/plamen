@@ -75,8 +75,9 @@ The installer:
 - Creates symlinks from `~/.plamen` into `~/.claude/` so Claude Code discovers Plamen's agents, rules, prompts, and commands
 - Merges Plamen's permissions into your existing `settings.json` (additive only — won't remove your entries)
 - Merges MCP server definitions into `mcp.json` (won't overwrite your existing servers)
+- Symlinks watchdog hooks into `~/.claude/hooks/` and merges hook triggers into `settings.json`
 - Injects Plamen instructions into `CLAUDE.md` between `<!-- PLAMEN:START/END -->` markers (preserves your content)
-- Installs Python dependencies and builds the RAG database
+- Installs Python dependencies (RAG database is built separately via `plamen rag`)
 
 Your existing Claude Code configuration is preserved.
 
