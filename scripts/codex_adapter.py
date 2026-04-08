@@ -157,8 +157,23 @@ def generate_agents_md(out_dir: Path) -> None:
 
 def generate_config_toml(out_dir: Path) -> None:
     """Generate codex/config.toml -- Codex main config with MCP server mappings."""
-    mcp_json = load_json(PLAMEN_HOME / "mcp.json.example")
-    servers = mcp_json.get("mcpServers", {})
+    # Try user's actual mcp.json first (has real API keys), fall back to example
+    claude_home = Path(os.path.expanduser("~/.claude"))
+    user_mcp = load_json(claude_home / "mcp.json")
+    example_mcp = load_json(PLAMEN_HOME / "mcp.json.example")
+    # Merge: example provides structure, user provides real keys
+    servers = example_mcp.get("mcpServers", {})
+    if user_mcp:
+        user_servers = user_mcp.get("mcpServers", {})
+        for name, srv in servers.items():
+            if name in user_servers:
+                # Inherit env vars (API keys) from user's actual config
+                user_env = user_servers[name].get("env", {})
+                srv_env = srv.get("env", {})
+                for key, val in user_env.items():
+                    if val and not val.startswith("YOUR_"):
+                        srv_env[key] = val
+                srv["env"] = srv_env
 
     lines = [
         '# Model for the orchestrator and agents that inherit from global config.',
