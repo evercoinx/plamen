@@ -5,6 +5,32 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.8] - 2026-04-08
+
+### Added
+- **Pipeline Watchdog Hooks**: Claude Code Stop + PostToolUse hooks (`phase_gate.py`) that mechanically enforce artifact existence at phase transitions. Prevents the orchestrator from skipping mandatory steps. Key features:
+  - Two-strike stall model (warn then block)
+  - Forward leak detection (blocks if later-phase artifacts appear before current phase completes)
+  - Mode-aware conditional checking (perturbation/DST only in thorough, confidence scores only in core+thorough)
+  - Niche agent enforcement (parses both bullet and table formats from template_recommendations.md)
+  - Actionable recovery hints (block messages include specific agent types and template file references)
+  - Anti-loop protection (block then free pass then fresh warn cycle)
+  - Dormant for non-audit sessions (zero overhead)
+  - Auto-installed via `plamen install` with platform-aware python resolution
+- **hooks/ directory symlinked** by `plamen install` (auto-updates on `git pull`)
+- **settings.json hooks merge** during `plamen install` (additive, platform-aware python command)
+- **Step 0.9 watchdog init** in pipeline startup (activates enforcement before recon agents)
+
+### Fixed
+- **Perturbation and Skill Execution Checklist sections missing from 4 language trees**: EVM, Solana, Aptos, and Sui phase4b-loop.md files were missing the Finding Perturbation Agent and Depth Skill Execution Checklist sections that existed only in Soroban. The watchdog enforced these artifacts but the templates that agents follow to produce them were absent, breaking the completeness chain in Thorough mode. Now propagated to all 5 language trees with language-specific skill mappings.
+- SETUP.md paste no longer triggers automatic RAG build (10GB RAM issue)
+- RAG positioned as optional across all documentation with resource warnings
+- Niche agent file naming aligned across SKILL.md, phase4b-required-artifacts.md, and watchdog
+- Scanner artifact naming made flexible (accepts blind_spot_*, scanner_*, validation_sweep_*)
+- Anti-loop stall state properly cleared after free pass
+- settings.json.example hook nesting corrected (statusMessage/async inside hook entries)
+- Python command resolution platform-agnostic (python3 on macOS/Linux, python on Windows)
+
 ## [1.1.6] - 2026-03-29
 
 ### Fixed

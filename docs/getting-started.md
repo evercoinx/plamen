@@ -10,8 +10,9 @@
 
 | Component | What it is | Status after install |
 |-----------|-----------|---------------------|
-| **Symlinks** | Links Plamen's agents, rules, and commands into `~/.claude/` | Done |
-| **Config** | Merged permissions, env vars, MCP servers into your Claude Code config | Done |
+| **Symlinks** | Links Plamen's agents, rules, commands, and hooks into `~/.claude/` | Done |
+| **Config** | Merged permissions, env vars, MCP servers, and hook triggers into your Claude Code config | Done |
+| **Watchdog** | Pipeline enforcement hooks that prevent the orchestrator from skipping steps during audits | Done (runs automatically, zero overhead outside audits) |
 | **Core Python deps** | `rich`, `InquirerPy` (wrapper UI) | Done |
 | **MCP server deps** | slither-mcp, solana-fender, farofino-mcp | Done |
 | **Chain toolchains** | Foundry, Solana CLI, Anchor, Aptos, Sui, etc. | Only if you selected them |

@@ -111,6 +111,7 @@ cd $HOME\.plamen; python plamen.py install
 
 This will:
 - Symlink Plamen's agents, rules, prompts, skills, and commands into `~/.claude/`
+- Symlink watchdog hooks into `~/.claude/hooks/` and merge hook triggers into `settings.json`
 - Merge permissions and env vars into `settings.json` (additive — won't remove your existing entries)
 - Merge MCP server definitions into `mcp.json` (won't overwrite your existing servers)
 - Inject Plamen's CLAUDE.md instructions between `<!-- PLAMEN:START -->` / `<!-- PLAMEN:END -->` markers

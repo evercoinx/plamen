@@ -105,7 +105,7 @@ pip install -e custom-mcp/slither-mcp
 
 ### 3. Configure MCP servers
 
-If using `python plamen.py install`, config files are merged automatically (settings.json, mcp.json, CLAUDE.md). For manual setup:
+If using `python plamen.py install`, config files are merged automatically (settings.json, mcp.json, CLAUDE.md, hooks). The installer also symlinks watchdog hooks into `~/.claude/hooks/` and merges hook triggers into `settings.json` — no manual configuration needed. For manual setup:
 
 ```bash
 cp mcp.json.example ~/.claude/mcp.json      # if ~/.claude/mcp.json doesn't exist
