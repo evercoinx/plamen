@@ -1,5 +1,6 @@
 model = "o3"
 model_context_window = 200000
+approval_mode = "full-auto"
 
 [agents]
 max_threads = 8

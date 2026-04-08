@@ -163,6 +163,7 @@ def generate_config_toml(out_dir: Path) -> None:
     lines = [
         'model = "o3"',
         'model_context_window = 200000',
+        'approval_mode = "full-auto"',
         '',
         '[agents]',
         'max_threads = 8',
