@@ -1,5 +1,10 @@
 [
   {
+    "event": "PreToolUse",
+    "matcher": "Bash",
+    "script": "python3 ~/.codex/plamen/hooks/command_guard.py"
+  },
+  {
     "event": "Stop",
     "script": "python3 ~/.codex/plamen/hooks/phase_gate.py --stop"
   },

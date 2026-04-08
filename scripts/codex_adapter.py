@@ -855,8 +855,13 @@ def generate_skill_md(out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def generate_hooks_json(out_dir: Path) -> None:
-    """Generate codex/hooks.json -- Codex hook format for phase_gate.py."""
+    """Generate codex/hooks.json -- Codex hook format for phase_gate.py + command_guard.py."""
     hooks = [
+        {
+            "event": "PreToolUse",
+            "matcher": "Bash",
+            "script": "python3 ~/.codex/plamen/hooks/command_guard.py"
+        },
         {
             "event": "Stop",
             "script": "python3 ~/.codex/plamen/hooks/phase_gate.py --stop"
