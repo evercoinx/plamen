@@ -425,6 +425,16 @@ When `MODE == light`, the orchestrator applies these overrides:
 
 ## Phase 1: Reconnaissance
 
+### Step 0.9: Initialize Pipeline Watchdog
+
+After creating the scratchpad directory and before spawning recon agents, initialize the watchdog:
+
+```bash
+python ~/.claude/hooks/phase_gate.py --init "{scratchpad}" {MODE} "{PROJECT_PATH}"
+```
+
+This activates the Stop hook enforcement. The watchdog will verify artifact existence at each phase transition and block the orchestrator if mandatory steps are skipped. Non-fatal if the hook script is missing — the pipeline continues without enforcement.
+
 ### Step 1: Read Recon Prompt
 **Read full prompt from**: `~/.claude/prompts/{LANGUAGE}/phase1-recon-prompt.md`
 
