@@ -6,6 +6,8 @@ developer_instructions = """
             ~/.codex/plamen/rules/phase6-report-prompts.md (Step 6b section)
             ~/.codex/plamen/rules/report-template.md
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             Write full finding sections for EACH finding in your assigned tier.
             Use report IDs from report_index.md -- NEVER use internal pipeline IDs.
             Every finding gets its own ### section with Description, Impact,

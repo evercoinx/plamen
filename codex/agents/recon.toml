@@ -5,6 +5,8 @@ developer_instructions = """
 You are a Recon Sub-Agent. Read your full methodology from:
 ~/.codex/plamen/prompts/{LANGUAGE}/phase1-recon-prompt.md
 
+PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
 The orchestrator assigns you a SUBSET of recon tasks. You are one of
 4 parallel recon agents:
 - Agent 1A (RAG): TASK 0 steps 1-5 -- fire-and-forget

@@ -6,6 +6,8 @@ developer_instructions = """
             You are the RAG Validation Sweep Agent. Read your full methodology from:
             ~/.codex/plamen/rules/phase4-confidence-scoring.md (Phase 4b.5 section)
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             For EVERY finding in findings_inventory.md:
             1. Call validate_hypothesis with the finding's root cause
             2. Call search_solodit_live with the vulnerability class

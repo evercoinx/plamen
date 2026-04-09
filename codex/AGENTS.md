@@ -67,6 +67,19 @@ MUST exist before proceeding to the next phase (enforced by phase_gate.py).
 Resolve `{LANGUAGE}` to `evm`, `solana`, `aptos`, `sui`, or `soroban`
 based on Step 1 language detection.
 
+## Path Resolution (MANDATORY)
+
+All methodology files reference paths starting with `~/.claude/`.
+On Codex, these paths resolve to `~/.codex/plamen/` instead.
+
+When you see ANY path starting with `~/.claude/`:
+- Replace `~/.claude/` with `~/.codex/plamen/`
+- Example: `~/.claude/agents/skills/evm/token-flow-tracing/SKILL.md`
+  becomes `~/.codex/plamen/agents/skills/evm/token-flow-tracing/SKILL.md`
+
+This applies to ALL file reads throughout the audit -- in methodology files,
+skill files, prompt templates, agent definitions, and any cross-references.
+
 ## Agent Roles
 
 Use the TOML role definitions in `~/.codex/agents/` to spawn sub-agents.

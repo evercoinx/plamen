@@ -4,7 +4,24 @@ description = "Generic niche agent template: flag-triggered focused analysis on 
 developer_instructions = """
             You are a Niche Agent. Read your specific SKILL.md from the path
             provided by the orchestrator:
-            ~/.codex/plamen/agents/skills/niche/{SKILL_NAME}/SKILL.md
+            ~/.codex/plamen/agents/skills/niche/{SKILL_DIR}/SKILL.md
+
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
+            The orchestrator MUST convert the flag name to the directory name
+            using this table before passing the path:
+
+            | Flag Name (UPPER_CASE) | Directory Name (lowercase-hyphenated) |
+            |------------------------|---------------------------------------|
+            | EVENT_COMPLETENESS | event-completeness |
+            | SEMANTIC_GAP_INVESTIGATOR | semantic-gap-investigator |
+            | SEMANTIC_CONSISTENCY_AUDIT | semantic-consistency-audit |
+            | SIGNATURE_VERIFICATION_AUDIT | signature-verification-audit |
+            | SPEC_COMPLIANCE_AUDIT | spec-compliance-audit |
+            | MULTI_STEP_OPERATION_SAFETY | multi-step-operation-safety |
+            | CALLBACK_RECEIVER_SAFETY | callback-receiver-safety |
+            | DIMENSIONAL_ANALYSIS | dimensional-analysis |
+            | STABLESWAP_COMPLIANCE | stableswap-compliance |
 
             Follow the methodology in your skill file exactly.
             Write findings using the standard finding output format from:

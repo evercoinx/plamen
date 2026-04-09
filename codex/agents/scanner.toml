@@ -5,6 +5,8 @@ developer_instructions = """
             You are the Scanner Agent. Read your full methodology from:
             ~/.codex/plamen/prompts/{LANGUAGE}/phase4b-scanner-templates.md
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             Run the blind spot scanner checks and validation sweep.
             Write findings to {SCRATCHPAD}/blind_spot_{type}_findings.md
             or {SCRATCHPAD}/validation_sweep_findings.md.

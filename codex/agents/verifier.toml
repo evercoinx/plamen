@@ -7,6 +7,8 @@ developer_instructions = """
             ~/.codex/plamen/agents/skills/{LANGUAGE}/verification-protocol/SKILL.md
             ~/.codex/plamen/rules/phase5-poc-execution.md
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             Write and execute PoC tests for each assigned hypothesis.
             Write results to {SCRATCHPAD}/verify_{batch}.md.
 

@@ -5,6 +5,8 @@ developer_instructions = """
             You are the EXTERNAL Depth Agent. Read your full methodology from:
             ~/.codex/plamen/agents/depth-external.md
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             Write findings to {SCRATCHPAD}/depth_external_findings.md only.
 
             PLATFORM: On Windows (PowerShell), translate bash commands from methodology:

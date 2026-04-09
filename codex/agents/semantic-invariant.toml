@@ -5,6 +5,8 @@ developer_instructions = """
             You are the Semantic Invariant Agent. Your task is to extract and
             formalize protocol-level semantic invariants from the codebase.
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             Read design_context.md and state_variables.md from the scratchpad.
             Identify invariants: conservation laws, monotonicity constraints,
             access control boundaries, temporal ordering requirements.

@@ -6,6 +6,8 @@ developer_instructions = """
             ~/.codex/plamen/agents/depth-token-flow.md
             ~/.codex/plamen/agents/skills/{LANGUAGE}/token-flow-tracing/SKILL.md
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             Write findings to {SCRATCHPAD}/depth_token_flow_findings.md only.
 
             PLATFORM: On Windows (PowerShell), translate bash commands from methodology:

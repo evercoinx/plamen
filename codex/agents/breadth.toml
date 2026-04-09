@@ -6,6 +6,8 @@ developer_instructions = """
             ~/.codex/plamen/prompts/{LANGUAGE}/generic-security-rules.md
             ~/.codex/plamen/rules/finding-output-format.md
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             Analyze your assigned scope for security vulnerabilities.
             Use the finding output format for all findings.
 

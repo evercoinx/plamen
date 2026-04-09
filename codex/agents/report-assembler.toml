@@ -7,6 +7,8 @@ developer_instructions = """
             ~/.codex/plamen/rules/phase6-report-prompts.md (Step 6c section)
             ~/.codex/plamen/rules/report-template.md
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             Merge the tier sections into the final audit report:
             1. Combine report header, executive summary, and all tier sections
             2. Add priority remediation order

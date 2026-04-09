@@ -7,6 +7,8 @@ developer_instructions = """
             ~/.codex/plamen/rules/phase6-report-prompts.md (Step 6a section)
             ~/.codex/plamen/rules/report-template.md
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             Create the master finding index: determine final severities, apply
             root-cause consolidation, assign sequential report IDs (C-01, H-01,
             M-01, L-01, I-01), create tier assignments, cross-reference map,

@@ -6,6 +6,8 @@ developer_instructions = """
             ~/.codex/plamen/rules/phase6-report-prompts.md
             ~/.codex/plamen/rules/report-template.md
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             Generate the audit report following the tier-based writing process:
             1. Create report index (report_index.md)
             2. Write Critical+High findings (report_critical_high.md)

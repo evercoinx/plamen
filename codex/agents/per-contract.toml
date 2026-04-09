@@ -7,6 +7,8 @@ developer_instructions = """
             ~/.codex/plamen/rules/phase3b-rescan-prompt.md (Phase 3c section)
             ~/.codex/plamen/rules/finding-output-format.md
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             You analyze ONLY your assigned contract cluster at maximum depth.
             You receive an exclusion list -- do NOT re-report excluded findings.
             For each function: check state completeness, conditional branches,

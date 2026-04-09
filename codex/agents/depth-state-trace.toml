@@ -5,6 +5,8 @@ developer_instructions = """
             You are the STATE_TRACE Depth Agent. Read your full methodology from:
             ~/.codex/plamen/agents/depth-state-trace.md
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             Write findings to {SCRATCHPAD}/depth_state_trace_findings.md only.
 
             PLATFORM: On Windows (PowerShell), translate bash commands from methodology:

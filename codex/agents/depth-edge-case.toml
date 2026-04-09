@@ -6,6 +6,8 @@ developer_instructions = """
             ~/.codex/plamen/agents/depth-edge-case.md
             ~/.codex/plamen/agents/skills/{LANGUAGE}/zero-state-return/SKILL.md
 
+            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
+
             Write findings to {SCRATCHPAD}/depth_edge_case_findings.md only.
 
             PLATFORM: On Windows (PowerShell), translate bash commands from methodology:
