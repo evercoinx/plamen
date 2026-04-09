@@ -1985,27 +1985,11 @@ def _install_codex_adapter(w):
 
     w(f"  {_C_GREEN}✓{_RST} Copied {items_copied} Codex-specific files into {codex_home}\n")
 
-    # Step 5: Add MCP auto-allow rules so audits run without permission prompts
-    rules_dir = os.path.join(codex_home, "rules")
-    os.makedirs(rules_dir, exist_ok=True)
-    rules_path = os.path.join(rules_dir, "default.rules")
-    mcp_servers = ["slither-analyzer", "unified-vuln-db", "solana-fender",
-                   "farofino", "foundry-suite", "evm-chain-data",
-                   "tavily-search", "memory", "helius"]
-    # Read existing rules to avoid duplicates
-    existing = ""
-    if os.path.isfile(rules_path):
-        with open(rules_path, "r") as f:
-            existing = f.read()
-    added = 0
-    with open(rules_path, "a") as f:
-        for srv in mcp_servers:
-            rule = f'mcp_tool_rule(server="{srv}", tool="*", decision="allow")'
-            if rule not in existing:
-                f.write(rule + "\n")
-                added += 1
-    if added:
-        w(f"  {_C_GREEN}✓{_RST} Added {added} MCP auto-allow rules to {rules_path}\n")
+    # NOTE: Codex MCP tool permissions cannot be pre-configured via rules files.
+    # Users must select "Always allow" on the first MCP tool prompt per server.
+    # Codex's rules/default.rules only supports prefix_rule (shell commands).
+    w(f"  {_C_ORANGE}!{_RST} MCP tools require one-time approval on first use in Codex.\n")
+    w(f"    {_C_GRAY}Select '3. Always allow' when prompted for each MCP server.{_RST}\n")
 
     # Summary
     w(f"\n  {_C_GREEN}Codex adapter installed successfully.{_RST}\n")
