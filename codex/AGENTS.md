@@ -33,8 +33,14 @@ Your methodology, prompts, and skill files live in `~/.codex/plamen/`.
 7. **METHODOLOGY NOT ANSWERS** -- Tell agents WHAT to analyze, not WHAT to find.
 8. **NO REPORT BEFORE VERIFICATION** -- Verify before reporting.
 9. **SEVERITY MATRIX** -- Use Impact x Likelihood.
-10. **MCP TIMEOUT POLICY** -- Agents that call MCP tools must NOT retry on timeout.
-    Record `[MCP: TIMEOUT]` and switch to fallback.
+10. **MCP LIMITATION** -- Most MCP servers do NOT expose tools in Codex due to a 
+    protocol handshake issue. Do NOT attempt to call mcp__ tools unless `/mcp` shows
+    actual tools for that server. Use these fallbacks instead:
+    - **Static analysis** (slither): use `forge inspect` + grep-based pattern scanning
+    - **RAG/vulnerability DB**: use web search (`tavily` or built-in) for historical findings
+    - **On-chain data**: use `cast` CLI commands directly instead of MCP
+    - **Fork testing**: use `forge test --fork-url` directly via shell
+    Only `helius` and `memory` MCP servers reliably expose tools in Codex currently.
 
 ## Phase Sequence
 
