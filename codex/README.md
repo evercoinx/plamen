@@ -70,7 +70,7 @@ python scripts/codex_adapter.py
   SKILL.md phase sequence, and agent developer_instructions are templated
   and must be updated manually when Claude-side files change. Phase 2 goal
   is to derive more content from CLAUDE.md and commands/plamen.md parsing.
-- **Model**: Codex uses `o3` (200K context) vs Claude Code's Opus (1M context).
+- **Model**: Codex uses `gpt-5.3-codex` (272K context) vs Claude Code's Opus (1M context).
   Thorough mode may require more careful context management.
 - **Thorough mode parity**: Several Thorough-only features are experimental or
   not yet implemented on Codex. See the Mode Support Status table in

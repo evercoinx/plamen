@@ -22,6 +22,19 @@ Parse `$ARGUMENTS`:
 - If it contains `scope:` followed by a path, set `SCOPE_FILE`.
 - If it contains `notes:` followed by text, set `SCOPE_NOTES`.
 
+## Step 0.5: Interactive Setup (when no arguments given)
+
+If MODE was not specified in arguments:
+
+1. Display: "Plamen Web3 Security Auditor -- Codex Runtime"
+2. Ask the user: "Which audit mode? [light/core/thorough] (default: core)"
+3. Wait for response. Set MODE accordingly. If empty or unrecognized, default to core.
+4. Confirm: "Starting {MODE} audit on {PROJECT_ROOT}"
+
+If a path was not specified, use cwd and confirm:
+"Target: {cwd} -- correct? [y/n]"
+If the user answers "n", ask for the correct path before proceeding.
+
 ## Step 1: Language Detection
 
 Detect the project's smart contract language by scanning `PROJECT_ROOT`:
@@ -106,7 +119,7 @@ Read the full recon prompt structure from:
 
 **Agent 1A: RAG Meta-Buffer** (FIRE-AND-FORGET)
 - Tasks: TASK 0 steps 1-5 (vuln-db probe + Solodit queries)
-- Model: o3-mini (mechanical query+format task)
+- Model: defined in agent role TOML (lightweight model -- mechanical query+format task)
 - Spawn with `spawn_agent` and do NOT wait for completion
 - Writes: `meta_buffer.md`
 - If still running after Agents 1B/2/3 finish, abandon it and write:
@@ -114,13 +127,13 @@ Read the full recon prompt structure from:
 
 **Agent 1B: Docs + External + Fork** (foreground)
 - Tasks: TASK 0 step 6 (fork ancestry), TASK 3 (docs), TASK 11 (external)
-- Model: o3 (web search + design reasoning)
+- Model: defined in agent role TOML (global model -- web search + design reasoning)
 - Role: `~/.codex/agents/recon.toml` (with task subset)
 - Writes: `design_context.md`, `external_production_behavior.md`
 
 **Agent 2: Build + Static + Tests** (foreground)
 - Tasks: TASK 1 (build), TASK 2 (static analysis), TASK 8 (tests), TASK 9 (coverage)
-- Model: o3-mini (tool execution + output formatting)
+- Model: defined in agent role TOML (lightweight model -- tool execution + output formatting)
 - Role: `~/.codex/agents/recon.toml` (with task subset)
 - Writes: `build_status.md`, `function_list.md`, `call_graph.md`,
   `state_variables.md`, `modifiers.md`, `event_definitions.md`,
@@ -129,7 +142,7 @@ Read the full recon prompt structure from:
 **Agent 3: Patterns + Surface + Templates** (foreground)
 - Tasks: TASK 4 (patterns), TASK 5 (inventory), TASK 6 (surface), TASK 7 (flags),
   TASK 10 (templates)
-- Model: o3 (attack surface + template selection requires reasoning)
+- Model: defined in agent role TOML (global model -- attack surface + template selection requires reasoning)
 - Role: `~/.codex/agents/recon.toml` (with task subset)
 - Writes: `contract_inventory.md`, `attack_surface.md`, `detected_patterns.md`,
   `setter_list.md`, `emit_list.md`, `constraint_variables.md`,
@@ -144,9 +157,10 @@ Verify all required artifacts exist per phase_manifest.json.
 ### Phase 3: Breadth Analysis
 
 Read `{SCRATCHPAD}/template_recommendations.md` for agent count and scope split.
-Spawn 3-9 `breadth` agents in parallel (from `~/.codex/agents/breadth.toml`):
+Spawn breadth agents in batches of max 6 (from `~/.codex/agents/breadth.toml`):
 - Each agent gets a unique `{N}` and scope assignment
-- Wait for all to complete
+- If 7+ agents needed: spawn agents 1-6, wait for all to complete, then spawn 7+
+- Wait for all batches to complete
 - Verify at least 3 `analysis_*.md` files exist
 
 ### Phase 4a: Findings Inventory
@@ -172,15 +186,19 @@ If MODE is core or thorough:
 
 ### Phase 4b: Depth Loop
 
-Spawn depth agents in parallel from their respective TOML roles:
+Spawn in 2 batches to respect the 8-thread limit:
+
+**Batch 1** (4 agents): Spawn depth agents from their respective TOML roles:
 - `depth-token-flow.toml`
 - `depth-state-trace.toml`
 - `depth-edge-case.toml`
 - `depth-external.toml`
+Wait for all 4 to complete.
 
-Also spawn scanner agents from `scanner.toml`.
-
-For Core/Thorough: spawn flag-triggered niche agents from `niche-agent.toml`.
+**Batch 2** (up to 6 agents): Spawn scanners + niche agents:
+- Scanner agents from `scanner.toml`
+- For Core/Thorough: flag-triggered niche agents from `niche-agent.toml`
+Wait for all to complete.
 
 For Thorough mode:
 - Run confidence scoring via `scoring.toml` agent
@@ -198,17 +216,18 @@ Read `~/.codex/plamen/rules/phase4c-chain-prompt.md` for prompts.
 
 ### Phase 5: Verification
 
-Spawn `verifier` agents for each hypothesis batch:
+Spawn `verifier` agents in batches of 6 for each hypothesis batch:
 - Read `~/.codex/plamen/rules/phase5-poc-execution.md` for PoC rules
 - Batch hypotheses by severity (Critical first)
+- If more than 6 hypotheses: spawn verifiers 1-6, wait, then spawn 7+
 - Execute PoCs and record verdicts
 
 ### Phase 6: Report Generation
 
-Spawn report agents per `~/.codex/plamen/rules/phase6-report-prompts.md`:
-1. `report-index.toml` agent (assigns clean report IDs, tier assignments)
-2. Three parallel `report-tier-writer.toml` agents (Critical+High, Medium, Low+Info)
-3. `report-assembler.toml` agent (combines into AUDIT_REPORT.md)
+Spawn report agents sequentially per `~/.codex/plamen/rules/phase6-report-prompts.md`:
+1. `report-index.toml` agent (1 agent -- assigns clean report IDs, tier assignments). Wait for completion.
+2. Three parallel `report-tier-writer.toml` agents (Critical+High, Medium, Low+Info). Wait for all 3.
+3. `report-assembler.toml` agent (1 agent -- combines into AUDIT_REPORT.md). Wait for completion.
 
 ## Artifact Gate Enforcement
 
