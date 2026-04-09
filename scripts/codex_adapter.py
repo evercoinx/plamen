@@ -244,6 +244,8 @@ def generate_config_toml(out_dir: Path) -> None:
         if comment:
             lines.append(f'# {comment}')
         lines.append(f'type = "stdio"')
+        lines.append(f'required = false')
+        lines.append(f'startup_timeout_sec = 30')
         if name in npm_servers:
             entry_js = str(npm_node_modules / npm_servers[name]).replace("\\", "/")
             lines.append(f'command = "{node_wrapper}"')
