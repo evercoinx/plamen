@@ -212,6 +212,21 @@ def generate_config_toml(out_dir: Path) -> None:
         if cwd:
             lines.append(f'cwd = "{cwd}"')
 
+        # Skip servers whose REQUIRED env vars are still placeholders.
+        # These would fail at MCP handshake with invalid credentials.
+        has_placeholder = any(v.startswith("YOUR_") for v in env.values()) if env else False
+        if has_placeholder:
+            # Comment out the entire server block
+            commented_start = len(lines) - 1
+            while commented_start >= 0 and not lines[commented_start].startswith(f'[mcp_servers.{name}]'):
+                commented_start -= 1
+            for i in range(commented_start, len(lines)):
+                if lines[i] and not lines[i].startswith('#'):
+                    lines[i] = '# ' + lines[i]
+            lines.append(f'# ^ Disabled: replace YOUR_* placeholders in env to enable')
+            lines.append('')
+            continue
+
         if env:
             lines.append(f'[mcp_servers.{name}.env]')
             for k, v in env.items():
