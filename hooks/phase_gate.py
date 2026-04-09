@@ -524,20 +524,53 @@ def cmd_track_write():
     PostToolUse hook for Write/Edit. Lightweight tracker.
     - If written file is in scratchpad, reset stall counter
     - If first scratchpad write, check for state initialization
+
+    Supports multiple payload formats:
+    - Claude Code: { "tool_input": { "file_path": "..." } }
+    - Codex flat:  { "file_path": "..." }  or  { "path": "..." }
+    - Codex tool_response: { "tool_response": { "filePath": "..." } }
     """
     stdin_data = read_stdin_json()
 
-    # Extract file path from tool input
+    # Try multiple payload field paths to find the written file path.
+    # Claude Code format: tool_input.file_path
+    file_path = ""
     tool_input = stdin_data.get("tool_input", {})
-    file_path = tool_input.get("file_path", "")
+    if isinstance(tool_input, dict):
+        file_path = tool_input.get("file_path", "")
+
+    # Codex may emit flat fields at the top level
+    if not file_path:
+        file_path = stdin_data.get("file_path", "")
 
     if not file_path:
-        # Also check tool_response for filePath (Edit tool uses this)
+        file_path = stdin_data.get("path", "")
+
+    # Claude Code Edit tool puts path in tool_response.filePath
+    if not file_path:
         tool_response = stdin_data.get("tool_response", {})
         if isinstance(tool_response, dict):
             file_path = tool_response.get("filePath", "")
+            if not file_path:
+                file_path = tool_response.get("file_path", "")
+
+    # Codex may nest under "output" or "result"
+    if not file_path:
+        for key in ("output", "result"):
+            nested = stdin_data.get(key, {})
+            if isinstance(nested, dict):
+                file_path = nested.get("file_path", "") or nested.get("filePath", "") or nested.get("path", "")
+                if file_path:
+                    break
 
     if not file_path:
+        print(
+            "[Watchdog] Unknown PostToolUse payload format -- stall tracking "
+            "disabled for this event. Keys received: {}".format(
+                list(stdin_data.keys()) if stdin_data else "empty"
+            ),
+            file=sys.stderr,
+        )
         sys.exit(0)
 
     file_path = file_path.replace("\\", "/")
@@ -628,6 +661,17 @@ def cmd_stop():
         save_json_file(state_path, state)
         sys.exit(0)
 
+    # Startup grace: never block until at least 1 audit artifact exists in scratchpad.
+    # Time-based grace (120s) was too fragile — Codex planning can take longer.
+    # Artifact-based grace is robust: once the first .md file appears (from any
+    # recon agent), enforcement activates. Until then, only warn.
+    try:
+        scratchpad_files = [f for f in os.listdir(scratchpad)
+                           if f.endswith(".md") and f != STATE_FILENAME]
+    except (IOError, OSError):
+        scratchpad_files = []
+    in_grace_period = len(scratchpad_files) == 0
+
     # Load manifest
     manifest = load_json_file(MANIFEST_PATH)
     if not manifest:
@@ -694,7 +738,26 @@ def cmd_stop():
     prev_stall_missing = sorted(state.get("stall_missing", []))
 
     if prev_stall_phase == current_phase_name and prev_stall_missing == missing_names:
-        # Second consecutive stop with same missing artifacts -> BLOCK
+        # Second consecutive stop with same missing artifacts
+
+        if in_grace_period:
+            # During startup grace period: warn only, never block.
+            # The orchestrator is still planning (reading prompts, detecting
+            # language, composing agent prompts) before spawning recon agents.
+            warn_msg = (
+                "[Watchdog] No artifacts in scratchpad yet — grace period active. "
+                "Phase {} has {} missing artifacts. "
+                "Enforcement activates after first artifact is written."
+            ).format(
+                     current_phase.get("display_name", current_phase_name),
+                     len(missing))
+            state["warnings_issued"] = state.get("warnings_issued", 0) + 1
+            save_json_file(state_path, state)
+            print(warn_msg, file=sys.stderr)
+            output_json({"systemMessage": warn_msg})
+            sys.exit(0)
+
+        # Past grace period -> BLOCK
         missing_str = format_missing_with_hints(missing, current_phase)
         block_msg = (
             "[Watchdog BLOCK] Stalled on phase: {}\n"

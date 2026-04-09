@@ -1,0 +1,16 @@
+[
+  {
+    "event": "PreToolUse",
+    "matcher": "Bash",
+    "script": "python ~/.codex/plamen/hooks/command_guard.py"
+  },
+  {
+    "event": "Stop",
+    "script": "python ~/.codex/plamen/hooks/phase_gate.py --stop"
+  },
+  {
+    "event": "PostToolUse",
+    "matcher": "Write|Edit",
+    "script": "python ~/.codex/plamen/hooks/phase_gate.py --track-write"
+  }
+]

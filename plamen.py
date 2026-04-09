@@ -1915,6 +1915,92 @@ def run_uninstall():
     w(f"  {_C_GRAY}Plamen repo at {PLAMEN_HOME} is untouched.{_RST}\n\n")
 
 
+def _install_codex_adapter(w):
+    """Generate Codex config files and install into ~/.codex/.
+
+    1. Runs scripts/codex_adapter.py to (re)generate codex/ files
+    2. Creates ~/.codex/ if it doesn't exist
+    3. Symlinks ~/.codex/plamen/ → PLAMEN_HOME (shared methodology)
+    4. Copies Codex-specific files (AGENTS.md, config.toml, agents/, skills/, hooks.json)
+    """
+    codex_home = os.path.normpath(os.path.expanduser("~/.codex"))
+    codex_plamen = os.path.normpath(os.path.join(codex_home, "plamen"))
+    codex_dir = os.path.normpath(os.path.join(PLAMEN_HOME, "codex"))
+    generator = os.path.normpath(os.path.join(PLAMEN_HOME, "scripts", "codex_adapter.py"))
+
+    # Step 1: Run the generator script
+    w(f"  {_C_ORANGE}>{_RST} Generating Codex config files...\n")
+    sys.stdout.flush()
+    py = _python_bin()
+    r = subprocess.run([py, generator, "--output-dir", codex_dir],
+                       capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        w(f"  {_C_RED}Generator failed: {r.stderr[:300]}{_RST}\n")
+        return False
+    w(f"  {_C_GREEN}✓{_RST} Generated Codex files in codex/\n")
+
+    # Step 2: Create ~/.codex/
+    os.makedirs(codex_home, exist_ok=True)
+    w(f"  {_C_GREEN}✓{_RST} ~/.codex/ directory ready\n")
+
+    # Step 3: Symlink ~/.codex/plamen/ → PLAMEN_HOME
+    w(f"  {_C_ORANGE}>{_RST} Linking ~/.codex/plamen/ → {PLAMEN_HOME}\n")
+    if _safe_link(PLAMEN_HOME, codex_plamen, w):
+        w(f"  {_C_GREEN}✓{_RST} Shared methodology linked\n")
+    else:
+        w(f"  {_C_ORANGE}!{_RST} Could not create symlink — Codex may not find methodology files\n")
+
+    # Step 4: Copy Codex-specific files into ~/.codex/
+    items_copied = 0
+    for item in ("AGENTS.md", "config.toml", "hooks.json"):
+        src = os.path.join(codex_dir, item)
+        dst = os.path.join(codex_home, item)
+        if os.path.isfile(src):
+            shutil.copy2(src, dst)
+            items_copied += 1
+
+    # Copy agents/ directory
+    agents_src = os.path.join(codex_dir, "agents")
+    agents_dst = os.path.join(codex_home, "agents")
+    if os.path.isdir(agents_src):
+        os.makedirs(agents_dst, exist_ok=True)
+        for f in os.listdir(agents_src):
+            src_f = os.path.join(agents_src, f)
+            dst_f = os.path.join(agents_dst, f)
+            if os.path.isfile(src_f):
+                shutil.copy2(src_f, dst_f)
+                items_copied += 1
+
+    # Copy skills/ directory tree
+    skills_src = os.path.join(codex_dir, "skills")
+    skills_dst = os.path.join(codex_home, "skills")
+    if os.path.isdir(skills_src):
+        for root, dirs, files in os.walk(skills_src):
+            rel = os.path.relpath(root, skills_src)
+            dst_root = os.path.join(skills_dst, rel)
+            os.makedirs(dst_root, exist_ok=True)
+            for f in files:
+                shutil.copy2(os.path.join(root, f), os.path.join(dst_root, f))
+                items_copied += 1
+
+    w(f"  {_C_GREEN}✓{_RST} Copied {items_copied} Codex-specific files into {codex_home}\n")
+
+    # NOTE: Codex MCP tool permissions cannot be pre-configured via rules files.
+    # Users must select "Always allow" on the first MCP tool prompt per server.
+    # Codex's rules/default.rules only supports prefix_rule (shell commands).
+    w(f"  {_C_ORANGE}!{_RST} MCP tools require one-time approval on first use in Codex.\n")
+    w(f"    {_C_GRAY}Select '3. Always allow' when prompted for each MCP server.{_RST}\n")
+
+    # Summary
+    w(f"\n  {_C_GREEN}Codex adapter installed successfully.{_RST}\n")
+    w(f"  {_C_GRAY}  Shared methodology: {codex_plamen} → {PLAMEN_HOME}{_RST}\n")
+    w(f"  {_C_GRAY}  Codex config: {os.path.join(codex_home, 'config.toml')}{_RST}\n")
+    w(f"  {_C_GRAY}  Agent roles: {os.path.join(codex_home, 'agents', '*.toml')}{_RST}\n")
+    w(f"  {_C_GRAY}  Skill: {os.path.join(codex_home, 'skills', 'plamen', 'SKILL.md')}{_RST}\n")
+    w(f"\n  {_C_ORANGE}>{_RST} Remember to replace API key placeholders in config.toml\n\n")
+    return True
+
+
 def run_setup():
     """Full setup flow: Python deps → config files → toolchain → RAG → re-check."""
     w = sys.stdout.write
@@ -2898,6 +2984,7 @@ def main():
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}setup{_RST}                        Install tools + build RAG\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}rag{_RST}                          Rebuild RAG database only\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}uninstall{_RST}                    Remove from ~/.claude\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}install --codex{_RST}             Install Codex adapter to ~/.codex\n")
             w(f"\n  {_C_WHITE}Options (for audit modes):{_RST}\n")
             w(f"    {_C_GRAY}--docs{_RST} PATH              Whitepaper or spec file\n")
             w(f"    {_C_GRAY}--scope{_RST} PATH             Scope file listing contracts\n")
@@ -2928,6 +3015,13 @@ def main():
 
         # ── Install / uninstall subcommands ───────────────────
         if arg in ("install", "setup"):
+            # Check for --codex flag
+            if "--codex" in sys.argv:
+                show_banner()
+                w = sys.stdout.write
+                console.print(Rule(title="Codex Adapter", style="color(238)"))
+                _install_codex_adapter(w)
+                return
             show_banner()
             run_setup()
             return

@@ -1,72 +1,64 @@
+
+!scripts/codex_adapter.py
+# ── Auth cache ────────────────────────────────────
 # ── Credentials & secrets ─────────────────────────
-.credentials.json
-*.env
-.env.*
-
-# ── User-specific config (use .example templates) ─
-mcp.json
-settings.json
-
-# ── Session / transient data ─────────────────────
-history.jsonl
-cache/
-debug/
-backups/
-downloads/
-file-history/
-paste-cache/
-shell-snapshots/
-todos/
-telemetry/
-memory/
-plans/
-tasks/
-plugins/
-projects/
-sessions/
-
+# ── IDE ───────────────────────────────────────────
+# ── Local-only working files (proposals, notes) ──
 # ── MCP server data (rebuilt via indexers) ────────
-custom-mcp/unified-vuln-db/data/
-custom-mcp/unified-vuln-db/*.egg-info/
-custom-mcp/defihacklabs-rag/data/
-custom-mcp/solodit-scraper/data/
-**/chroma_db/
-**/DeFiHackLabs/
-**/immunefi_cache/
-**/solodit_cache/
-
+# ── Nested git repos (submodules have their own) ─
+# ── Node ──────────────────────────────────────────
+# ── OS files ──────────────────────────────────────
 # ── Python ────────────────────────────────────────
+# ── Scripts (dev-only banner experiments) ─────────
+# ── Session / transient data ─────────────────────
+# ── User-specific config (use .example templates) ─
+**/.git_bak/
+**/.venv*/
+**/DeFiHackLabs/
 **/__pycache__/
+**/chroma_db/
+**/immunefi_cache/
+**/node_modules/
+**/solodit_cache/
+*.egg-info/
+*.env
 *.pyc
 *.pyo
-*.egg-info/
-dist/
-build/
-.eggs/
-**/.venv*/
-
-# ── Node ──────────────────────────────────────────
-**/node_modules/
-
-# ── Auth cache ────────────────────────────────────
-mcp-needs-auth-cache.json
-
-# ── OS files ──────────────────────────────────────
-.DS_Store
-Thumbs.db
-
-# ── IDE ───────────────────────────────────────────
-.vscode/
-.idea/
-*.swp
 *.swo
-
-# ── Nested git repos (submodules have their own) ─
-**/.git_bak/
+*.swp
+.DS_Store
+.credentials.json
+.eggs/
+.env.*
 .git_old/
-
-# ── Scripts (dev-only banner experiments) ─────────
-scripts/
-
-# ── Local-only working files (proposals, notes) ──
+.idea/
+.vscode/
+Thumbs.db
+backups/
+build/
+cache/
+codex/config.toml
+custom-mcp/defihacklabs-rag/data/
+custom-mcp/solodit-scraper/data/
+custom-mcp/unified-vuln-db/*.egg-info/
+custom-mcp/unified-vuln-db/data/
+debug/
+dist/
+downloads/
+file-history/
+history.jsonl
 local/
+mcp-needs-auth-cache.json
+mcp.json
+memory/
+paste-cache/
+plans/
+plugins/
+projects/
+scripts/*
+sessions/
+settings.json
+shell-snapshots/
+tasks/
+telemetry/
+todos/
