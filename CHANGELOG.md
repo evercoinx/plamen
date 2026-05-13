@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.0.0] - 2026-05-13
 
+### Impact vs v1.1.8 — quality, cost, time
+
+These are the observed deltas comparing v2.0.0 to the last v1.x release
+on the internal recall-benchmark corpus. Numbers are indicative, not
+contractual — your-mileage-may-vary on individual targets.
+
+- **Findings**: roughly **2× recall** over v1.1.8 on the benchmark
+  corpus. The deterministic Python driver enables a wider agent fan-out
+  per phase without the context-saturation skip class that bit v1
+  Thorough runs late in the pipeline, and the dynamic-retry gate
+  resurfaces files that were missed first time around.
+- **False positives**: meaningfully lower. The post-depth Skeptic-Judge
+  pass on HIGH/CRITICAL, the cross-batch consistency check, and the
+  mandatory PoC-execution rule with harm-identity enforcement collapse
+  the "looks-bad in prose, doesn't actually exploit" class of finding.
+- **Cost**: roughly the same dollar envelope as v1.1.8 at equivalent
+  modes. The pipeline spawns more agents than v1, but the model cap is
+  **Sonnet for breadth + Opus 4.6 for depth** — Opus 4.7 was tested,
+  showed diminishing returns on the audit corpus, and burned tokens
+  faster than the recall gain justified. The cost table in `README.md`
+  and `docs/audit-modes.md` covers the per-mode ranges.
+- **Wall-clock time**: slightly shorter than v1.1.8 at equivalent
+  modes. Several phases that v1 ran through an LLM (report assembly,
+  dedup, severity index) are now mechanical Python steps in v2 —
+  milliseconds instead of minutes. The time budget those steps freed
+  up was reinvested as longer per-agent timeouts (recon, breadth,
+  depth, verify shards all 2× v1.1.8) so the analytical phases have
+  more room on large codebases.
+- **Surface coverage**: 5 SC chains (added **Soroban/Stellar**) plus
+  the new **L1 mode** for Go/Rust node clients — broader than v1.1.8.
+- **Backend**: V2 driver runs against **either Claude Code or Codex
+  CLI** with the same pipeline and gates.
+- **Engineering ergonomics**: the new architecture is markedly easier
+  to extend (add a phase = add a `Phase()` entry + a gate spec) and
+  test (each phase is a unit-testable subprocess invocation rather
+  than a hidden branch in a giant LLM prompt). CI smoke matrix on
+  `ubuntu` / `macos` / `windows` × `py3.11` / `py3.12` runs the
+  install + non-TTY path on every push.
+
 ### Added (release-candidate hardening)
 - **ast-grep auto-install**: added to `_INSTALL_RECIPES` under a new `L1 (ast-grep)` group and surfaced in the `check_dependencies` toolchain box. `plamen setup` now installs ast-grep alongside rust-analyzer; previously it was used by the L1 pipeline but never offered to install.
 - `plamen doctor` (aliases: `verify`, `check`) — fast install-verification subcommand. Checks Plamen home, PATH for `python`/`git`/`npx`/`claude`/`codex`, Python deps, `~/.claude` manifest items, `~/.codex/plamen` tree, submodule population, CLAUDE.md PLAMEN markers. Exits non-zero on hard failures; no audit run, no paid API calls. Suitable for CI smoke tests.
