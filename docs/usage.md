@@ -10,7 +10,7 @@
 plamen
 ```
 
-Interactive UI with dependency checking, tool installation, cost estimation, and Claude Code launch.
+Interactive UI with dependency checking, tool installation, cost estimation, and backend launch (Claude Code or Codex CLI).
 
 **CLI fast path** (skip the wizard):
 
@@ -21,7 +21,7 @@ plamen l1 core /path/to/node-client     # L1 infrastructure audit
 plamen l1 thorough /path/to/geth         # L1 thorough mode
 plamen setup                        # install chain toolchains
 plamen rag                          # build/rebuild RAG database
-plamen uninstall                    # remove Plamen from ~/.claude
+plamen uninstall                    # remove Plamen from ~/.claude (and ~/.codex/plamen/ if installed)
 ```
 
 > **Important**: Always use `plamen` (not `python3 plamen.py`) after PATH is set. The `python3 plamen.py` form only works from inside `~/.plamen/`.
@@ -74,7 +74,7 @@ python ~/.plamen/scripts/plamen_driver.py /path/to/project/.scratchpad/config.js
 python ~/.plamen/scripts/plamen_driver.py --fresh /path/to/project/.scratchpad/config.json
 ```
 
-The V2 driver runs each phase as a separate `claude -p` subprocess with automatic checkpointing. If the process crashes or hits rate limits, re-run the same command to resume from the last successful phase.
+The V2 driver runs each phase as a separate subprocess (`claude -p` on Claude Code, `codex exec` on Codex) with automatic checkpointing. The backend is auto-detected via `plamen_home()`. If the process crashes or hits rate limits, re-run the same command to resume from the last successful phase.
 
 ### When to Use Which
 

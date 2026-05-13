@@ -1,6 +1,6 @@
 # Setup Guide
 
-> **⚠️ Do NOT paste this file into Claude Code.** These are manual setup instructions meant to be followed in your terminal. Pasting into Claude Code causes it to autonomously execute the commands, including the optional RAG build which requires ~6GB free RAM and heavy CPU for several minutes.
+> **⚠️ Do NOT paste this file into Claude Code or Codex CLI.** These are manual setup instructions meant to be followed in your terminal. Pasting into an AI coding assistant causes it to autonomously execute the commands, including the optional RAG build which requires ~6GB free RAM and heavy CPU for several minutes.
 
 > **Just installed?** See [getting-started.md](getting-started.md) for the short version — what's required, what's optional, first audit walkthrough.
 >
@@ -128,29 +128,60 @@ pip install -e custom-mcp/slither-mcp
 
 > On macOS/Linux, use `pip3 --user` instead of bare `pip` to install to user site-packages. On Homebrew Python or Ubuntu 23.04+, also add `--break-system-packages`. The `plamen install` command handles all this automatically.
 
-### 3. Configure MCP servers
+### 3. Configure for your backend
 
-If using `python plamen.py install`, config files are merged automatically (settings.json, mcp.json, CLAUDE.md, hooks). The installer also symlinks watchdog hooks into `~/.claude/hooks/` and merges hook triggers into `settings.json` — no manual configuration needed. For Codex CLI, also run `plamen install --codex`. For manual setup:
+Plamen supports two AI backends. Install one or both:
+
+**Claude Code** (default):
 
 ```bash
-cp mcp.json.example ~/.claude/mcp.json      # if ~/.claude/mcp.json doesn't exist
-cp settings.json.example ~/.claude/settings.json  # if ~/.claude/settings.json doesn't exist
+python plamen.py install        # macOS / Linux
+python plamen.py install        # Windows
 ```
 
-Edit `~/.claude/mcp.json` with your API keys. See [MCP Servers](mcp-servers.md) for details.
+This merges config files automatically (`settings.json`, `mcp.json`, `CLAUDE.md`, hooks), symlinks watchdog hooks into `~/.claude/hooks/`, and merges hook triggers into `settings.json`. No manual configuration needed.
 
-**macOS/Linux — fix the Python command:** The Python-based MCP servers use `"command": "python"` by default. If your system only has `python3` (check: `which python`), update mcp.json:
+**Codex CLI:**
+
+```bash
+python plamen.py install --codex    # macOS / Linux
+python plamen.py install --codex    # Windows
+```
+
+This generates Codex config files, creates `~/.codex/plamen/` (symlinked to your Plamen checkout), and copies `codex/config.toml` and `codex/AGENTS.md` into `~/.codex/`. MCP servers are configured in `codex/config.toml` (TOML `[mcp_servers.*]` sections) instead of `mcp.json`. Permissions are controlled by `config.toml`'s `approval_mode` and `sandbox_mode` fields, not `settings.json`.
+
+> **Both backends**: If you use both Claude Code and Codex CLI, run the installer twice — once without `--codex` (for `~/.claude/`) and once with `--codex` (for `~/.codex/plamen/`). The methodology files are shared via symlinks; only the runtime config differs.
+
+**Manual setup** (if not using the installer):
+
+```bash
+# Claude Code
+cp mcp.json.example ~/.claude/mcp.json          # if ~/.claude/mcp.json doesn't exist
+cp settings.json.example ~/.claude/settings.json # if ~/.claude/settings.json doesn't exist
+
+# Codex CLI
+mkdir -p ~/.codex/plamen
+ln -s ~/.plamen ~/.codex/plamen                  # or copy
+cp codex/config.toml ~/.codex/config.toml
+cp codex/AGENTS.md ~/.codex/AGENTS.md
+```
+
+Edit `~/.claude/mcp.json` (Claude Code) or `codex/config.toml` (Codex CLI) with your API keys. See [MCP Servers](mcp-servers.md) for details.
+
+**macOS/Linux — fix the Python command (Claude Code only):** The Python-based MCP servers in `mcp.json` use `"command": "python"` by default. If your system only has `python3` (check: `which python`), update mcp.json:
 
 ```bash
 sed -i '' 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json  # macOS
 sed -i 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json    # Linux
 ```
 
-Windows users: keep `"command": "python"` as-is.
+Windows users: keep `"command": "python"` as-is. Codex CLI users: `config.toml` MCP commands are already set correctly by the installer.
 
 ### 4. Build the RAG database (OPTIONAL — ~6GB RAM required)
 
-First, add `SOLODIT_API_KEY` to `~/.claude/settings.json` → `"env"` section:
+First, add `SOLODIT_API_KEY` to your backend's config:
+
+**Claude Code** — add to `~/.claude/settings.json` → `"env"` section:
 
 ```json
 {
@@ -162,7 +193,14 @@ First, add `SOLODIT_API_KEY` to `~/.claude/settings.json` → `"env"` section:
 }
 ```
 
-> **Why settings.json and not `export`?** Claude Code runs subprocesses in non-interactive shells that don't source `.bashrc`/`.zshrc`. Only `settings.json` `"env"` vars are reliably propagated to both `plamen rag` and audit agent Bash subprocesses.
+**Codex CLI** — set as a shell environment variable before running `plamen rag`, or add to your shell profile:
+
+```bash
+export SOLODIT_API_KEY="your_key_here"    # macOS / Linux
+$env:SOLODIT_API_KEY = "your_key_here"    # Windows PowerShell
+```
+
+> **Why settings.json for Claude Code and not `export`?** Claude Code runs subprocesses in non-interactive shells that don't source `.bashrc`/`.zshrc`. Only `settings.json` `"env"` vars are reliably propagated to both `plamen rag` and audit agent Bash subprocesses. Codex CLI inherits shell environment variables normally, so `export` or `$env:` works.
 
 Then run:
 
@@ -193,9 +231,13 @@ The startup screen runs a dependency check showing which tools are available.
 
 ---
 
-## Permissions (settings.json)
+## Permissions
 
-The default `settings.json.example` auto-approves all tool calls required for autonomous auditing:
+Plamen requires broad tool access for autonomous auditing. The permission model differs by backend:
+
+**Claude Code** (`settings.json`):
+
+The default `settings.json.example` auto-approves all tool calls:
 
 | Permission | Why Required |
 |-----------|-------------|
@@ -206,27 +248,44 @@ The default `settings.json.example` auto-approves all tool calls required for au
 
 The deny list blocks destructive operations (`rm -rf`, `sudo`, force push).
 
+**Codex CLI** (`codex/config.toml`):
+
+Permissions are controlled by two fields in `config.toml`:
+
+| Field | Value | Effect |
+|-------|-------|--------|
+| `approval_mode` | `"full-auto"` | All tool calls auto-approved (equivalent to Claude Code's `Agent(*)` + `Bash(*)`) |
+| `sandbox_mode` | `"danger-full-access"` | Full filesystem and network access for build/test/fork operations |
+
+MCP server access is granted per-server in the `[mcp_servers.*]` sections of `config.toml`. No separate permissions file needed.
+
 ---
 
 ## Cold Start
 
-The first MCP tool call per Claude Code session loads ChromaDB and the all-MiniLM-L6-v2 embedding model (~5s). Subsequent calls are instant. The pipeline handles this automatically with probe-first patterns and WebSearch fallback.
+The first MCP tool call per session loads ChromaDB and the all-MiniLM-L6-v2 embedding model (~5s). Subsequent calls are instant. Both Claude Code and Codex CLI experience this cold start. The pipeline handles it automatically with probe-first patterns and WebSearch fallback. On Codex CLI, MCP server startup timeouts are configured per-server in `config.toml` (`startup_timeout_sec = 30` by default).
 
 ---
 
 ## Updating
 
-After pulling new versions, always re-run the installer:
+After pulling new versions, always re-run the installer for each backend you use:
 
 ```bash
-cd ~/.plamen && git pull && plamen install
+cd ~/.plamen && git pull && plamen install              # Claude Code
+cd ~/.plamen && git pull && plamen install --codex      # Codex CLI (if used)
 ```
 
-`git pull` updates symlinked files (agents, rules, skills, prompts) automatically, but three files are injected/merged copies — not symlinks — and require `plamen install` to refresh:
+`git pull` updates symlinked files (agents, rules, skills, prompts) automatically, but several files are injected/merged copies — not symlinks — and require `plamen install` to refresh:
 
+**Claude Code** (`plamen install`):
 - **`CLAUDE.md`** — orchestrator rules (agent counts, critical rules, phase references)
 - **`settings.json`** — new permissions or env vars added in a release
 - **`mcp.json`** — new MCP server definitions added in a release
+
+**Codex CLI** (`plamen install --codex`):
+- **`codex/AGENTS.md`** — Codex orchestrator rules (equivalent to `CLAUDE.md`)
+- **`codex/config.toml`** — permissions, model config, and MCP server definitions
 
 Without re-install, the orchestrator follows stale rules while skills and prompts are already updated. `plamen` will warn you on next launch if it detects a version mismatch.
 

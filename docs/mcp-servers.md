@@ -1,6 +1,6 @@
 # MCP Servers
 
-Plamen uses 9 MCP servers configured in `mcp.json`. All keys are optional -- the pipeline degrades gracefully.
+Plamen uses 9 MCP servers configured in `mcp.json` (Claude Code) or `config.toml` (Codex, with tool translation via `codex_adapter.py`). All keys are optional -- the pipeline degrades gracefully. MCP servers are a Claude Code feature; on Codex, the adapter translates tool calls to equivalent Codex sandbox operations where possible, and falls back to grep/WebSearch where not.
 
 ## Bundled (custom-mcp/)
 
@@ -40,7 +40,11 @@ Plamen uses 9 MCP servers configured in `mcp.json`. All keys are optional -- the
 
 ## Configuration Example
 
-See `mcp.json.example` for the full 9-server configuration. Key entries:
+**Claude Code**: See `mcp.json.example` for the full 9-server configuration. After `plamen install`, `mcp.json` is placed in `~/.claude/`.
+
+**Codex**: MCP servers are not natively supported. The V2 driver's `codex_adapter.py` translates RAG and static analysis tool calls. For full MCP support, use the Claude Code backend.
+
+Key `mcp.json` entries:
 
 ```json
 {
@@ -59,4 +63,4 @@ See `mcp.json.example` for the full 9-server configuration. Key entries:
 }
 ```
 
-Path notes: `cwd` fields use relative paths resolved from `~/.plamen/`.
+Path notes: `cwd` fields use relative paths resolved from `~/.plamen/`. On Codex, these paths are rewritten to `~/.codex/plamen/` equivalents by the installer.

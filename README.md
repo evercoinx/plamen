@@ -32,15 +32,17 @@ Open Claude Code (or Codex CLI) and paste the contents of [`SETUP.md`](SETUP.md)
 ```bash
 git clone https://github.com/PlamenTSV/plamen.git ~/.plamen
 cd ~/.plamen && python3 plamen.py install
+python3 plamen.py install --codex    # optional: add Codex CLI backend
 ```
 
 **Windows (PowerShell):**
 ```powershell
 git clone https://github.com/PlamenTSV/plamen.git $HOME\.plamen
 cd $HOME\.plamen; python plamen.py install
+python plamen.py install --codex     # optional: add Codex CLI backend
 ```
 
-> **Before building the RAG database**: add `SOLODIT_API_KEY` to `~/.claude/settings.json` → `"env"` section (free key from [solodit.cyfrin.io](https://solodit.cyfrin.io)). This is the only place the key is reliably visible to both `plamen rag` and audit agent subprocesses. A terminal `export` is not sufficient — Claude Code and Codex CLI spawn non-interactive subshells that don't source `.bashrc`/`.zshrc`.
+> **Before building the RAG database**: add `SOLODIT_API_KEY` to `~/.claude/settings.json` → `"env"` section (or `~/.codex/plamen/config.toml` → `[env]` for Codex). Free key from [solodit.cyfrin.io](https://solodit.cyfrin.io). This is the only place the key is reliably visible to both `plamen rag` and audit agent subprocesses. A terminal `export` is not sufficient — Claude Code and Codex CLI spawn non-interactive subshells that don't source `.bashrc`/`.zshrc`.
 >
 > Python dependencies are installed automatically on first run. On macOS/Linux use `python3`, on Windows use `python`.
 
@@ -71,26 +73,35 @@ plamen uninstall                    # remove Plamen symlinks
 
 > **Important**: Always use `plamen` (not `python3 plamen.py`) after PATH is set. The `python3 plamen.py` form only works from inside `~/.plamen/`.
 
-The installer:
+The installer (`plamen install`):
 - Creates symlinks from `~/.plamen` into `~/.claude/` so Claude Code discovers Plamen's agents, rules, prompts, and commands
-- Merges Plamen's permissions into your existing `settings.json` (additive only — won't remove your entries)
-- Merges MCP server definitions into `mcp.json` (won't overwrite your existing servers)
+- Merges Plamen's permissions into your existing `~/.claude/settings.json` (additive only — won't remove your entries)
+- Merges MCP server definitions into `~/.claude/mcp.json` (won't overwrite your existing servers)
 - Symlinks watchdog hooks into `~/.claude/hooks/` and merges hook triggers into `settings.json`
-- Injects Plamen instructions into `CLAUDE.md` between `<!-- PLAMEN:START/END -->` markers (preserves your content)
+- Injects Plamen instructions into `~/.claude/CLAUDE.md` between `<!-- PLAMEN:START/END -->` markers (preserves your content)
 - Installs Python dependencies (RAG database is built separately via `plamen rag`)
 
-For Codex CLI support, also run `plamen install --codex` — this sets up `~/.codex/plamen/` with Codex-specific config and commands.
+For Codex CLI support, also run `plamen install --codex`. This sets up `~/.codex/plamen/` (symlinked from `~/.plamen/codex/`) with:
+- Codex orchestrator config in `codex/AGENTS.md` (equivalent of `CLAUDE.md`)
+- MCP/tool config in `codex/config.toml` (equivalent of `settings.json` + `mcp.json`)
+- Codex-specific commands in `codex/commands/`
+- Watchdog hooks adapted for Codex's hook system
 
 Your existing Claude Code and Codex CLI configuration is preserved.
 
 <details>
 <summary>How symlinks work</summary>
 
-The Plamen repo stays at `~/.plamen`. The installer creates symlinks (shortcuts) in `~/.claude/` (and optionally `~/.codex/plamen/`) that point back to `~/.plamen/`. When the AI runtime reads `~/.claude/agents/depth-edge-case.md`, the OS transparently reads `~/.plamen/agents/depth-edge-case.md`. This means:
-- `git pull` in `~/.plamen` updates symlinked files (agents, rules, skills, prompts) automatically
-- **You still need `plamen install` after pull** — `CLAUDE.md`, `settings.json`, and `mcp.json` are injected/merged copies, not symlinks. Without re-install, the orchestrator follows stale rules. See [docs/updating.md](docs/updating.md).
+The Plamen repo stays at `~/.plamen`. The installer creates symlinks (shortcuts) pointing back to `~/.plamen/`:
+
+- **Claude Code** (`plamen install`): symlinks into `~/.claude/` — agents, rules, skills, prompts, commands
+- **Codex CLI** (`plamen install --codex`): symlinks into `~/.codex/plamen/` (via `~/.plamen/codex/`) — agents, skills, Codex-specific commands
+
+When the AI runtime reads `~/.claude/agents/depth-edge-case.md` (or `~/.codex/plamen/agents/depth-edge-case.md`), the OS transparently reads `~/.plamen/agents/depth-edge-case.md`. This means:
+- `git pull` in `~/.plamen` updates symlinked files (agents, rules, skills, prompts) automatically for both backends
+- **You still need `plamen install` (and `plamen install --codex`) after pull** — `CLAUDE.md`/`AGENTS.md`, `settings.json`/`config.toml`, and `mcp.json` are injected/merged copies, not symlinks. Without re-install, the orchestrator follows stale rules. See [docs/updating.md](docs/updating.md).
 - Your own files in `~/.claude/` or `~/.codex/` (custom agents, commands, hooks) are untouched
-- Deleting `~/.plamen` would break the symlinks — don't delete it while Plamen is installed
+- Deleting `~/.plamen` would break the symlinks for both backends — don't delete it while Plamen is installed
 
 | Platform | How links are created | Requirements |
 |----------|----------------------|-------------|
@@ -100,13 +111,13 @@ The Plamen repo stays at `~/.plamen`. The installer creates symlinks (shortcuts)
 
 </details>
 
-> **Migrating from v1.0.x** (installed directly in `~/.claude`): Close Claude Code first, then run both commands together:
+> **Migrating from v1.0.x** (installed directly in `~/.claude`): Close Claude Code (and Codex CLI if running) first, then run both commands together:
 >
 > Linux/macOS: `mv ~/.claude ~/.plamen && cd ~/.plamen && python3 plamen.py install`
 >
 > Windows (PowerShell): `Rename-Item $HOME\.claude $HOME\.plamen; cd $HOME\.plamen; python plamen.py install`
 >
-> This moves the repo to `~/.plamen` and immediately recreates `~/.claude` with symlinks + merged config. Claude Code will not work between the move and install — run them together.
+> This moves the repo to `~/.plamen` and immediately recreates `~/.claude` with symlinks + merged config. Claude Code will not work between the move and install — run them together. For Codex support, follow up with `plamen install --codex` to set up `~/.codex/plamen/`.
 
 ### Option C: Manual dependency install
 
@@ -139,6 +150,11 @@ cd ../..
 curl -L https://foundry.paradigm.xyz | bash && foundryup          # EVM
 pip install slither-analyzer                                       # EVM static analysis
 # See docs/setup.md for Solana, Aptos, Sui, Medusa, Trident
+
+# 4. Codex backend (optional — after steps 1-3)
+python3 plamen.py install --codex
+# This generates ~/.codex/plamen/ with AGENTS.md, config.toml, and commands/
+# from the Claude-side manifests. No additional deps needed.
 ```
 
 > **Windows + Solana**: Enable Developer Mode (Settings > System > For Developers) and install OpenSSL (`winget install ShiningLight.OpenSSL.Dev`) before building. See [docs/dependencies.md](docs/dependencies.md).
@@ -151,11 +167,12 @@ See [docs/setup.md](docs/setup.md) for the full guide with all per-language prer
 
 ```bash
 cd ~/.plamen && git pull && plamen install
+plamen install --codex    # if using Codex backend
 ```
 
-That's it. `plamen install` is idempotent — it re-links symlinks, re-injects the updated CLAUDE.md, and merges any new config entries. It does **not** wipe your RAG database, re-install toolchains, or overwrite your API keys.
+That's it. `plamen install` is idempotent — it re-links symlinks, re-injects the updated `CLAUDE.md`, and merges any new `settings.json`/`mcp.json` entries. Adding `--codex` does the same for `AGENTS.md` and `config.toml`. Neither wipes your RAG database, re-installs toolchains, or overwrites your API keys.
 
-> **Why `plamen install` after pull?** Most files auto-update via symlinks, but `~/.claude/CLAUDE.md` (the orchestrator's rules) is injected between markers — not symlinked. Without re-install, the orchestrator follows stale rules while everything else is updated. `plamen` will warn you if it detects a version mismatch.
+> **Why `plamen install` after pull?** Most files auto-update via symlinks, but injected/merged files (`CLAUDE.md`/`AGENTS.md`, `settings.json`/`config.toml`, `mcp.json`) are copies, not symlinks. Without re-install, the orchestrator follows stale rules while everything else is updated. `plamen` will warn you if it detects a version mismatch.
 
 See [docs/updating.md](docs/updating.md) for details on what updates automatically and what doesn't.
 
@@ -189,7 +206,7 @@ Plamen also audits **L1 node clients and blockchain infrastructure** — consens
 plamen l1 core /path/to/node-client
 ```
 
-Or inside Claude Code: `/plamen l1 core`
+Or inside Claude Code: `/plamen l1 core` · Inside Codex CLI: `$plamen l1 core /path/to/node-client`
 
 L1 mode adds:
 - **22+ injectable skills** covering consensus safety, fork choice, p2p DoS/eclipse, mempool asymmetric DoS, BLS aggregation, light client proofs, state sync/pruning, execution client hardening, validator lifecycle, and more
@@ -233,24 +250,25 @@ See [docs/usage.md](docs/usage.md) for PATH setup and all CLI options.
 
 ## Resumable Pipeline (V2)
 
-The V2 pipeline (`plamen-wizard`) runs a Python driver that executes one `claude -p` subprocess per phase. If usage runs out or the process crashes, re-run the same command — it auto-resumes from the last successful checkpoint.
+The V2 pipeline (`plamen-wizard`) runs a Python driver that executes one `claude -p` (or `codex exec`) subprocess per phase. If usage runs out or the process crashes, re-run the same command — it auto-resumes from the last successful checkpoint.
 
 ```bash
 # Launch via wizard (interactive)
 plamen                              # terminal wrapper starts wizard
 /plamen-wizard                      # inside Claude Code
+$plamen-wizard                      # inside Codex CLI
 
 # Resume a crashed/interrupted audit
 python ~/.plamen/scripts/plamen_driver.py /path/to/project/.scratchpad/config.json
 ```
 
-The driver handles: phase scheduling, artifact gating, rate-limit pauses, retry-with-degradation, and subprocess isolation. Claude handles: agent orchestration, finding analysis, PoC execution, and report generation.
+The driver handles: phase scheduling, artifact gating, rate-limit pauses, retry-with-degradation, and subprocess isolation via the `plamen_home()` abstraction (resolves to `~/.claude/` or `~/.codex/plamen/` based on the configured backend). The LLM handles: agent orchestration, finding analysis, PoC execution, and report generation.
 
 ---
 
 ## Codex CLI Backend
 
-Plamen supports [OpenAI Codex CLI](https://github.com/openai/codex) as an alternative backend. The V2 driver translates tool calls, rewrites paths (`~/.claude/` → `~/.codex/plamen/`), and adapts sandbox constraints.
+Plamen supports [OpenAI Codex CLI](https://github.com/openai/codex) as an alternative backend. The V2 driver translates tool calls (Write to `apply_patch`, Bash to `shell`), rewrites paths (`~/.claude/` to `~/.codex/plamen/`), and adapts sandbox constraints.
 
 ```bash
 # Install Codex backend (after standard install)
@@ -260,7 +278,15 @@ plamen install --codex
 $plamen core /path/to/project       # inside Codex CLI
 ```
 
-Codex configuration lives in `~/.codex/plamen/` (symlinked from `~/.plamen/codex/`). See `codex/AGENTS.md` for Codex-specific orchestrator config.
+Codex configuration lives in `~/.codex/plamen/` (symlinked from `~/.plamen/codex/`):
+
+| Claude Code | Codex CLI | Purpose |
+|-------------|-----------|---------|
+| `~/.claude/CLAUDE.md` | `~/.codex/plamen/AGENTS.md` | Orchestrator rules |
+| `~/.claude/settings.json` | `~/.codex/plamen/config.toml` | Permissions, env vars, hooks |
+| `~/.claude/mcp.json` | `~/.codex/plamen/config.toml` `[mcp]` | MCP server definitions |
+| `~/.claude/commands/` | `~/.codex/plamen/commands/` | Slash commands |
+| `~/.claude/hooks/` | `~/.codex/plamen/hooks/` | Watchdog hooks |
 
 ---
 

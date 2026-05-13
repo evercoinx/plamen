@@ -4,7 +4,7 @@
 
 ```
                           +-----------------------------------+
-                          |       ORCHESTRATOR (CLAUDE.md)     |
+                          |  ORCHESTRATOR (CLAUDE.md/AGENTS.md)|
                           |  Detects language, reads phase     |
                           |  prompts, spawns agents,           |
                           |  enforces gates                    |
@@ -165,7 +165,7 @@ Key properties:
 
 ## L1 Pipeline Differences
 
-When running in L1 mode (`/plamen l1`), the pipeline adjusts:
+When running in L1 mode (`/plamen l1` in Claude Code, `$plamen l1` in Codex, or `plamen l1` from the terminal), the pipeline adjusts:
 
 | SC Pipeline | L1 Pipeline | Reason |
 |-------------|-------------|--------|
@@ -185,7 +185,8 @@ See [l1-mode/design.md](l1-mode/design.md) for the complete L1 architecture.
 
 The V2 driver supports OpenAI Codex CLI as an alternative backend:
 
-- Prompts are rewritten: `~/.claude/` → `~/.codex/plamen/`
-- Tool calls are translated to Codex equivalents
-- Sandbox constraints are adapted
-- Codex config lives at `~/.codex/plamen/` (symlinked from `~/.plamen/codex/`)
+- Prompts are rewritten: `~/.claude/` paths become `~/.codex/plamen/` equivalents
+- Tool calls are translated to Codex equivalents (via `codex_adapter.py`)
+- Sandbox constraints are adapted for Codex's execution model
+- Codex config lives at `~/.codex/plamen/` (symlinked from `~/.plamen/codex/`): `AGENTS.md` (orchestrator) and `config.toml` (settings), replacing Claude Code's `CLAUDE.md`, `settings.json`, and `mcp.json`
+- Install: `plamen install --codex`. The V2 driver auto-detects the active backend via `plamen_home()`

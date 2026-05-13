@@ -51,8 +51,9 @@ L1 infrastructure audits use the same Light/Core/Thorough tiers with these diffe
 | Evidence tags | + [DIFF-PASS], [CONFORMANCE-PASS], [NON-DET-PASS], [FUZZ-PASS], [LSP-TRACE] |
 
 ```bash
-plamen l1 core /path/to/node-client
+plamen l1 core /path/to/node-client    # terminal wrapper
 /plamen l1 thorough                    # inside Claude Code
+$plamen l1 thorough                    # inside Codex CLI
 ```
 
 See [l1-mode/design.md](l1-mode/design.md) for the full L1 architecture.
@@ -61,4 +62,4 @@ See [l1-mode/design.md](l1-mode/design.md) for the full L1 architecture.
 
 ## Codex Backend
 
-All audit modes work with both Claude Code and OpenAI Codex CLI backends. The V2 driver handles tool translation and path rewriting automatically. See the main [README](../README.md) for Codex setup.
+All audit modes work with both Claude Code and OpenAI Codex CLI backends. The V2 driver (`plamen_driver.py`) auto-detects the active backend via `plamen_home()` and handles tool translation and path rewriting (`~/.claude/` vs `~/.codex/plamen/`). Install the Codex backend with `plamen install --codex`. See the main [README](../README.md) for full Codex setup.

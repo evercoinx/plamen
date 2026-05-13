@@ -1,6 +1,6 @@
 # Getting Started
 
-> **⚠️ Do NOT paste this file or setup.md into Claude Code.** Follow these instructions in your terminal. Pasting into Claude Code causes autonomous command execution including the optional RAG build (~6GB RAM).
+> **⚠️ Do NOT paste this file or setup.md into Claude Code / Codex CLI.** Follow these instructions in your terminal. Pasting into an AI coding assistant causes autonomous command execution including the optional RAG build (~6GB RAM).
 
 > Just installed Plamen? This page tells you exactly what to do next — what's required, what's optional, and how to run your first audit.
 
@@ -10,8 +10,9 @@
 
 | Component | What it is | Status after install |
 |-----------|-----------|---------------------|
-| **Symlinks** | Links Plamen's agents, rules, commands, and hooks into `~/.claude/` (and `~/.codex/plamen/` if `--codex`) | Done |
-| **Config** | Merged permissions, env vars, MCP servers, and hook triggers into your Claude Code / Codex config | Done |
+| **Symlinks** | Links Plamen's agents, rules, commands, and hooks into `~/.claude/` (Claude Code) or `~/.codex/plamen/` (Codex CLI) | Done |
+| **Config** | Merged permissions, env vars, MCP servers, and hook triggers into `settings.json` (Claude Code) or `codex/config.toml` (Codex CLI) | Done |
+| **Orchestrator rules** | Injected `CLAUDE.md` (Claude Code) or `codex/AGENTS.md` (Codex CLI) — the orchestrator's top-level instructions | Done |
 | **Watchdog** | Pipeline enforcement hooks that prevent the orchestrator from skipping steps during audits | Done (runs automatically, zero overhead outside audits) |
 | **Core Python deps** | `rich`, `InquirerPy` (wrapper UI) | Done |
 | **MCP server deps** | slither-mcp, solana-fender, farofino-mcp | Done |
@@ -60,13 +61,13 @@ You can always build it later. Run the same command to rebuild after updates.
 
 ### Optional: API keys
 
-Set in `~/.claude/mcp.json` or `~/.codex/plamen/mcp.json` (edit the file, replace `YOUR_*` placeholders):
+Set in `~/.claude/mcp.json` (Claude Code) or `~/.codex/plamen/mcp.json` (Codex CLI). Edit the file for your backend and replace the `YOUR_*` placeholders:
 
 | Key | What it does | Impact if missing | Get it |
 |-----|-------------|-------------------|--------|
 | `SOLODIT_API_KEY` | Indexes Solodit findings into RAG | RAG database will be smaller (misses 3400+ Solodit findings) | [solodit.cyfrin.io](https://solodit.cyfrin.io) (free) |
 | `ETHERSCAN_API_KEY` | Fetches verified source code on-chain | No production source verification (EVM only) | [etherscan.io/apis](https://etherscan.io/apis) (free) |
-| `TAVILY_API_KEY` | Web search fallback when RAG fails | Falls back to Claude's built-in web search | [tavily.com](https://tavily.com) (free tier) |
+| `TAVILY_API_KEY` | Web search fallback when RAG fails | Falls back to built-in web search | [tavily.com](https://tavily.com) (free tier) |
 | `HELIUS_API_KEY` | Solana on-chain data | No Solana account inspection | [helius.dev](https://helius.dev) (free tier) |
 | RPC URL | Ethereum fork testing | No fork-mode PoC verification (EVM only) | Alchemy, Infura, or `https://eth.llamarpc.com` |
 
@@ -74,13 +75,13 @@ Set in `~/.claude/mcp.json` or `~/.codex/plamen/mcp.json` (edit the file, replac
 
 ## Run your first audit
 
-### Option A: Terminal (recommended for first time)
+### Option A: Terminal wizard (recommended for first time)
 
 ```bash
 plamen
 ```
 
-The interactive wizard walks you through: mode selection → target project → docs → scope → cost estimate → launch.
+The interactive wizard walks you through: mode selection → target project → docs → scope → cost estimate → launch. The V2 driver auto-detects your backend (Claude Code or Codex CLI) via `plamen_home()`.
 
 ### Option B: One-liner
 
@@ -88,19 +89,19 @@ The interactive wizard walks you through: mode selection → target project → 
 plamen core /path/to/your/project
 ```
 
-### Option C: Inside Claude Code
+### Option C: From inside your AI coding assistant
 
+**Claude Code:**
 ```
 /plamen
 ```
 
-### Option D: Inside Codex CLI
-
+**Codex CLI:**
 ```
 $plamen core /path/to/project
 ```
 
-Requires prior Codex setup: `plamen install --codex`.
+Both invoke the same V2 driver and pipeline. The backend difference is transparent — agent prompts, depth templates, and verification logic are identical.
 
 ## What mode should I pick?
 
@@ -112,7 +113,7 @@ Requires prior Codex setup: `plamen install --codex`.
 
 Start with **Light** if you're on a Pro plan or just trying it out. Use **Core** for real audits.
 
-> **L1 mode**: For node client / infrastructure audits, use `plamen l1 [light|core|thorough]`. Same mode tiers apply.
+These tiers apply to both smart contract and L1 infrastructure audits. For node client / infrastructure codebases (Go/Rust), use `plamen l1 [light|core|thorough]` — same three tiers, same depth loop and verification pipeline, with L1-specific depth agents (consensus-invariant, network-surface) replacing token-flow.
 
 ## Verify everything works
 
@@ -122,7 +123,7 @@ Run `plamen setup` at any time to see your toolchain status:
   ╭────────────────────────────────────────────────────╮
   │  Toolchain                                         │
   │                                                    │
-  │  ✓claude  ✓python  ✓npx  ✓git                  ok │
+  │  ✓claude  ✓codex  ✓python  ✓npx  ✓git          ok │
   ├────────────────────────────────────────────────────┤
   │  EVM      ✓forge ✓slither ○medusa             2/3 │
   │  Solana   ○solana ○anchor ○trident             0/3 │
@@ -135,6 +136,7 @@ Run `plamen setup` at any time to see your toolchain status:
 
 - **✓** = installed
 - **○** = not installed (optional — install only what you need)
+- You need at least one backend (`claude` or `codex`) — both are shown but only one is required
 - **RAG DB** = run `plamen rag` to build
 
 ## Updating
@@ -145,7 +147,13 @@ After pulling new versions:
 cd ~/.plamen && git pull && plamen install
 ```
 
-`git pull` alone updates symlinked files (agents, rules, skills, prompts), but `CLAUDE.md` (the orchestrator's rules) is an injected copy — not a symlink. Without `plamen install`, the orchestrator follows stale rules while everything else is updated. `plamen` will warn you if it detects a version mismatch.
+For Codex backend, add the `--codex` flag:
+
+```bash
+cd ~/.plamen && git pull && plamen install --codex
+```
+
+`git pull` alone updates symlinked files (agents, rules, skills, prompts), but `CLAUDE.md` / `codex/AGENTS.md` (the orchestrator's rules) are injected copies — not symlinks. Without `plamen install`, the orchestrator follows stale rules while everything else is updated. `plamen` will warn you if it detects a version mismatch.
 
 See [updating.md](updating.md) for details on what auto-updates and what doesn't.
 

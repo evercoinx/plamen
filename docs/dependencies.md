@@ -21,11 +21,11 @@ The setup wizard detects your OS and installed tools, then offers to install mis
 
 | Tool | Version | Purpose | Install |
 |------|---------|---------|---------|
-| Claude Code or Codex CLI | latest | AI runtime | `npm install -g @anthropic-ai/claude-code` or [github.com/openai/codex](https://github.com/openai/codex) |
+| Claude Code and/or Codex CLI | latest | AI runtime (one or both) | `npm install -g @anthropic-ai/claude-code` and/or [github.com/openai/codex](https://github.com/openai/codex) |
 | Python | 3.11-3.12 (recommended) | MCP servers, wrapper | [python.org](https://python.org) |
 | Node.js | 18+ | npm-based MCP servers | [nodejs.org](https://nodejs.org) |
 | Git | any | Submodules, version control | [git-scm.com](https://git-scm.com) |
-| Rust | stable | Solana toolchain (Trident fuzzer) | [rustup.rs](https://rustup.rs) — Solana only |
+| Rust | stable | Solana (Trident fuzzer), Soroban contracts, L1 Rust clients | [rustup.rs](https://rustup.rs) — Solana, Soroban, and L1 Rust |
 
 ### Windows: Developer Mode (required)
 
@@ -192,7 +192,9 @@ These tools power the Phase 0.5 "Bake" step that batch-indexes repositories befo
 
 ---
 
-## MCP Servers & RAG
+## MCP Servers & RAG (Claude Code Only)
+
+MCP servers are used by the Claude Code backend only. The Codex backend uses tool translation and does not load MCP servers. The RAG database itself is shared between backends.
 
 | Component | Purpose | Install | Required? |
 |-----------|---------|---------|-----------|
@@ -213,7 +215,7 @@ These tools power the Phase 0.5 "Bake" step that batch-indexes repositories befo
 | `HELIUS_API_KEY` | [helius.dev](https://helius.dev) | Solana on-chain data | Optional (free tier) |
 | RPC URL | Alchemy/Infura/public | Ethereum fork testing | Optional (free tier) |
 
-Set keys in `~/.claude/mcp.json` after copying from `mcp.json.example`. See [MCP Servers](mcp-servers.md) for details.
+Set keys in `~/.claude/mcp.json` (Claude Code) after copying from `mcp.json.example`. Codex backend does not use MCP -- API keys for Codex are set in `~/.codex/plamen/config.toml`. See [MCP Servers](mcp-servers.md) for details.
 
 ---
 
@@ -232,7 +234,7 @@ You don't need honggfuzz. Trident v0.11+ uses TridentSVM. Just `cargo install tr
 This occurs when Anchor CLI encounters Agave v3 (Solana CLI 3.x). Use Solana CLI 2.x for Anchor projects that specify `solana_version = "2.x"` in Anchor.toml.
 
 ### MCP server won't start (`spawn python ENOENT` or server shows as failed)
-The Python-based MCP servers use `"command": "python"` in mcp.json. On macOS/Linux, change to `"command": "python3"`:
+Claude Code only (Codex does not use MCP servers). The Python-based MCP servers use `"command": "python"` in mcp.json. On macOS/Linux, change to `"command": "python3"`:
 ```bash
 sed -i '' 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json  # macOS
 sed -i 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json    # Linux
@@ -240,10 +242,10 @@ sed -i 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json    # Li
 Restart Claude Code after editing. On Windows, keep `"command": "python"`.
 
 ### MCP server timeout on first call
-ChromaDB and all-MiniLM-L6-v2 load on first use (~5s cold start). This is normal. The pipeline handles it with probe-first patterns and WebSearch fallback. The tool timeout is set to 300s in `settings.json`.
+Claude Code only. ChromaDB and all-MiniLM-L6-v2 load on first use (~5s cold start). This is normal. The pipeline handles it with probe-first patterns and WebSearch fallback. The tool timeout is set to 300s in `settings.json`.
 
 ### RAG database build failed or entries count is too low
-Run `plamen rag` again — it wipes the existing database and rebuilds from scratch. Ensure `SOLODIT_API_KEY` is set in `~/.claude/settings.json` → `"env"` section first. Safe to re-run as many times as needed.
+Run `plamen rag` again — it wipes the existing database and rebuilds from scratch. Ensure `SOLODIT_API_KEY` is set in `~/.claude/settings.json` → `"env"` section (Claude Code) or `~/.codex/plamen/config.toml` → `[env]` section (Codex). Safe to re-run as many times as needed.
 
 ### `No IDL files found`
 Run `anchor build` or `cargo build-sbf` first to generate IDL files before `trident init`.

@@ -84,25 +84,25 @@ Codex-specific commands (`codex/commands/`) and skill overrides (`codex/skills/`
 # Clone the repo
 git clone https://github.com/PlamenTSV/plamen.git ~/.plamen
 
-# Install and link into ~/.claude/
+# Install into ~/.claude/ (Claude Code backend)
 cd ~/.plamen && python3 plamen.py install  # or 'python' on Windows
+
+# Install into ~/.codex/plamen/ (Codex backend, optional)
+plamen install --codex
 
 # Install CLI wrapper dependencies
 pip install rich InquirerPy
 
-# Install MCP server dependencies
+# Install MCP server dependencies (Claude Code only — Codex uses tool translation)
 cd ~/.plamen/custom-mcp/unified-vuln-db
 pip install -e .
 
 # Run the CLI
 plamen.bat  # Windows
 ./plamen.sh # Linux/macOS
-
-# Codex backend (optional)
-plamen install --codex
 ```
 
-> **After `git pull`**: Always run `plamen install` to refresh `CLAUDE.md`, `settings.json`, and `mcp.json` — these are injected/merged copies, not symlinks, and go stale without re-install. See [docs/updating.md](docs/updating.md).
+> **After `git pull`**: Always run `plamen install` to refresh injected config files (`CLAUDE.md`, `settings.json`, `mcp.json` for Claude Code; `AGENTS.md`, `config.toml` for Codex). These are merged copies, not symlinks, and go stale without re-install. If using both backends, run `plamen install && plamen install --codex`. See [docs/updating.md](docs/updating.md).
 
 ### Testing Your Changes
 
