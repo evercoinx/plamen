@@ -964,7 +964,9 @@ def _scout_soroban_cmds():
 
 
 def _scip_go_cmds():
-    return ['go install github.com/sourcegraph/scip-go/cmd/scip-go@latest']
+    # Repo was moved from sourcegraph/scip-go to scip-code/scip-go. The
+    # original module path now errors with `module declares its path as: ...`.
+    return ['go install github.com/scip-code/scip-go/cmd/scip-go@latest']
 
 
 def _opengrep_cmds():
@@ -1079,10 +1081,10 @@ _INSTALL_RECIPES = {
          ["~/go/bin"], "go"),
 
         ("opengrep / semgrep (static analysis)",
-         lambda: _find_bin("opengrep") or _find_bin("semgrep"),
+         lambda: _find_bin("opengrep", ["~/.local/bin"]) or _find_bin("semgrep"),
          _opengrep_cmds,
          ["opengrep", "semgrep"], "~30s",
-         [], None),
+         ["~/.local/bin"], None),
     ],
 
     "L1 (Rust)": [
@@ -1097,10 +1099,10 @@ _INSTALL_RECIPES = {
          "rust" if not (sys.platform == "darwin" and _has_brew()) else None),
 
         ("opengrep / semgrep (static analysis)",
-         lambda: _find_bin("opengrep") or _find_bin("semgrep"),
+         lambda: _find_bin("opengrep", ["~/.local/bin"]) or _find_bin("semgrep"),
          _opengrep_cmds,
          ["opengrep", "semgrep"], "~30s",
-         [], None),
+         ["~/.local/bin"], None),
     ],
 
     "L1 (ast-grep)": [
