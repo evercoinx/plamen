@@ -147,6 +147,28 @@ Tag: `[TRACE: price[8-dec] stored as priceWad -> mulWad(priceWad, amount) -> 10^
 Tag: `[BOUNDARY: USDC_amount=1e6 as WAD input -> mulWad rounds to 0 -> user receives nothing]`
 Tag: `[VARIATION: token.decimals()=6->18 -> 10^12 collateral valuation change]`
 
+### 4.4 Rounding-Direction Edge Cases (MANDATORY — class missed in AwesomeX run)
+
+Dimensional correctness alone is insufficient. Even when units align, a rounding-direction choice on small remainders can produce the same severity of loss as a decimal mismatch. For EVERY division / mulDiv / mulWad / rayMul / FullMath.mulDiv / fixedPointMath call, check BOTH: the correctness-direction (up or down) AND what happens at the minimum non-zero input where integer division truncates or ceils across a unit boundary.
+
+**Ceil-round-up-on-small-remainder — the AwesomeX L-3 class**:
+- Pattern: `fee = mulDivRoundUp(amount, feeBps, BPS_DENOM)` where `amount` is small enough that `amount * feeBps < BPS_DENOM`
+- Dimensional result: `fee = 1 wei` (the ceiling of a fractional value < 1)
+- Semantic result: `net = amount - fee = amount - 1`. For `amount == 1 wei`, `net == 0`, and the subsequent `transferFrom(net)` reverts OR sends zero — user's transaction fails at the dust boundary.
+- Variant: floor-round-down on `reward = mulDiv(stake, rate, 1e18)` with small `stake`, same mechanism opposite direction — user receives 0 reward on dust stakes, protocol keeps the residual.
+- Where it hits: deposit/withdraw dust; last-user-out drain paths; incentive claim loops iterating until `pending < minClaim`; refund-the-remainder paths.
+
+**Check procedure (per rounding call)**:
+1. Identify rounding direction: `mulDivRoundUp` / `mulDivRoundDown` / implicit truncation (`a / b`).
+2. Enumerate inputs at: `amount = 1` (dust), `amount = BPS_DENOM - 1` (just-below boundary), `amount = BPS_DENOM` (boundary), `amount = BPS_DENOM + 1` (just-above).
+3. Compute the rounded result at each input. If the rounded result crosses into `0`, `amount` itself, or any critical threshold (transfer-min, revert-condition), that is a finding.
+4. Ask: can an external actor force the system to process inputs in the problematic range? For buy-and-burn accumulators, the answer is yes — attacker sprinkles 1-wei donations into an accumulation variable to force ceil-up on the denominator.
+
+Tag: `[BOUNDARY: amount=1 wei + roundUp fee -> fee=1 wei -> net=0 -> transferFrom reverts]`.
+Tag: `[VARIATION: round=floor @ amount < 1/rate -> reward=0 -> protocol keeps residual indefinitely]`.
+
+Severity: if the boundary is reachable without privileged access and the user experiences a fund-affecting outcome (revert, lost residual, repeated drain), default Medium; upgrade to High if the residual compounds across many users or locks a meaningful fraction of TVL.
+
 ## Expression Disposition Table (MANDATORY — write FIRST, update per expression)
 
 Write this skeleton table to {SCRATCHPAD}/niche_dimensional_analysis_findings.md BEFORE starting Phase 2.

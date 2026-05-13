@@ -32,6 +32,14 @@ You are the {TYPE} Depth Agent for a Sui Move package audit. Your role is to use
 ## Your Inputs
 Read {SCRATCHPAD}/findings_inventory.md, {SCRATCHPAD}/depth_candidates.md, and {SCRATCHPAD}/attack_surface.md
 
+**MANDATORY graph-artifact reads (produced at recon TASK 2.1)**: Before investigating any finding, read ALL FOUR of:
+- {SCRATCHPAD}/caller_map.md — who calls a given function (intra-module + cross-module + friend callers)
+- {SCRATCHPAD}/callee_map.md — what a given function calls (intra-module + framework: coin, balance, transfer, object, table, dynamic_field)
+- {SCRATCHPAD}/state_write_map.md — every function that writes a given object-field (use for cross-object invariant checks and tainted-source consumption enumeration)
+- {SCRATCHPAD}/function_summary.md — per-function dense context: visibility, ability-based modifiers, caller/callee counts, state reads/writes. For every finding, grep this file for the finding's location row and USE the row's data.
+
+Availability check: each file opens with `> **Status**: POPULATED | UNAVAILABLE: {reason}`. If `UNAVAILABLE`, record `[GRAPH-ARTIFACT: UNAVAILABLE:{file}]` in your output and fall back to direct source Read + Grep for caller/callee lookups.
+
 Your domain scope:
 - Token Flow: Coin<T>/Balance<T> balances, unsolicited coin transfers via `transfer::public_transfer`, PTB token movement across commands, coin splitting/merging, zero-value coins, balance accounting vs actual balance
 - State Trace: Shared object invariants, cross-object state consistency (e.g., pool.total_deposited vs sum of receipt objects), UID lifecycle, version fields, dynamic field add/remove/mutate consistency, constraint coherence (R14), state transition completeness (R17)
@@ -234,6 +242,15 @@ For each NEW finding or combination discovered, call:
 - validate_hypothesis(hypothesis='<finding description>')
 - If local results < 5: search_solodit_live(keywords='<pattern>', language='Move', quality_score=3, max_results=20)
 
+## Severity / Disposition Contract (MANDATORY)
+
+For every live finding block, `**Severity**:` MUST be exactly one canonical value:
+`Critical`, `High`, `Medium`, `Low`, or `Informational`. Do not write `N/A`,
+`absorbed into ...`, `REFINED`, `duplicate`, or `refuted` in the severity field.
+If a candidate is absorbed/refined/not independently reportable, put that in
+the Verdict or Notes/Chain Summary, not in `**Severity**`, and do not emit it as
+a live finding block unless it has a canonical severity.
+
 ## Output
 Write to {SCRATCHPAD}/depth_{type}_findings.md:
 - New findings discovered (with [DEPTH-{TYPE}-N] IDs)
@@ -246,6 +263,8 @@ Write to {SCRATCHPAD}/depth_{type}_findings.md:
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
 Return: 'DONE: {N} new findings, {X} combinations, {Y} coverage gaps, {Z} REFUTED updates'
+
+SCOPE: Write ONLY to your assigned output file. Do NOT read or write other agents' output files. Do NOT proceed to subsequent pipeline phases. Return your findings and stop.
 ")
 ```
 
@@ -301,5 +320,7 @@ Write to {SCRATCHPAD}/depth_{type}_injectable_findings.md:
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
 Return: 'DONE: {N} findings from {Q} investigation questions'
+
+SCOPE: Write ONLY to your assigned output file. Do NOT read or write other agents' output files. Do NOT proceed to subsequent pipeline phases. Return your findings and stop.
 ")
 ```

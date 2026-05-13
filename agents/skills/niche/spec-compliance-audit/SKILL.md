@@ -9,7 +9,6 @@ description: "Trigger HAS_DOCS flag in template_recommendations.md (recon detect
 > **Agent Type**: `general-purpose` (standalone niche agent, NOT injected into another agent)
 > **Budget**: 1 depth budget slot in Phase 4b iteration 1
 > **Finding prefix**: `[SPEC-N]`
-> **Added in**: v9.9.5
 
 ## When This Agent Spawns
 
@@ -94,6 +93,44 @@ Scan function_list.md for significant functions that the documentation does NOT 
 - Emergency/admin functions not in the trust model
 
 These are not vulnerabilities per se, but document them as INFO findings - undocumented behavior is a trust risk.
+
+## STEP 5: Enforcement-Gap Check (L1 and Cross-Chain)
+
+For each PARAMETER, THRESHOLD, INVARIANT, or SEQUENCE claim marked MATCH
+in STEP 2, verify there is an ACTIVE CHECK in code — not merely a stated
+assumption. A claim like 'data producers must upload every partition' is
+NOT satisfied by a constant or comment; there must be a code path that
+slashes / rejects / alarms when the claim is violated. The bug class is
+'spec claims X; code relies on honest actors to volunteer X'.
+
+Concretely, for each matched claim:
+
+| Claim | Documented Obligation | Code Enforcement Site | Penalty on Violation |
+
+If the "Code Enforcement Site" column is empty or points to a comment,
+promote to a finding tagged `[SPEC-NO-ENFORCEMENT:{claim}]`. Severity is
+High when violation is silently profitable for the actor (e.g., validator
+gets block reward without performing the claimed work); Medium when it
+degrades service quality without direct economic gain.
+
+This step exists because the Irys L1 class of bug — where a validator
+commits to data availability but nothing downstream samples / verifies /
+challenges the commitment — is invisible to STEP 2 (the spec says X, the
+code says X, both agree X is the contract; neither enforces X).
+
+## STEP 6: Implicit-Assumption Extraction
+
+Re-scan the documentation for statements of the form 'we assume that',
+'trusted to', 'it is expected that', 'relayers / validators / operators
+will' — these are implicit trust statements that look like design
+commentary but are actually unverified preconditions. For each such
+statement, add a row to:
+
+| Assumed Behavior | Who | Check in Code? | What Breaks if False |
+
+Any row with "Check in Code? = NO" and a blast radius greater than 'a
+single actor's own reward' is a finding tagged
+`[SPEC-IMPLICIT-TRUST:{actor}:{behavior}]`.
 
 **Coverage assertion**: Before returning, verify every entity enumerated under each step has been processed. Report enumerated vs analyzed counts in your return message.
 

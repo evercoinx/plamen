@@ -33,6 +33,14 @@ You are the {TYPE} Depth Agent for an Aptos Move module audit. Your role is to u
 ## Your Inputs
 Read {SCRATCHPAD}/findings_inventory.md, {SCRATCHPAD}/depth_candidates.md, and {SCRATCHPAD}/attack_surface.md
 
+**MANDATORY graph-artifact reads (produced at recon TASK 2.1)**: Before investigating any finding, read ALL FOUR of:
+- {SCRATCHPAD}/caller_map.md — who calls a given function (intra-module + cross-module + friend callers)
+- {SCRATCHPAD}/callee_map.md — what a given function calls (intra-module + framework)
+- {SCRATCHPAD}/state_write_map.md — every function that writes a given resource field (use for cross-resource invariant checks and tainted-source consumption enumeration)
+- {SCRATCHPAD}/function_summary.md — per-function dense context: visibility, `acquires` declarations, caller/callee counts, state reads/writes. For every finding, grep this file for the finding's location row and USE the row's data.
+
+Availability check: each file opens with `> **Status**: POPULATED | UNAVAILABLE: {reason}`. If `UNAVAILABLE`, record `[GRAPH-ARTIFACT: UNAVAILABLE:{file}]` in your output and fall back to direct source Read + Grep for caller/callee lookups.
+
 Your domain scope (Aptos Move-specific):
 - Token Flow: FungibleAsset/Coin<T> flows, FungibleStore creation gaps, metadata validation gaps, dispatchable hook side effects, unsolicited deposits (primary_fungible_store::deposit, coin::deposit), Coin-to-FA accounting parity, transfer fee accounting for custom FA implementations
 - State Trace: Global storage invariants across resources, resource lifecycle (move_to/move_from/borrow_global/borrow_global_mut), module reentrancy paths via circular cross-module calls, ref leaks (MintRef/TransferRef/BurnRef/ExtendRef storage security), cross-module state consistency, constraint coherence (R14), state transition completeness (R17)
@@ -205,6 +213,15 @@ For each NEW finding or combination discovered, call:
 - Always available: `mcp__unified-vuln-db__*` tools for RAG validation
 - Always available: `mcp__farofino__*` tools if configured for Move analysis
 
+## Severity / Disposition Contract (MANDATORY)
+
+For every live finding block, `**Severity**:` MUST be exactly one canonical value:
+`Critical`, `High`, `Medium`, `Low`, or `Informational`. Do not write `N/A`,
+`absorbed into ...`, `REFINED`, `duplicate`, or `refuted` in the severity field.
+If a candidate is absorbed/refined/not independently reportable, put that in
+the Verdict or Notes/Chain Summary, not in `**Severity**`, and do not emit it as
+a live finding block unless it has a canonical severity.
+
 ## Output
 Write to {SCRATCHPAD}/depth_{type}_findings.md:
 - New findings discovered (with [DEPTH-{TYPE}-N] IDs)
@@ -217,6 +234,8 @@ Write to {SCRATCHPAD}/depth_{type}_findings.md:
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
 Return: 'DONE: {N} new findings, {X} combinations, {Y} coverage gaps, {Z} REFUTED updates'
+
+SCOPE: Write ONLY to your assigned output file. Do NOT read or write other agents' output files. Do NOT proceed to subsequent pipeline phases. Return your findings and stop.
 ")
 ```
 
@@ -272,5 +291,7 @@ Write to {SCRATCHPAD}/depth_{type}_injectable_findings.md:
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
 Return: 'DONE: {N} findings from {Q} investigation questions'
+
+SCOPE: Write ONLY to your assigned output file. Do NOT read or write other agents' output files. Do NOT proceed to subsequent pipeline phases. Return your findings and stop.
 ")
 ```

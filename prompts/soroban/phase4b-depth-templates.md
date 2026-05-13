@@ -20,8 +20,18 @@ This is the standalone Soroban depth agent template. It contains the complete pr
 Task(subagent_type="depth-{type}", prompt="
 You are the {TYPE} Depth Agent for a Soroban contract audit. Your role is to use breadth findings as STEPPING STONES to discover combinations, deeper attack paths, and NEW findings that breadth agents missed.
 
+**FIRST ACTION**: Use the Write tool to create `{SCRATCHPAD}/depth_{type}_findings.md` with a one-line header `# Depth Findings: {TYPE}`. This reserves your write budget so the file exists on disk even if your analysis is interrupted. You will overwrite it with your full output at the end.
+
 ## Your Inputs
 Read {SCRATCHPAD}/findings_inventory.md, {SCRATCHPAD}/depth_candidates.md, and {SCRATCHPAD}/attack_surface.md
+
+**MANDATORY graph-artifact reads (produced at recon TASK 2.1)**: Before investigating any finding, read ALL FOUR of:
+- {SCRATCHPAD}/caller_map.md — who calls a given contractimpl method or internal function
+- {SCRATCHPAD}/callee_map.md — what a given function calls (intra-contract + env storage/events/crypto + cross-contract via contractimport!)
+- {SCRATCHPAD}/state_write_map.md — every function that writes a given DataKey storage entry (use for cross-key invariant checks and tainted-source consumption enumeration)
+- {SCRATCHPAD}/function_summary.md — per-function dense context: visibility, auth modifiers (require_auth, require_admin), caller/callee counts, state reads/writes. For every finding, grep this file for the finding's location row and USE the row's data.
+
+Availability check: each file opens with `> **Status**: POPULATED | UNAVAILABLE: {reason}`. If `UNAVAILABLE`, record `[GRAPH-ARTIFACT: UNAVAILABLE:{file}]` in your output and fall back to direct source Read + Grep for caller/callee lookups.
 
 Your domain scope (Soroban-specific):
 - Token Flow: SEP-41 token interface tracing, transfer/transfer_from/approve/allowance flows, Stellar Asset Contract (SAC) interaction, allowance expiry (ledger-based expiry), balance accounting consistency
@@ -134,6 +144,15 @@ For each NEW finding or combination discovered, call:
 - Use `Read` tool for source extraction, `Grep` for caller/callee tracing
 - When an MCP tool call returns a timeout error or fails, do NOT retry the same call. Record [MCP: TIMEOUT] and skip ALL remaining calls to that provider - switch immediately to fallback (code analysis, grep, WebSearch).
 
+## Severity / Disposition Contract (MANDATORY)
+
+For every live finding block, `**Severity**:` MUST be exactly one canonical value:
+`Critical`, `High`, `Medium`, `Low`, or `Informational`. Do not write `N/A`,
+`absorbed into ...`, `REFINED`, `duplicate`, or `refuted` in the severity field.
+If a candidate is absorbed/refined/not independently reportable, put that in
+the Verdict or Notes/Chain Summary, not in `**Severity**`, and do not emit it as
+a live finding block unless it has a canonical severity.
+
 ## Output
 Write to {SCRATCHPAD}/depth_{type}_findings.md:
 - New findings discovered (with [DEPTH-{TYPE}-N] IDs)
@@ -146,6 +165,8 @@ Write to {SCRATCHPAD}/depth_{type}_findings.md:
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
 Return: 'DONE: {N} new findings, {X} combinations, {Y} coverage gaps, {Z} REFUTED updates'
+
+SCOPE: Write ONLY to your assigned output file. Do NOT read or write other agents' output files. Do NOT proceed to subsequent pipeline phases. Return your findings and stop.
 ")
 ```
 
@@ -177,6 +198,8 @@ For each finding you CONFIRM at Medium+ severity, you MUST check: does this find
 ## EXPLOITATION TRACE MANDATE
 For every Medium+ finding, produce a concrete exploitation trace: attacker action → state change → concrete profit/loss in stroops or token units. Trace until tokens move, users lose measurable value, OR the attacker gains a privileged state that enables further exploitation.
 
+**FIRST ACTION**: Use the Write tool to create `{SCRATCHPAD}/depth_{type}_injectable_findings.md` with a one-line header. This reserves your write budget so the file exists on disk even if your analysis is interrupted.
+
 ## Your ONLY Task
 Answer the investigation questions below using the source code.
 
@@ -201,5 +224,7 @@ Write to {SCRATCHPAD}/depth_{type}_injectable_findings.md:
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
 Return: 'DONE: {N} findings from {Q} investigation questions'
+
+SCOPE: Write ONLY to your assigned output file. Do NOT read or write other agents' output files. Do NOT proceed to subsequent pipeline phases. Return your findings and stop.
 ")
 ```

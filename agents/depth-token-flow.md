@@ -57,6 +57,14 @@ For every direct balance query (protocol querying its own holdings):
 - Simulate: attacker donates X tokens directly → what rate change?
 - With actual constants, is the attack economically viable?
 
+### 5b. Approval Collision in Multi-Transaction Sequences
+For each function that builds an array of transactions (common in guard contracts, flash loan callbacks, withdrawal processing):
+1. Extract all `approve(spender, amount)` calls in the transaction sequence
+2. Check: does the same `(token, spender)` pair appear more than once?
+3. If YES: ERC20 `approve` OVERWRITES (does not ADD). The second call replaces the first allowance.
+4. If the spender needs the SUM of both amounts (e.g., two collateral types producing the same underlying token), the second approve leaves insufficient allowance for the first batch → transaction reverts.
+5. **Common pattern**: Withdrawal flows that convert Pendle PTs to underlying AND also withdraw the same underlying as direct collateral — both approve the swapper for the same token, but only the last approve survives.
+
 ### 6. Real Constant Validation
 **CRITICAL**: Before confirming any finding:
 - Extract the ACTUAL constant values from the source code

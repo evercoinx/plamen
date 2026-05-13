@@ -150,6 +150,121 @@ For EACH signature verification:
   - **Solana**: CPI to ed25519 program is safe (system program), but CPI to a custom verification program could be malicious
   - **Aptos/Sui**: External module calls for verification - check if the called module can re-enter the calling module via friend functions or public entry points
 
+## CHECK 9: Signature-to-Derived-ID Binding
+
+**What this catches**: Systems where a transaction, block, or message has both
+a signature field AND an ID field derived from "the signed content," but the
+verifier does NOT recompute the derived ID. An adversary who obtains a valid
+signature over payload P can set the ID field to any value they choose; the
+signature still verifies because the verifier checks `verify(pubkey, P, sig)`
+without independently binding the ID to P.
+
+**Why this is a whole class, not a rare case**:
+
+1. **Bitcoin signature malleability (BIP-62, BIP-141, pre-2015)** — ECDSA
+   `(r, s)` has a trivial second valid form `(r, n−s)`. Before BIP-62, an
+   adversary could take a valid transaction, substitute the malleated
+   signature, and the resulting transaction had a DIFFERENT `txid`
+   (because txid = hash of serialized tx including the signature) but the
+   SAME semantics. Mechanism confirmed in the historical Bitcoin mailing
+   list and formalized in [BIP-62](https://github.com/bitcoin/bips/blob/master/bip-0062.mediawiki).
+   Mt. Gox cited this class as contributing to accounting confusion in
+   2014 (attribution to the exchange's losses is contested per Decker &
+   Wattenhofer arxiv 1403.6676 — cite only as the mechanism
+   demonstration, not as the proven root cause of Gox's insolvency).
+   [BIP-141 SegWit](https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki)
+   structurally fixed this by moving signatures outside the txid
+   preimage.
+
+2. **Ethereum EIP-2 (homestead fork)** — restricted ECDSA `s` to the lower
+   half of the curve order to eliminate the `(r, n−s)` malleability
+   variant at the protocol level. Every pre-EIP-2 contract that derived an
+   ID from `keccak(r, s, v)` had this class of bug.
+   [EIP-2](https://eips.ethereum.org/EIPS/eip-2).
+
+3. **Cosmos SDK #9723** — secp256r1 signature handling where the derived
+   identifier was not recomputed under the enforced canonical form.
+   [Cosmos SDK #9723](https://github.com/cosmos/cosmos-sdk/pull/9723).
+   Cosmos's `TxRaw.signatures` protobuf field is expressly a list of raw
+   signatures over `SignDoc`; the verifier MUST reconstruct `SignDoc` and
+   recompute anything derived from it — the transaction's hash is
+   `hash(TxRaw)`, not `hash(SignDoc)`, and these are not the same preimage.
+
+**Check**:
+
+1. For every signed object type (transaction, block header, commitment,
+   attestation, governance proposal, authorization grant), locate the
+   struct definition and enumerate fields. Identify:
+   - `signature` / `sig` / `signatures[]` — the raw signature bytes
+   - `id` / `hash` / `tx_id` / `block_hash` / `commitment_id` — the
+     derived identifier
+   - `payload` / `body` / `sign_doc` — the canonicalized form that the
+     signer actually signed over
+
+2. Locate the verifier. Verify EACH of:
+   - **Signature verify**: `verify(pubkey, payload_bytes, signature)` returns true
+   - **ID recompute**: `recomputed_id = hash(payload_bytes)` (or the
+     protocol's canonical form — `hash(TxRaw)`, `keccak256(rlp(tx))`, etc.)
+   - **ID binding**: `assert recomputed_id == provided_id` — this is the
+     critical line. If missing, producer can set `id = arbitrary_value`
+     while signature still verifies.
+   - **Malleability normalization**: if the signature scheme admits
+     multiple valid encodings (ECDSA low-s, encoding variants in DER vs
+     compact, trailing zero bytes), verify the normalized form is used
+     in the `recomputed_id` computation — otherwise two IDs for the same
+     semantic object exist.
+
+3. For multi-sig / threshold schemes, the preimage MUST include either
+   the aggregated signature OR an order-canonicalized list. Order-
+   sensitive hashing of signatures is itself a malleability vector.
+
+**Tag**: `[SIG-ID-NOT-BOUND:{struct_name}.{id_field}]` — CRITICAL-default
+when the ID is used as a cache key, a dedup key, a dependency reference
+(parent block hash, anchor tx id), or any cross-system identifier.
+
+## CHECK 10: Aggregate Signature ↔ Merkle Leaf Linkage
+
+**What this catches**: A signed aggregate (block, batch, commitment bundle)
+carries a Merkle root R and a signature σ over R. Downstream consumers
+receive (σ, R, leaves[], proofs[]) and MUST verify that σ authenticates R
+AND that each leaf is proven under R. The bug class: the verifier checks σ
+binds to R, but either (a) never re-roots the leaves to confirm R is the
+root of the claimed leaves, or (b) accepts an alternate leaf with a valid
+Merkle proof under R when R commits to something else (second-preimage /
+alternate-encoding), or (c) checks the proof but not that the leaf index
+is monotonic, allowing leaf replacement at the same index.
+
+**Check**:
+
+1. For each protocol message shape of the form `{signature, root, leaves,
+   proofs}` (block+txs, checkpoint+attestations, commitment+chunks, batch+
+   items), locate the verifier.
+2. Verify ALL THREE:
+   - σ verifies against R with the correct signer key set.
+   - Each leaf `L[i]` passes `merkle_verify(R, L[i], proof[i], index[i])`.
+   - `hash(L[i])` uses the exact canonicalization the producer used. Flag
+     any encoding mismatch: variable-length integers, endianness, padding
+     rules, domain-separator bytes missing from either side.
+3. Merkle-specific second-preimage guards:
+   - Leaf hashes MUST be domain-separated from internal-node hashes
+     (e.g., prefix byte `0x00` for leaves, `0x01` for nodes). Otherwise
+     an internal node can be presented as a "leaf" with a shorter proof.
+   - Tree depth must be fixed or length-prefixed. Variable-depth trees
+     without length binding allow the same R to have multiple valid leaf
+     sets at different depths.
+4. Index binding: if the protocol assigns semantic meaning to leaf index
+   (e.g., "tx at index 0 is coinbase"), verify the index is bound into
+   the leaf's hash input. Otherwise leaves can be re-ordered and still
+   prove under the same R.
+5. For consensus-level aggregates (BLS): verify the signed message binds
+   the slot/epoch/view AND the root. A signature over bare R without the
+   view is replayable across any view that ever produced the same R.
+
+**Tag**: `[SIG-MERKLE-LINK:{field}:{missing-check}]`. Severity High by
+default (can corrupt the set of committed items while still validating);
+Critical when the corrupted set influences consensus weight, reward
+distribution, or inclusion proofs consumed by other chains.
+
 **Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
 ## Output Requirements
@@ -162,7 +277,7 @@ Maximum 8 findings - prioritize by severity.
 Every finding MUST cite the specific signature verification code (file:line) AND the missing/broken protection.
 Do NOT flag patterns that framework-provided safe wrappers already handle (e.g., OpenZeppelin ECDSA.recover, Anchor's ed25519 instruction parsing) - verify whether the protocol uses the raw primitive or a safe wrapper.
 
-Return: 'DONE: {N} signature findings - {R} replay, {M} malleability, {S} scope binding, {A} approval, {E} validation, {O} other'
+Return: 'DONE: {N} signature findings - {R} replay, {M} malleability, {S} scope binding, {A} approval, {E} validation, {I} id-binding, {O} other'
 ")
 ```
 

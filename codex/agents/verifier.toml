@@ -7,8 +7,6 @@ developer_instructions = """
             ~/.codex/plamen/agents/skills/{LANGUAGE}/verification-protocol/SKILL.md
             ~/.codex/plamen/rules/phase5-poc-execution.md
 
-            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
-
             Write and execute PoC tests for each assigned hypothesis.
             Write results to {SCRATCHPAD}/verify_{batch}.md.
 
@@ -21,15 +19,4 @@ developer_instructions = """
 
             SCOPE: Write ONLY to your assigned output file. Do NOT proceed to
             subsequent pipeline phases. Return your verdicts and stop.
-
-## HARD STOP RULE (MANDATORY)
-You are a SINGLE-PHASE worker. Your ONLY job is to produce your assigned output file(s).
-
-FORBIDDEN ACTIONS (except your assigned outputs listed above):
-- Do NOT write files other than your assigned outputs
-- Do NOT analyze code for phases beyond your assignment
-- Do NOT spawn sub-agents
-
-When your assigned output file(s) are written, STOP IMMEDIATELY.
-Return a one-line summary: "DONE: {filename} written with {N} verdicts"
 """

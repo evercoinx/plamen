@@ -23,6 +23,14 @@ You are the {TYPE} Depth Agent for a Solana program audit. Your role is to use b
 ## Your Inputs
 Read {SCRATCHPAD}/findings_inventory.md, {SCRATCHPAD}/depth_candidates.md, and {SCRATCHPAD}/attack_surface.md
 
+**MANDATORY graph-artifact reads (produced at recon TASK 2.1)**: Before investigating any finding, read ALL FOUR of:
+- {SCRATCHPAD}/caller_map.md — who calls a given instruction handler or internal function
+- {SCRATCHPAD}/callee_map.md — what a given function calls (intra-program + CPI targets)
+- {SCRATCHPAD}/state_write_map.md — every function that writes a given account-struct field (use for cross-account invariant checks and tainted-source consumption enumeration)
+- {SCRATCHPAD}/function_summary.md — per-function dense context: visibility, Anchor account constraints, caller/callee counts, state reads/writes. For every finding, grep this file for the finding's location row and USE the row's data.
+
+Availability check: each file opens with `> **Status**: POPULATED | UNAVAILABLE: {reason}`. If `UNAVAILABLE`, record `[GRAPH-ARTIFACT: UNAVAILABLE:{file}]` in your output and fall back to direct source Read + Grep for caller/callee lookups.
+
 Your domain scope (Solana-specific):
 - Token Flow: vault token account balances, unsolicited SPL/SOL transfers, Token-2022 extension impact, transfer fee accounting
 - State Trace: cross-account state invariants, PDA state consistency, CPI state mutations, instruction ordering dependencies
@@ -145,6 +153,15 @@ For each NEW finding or combination discovered, call:
 - If `FENDER_AVAILABLE = false`: use `Read` tool for source extraction, `Grep` for caller/callee tracing
 - Always available: `mcp__unified-vuln-db__*` tools for RAG validation
 
+## Severity / Disposition Contract (MANDATORY)
+
+For every live finding block, `**Severity**:` MUST be exactly one canonical value:
+`Critical`, `High`, `Medium`, `Low`, or `Informational`. Do not write `N/A`,
+`absorbed into ...`, `REFINED`, `duplicate`, or `refuted` in the severity field.
+If a candidate is absorbed/refined/not independently reportable, put that in
+the Verdict or Notes/Chain Summary, not in `**Severity**`, and do not emit it as
+a live finding block unless it has a canonical severity.
+
 ## Output
 Write to {SCRATCHPAD}/depth_{type}_findings.md:
 - New findings discovered (with [DEPTH-{TYPE}-N] IDs)
@@ -157,6 +174,8 @@ Write to {SCRATCHPAD}/depth_{type}_findings.md:
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
 Return: 'DONE: {N} new findings, {X} combinations, {Y} coverage gaps, {Z} REFUTED updates'
+
+SCOPE: Write ONLY to your assigned output file. Do NOT read or write other agents' output files. Do NOT proceed to subsequent pipeline phases. Return your findings and stop.
 ")
 ```
 
@@ -212,5 +231,7 @@ Write to {SCRATCHPAD}/depth_{type}_injectable_findings.md:
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
 Return: 'DONE: {N} findings from {Q} investigation questions'
+
+SCOPE: Write ONLY to your assigned output file. Do NOT read or write other agents' output files. Do NOT proceed to subsequent pipeline phases. Return your findings and stop.
 ")
 ```

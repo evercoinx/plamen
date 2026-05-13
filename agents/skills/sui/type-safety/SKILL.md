@@ -59,6 +59,19 @@ For each generic function, verify constraints are sufficient:
 
 **Rule**: Phantom type parameters MUST NOT be used in runtime field types (non-phantom positions). If a phantom param is used in a non-phantom position, the compiler rejects it. But check: is the phantom param providing meaningful type distinction, or can an attacker substitute any type?
 
+### 2d. Mutable Reference Assignment Correctness
+
+For every function that destructures a mutable reference or binds `&mut` field references, verify assignments update values rather than rebinding references:
+
+| Function | Source of `&mut` | Ref Variables | Assignment | Uses `*lhs = *rhs`? | Wrong Field Possible? |
+|----------|------------------|---------------|------------|--------------------|-----------------------|
+
+**Checks**:
+- [ ] If destructuring `&mut Struct`, treat destructured fields as references, not copied values.
+- [ ] Assignment like `left = limit` rebinds the local reference; it does not copy `limit` into the `left` field. Confirm the intended code uses `*left = *limit` or equivalent.
+- [ ] After any reference rebinding, trace subsequent `*ref = ...` writes. Do they now write to the original field or to another field?
+- [ ] Prioritize reset/quota/epoch/cooldown/accounting logic, where a wrong-field write can permanently corrupt limits or lock users out.
+
 ## 3. Type Witness Pattern Audit
 
 Identify all witness patterns (structs used for one-time authorization):
@@ -151,6 +164,22 @@ Can an attacker create Pool<FakeToken> and interact with Pool<RealToken>'s funct
 - Can an attacker drain `Pool<A>` by exploiting `Pool<FakeA>`?
 - Is there a registry/mapping that validates the type parameter? (e.g., `Table<TypeName, PoolConfig>`)
 
+### 5c. Generic Type to Config/Object Binding
+
+Move generics prove that `Pool<BTC>` holds BTC, but they do NOT prove that a runtime selector, config row, position, or receipt supplied in the same call belongs to that generic type. For every public/package function accepting both generic type parameters and runtime identity inputs, build this table:
+
+| Function | Generic Type(s) | Runtime Selector / Config / Object | Binding Check | Missing Binding Impact |
+|----------|-----------------|------------------------------------|---------------|------------------------|
+| `withdraw<T>` | `T` | `asset: u8`, `Pool<T>` | `type_name::get<T>() == config.coin_type`? | wrong asset accounting / wrong pool withdrawal |
+| `liquidate<X,Y,SX>` | `SX` | `Position`, `SupplyPool<X,SX>` | pool ID or debt-share type matches position? | free collateral / debt not repaid |
+
+**Checks**:
+- [ ] If a function accepts `T` plus an asset index/config ID, does it validate `type_name::get<T>()` against the stored config row?
+- [ ] If an index can be derived from `T`, does the function derive it instead of trusting a user-supplied index?
+- [ ] If a position/receipt/order was created with a specific pool, does the later function assert `object::id(pool) == stored_pool_id` or equivalent?
+- [ ] If there are multiple dependent type parameters (`X`, `Y`, `SX`, `LP`), does the function bind all of them to the stored position/config, not just the coin type?
+- [ ] If no binding exists, model attacker flow with a valid object of the wrong semantic pool/config and mark as finding if value, collateral, debt, or accounting can move under the wrong identity.
+
 ## 6. Coin/Balance Type Safety
 
 Specific analysis for `Coin<T>` and `Balance<T>` patterns:
@@ -223,12 +252,14 @@ Analyze `Publisher` object usage:
 | 1. Generic Function Inventory | YES | Y/X/? | All modules |
 | 2. Type Parameter Constraint Analysis | YES | Y/X/? | |
 | 2c. Phantom Type Correctness | IF phantom params | Y/X(N/A)/? | |
+| 2d. Mutable Reference Assignment Correctness | IF `&mut` destructuring/ref assignment | Y/X(N/A)/? | |
 | 3. Type Witness Pattern Audit | IF witness patterns | Y/X(N/A)/? | |
 | 3a. Witness Forgery Check | IF witness patterns | Y/X(N/A)/? | |
 | 4. OTW Analysis | IF `init` with witness | Y/X(N/A)/? | **HIGH PRIORITY** |
 | 4a. OTW Verification Pattern | IF generic witness functions | Y/X(N/A)/? | |
 | 5. Generic Type Confusion Attacks | YES | Y/X/? | |
 | 5b. Struct-Level Type Confusion | IF generic structs | Y/X(N/A)/? | |
+| 5c. Generic Type to Config/Object Binding | IF generic + runtime selector/object | Y/X(N/A)/? | |
 | 6. Coin/Balance Type Safety | IF Coin/Balance used | Y/X(N/A)/? | **HIGH PRIORITY** |
 | 6b. Balance Accounting Type Safety | IF Balance used | Y/X(N/A)/? | |
 | 7. Publisher and Package Authority | IF Publisher used | Y/X(N/A)/? | |

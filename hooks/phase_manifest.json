@@ -1,6 +1,6 @@
 {
-  "version": "1.0.0",
-  "description": "Plamen pipeline watchdog - artifact requirements per phase",
+  "version": "2.0.0",
+  "description": "Plamen pipeline watchdog - artifact requirements per phase. L1 mode overrides use 'l1_*' prefixed fields which are picked up when mode starts with 'l1'.",
   "phases": {
     "recon": {
       "order": 1,
@@ -18,6 +18,21 @@
         "emit_list.md",
         "recon_summary.md"
       ],
+      "l1_required_artifacts": [
+        "threat_model.md",
+        "subsystem_map.md",
+        "attack_surface.md",
+        "trust_boundaries.md",
+        "template_recommendations.md",
+        "scope_leftover.md",
+        "recon_summary.md",
+        "primitive_status.md"
+      ],
+      "l1_optional_artifacts": [
+        "attack_surface_layers.md",
+        "integration_points.md",
+        "opengrep_hits_ranked.md"
+      ],
       "optional_artifacts": [
         "meta_buffer.md",
         "call_graph.md",
@@ -30,7 +45,8 @@
         "external_production_behavior.md"
       ],
       "min_file_bytes": 100,
-      "gate_message": "Recon incomplete. Missing artifacts block Phase 2 instantiation. Ensure all 4 recon agents have completed."
+      "gate_message": "Recon incomplete. Missing artifacts block Phase 2 instantiation. Ensure all 4 recon agents have completed.",
+      "l1_gate_message": "L1 recon incomplete. Missing threat_model / subsystem_map / attack_surface / trust_boundaries / template_recommendations / scope_leftover / recon_summary / primitive_status artifacts. Ensure the L1 recon phase completed and Phase 0.5 Bake wrote primitive_status.md."
     },
     "breadth": {
       "order": 2,
@@ -39,33 +55,35 @@
         "analysis_*.md"
       ],
       "min_required_glob_matches": 3,
+      "l1_min_required_glob_matches": 2,
       "min_file_bytes": 200,
-      "gate_message": "Breadth analysis incomplete. At least 3 analysis_*.md files required before proceeding to inventory."
+      "gate_message": "Breadth analysis incomplete. At least 3 first-pass analysis_*.md files required before proceeding to re-scan or inventory.",
+      "l1_gate_message": "L1 breadth analysis incomplete. At least 2 analysis_*.md files required (one per detected subsystem layer)."
     },
     "inventory": {
-      "order": 3,
+      "order": 5,
       "display_name": "Phase 4a: Findings Inventory",
       "required_artifacts": [
         "findings_inventory.md"
       ],
       "min_file_bytes": 100,
-      "gate_message": "Findings inventory not created. Cannot proceed to re-scan, semantic invariants, or depth without findings_inventory.md."
+      "gate_message": "Findings inventory not created. Cannot proceed to semantic invariants or depth without findings_inventory.md."
     },
     "rescan": {
-      "order": 4,
+      "order": 3,
       "display_name": "Phase 3b: Breadth Re-Scan",
-      "mode_required": ["thorough"],
+      "mode_required": ["thorough", "l1-thorough"],
       "required_artifacts": [
         "analysis_rescan_*.md"
       ],
       "min_required_glob_matches": 1,
       "min_file_bytes": 100,
-      "gate_message": "Breadth re-scan required in Thorough mode. At least 1 analysis_rescan_*.md file needed."
+      "gate_message": "Breadth re-scan required in Thorough mode before inventory. At least 1 analysis_rescan_*.md file needed."
     },
     "per_contract": {
-      "order": 5,
+      "order": 4,
       "display_name": "Phase 3c: Per-Contract Analysis",
-      "mode_required": ["thorough"],
+      "mode_required": ["thorough", "l1-thorough"],
       "required_artifacts": [
         "analysis_percontract_*.md"
       ],
@@ -76,7 +94,7 @@
     "semantic_invariants": {
       "order": 6,
       "display_name": "Phase 4a.5: Semantic Invariants",
-      "mode_required": ["core", "thorough"],
+      "mode_required": ["core", "thorough", "l1-core", "l1-thorough"],
       "required_artifacts": [
         "semantic_invariants.md"
       ],
@@ -89,11 +107,21 @@
       "required_artifacts": [
         "depth_*_findings.md"
       ],
+      "l1_required_artifacts": [
+        "depth_*_findings.md"
+      ],
       "min_required_glob_matches_map": {
         "depth_*_findings.md": 2
       },
+      "l1_min_required_glob_matches_map": {
+        "depth_*_findings.md": 3
+      },
       "optional_artifacts": [
         "adaptive_loop_log.md"
+      ],
+      "l1_optional_artifacts": [
+        "adaptive_loop_log.md",
+        "tool_calls.jsonl"
       ],
       "scanner_artifacts": {
         "description": "At least 1 scanner/validation output must exist (any naming convention)",
@@ -105,28 +133,43 @@
         ],
         "min_matches": 1
       },
+      "l1_scanner_artifacts": null,
       "conditional_artifacts": {
         "design_stress_findings.md": "MODE == thorough",
         "perturbation_findings.md": "MODE == thorough",
         "skill_execution_gaps.md": "MODE == thorough",
+        "symmetric_pairs.md": "MODE == thorough",
+        "variable_finding_map.md": "MODE == thorough",
         "confidence_scores.md": "MODE != light",
         "rag_validation.md": "MODE != light"
       },
+      "l1_conditional_artifacts": {
+        "rag_validation.md": "MODE != light",
+        "confidence_scores.md": "MODE == thorough",
+        "design_stress_findings.md": "MODE == thorough",
+        "perturbation_findings.md": "MODE == thorough",
+        "skill_execution_gaps.md": "MODE == thorough"
+      },
       "niche_artifacts_source": "template_recommendations.md",
+      "l1_niche_artifacts_source": null,
       "min_file_bytes": 50,
       "gate_message": "Depth loop incomplete. Missing required depth/scanner/validation artifacts.",
+      "l1_gate_message": "L1 depth loop incomplete. Need at least 3 depth_*_findings.md (e.g. depth_consensus_invariant / depth_network_surface / depth_state_trace). No scanner or blind-spot artifacts required in L1 mode.",
       "recovery_hints": {
-        "depth_*_findings.md": "Spawn depth agents (token-flow, state-trace, edge-case, external) per phase4b-depth-templates.md. Each writes depth_{type}_findings.md.",
+        "depth_*_findings.md": "Spawn depth agents (consensus-invariant, network-surface, state-trace, external, edge-case) per plamen-l1.md Step 4b. Each writes depth_{type}_findings.md via §WRITE-THEN-VERIFY.",
         "design_stress_findings.md": "Spawn Design Stress Testing agent (sonnet, 1 slot, UNCONDITIONAL in Thorough). Read phase4b-scanner-templates.md Design Stress section.",
         "perturbation_findings.md": "Spawn Finding Perturbation agent (sonnet). Read phase4b-loop.md Perturbation section. Applies DIRECTION_FLIP and other operators to existing findings.",
         "skill_execution_gaps.md": "Spawn Skill Execution Checklist agent (haiku). Read phase4b-loop.md Skill Checklist section. Verifies depth agents executed all skill steps.",
-        "confidence_scores.md": "Spawn confidence scoring agent (haiku). Read rules/phase4-confidence-scoring.md for the 4-axis model.",
+        "symmetric_pairs.md": "Orchestrator-produced (pre-depth). Read phase4b-loop.md Symmetric Pairs section: extract symmetric pairs (deposit/withdraw, mint/burn, lock/unlock, etc.) from function_list.md and write a compact table to {SCRATCHPAD}/symmetric_pairs.md. Inject the table into each depth agent's prompt.",
+        "variable_finding_map.md": "Spawn variable_map_agent (sonnet). Read phase4b-loop.md Variable-Finding Cross-Reference section (lines 450-468). Agent reads semantic_invariants.md + findings_inventory.md, greps for variable→finding references, writes a 30-row table for chain analysis precision.",
+        "confidence_scores.md": "Spawn confidence scoring agent (sonnet). Read rules/phase4-confidence-scoring.md for the 4-axis model.",
         "rag_validation.md": "Spawn RAG Validation Sweep agent (sonnet). Read rules/phase4-confidence-scoring.md Phase 4b.5 section. If MCP fails, write floor scores (0.3)."
       }
     },
     "chain": {
       "order": 8,
       "display_name": "Phase 4c: Chain Analysis",
+      "mode_excluded": ["l1", "l1-core", "l1-thorough"],
       "required_artifacts": [
         "hypotheses.md",
         "finding_mapping.md",
@@ -142,9 +185,14 @@
       "required_artifacts": [
         "verify_*.md"
       ],
+      "conditional_artifacts": {
+        "cross_batch_consistency.md": "MODE != light",
+        "skeptic_findings.md": "MODE == thorough",
+        "skeptic_judge_decisions.md": "MODE == thorough"
+      },
       "min_required_glob_matches": 1,
       "min_file_bytes": 100,
-      "gate_message": "Verification incomplete. At least 1 verify_*.md file required before report generation."
+      "gate_message": "Verification incomplete. At least 1 verify_*.md file required before report generation. Core/Thorough mode also requires cross_batch_consistency.md (Phase 5.2). Thorough adds skeptic_findings.md + skeptic_judge_decisions.md (Phase 5.1)."
     },
     "report": {
       "order": 10,

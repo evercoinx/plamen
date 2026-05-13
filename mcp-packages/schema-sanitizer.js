@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
- * MCP Schema Sanitizer Proxy
+ * MCP compatibility proxy.
  *
- * Wraps an MCP server and strips oneOf/allOf/anyOf from tool inputSchema
- * before passing responses back to Claude Code. This fixes the Anthropic API
- * error: "input_schema does not support oneOf, allOf, or anyOf at the top level"
+ * Responsibilities:
+ * - sanitize tool schemas (oneOf/allOf/anyOf/$defs/$ref)
+ * - bridge framed MCP stdio <-> newline-delimited JSON stdio
+ * - force JS entrypoints to execute via Node on Windows
  *
- * Usage: node schema-sanitizer.js <command> [args...]
- * Example: node schema-sanitizer.js node ./node_modules/.bin/evm-mcp-server
+ * Codex speaks framed MCP stdio. Some Python MCP servers in this stack still
+ * read/write newline-delimited JSON on stdio, so they need a transport shim.
  */
 
 const { spawn } = require('child_process');
@@ -36,51 +37,119 @@ const child = spawn(command, commandArgs, {
   shell: false
 });
 
-// Buffer for incomplete messages from the child
-let childBuf = '';
+let parentBuf = Buffer.alloc(0);
+let childBuf = Buffer.alloc(0);
 
-// Parse JSON-RPC messages from a stream using Content-Length framing
-function processChildOutput(chunk) {
-  childBuf += chunk;
+function sanitizeMessage(msg) {
+  if (msg.result && msg.result.tools && Array.isArray(msg.result.tools)) {
+    msg.result.tools = msg.result.tools.map(tool => {
+      if (tool.inputSchema) {
+        tool.inputSchema = sanitizeSchema(tool.inputSchema);
+      }
+      if (tool.outputSchema) {
+        tool.outputSchema = sanitizeSchema(tool.outputSchema);
+      }
+      return tool;
+    });
+  }
+  return msg;
+}
+
+function writeFramedToParent(msg) {
+  const body = JSON.stringify(sanitizeMessage(msg));
+  process.stdout.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+}
+
+function writeJsonLineToChild(msg) {
+  child.stdin.write(JSON.stringify(msg) + '\n');
+}
+
+function processParentInput(chunk) {
+  parentBuf = Buffer.concat([parentBuf, chunk]);
 
   while (true) {
-    const headerEnd = childBuf.indexOf('\r\n\r\n');
-    if (headerEnd === -1) break;
+    const headerEnd = parentBuf.indexOf('\r\n\r\n');
+    if (headerEnd === -1) {
+      return;
+    }
 
-    const header = childBuf.substring(0, headerEnd);
+    const header = parentBuf.subarray(0, headerEnd).toString('utf8');
     const match = header.match(/Content-Length:\s*(\d+)/i);
     if (!match) {
-      // Not a proper message, skip to next \r\n\r\n
-      childBuf = childBuf.substring(headerEnd + 4);
+      parentBuf = parentBuf.subarray(headerEnd + 4);
       continue;
     }
 
     const contentLength = parseInt(match[1], 10);
     const bodyStart = headerEnd + 4;
+    if (parentBuf.length < bodyStart + contentLength) {
+      return;
+    }
 
-    if (childBuf.length < bodyStart + contentLength) break; // incomplete
-
-    const body = childBuf.substring(bodyStart, bodyStart + contentLength);
-    childBuf = childBuf.substring(bodyStart + contentLength);
+    const body = parentBuf.subarray(bodyStart, bodyStart + contentLength).toString('utf8');
+    parentBuf = parentBuf.subarray(bodyStart + contentLength);
 
     try {
-      const msg = JSON.parse(body);
+      writeJsonLineToChild(JSON.parse(body));
+    } catch {
+      // Drop malformed parent messages instead of poisoning the child stream.
+    }
+  }
+}
 
-      // Sanitize tools/list response
-      if (msg.result && msg.result.tools && Array.isArray(msg.result.tools)) {
-        msg.result.tools = msg.result.tools.map(tool => {
-          if (tool.inputSchema) {
-            tool.inputSchema = sanitizeSchema(tool.inputSchema);
-          }
-          return tool;
-        });
+function processChildOutput(chunk) {
+  childBuf = Buffer.concat([childBuf, chunk]);
+
+  while (true) {
+    if (childBuf.length === 0) {
+      return;
+    }
+
+    if (childBuf.indexOf(Buffer.from('Content-Length:')) === 0) {
+      const headerEnd = childBuf.indexOf('\r\n\r\n');
+      if (headerEnd === -1) {
+        return;
       }
 
-      const sanitized = JSON.stringify(msg);
-      process.stdout.write(`Content-Length: ${Buffer.byteLength(sanitized)}\r\n\r\n${sanitized}`);
-    } catch (e) {
-      // Pass through unparseable messages
-      process.stdout.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+      const header = childBuf.subarray(0, headerEnd).toString('utf8');
+      const match = header.match(/Content-Length:\s*(\d+)/i);
+      if (!match) {
+        childBuf = childBuf.subarray(headerEnd + 4);
+        continue;
+      }
+
+      const contentLength = parseInt(match[1], 10);
+      const bodyStart = headerEnd + 4;
+      if (childBuf.length < bodyStart + contentLength) {
+        return;
+      }
+
+      const body = childBuf.subarray(bodyStart, bodyStart + contentLength).toString('utf8');
+      childBuf = childBuf.subarray(bodyStart + contentLength);
+
+      try {
+        writeFramedToParent(JSON.parse(body));
+      } catch {
+        process.stdout.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+      }
+      continue;
+    }
+
+    const newline = childBuf.indexOf('\n');
+    if (newline === -1) {
+      return;
+    }
+
+    const line = childBuf.subarray(0, newline).toString('utf8').trim();
+    childBuf = childBuf.subarray(newline + 1);
+    if (!line) {
+      continue;
+    }
+
+    try {
+      writeFramedToParent(JSON.parse(line));
+    } catch {
+      // Child logs should go to stderr; ignore stray stdout text.
     }
   }
 }
@@ -186,10 +255,7 @@ function sanitizeSchema(schema, defs) {
   return result;
 }
 
-// Pipe stdin to child (pass-through, no modification needed for requests)
-process.stdin.pipe(child.stdin);
-
-// Process child stdout through sanitizer
+process.stdin.on('data', processParentInput);
 child.stdout.on('data', processChildOutput);
 
 child.on('close', (code) => process.exit(code || 0));

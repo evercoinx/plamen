@@ -1,0 +1,10592 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+import json
+import logging
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import hashlib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+from plamen_types import (
+    Phase, Checkpoint, SC_PHASES, L1_PHASES, log,
+    L1_NEVER_CUT_ARTIFACT_GROUPS,
+    SC_NEVER_CUT_BASE, SC_NEVER_CUT_CORE_EXTRAS, SC_NEVER_CUT_THOROUGH_EXTRAS,
+    sc_never_cut_groups, _NEVER_CUT_SKIP_REASONS,
+    L1_VERIFY_SHARD_MANIFESTS, L1_VERIFY_PHASE_NAMES,
+    L1_VERIFY_CRITHIGH_PHASE_NAMES,
+    SC_VERIFY_SHARD_MANIFESTS, SC_VERIFY_PHASE_NAMES,
+    SC_VERIFY_CRITHIGH_PHASE_NAMES,
+    _VALID_PIPELINES, _VALID_MODES,
+    EVIDENCE_TAGS_PROOF, EVIDENCE_TAG_NAMES_RE, has_mechanical_proof,
+    normalize_severity,
+)
+from plamen_parsers import *  # noqa: F403,F401
+
+__all__ = [
+    "_NEVER_CUT_FILENAME_ALIASES",
+    "_QUARANTINE_PATTERNS_BY_PHASE",
+    "_RETRY_HINT_SUFFIX",
+    "_ACCUMULATE_ON_RETRY_PHASES",
+    "_RETRY_QUARANTINE_EXTRAS",
+    "_assert_never_cut_artifacts",
+    "_assert_never_cut_checkpoint",
+    "_basenames",
+    "_canonicalize_summary_table",
+    "_check_graph_artifact_consumption",
+    "_check_index_completeness",
+    "_check_notread_priority_coverage",
+    "_check_promotion_symmetry",
+    "_check_step_execution_traces",
+    "_check_unresolved_authenticity",
+    "_cleanup_quarantine_backups",
+    "_clear_retry_hint",
+    "_clear_stale_degraded_sentinels",
+    "_collect_body_unresolved_report_ids",
+    "_collect_consolidation_absorbed_ids",
+    "_collect_cited_paths",
+    "_collect_index_acknowledged_ids",
+    "_collect_judge_unresolved_ids",
+    "_collect_report_coverage_acknowledged_ids",
+    "_collect_report_promoted_ids",
+    "_collect_scip_indexed_paths",
+    "_collect_verify_hypothesis_ids",
+    "_collect_verify_promotion_receipts",
+    "_compute_assemble_count_delta",
+    "_compute_scip_coverage_sets",
+    "_compute_subsystem_coverage_gap",
+    "_compute_tier_completeness_delta",
+    "_detect_foreign_phase_writes",
+    "_protected_phase_write_patterns",
+    "_record_phase_artifact_state",
+    "_phase_artifacts_have_active_owner_state",
+    "_ensure_report_consolidation_map",
+    "_ensure_step_execution_traces",
+    "_field_validation_sweep_relevant",
+    "_filter_verification_queue_by_evidence",
+    "_generate_assemble_retry_hint",
+    "_generate_attention_repair_retry_hint",
+    "_generate_breadth_retry_hint",
+    "_generate_body_writer_retry_hint",
+    "_generate_crossbatch_retry_hint",
+    "_generate_depth_retry_hint",
+    "_generate_graph_sweeps_retry_hint",
+    "_generate_inventory_retry_hint",
+    "_generate_recon_retry_hint",
+    "_generate_report_index_retry_hint",
+    "_generate_skeptic_retry_hint",
+    "_generate_tier_retry_hint",
+    "_generate_verify_aggregate_retry_hint",
+    "_generate_verify_core_if_missing",
+    "_generate_verify_queue_retry_hint",
+    "_generate_verify_shard_retry_hint",
+    "_graph_sweeps_needed",
+    "_write_chain_passthrough_outputs",
+    "_body_writer_evidence_fields",
+    "_expected_report_index_severities",
+    "_is_substantive_body_evidence",
+    "_is_spec_support_path",
+    "_is_evidence_missing_for_body",
+    "_location_present_in_body",
+    "_lifecycle_replay_sweep_relevant",
+    "_match_label_status",
+    "_matches_any_pattern",
+    "_materialize_sc_slither_flat_files",
+    "_maybe_skip_empty_body_writer",
+    "_network_amplification_sweep_relevant",
+    "_normalize_never_cut_filenames",
+    "_owned_artifact_patterns",
+    "_panic_sites_available",
+    "_parse_inventory_evidence_validation",
+    "_parse_subsystem_coverage_gap",
+    "_primitive_sweep_relevant",
+    "_promote_depth_findings_to_inventory",
+    "_quarantine_foreign_phase_writes",
+    "_quarantine_phase_overreach",
+    "_quarantine_report_without_completed_assemble",
+    "_quarantine_stale_on_retry",
+    "_read_retry_hint",
+    "_read_artifact_state",
+    "_report_index_adjustment_reason_present",
+    "_repair_report_index_dropouts",
+    "_restore_quarantined_on_retry_failure",
+    "_rewind_completed_after_overflow",
+    "_run_report_quality_gate",
+    "_scan_for_halt_and_gatefail",
+    "_scip_text_contains_any",
+    "_skeptic_expected_findings",
+    "_snapshot_file_state",
+    "_snapshot_report_timestamped",
+    "_step_trace_has_ceremonial_yes",
+    "_sync_degraded_sentinels_to_checkpoint",
+    "_synthesize_step_execution_trace",
+    "_validate_assemble_not_degraded",
+    "_validate_attention_repair",
+    "_validate_cited_paths_in_verify",
+    "_validate_crossbatch_full_coverage",
+    "_validate_crossbatch_quality",
+    "_parse_confidence_scores_permissive",
+    "_validate_confidence_iter2_mandatory",
+    "_validate_confidence_scores_quality",
+    "_validate_depth_coverage",
+    "_validate_depth_exit",
+    "_validate_depth_iterations",
+    "_validate_semantic_gap_niche",
+    "_validate_depth_promotion_receipt",
+    "_validate_depth_promotion_dedup",
+    "_validate_graph_sweeps",
+    "_validate_inventory_evidence",
+    "_validate_inventory_chunk_structure",
+    "_validate_inventory_parity",
+    "_validate_inventory_structure",
+    "_validate_rc_parity",
+    "_validate_recon_content_structure",
+    "_validate_recon_coverage",
+    "_has_live_placeholder_language",
+    "_validate_report_body",
+    "_validate_report_index_inputs",
+    "_validate_report_index_prewrite_inputs",
+    "_validate_report_index_severity_provenance",
+    "_validate_report_index_triage_safety",
+    "_validate_report_tier_completeness",
+    "_validate_sc_subsystem_coverage",
+    "_validate_scope_leftover",
+    "_validate_skeptic_full_ch_coverage",
+    "_validate_skeptic_scope",
+    "_validate_spawn_manifest_schema",
+    "_validate_tier_body_against_manifest",
+    "_validate_verification_queue_inventory_parity",
+    "_validate_verify_completion",
+    "_find_verify_file",
+    "_validate_poc_attempt_coverage",
+    "_apply_poc_fail_demotions",
+    "_append_crossbatch_coverage_ledger",
+    "_validate_report_coverage_accounting",
+    "_validate_poc_pass_integrity",
+    "_TRIVIAL_ASSERT_STRS",
+    "_NONTRIVIAL_ASSERT_RE",
+    "_ANY_ASSERT_RE",
+    "_validate_verify_content_quality",
+    "_validate_verify_evidence_tags",
+    "_validate_verify_files_for_queue",
+    "_verify_file_present_for_id",
+    "_write_final_subsystem_coverage_summary",
+    "_write_empty_verification_queue",
+    "_write_inventory_base_snapshot",
+    "_write_crossbatch_manifest",
+    "_write_graph_sweeps_skip",
+    "_write_rag_validation_floor",
+    "_write_promotion_dropout_retry_hint",
+    "_write_retry_hint",
+    "_write_semantic_invariants_fallback",
+    "_write_semantic_dedup_skip_outputs",
+    "_write_skeptic_manifest",
+    "_semantic_gap_trigger_counts",
+    "_semantic_gap_required",
+    "gate_passes",
+    "is_verification_queue_empty",
+    "identify_missing_verify_ids",
+    "stub_missing_verify_files",
+    "write_empty_verify_placeholders",
+    "_collect_judge_downgrade_map",
+]
+
+
+def is_verification_queue_empty(scratchpad: Path, pipeline: str) -> tuple:
+    """Return (is_empty, reason).
+
+    A verification queue is empty when there are ZERO Medium+ findings to
+    verify. This is a legitimate N/A state (e.g., a clean codebase that
+    produced only Low/Info findings) — NOT a pipeline failure. The verify
+    phase is `critical=True` with a `verify_*.md` glob that matches 0
+    files → gate_passes() would mark the phase degraded and HALT the
+    pipeline, which is wrong for an empty queue.
+
+    Sources (order of preference):
+    - SC: hypotheses.md (post-chain) + chain_hypotheses.md, fall back to
+      findings_inventory.md if neither exists.
+    - L1: findings_inventory.md (no chain phase in L1 per design.md §4.2).
+
+    We count occurrences of `Critical`, `High`, `Medium` in severity
+    contexts. Zero matches across ALL sources → empty queue.
+    Unreadable sources are treated as "not empty" (conservative: let the
+    phase run rather than falsely skip).
+    """
+    q = scratchpad / "verification_queue.md"
+    if q.exists():
+        try:
+            q_text = _llm_norm(q.read_text(encoding="utf-8", errors="replace"))
+        except Exception as exc:
+            return (False, f"could not read verification_queue.md: {exc}")
+        if parse_verification_queue_rows(scratchpad):
+            return (False, "verification_queue.md contains reportable rows")
+        if re.search(r"\bTotal:\s*0\s+findings\b", q_text, re.IGNORECASE):
+            return (True, "verification_queue.md declares Total: 0 findings")
+        if q_text.strip():
+            return (False, "verification_queue.md exists but is not parseable")
+
+    if pipeline == "l1":
+        sources = ["findings_inventory.md"]
+    else:
+        # Prefer the post-chain hypotheses set; fall back to raw inventory
+        # if chain never ran (resume mid-pipeline, Light mode, etc.).
+        hyp = scratchpad / "hypotheses.md"
+        sources = []
+        if hyp.exists():
+            sources.append("hypotheses.md")
+            if (scratchpad / "chain_hypotheses.md").exists():
+                sources.append("chain_hypotheses.md")
+        else:
+            sources.append("findings_inventory.md")
+
+    total = 0
+    any_readable = False
+    for name in sources:
+        p = scratchpad / name
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return (False, f"could not read {name}")
+        any_readable = True
+        total += len(re.findall(r"(?i)\b(Critical|High|Medium)\b", text))
+
+    if not any_readable:
+        # No queue source written yet (e.g., resume before inventory ran).
+        # Don't short-circuit — let gate_passes handle it.
+        return (False, "no queue source files exist yet")
+    if total == 0:
+        return (True, f"0 reportable finding markers in {', '.join(sources)}")
+    return (False, f"{total} reportable finding markers found")
+
+
+def _write_semantic_dedup_skip_outputs(
+    scratchpad: Path,
+    phase_name: str,
+    reason: str = "no candidate pairs and no LIKELY-DUP tags",
+) -> list[str]:
+    """Materialize semantic-dedup passthrough outputs before checkpoint completion."""
+    scratchpad = Path(scratchpad)
+    written: list[str] = []
+
+    decisions = scratchpad / "dedup_decisions.md"
+    decisions.write_text(
+        "# Semantic Dedup Decisions\n\n"
+        "**Status**: PASSTHROUGH\n\n"
+        f"**Reason**: {reason}.\n\n"
+        "This phase preserves the upstream artifact unchanged unless a bounded "
+        "semantic-dedup subprocess later overwrites this passthrough with a "
+        "valid deduplicated artifact. The explicit passthrough prevents a "
+        "quality-improvement helper from creating missing-file or retry loops.\n",
+        encoding="utf-8",
+    )
+    written.append(decisions.name)
+
+    if phase_name == "semantic_dedup":
+        source = scratchpad / "verification_queue.md"
+        target = scratchpad / "verification_queue_deduped.md"
+        label = "Verification Queue Deduped"
+    elif phase_name == "sc_semantic_dedup":
+        source = scratchpad / "findings_inventory.md"
+        target = scratchpad / "findings_inventory_deduped.md"
+        label = "Findings Inventory Deduped"
+    else:
+        raise ValueError(f"unsupported semantic dedup phase: {phase_name}")
+
+    if source.exists() and source.stat().st_size > 0:
+        body = source.read_text(encoding="utf-8", errors="replace")
+        if len(body.encode("utf-8", errors="replace")) < 100:
+            body += (
+                "\n\n<!-- semantic_dedup: no dedup signals; source preserved "
+                "unchanged for downstream phases. -->\n"
+            )
+        target.write_text(body, encoding="utf-8")
+    else:
+        target.write_text(
+            f"# {label}\n\n"
+            "**Status**: PASSTHROUGH\n\n"
+            f"Source artifact `{source.name}` was unavailable or empty while "
+            "semantic dedup needed a deterministic passthrough. Downstream "
+            "phases receive this explicit placeholder instead of a missing "
+            "file.\n\n"
+            "No semantic merge decisions were applied by this fallback.\n",
+            encoding="utf-8",
+        )
+    written.append(target.name)
+    return written
+
+
+def _write_chain_passthrough_outputs(
+    scratchpad: Path,
+    reason: str = "pre-run scaffold safety net",
+) -> list[str]:
+    """Write a valid one-finding-per-hypothesis chain baseline.
+
+    Chain Agent 1 is quality-improving, but downstream verification needs the
+    three handoff files to exist. This scaffold preserves every inventory
+    finding as its own hypothesis until the LLM overwrites it with better
+    grouping/enabler analysis.
+    """
+    scratchpad = Path(scratchpad)
+    inv_path = scratchpad / "findings_inventory.md"
+    entries = _parse_inventory_chunk(inv_path) if inv_path.exists() else []
+    if not entries:
+        ids: list[str] = []
+        if inv_path.exists():
+            try:
+                text = inv_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                text = ""
+            ids = sorted(_extract_finding_ids_from_text(text))
+        entries = [
+            {
+                "local_id": fid,
+                "title": f"Inventory finding {fid}",
+                "severity": "Medium",
+                "location": "UNKNOWN",
+                "source_ids": [fid],
+                "root_cause": "",
+                "description": "",
+            }
+            for fid in ids
+        ]
+
+    written: list[str] = []
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    hyp_lines = [
+        "# Hypotheses",
+        "",
+        "**Status**: MECHANICAL_BASELINE",
+        f"**Reason**: {reason}.",
+        f"**Generated At**: {stamp}",
+        "",
+        "| Hypothesis ID | Severity | Title | Constituent Findings | Location | Notes |",
+        "|---------------|----------|-------|----------------------|----------|-------|",
+    ]
+    map_lines = [
+        "# Finding Mapping",
+        "",
+        "**Status**: MECHANICAL_BASELINE",
+        f"**Reason**: {reason}.",
+        "",
+        "| Finding ID | Hypothesis ID | Mapping Status | Notes |",
+        "|------------|---------------|----------------|-------|",
+    ]
+    for idx, entry in enumerate(entries, start=1):
+        def _cell(value: str) -> str:
+            return re.sub(r"\s+", " ", str(value or "").replace("|", "/")).strip()
+
+        local = (
+            _normalize_finding_id(str(entry.get("local_id", "")))
+            or next(iter(entry.get("source_ids", []) or []), "")
+            or f"INV-{idx:03d}"
+        )
+        local = _normalize_finding_id(str(local)) or str(local)
+        hid = f"H-{idx}"
+        sev = normalize_severity(str(entry.get("severity") or "Medium"))
+        title = _cell(str(entry.get("title") or f"Inventory finding {local}"))
+        loc = _cell(str(entry.get("location") or "UNKNOWN"))
+        source_ids = list(entry.get("source_ids", []) or [])
+        if local and local not in source_ids:
+            source_ids.insert(0, local)
+        sources = ", ".join(str(s) for s in source_ids if str(s).strip()) or local
+        note = "Baseline one-to-one mapping; Chain Agent 1 may consolidate if safe."
+        hyp_lines.append(
+            f"| {hid} | {sev} | {title} | {sources} | {loc} | {note} |"
+        )
+        map_lines.append(
+            f"| {local} | {hid} | BASELINE_ONE_TO_ONE | preserved from inventory |"
+        )
+
+    if len(hyp_lines) == 7:
+        hyp_lines.append(
+            "| H-0 | Informational | No inventory findings parsed | NONE | UNKNOWN | "
+            "Placeholder to satisfy downstream handoff; upstream inventory should be checked. |"
+        )
+        map_lines.append("| NONE | H-0 | EMPTY_INVENTORY | no parsed inventory rows |")
+
+    (scratchpad / "hypotheses.md").write_text("\n".join(hyp_lines) + "\n", encoding="utf-8")
+    written.append("hypotheses.md")
+    (scratchpad / "finding_mapping.md").write_text("\n".join(map_lines) + "\n", encoding="utf-8")
+    written.append("finding_mapping.md")
+    enabler = (
+        "# Enabler Results\n\n"
+        "**Status**: MECHANICAL_BASELINE\n\n"
+        f"**Reason**: {reason}.\n\n"
+        "No new enabler paths were mechanically introduced by this scaffold. "
+        "Chain Agent 1 may overwrite this file with dangerous-state tables and "
+        "cross-state interactions. Until then, downstream phases preserve the "
+        "one-to-one inventory hypotheses without treating this scaffold as a "
+        "claim that no enablers exist.\n"
+    )
+    (scratchpad / "enabler_results.md").write_text(enabler, encoding="utf-8")
+    written.append("enabler_results.md")
+    return written
+
+
+def _write_semantic_invariants_fallback(
+    scratchpad: Path,
+    reason: str,
+) -> list[str]:
+    """Write the documented invariant fallback artifact.
+
+    The invariant prompt contract says depth may fall back to
+    `state_variables.md` if this enrichment phase times out. The phase gate
+    still needs a concrete artifact so resume/checkpoint state remains
+    explicit instead of retrying a non-load-bearing helper.
+    """
+    scratchpad = Path(scratchpad)
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    state_path = scratchpad / "state_variables.md"
+    variables: list[str] = []
+    if state_path.exists():
+        try:
+            text = state_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            text = ""
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("|") or "---" in stripped:
+                continue
+            cells = [c.strip(" `*") for c in stripped.strip("|").split("|")]
+            if cells and cells[0] and cells[0].lower() not in {
+                "variable", "state variable", "name",
+            }:
+                variables.append(cells[0])
+        variables = list(dict.fromkeys(variables))[:200]
+
+    if variables:
+        variable_cell = ", ".join(variables[:25])
+        if len(variables) > 25:
+            variable_cell += f", ... (+{len(variables) - 25} more)"
+    else:
+        variable_cell = "None parsed from state_variables.md"
+
+    body = (
+        "# Semantic Invariants\n\n"
+        "**Status**: FALLBACK\n\n"
+        f"**Reason**: {reason}\n\n"
+        f"**Generated**: {stamp}\n\n"
+        "The semantic-invariant enrichment pass did not produce a complete "
+        "artifact. This file preserves the documented transition contract: "
+        "depth agents must read `state_variables.md` directly and derive "
+        "invariants locally instead of treating this phase as absent.\n\n"
+        "### Main Table\n\n"
+        "| Variable | Contract/Module | Semantic Invariant | Write Sites "
+        "(with CONDITIONAL annotations) | Value-Changing Functions | "
+        "Potential Gaps |\n"
+        "|---|---|---|---|---|---|\n"
+        f"| {variable_cell} | See state_variables.md | FALLBACK: derive in "
+        "depth phase | See state_variables.md and source grep | See "
+        "function_list.md | Not precomputed |\n\n"
+        "### Mirror Variable Pairs\n\n"
+        "| Variable A | Variable B | Same Concept | Functions Writing A Only | "
+        "Functions Writing B Only | Sync Gaps |\n"
+        "|---|---|---|---|---|---|\n"
+        "| FALLBACK | FALLBACK | Not precomputed | Not precomputed | "
+        "Not precomputed | Depth must inspect if relevant |\n\n"
+        "### Time-Weighted Accumulators\n\n"
+        "| Accumulator | Formula Pattern | Controllable Input | Time Source | "
+        "Unbounded Delta? | Exposure |\n"
+        "|---|---|---|---|---|---|\n"
+        "| FALLBACK | Not precomputed | Not precomputed | Not precomputed | "
+        "Unknown | Depth must inspect if relevant |\n\n"
+        "### Semantic Clusters\n\n"
+        "| Cluster Name | Variables | Lifecycle Functions | Full-Write Functions | "
+        "Partial-Write Functions |\n"
+        "|---|---|---|---|---|\n"
+        f"| FALLBACK | {variable_cell} | See function_list.md | Not precomputed | "
+        "Not precomputed |\n"
+    )
+    target = scratchpad / "semantic_invariants.md"
+    target.write_text(body, encoding="utf-8")
+    return [target.name]
+
+
+def _write_rag_validation_floor(
+    scratchpad: Path,
+    reason: str,
+) -> list[str]:
+    """Write complete RAG floor scores for every inventory finding.
+
+    RAG validation is quality-improving context. Final scoring already
+    defines 0.3 as the no-support/tool-failed floor, so the deterministic
+    fallback must materialize that floor for every finding rather than
+    forcing a retry on a missing `rag_validation.md`.
+    """
+    scratchpad = Path(scratchpad)
+    inv_path = scratchpad / "findings_inventory.md"
+    rows: list[tuple[str, str]] = []
+    if inv_path.exists():
+        try:
+            text = _llm_norm(inv_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            text = ""
+        for m in re.finditer(
+            r"(?im)^\s*#{2,4}\s+Finding\s+\[([A-Z0-9]+(?:-[A-Z0-9]+)*-\d+)\]:\s*(.+)$",
+            text,
+        ):
+            rows.append((m.group(1).strip(), m.group(2).strip()))
+
+    if not rows:
+        rows = [("NONE", "No inventory findings parsed")]
+
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    lines = [
+        "# RAG Validation",
+        "",
+        "**Status**: FALLBACK_FLOOR",
+        "",
+        f"**Reason**: {reason}",
+        f"**Generated**: {stamp}",
+        "",
+        "| Finding ID | validate_hypothesis Score | solodit_live Matches | Final RAG Score | Notes |",
+        "|---|---|---|---|---|",
+    ]
+    for fid, title in rows:
+        safe_title = title.replace("|", "/")[:120]
+        lines.append(
+            f"| {fid} | N/A | 0 | 0.3 | [RAG: DRIVER_FLOOR] {safe_title}; {reason} |"
+        )
+    lines.append("")
+    target = scratchpad / "rag_validation.md"
+    target.write_text("\n".join(lines), encoding="utf-8")
+    return [target.name]
+
+
+def _write_empty_verification_queue(scratchpad: Path, reason: str) -> list[str]:
+    """Write canonical zero-row queue artifacts for an empty verify queue."""
+    scratchpad = Path(scratchpad)
+    written: list[str] = []
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    body = (
+        "# Verification Queue\n\n"
+        "| Queue # | Finding ID | Report ID | Severity | Title | Location | "
+        "Preferred Tag | Required Evidence | Status |\n"
+        "|---|---|---|---|---|---|---|---|---|\n\n"
+        "Total: 0 findings\n\n"
+        f"Reason: {reason}\n"
+        f"Generated: {stamp}\n\n"
+        "This is the canonical empty queue artifact. Downstream verify shards, "
+        "semantic dedup, cross-batch, and report phases must treat this as a "
+        "complete zero-row manifest, not as a missing queue.\n"
+    )
+    queue = scratchpad / "verification_queue.md"
+    queue.write_text(body, encoding="utf-8")
+    written.append(queue.name)
+
+    excluded = scratchpad / "verification_queue_evidence_excluded.md"
+    excluded.write_text(
+        "# Verification Queue Evidence-Excluded\n\n"
+        "| Finding ID | Severity | Title | Exclusion Reason |\n"
+        "|---|---|---|---|\n\n"
+        "Total: 0 findings\n\n"
+        f"Reason: {reason}\n"
+        f"Generated: {stamp}\n",
+        encoding="utf-8",
+    )
+    written.append(excluded.name)
+    return written
+
+
+def write_empty_verify_placeholders(scratchpad: Path, phase_name: str, reason: str) -> None:
+    """Write N/A artifacts so downstream phases (report) have something
+    to read. These pass gate_passes() because they are substantial files
+    (>= min_artifact_bytes default 50 bytes) even though semantically
+    they record the N/A state.
+    """
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    if phase_name == "verify":
+        marker = scratchpad / "verify_NONE.md"
+        marker.write_text(
+            f"# Verification Queue: N/A\n\n"
+            f"No reportable findings were produced by the breadth/depth/chain "
+            f"pipeline, so the verification phase has nothing to exercise.\n\n"
+            f"- Reason: {reason}\n"
+            f"- Timestamp: {stamp}\n\n"
+            f"Report generation proceeds with an empty verified set.\n",
+            encoding="utf-8",
+        )
+    elif phase_name in ("verify_aggregate", "sc_verify_aggregate"):
+        marker = scratchpad / "verify_core.md"
+        marker.write_text(
+            f"# verify_core: N/A\n\n"
+            f"No verifier outputs exist for aggregation.\n\n"
+            f"- Reason: {reason}\n"
+            f"- Timestamp: {stamp}\n",
+            encoding="utf-8",
+        )
+    elif phase_name in SC_VERIFY_PHASE_NAMES:
+        marker = scratchpad / f"{phase_name}_NONE.md"
+        marker.write_text(
+            f"# {phase_name}: N/A\n\n"
+            f"No findings assigned to this SC verify shard.\n\n"
+            f"- Reason: {reason}\n"
+            f"- Timestamp: {stamp}\n",
+            encoding="utf-8",
+        )
+    elif phase_name == "skeptic":
+        marker = scratchpad / "skeptic_NONE.md"
+        marker.write_text(
+            f"# Skeptic-Judge Queue: N/A\n\n"
+            f"No Medium+ findings → no High/Critical verdicts to adversarially "
+            f"review.\n\n- Reason: {reason}\n- Timestamp: {stamp}\n",
+            encoding="utf-8",
+        )
+    elif phase_name == "crossbatch":
+        marker = scratchpad / "cross_batch_consistency.md"
+        marker.write_text(
+            f"# Cross-Batch Consistency: N/A\n\n"
+            f"No verifier batches were produced (empty verification queue). "
+            f"There are no severities to cross-compare.\n\n"
+            f"- Reason: {reason}\n- Timestamp: {stamp}\n",
+            encoding="utf-8",
+        )
+
+
+def identify_missing_verify_ids(
+    scratchpad: Path,
+    *,
+    min_bytes: int = 100,
+) -> list[tuple[str, dict]]:
+    """Return (finding_id, queue_row) pairs for queue rows without verify files.
+
+    v2.6.8: Extracted from stub_missing_verify_files so the driver can
+    first attempt a recovery verification shard before falling back to
+    mechanical stubs.
+    """
+    rows = parse_verification_queue_rows(scratchpad)
+    missing: list[tuple[str, dict]] = []
+    for row in rows:
+        fid = (row.get("finding id") or "").strip()
+        if not fid:
+            continue
+        if _verify_file_present_for_id(scratchpad, fid, min_bytes=min_bytes):
+            continue
+        missing.append((fid, row))
+    return missing
+
+
+def stub_missing_verify_files(
+    scratchpad: Path,
+    pipeline: str,
+    *,
+    min_bytes: int = 100,
+) -> list[str]:
+    """Mechanically stub verify files that verify shards failed to produce.
+
+    v2.6.7: When verify shards hit context/time limits they produce partial
+    output (e.g. 87/103 files). Without stubs the E1 parity gate
+    (_validate_verify_files_for_queue) correctly catches the gap but the
+    only recovery is a pipeline halt — there is no fallback to fill the
+    gap mechanically.
+
+    v2.6.8: Refactored to use identify_missing_verify_ids(). The driver
+    now runs a recovery shard first; this function stubs whatever remains.
+
+    Returns the list of finding IDs that were stubbed.
+    """
+    missing = identify_missing_verify_ids(scratchpad, min_bytes=min_bytes)
+    if not missing:
+        return []
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    stubbed: list[str] = []
+    for fid, row in missing:
+        severity = (row.get("severity") or "Unknown").strip()
+        title = (row.get("title") or "").strip()
+        location = (row.get("location") or "").strip()
+        stub_path = scratchpad / f"verify_{fid}.md"
+        stub_path.write_text(
+            f"# Verification: {fid}\n\n"
+            f"**Finding ID**: {fid}\n"
+            f"**Title**: {title}\n"
+            f"**Severity**: {severity}\n"
+            f"**Location**: {location}\n\n"
+            f"**Verdict**: UNVERIFIED\n"
+            f"**Evidence Tag**: [CODE-TRACE]\n"
+            f"**Preferred Tag**: [CODE-TRACE]\n\n"
+            f"## VERIFICATION NOT EXECUTED\n\n"
+            f"This finding was not verified by the verification subprocess. "
+            f"The verify shard that was assigned this finding either timed "
+            f"out or exceeded its context budget before producing a verify "
+            f"file for this finding.\n\n"
+            f"- Stub reason: verify shard partial output\n"
+            f"- Timestamp: {stamp}\n"
+            f"- Original severity preserved: {severity}\n\n"
+            f"Human reviewer should treat this finding as unverified and "
+            f"apply independent judgment on exploitability.\n",
+            encoding="utf-8",
+        )
+        stubbed.append(fid)
+    return stubbed
+
+
+def _verify_shard_gate_missing(scratchpad: Path, phase_name: str, *, min_bytes: int = 100) -> list[str]:
+    """Artifact-existence gate for manifest-driven verify shards.
+
+    Verify shard phases intentionally have no static `expected_artifacts`
+    because their output set is derived from `verification_queue.md`. Treating
+    that as a normal empty-artifact phase creates a misleading vacuous-pass
+    warning and hides the real contract from the first gate layer.
+    """
+    if phase_name in SC_VERIFY_PHASE_NAMES:
+        shards = compute_sc_verify_shards(scratchpad)
+    else:
+        shards = compute_verify_shards(scratchpad)
+    queue_path = scratchpad / "verification_queue.md"
+    if queue_path.exists():
+        try:
+            queue_text = _llm_norm(queue_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            queue_text = ""
+        if (
+            queue_text.strip()
+            and not parse_verification_queue_rows(scratchpad)
+            and not re.search(r"\bTotal:\s*0\s+findings\b", queue_text, re.IGNORECASE)
+        ):
+            return [
+                "verify queue parse: verification_queue.md exists but no "
+                "parseable finding rows were found"
+            ]
+    expected_rows = shards.get(phase_name, [])
+    expected_ids = [row.get("finding id", "") for row in expected_rows]
+    expected_ids = [fid for fid in expected_ids if fid]
+    if not expected_ids:
+        return []
+
+    def _verify_names(fid: str) -> tuple[str, ...]:
+        return (
+            f"verify_{fid}.md",
+            f"verify_F-{fid}.md",
+            f"verify_F_{fid}.md",
+            f"verify_[{fid}].md",
+        )
+
+    def _present(fid: str) -> bool:
+        for name in _verify_names(fid):
+            p = scratchpad / name
+            if p.exists() and p.stat().st_size >= min_bytes:
+                return True
+        return False
+
+    missing_ids = [fid for fid in expected_ids if not _present(fid)]
+    if not missing_ids:
+        return []
+    sample = sorted(missing_ids)[:5]
+    extra = f" (+{len(missing_ids) - len(sample)} more)" if len(missing_ids) > len(sample) else ""
+    return [
+        f"verify completion: wrote {len(expected_ids) - len(missing_ids)}/"
+        f"{len(expected_ids)} verifier files; missing: {sample}{extra}"
+    ]
+
+
+def gate_passes(scratchpad: Path, project_root: str, phase: Phase) -> tuple:
+    """Return (passed, missing). Two-mode gate:
+    - Explicit filename (no glob wildcards): THAT file must exist and be
+      >= min_artifact_bytes. A stub fails the pattern.
+    - Glob pattern (contains `*` or `?`): at least `min_artifacts_count`
+      matching files must be >= min_artifact_bytes. Default count is 1
+      (any substantial match passes — permissive). Critical phases set
+      count >= 3 to catch silent degradations where one solo agent writes
+      while the other N-1 are never spawned (manifest-aware quorum).
+    """
+    missing = []
+    if not phase.expected_artifacts and not getattr(phase, "any_of", None):
+        if phase.name in L1_VERIFY_PHASE_NAMES or phase.name in SC_VERIFY_PHASE_NAMES:
+            missing.extend(_verify_shard_gate_missing(scratchpad, phase.name, min_bytes=phase.min_artifact_bytes))
+        else:
+            log.warning(
+                f"[gate_passes] {phase.name}: no expected_artifacts and no any_of — "
+                f"vacuous pass (phase may be misconfigured)"
+            )
+    for pattern in phase.expected_artifacts:
+        if pattern == "AUDIT_REPORT.md":
+            p = Path(project_root) / "AUDIT_REPORT.md"
+            if not p.exists() or p.stat().st_size < phase.min_artifact_bytes:
+                missing.append(pattern)
+            continue
+        if phase.name == "breadth" and pattern == "analysis_*.md":
+            expected_outputs = parse_breadth_manifest_outputs(scratchpad)
+            if expected_outputs:
+                missing_expected = []
+                stub_expected = []
+                for name in expected_outputs:
+                    p = scratchpad / name
+                    if not p.exists():
+                        missing_expected.append(name)
+                    elif p.stat().st_size < phase.min_artifact_bytes:
+                        stub_expected.append(name)
+                if missing_expected or stub_expected:
+                    detail = []
+                    if missing_expected:
+                        sample = ", ".join(missing_expected[:12])
+                        if len(missing_expected) > 12:
+                            sample += f", ... (+{len(missing_expected) - 12} more)"
+                        detail.append(f"missing: {sample}")
+                    if stub_expected:
+                        sample = ", ".join(stub_expected[:12])
+                        if len(stub_expected) > 12:
+                            sample += f", ... (+{len(stub_expected) - 12} more)"
+                        detail.append(f"stub: {sample}")
+                    missing.append(
+                        "analysis_*.md manifest-exact incomplete "
+                        f"({len(expected_outputs)} expected; {'; '.join(detail)})"
+                    )
+                    continue
+                # The manifest is the authoritative breadth contract. If it
+                # names two spawned agents, requiring the phase's legacy
+                # static min_artifacts_count=3 reintroduces a false retry.
+                continue
+        is_glob = any(ch in pattern for ch in "*?[")
+        matches = list(scratchpad.glob(pattern))
+        if phase.name == "breadth" and pattern == "analysis_*.md":
+            matches = [
+                m for m in matches
+                if not (
+                    m.name.startswith("analysis_rescan_")
+                    or m.name.startswith("analysis_percontract_")
+                )
+            ]
+        if not matches:
+            missing.append(pattern)
+            continue
+        if is_glob:
+            substantial = [m for m in matches
+                           if m.stat().st_size >= phase.min_artifact_bytes]
+            needed = max(1, phase.min_artifacts_count)
+            if len(substantial) < needed:
+                missing.append(
+                    f"{pattern} (quorum: {len(substantial)}/{needed} substantial)"
+                )
+        else:
+            # Strict: single explicit filename — it must be substantial
+            if matches[0].stat().st_size < phase.min_artifact_bytes:
+                missing.append(pattern + " (stub only)")
+
+    # any_of: ALL outer groups must be satisfied; within an outer group,
+    # AT LEAST ONE pattern must have a substantial match. This decouples
+    # the gate from naming-convention flux (e.g. verify_F_*.md vs
+    # verify_F-*.md — either shape alone means the LLM wrote verifiers).
+    for group_idx, or_group in enumerate(getattr(phase, "any_of", []) or []):
+        group_satisfied = False
+        for pattern in or_group:
+            matches = list(scratchpad.glob(pattern))
+            if not matches:
+                continue
+            substantial = [m for m in matches
+                           if m.stat().st_size >= phase.min_artifact_bytes]
+            if substantial:
+                group_satisfied = True
+                break
+        if not group_satisfied:
+            missing.append(
+                f"any_of[{group_idx}]: none of {or_group} matched substantially"
+            )
+    return (not missing, missing)
+
+
+def _validate_spawn_manifest_schema(scratchpad: Path) -> list[str]:
+    """Validate the Phase 2 manifest at the producer boundary.
+
+    `spawn_manifest.md` is the contract consumed by breadth. Letting
+    `instantiate` complete with a table-ish but unparseable manifest shifts
+    a producer bug into the next phase and creates misleading breadth retry
+    loops. This validator uses the same canonical parser as the breadth gate
+    so the schema is accepted or rejected exactly once, at the artifact owner.
+    """
+    path = scratchpad / "spawn_manifest.md"
+    if not path.exists():
+        return ["spawn_manifest.md missing"]
+    try:
+        text = _llm_norm(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        return [f"spawn_manifest.md unreadable: {exc}"]
+    if path.stat().st_size < 50:
+        return ["spawn_manifest.md is a stub (<50 bytes)"]
+
+    forbidden = sorted(set(re.findall(
+        r"\b(?:verify_[A-Za-z0-9_.-]*|analysis_rescan_[A-Za-z0-9_.-]+|"
+        r"analysis_percontract_[A-Za-z0-9_.-]+|analysis_merged_into_[A-Za-z0-9_.-]+)\.md\b",
+        text,
+    )))
+    outputs = parse_breadth_manifest_outputs(scratchpad)
+    count = parse_breadth_manifest_count(scratchpad)
+    if outputs and count:
+        issues: list[str] = []
+        if forbidden:
+            issues.append(
+                "spawn_manifest.md contains non-breadth artifact row(s): "
+                + ", ".join(forbidden[:8])
+            )
+        if len(outputs) != count:
+            issues.append(
+                "spawn_manifest.md maps spawned breadth agents to "
+                f"{len(outputs)} unique output file(s) for {count} spawned "
+                "agent row(s); each spawned agent needs a distinct "
+                "analysis_*.md output"
+            )
+        if not issues:
+            return []
+        return issues
+
+    has_table = any(
+        line.strip().startswith("|")
+        and "template" in line.lower()
+        and "required" in line.lower()
+        for line in text.splitlines()
+    )
+    if not has_table:
+        log.warning(
+            "[_validate_spawn_manifest_schema] spawn_manifest.md lacks "
+            "recognizable table header with Template and Required columns "
+            "— LLM prose check (soft)"
+        )
+
+    suffix = ""
+    if forbidden:
+        suffix = "; non-breadth artifact rows present: " + ", ".join(forbidden[:8])
+    return [
+        "spawn_manifest.md schema invalid: no parseable spawned breadth-agent "
+        "rows. Required rows must identify spawned agents and derive or name "
+        "first-pass analysis_*.md outputs" + suffix
+    ]
+
+
+def _validate_verification_queue_inventory_parity(scratchpad: Path) -> list[str]:
+    """Ensure every inventory ID is routed to verify or explicitly excluded.
+
+    Evidence filtering is allowed to suppress rows only by writing
+    verification_queue_evidence_excluded.md. Anything else is a promotion
+    dropout and must halt before verification.
+    """
+    inv_path = scratchpad / "findings_inventory.md"
+    if not inv_path.exists():
+        return ["verification queue parity: findings_inventory.md missing"]
+    try:
+        inventory_ids = {
+            _normalize_finding_id(b.get("id", ""))
+            for b in _inventory_blocks(inv_path.read_text(encoding="utf-8", errors="replace"))
+        }
+    except Exception as exc:
+        return [f"verification queue parity: inventory parse failed: {exc}"]
+    inventory_ids.discard("")
+    if not inventory_ids:
+        return []
+
+    active_ids = {
+        _normalize_finding_id(r.get("finding id", ""))
+        for r in parse_verification_queue_rows(scratchpad)
+    }
+    active_ids.discard("")
+
+    # v2.4.9: hypothesis-aware expansion.  _dedup_queue_by_hypothesis collapses
+    # INV-NNN rows into H-N representative rows.  Expand H-N/CH-N back to their
+    # constituent INV-NNN IDs so the parity check works across ID namespaces.
+    hypo_map = _parse_hypothesis_constituents(scratchpad)
+    expanded_ids: set[str] = set(active_ids)
+    mapped_hypos: set[str] = set()
+    for aid in active_ids:
+        constituents = hypo_map.get(aid, [])
+        if constituents:
+            mapped_hypos.add(aid)
+            for cid in constituents:
+                norm = _normalize_finding_id(cid) or cid.upper()
+                if norm:
+                    expanded_ids.add(norm)
+
+    excluded_ids: set[str] = set()
+    excluded_path = scratchpad / "verification_queue_evidence_excluded.md"
+    if excluded_path.exists():
+        try:
+            text = excluded_path.read_text(encoding="utf-8", errors="replace")
+            headers, rows = _parse_markdown_table(text, ["severity"])
+            if headers:
+                headers_lc = [h.strip().lower() for h in headers]
+                fid_idx = next(
+                    (
+                        i for i, h in enumerate(headers_lc)
+                        if _match_canonical_header(h) == "finding id"
+                    ),
+                    -1,
+                )
+                if fid_idx >= 0:
+                    for row in rows:
+                        if fid_idx < len(row):
+                            excluded_ids.add(_normalize_finding_id(row[fid_idx]))
+        except Exception:
+            pass
+    excluded_ids.discard("")
+    expanded_excluded_ids: set[str] = set(excluded_ids)
+    for eid in excluded_ids:
+        constituents = hypo_map.get(eid, [])
+        for cid in constituents:
+            norm = _normalize_finding_id(cid) or cid.upper()
+            if norm:
+                expanded_excluded_ids.add(norm)
+
+    dedup_acknowledged_ids = _collect_semantic_dedup_acknowledged_ids(scratchpad)
+    acknowledged = expanded_ids | expanded_excluded_ids | dedup_acknowledged_ids
+    missing = sorted(inventory_ids - acknowledged)
+    extra = sorted((active_ids - mapped_hypos) - inventory_ids)
+    issues: list[str] = []
+    if missing:
+        sample = ", ".join(missing[:10])
+        more = f" (+{len(missing) - 10} more)" if len(missing) > 10 else ""
+        issues.append(
+            f"verification queue dropout: {len(missing)} inventory ID(s) "
+            "absent from active queue, evidence-excluded queue, and semantic "
+            f"dedup receipt: {sample}{more}"
+        )
+    if len(acknowledged) < len(inventory_ids):
+        issues.append(
+            f"verification queue coverage: acknowledged {len(acknowledged)}/"
+            f"{len(inventory_ids)} inventory IDs"
+        )
+    if extra:
+        sample = ", ".join(extra[:10])
+        more = f" (+{len(extra) - 10} more)" if len(extra) > 10 else ""
+        issues.append(
+            f"verification queue has {len(extra)} ID(s) not present in inventory: "
+            f"{sample}{more}"
+        )
+    return issues
+
+
+def _collect_semantic_dedup_acknowledged_ids(scratchpad: Path) -> set[str]:
+    """Return inventory IDs explicitly absorbed/grouped by semantic dedup.
+
+    After `semantic_dedup`, the active verification queue may intentionally
+    omit absorbed duplicate rows. Startup reconciliation must not treat those
+    IDs as lost, but it also must not excuse plain PASS rows that vanished.
+    """
+    path = scratchpad / "dedup_decisions.md"
+    if not path.exists():
+        return set()
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return set()
+
+    acknowledged: set[str] = set()
+
+    # Heading form:
+    #   ### MERGE: INV-011 absorbs INV-010
+    #   ### GROUP: INV-001 represents INV-002, INV-003
+    for line in text.splitlines():
+        m = re.match(
+            r"(?i)^\s*#{2,6}\s+MERGE:\s+"
+            r"([A-Z]+-\d+)\s+absorbs\s+(.+?)\s*$",
+            line,
+        )
+        if m:
+            for fid in re.findall(r"\b[A-Z]+-\d+\b", m.group(2)):
+                norm = _normalize_finding_id(fid)
+                if norm:
+                    acknowledged.add(norm)
+            continue
+        m = re.match(
+            r"(?i)^\s*#{2,6}\s+GROUP:\s+"
+            r"([A-Z]+-\d+)\s+represents\s+(.+?)\s*$",
+            line,
+        )
+        if m:
+            representative = _normalize_finding_id(m.group(1))
+            for fid in re.findall(r"\b[A-Z]+-\d+\b", m.group(2)):
+                norm = _normalize_finding_id(fid)
+                if norm and norm != representative:
+                    acknowledged.add(norm)
+            continue
+
+        # Status-table form:
+        # | INV-010 | MERGED into INV-011 | ... |
+        # | INV-002 | GROUPED under INV-001 | ... |
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        fid = _normalize_finding_id(cells[0])
+        status = cells[1].lower()
+        if fid and (
+            status.startswith("merged")
+            or status.startswith("absorbed")
+            or status.startswith("grouped")
+            or "merged into" in status
+            or "inherits verification" in status
+        ):
+            acknowledged.add(fid)
+
+    acknowledged.discard("")
+    return acknowledged
+
+
+def _snapshot_file_state(scratchpad: Path, project_root: str) -> dict[str, tuple[int, int]]:
+    """Return path -> (mtime_ns, size) for current run-relevant artifacts."""
+    state: dict[str, tuple[int, int]] = {}
+    excluded_dirs = {
+        "_overflow",
+        "_retry_quarantine",
+        ".pytest_cache",
+        "__pycache__",
+    }
+    for p in scratchpad.rglob("*"):
+        if not p.is_file():
+            continue
+        rel_parts = p.relative_to(scratchpad).parts
+        if rel_parts and rel_parts[0] in excluded_dirs:
+            continue
+        try:
+            stat = p.stat()
+        except Exception:
+            continue
+        state[p.relative_to(scratchpad).as_posix()] = (stat.st_mtime_ns, stat.st_size)
+    report = Path(project_root) / "AUDIT_REPORT.md"
+    if report.exists():
+        try:
+            stat = report.stat()
+            state["../AUDIT_REPORT.md"] = (stat.st_mtime_ns, stat.st_size)
+        except Exception:
+            pass
+    return state
+
+
+_PROTECTED_WRITE_PATTERNS_BY_PHASE: dict[str, tuple[str, ...]] = {
+    "depth": (
+        "rag_validation.md",
+        "chain_summaries_compact.md",
+        "hypotheses.md",
+        "finding_mapping.md",
+        "enabler_results.md",
+        "chain_hypotheses.md",
+        "composition_coverage.md",
+        "synthesis_full.md",
+        "verification_queue*.md",
+        "verify_*.md",
+        "verify_H*.md",
+        "verify_CH*.md",
+        "verify_F*.md",
+        "verify_core.md",
+        "cross_batch_consistency*.md",
+        "skeptic_*.md",
+        "judge_*.md",
+        "report_index.md",
+        "report_coverage.md",
+        "report_quality.md",
+        "report_*.md",
+        "../AUDIT_REPORT.md",
+    ),
+    "breadth": (
+        "findings_inventory*.md",
+        "semantic_invariants.md",
+        "depth_*",
+        "rag_validation.md",
+        "hypotheses.md",
+        "finding_mapping.md",
+        "enabler_results.md",
+        "chain_hypotheses.md",
+        "verification_queue*.md",
+        "verify_*.md",
+        "report_*.md",
+        "../AUDIT_REPORT.md",
+    ),
+}
+
+
+def _protected_phase_write_patterns(phase_name: str) -> tuple[str, ...]:
+    return _PROTECTED_WRITE_PATTERNS_BY_PHASE.get(phase_name, ())
+
+
+_ARTIFACT_STATE_NAME = "_artifact_state.json"
+
+
+def _artifact_state_path(scratchpad: Path) -> Path:
+    return scratchpad / _ARTIFACT_STATE_NAME
+
+
+def _read_artifact_state(scratchpad: Path) -> dict[str, Any]:
+    """Read durable artifact ownership metadata.
+
+    The ledger is intentionally best-effort: corrupted or missing metadata must
+    not crash the pipeline, but callers should then treat provenance as unknown
+    instead of silently inferring ownership from file presence.
+    """
+    path = _artifact_state_path(scratchpad)
+    if not path.exists():
+        return {"version": 1, "artifacts": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("[artifact-state] ignoring unreadable artifact ledger: %s", exc)
+        return {"version": 1, "artifacts": {}}
+    if not isinstance(data, dict):
+        return {"version": 1, "artifacts": {}}
+    artifacts = data.get("artifacts")
+    if not isinstance(artifacts, dict):
+        data["artifacts"] = {}
+    data.setdefault("version", 1)
+    return data
+
+
+def _write_artifact_state(scratchpad: Path, state: dict[str, Any]) -> None:
+    path = _artifact_state_path(scratchpad)
+    payload = json.dumps(state, indent=2, sort_keys=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=str(path.parent), delete=False,
+        prefix=f".{path.name}.", suffix=".tmp",
+    ) as tmp:
+        tmp.write(payload)
+        tmp.write("\n")
+        tmp_path = Path(tmp.name)
+    os.replace(tmp_path, path)
+
+
+def _artifact_path_for_name(scratchpad: Path, project_root: str, name: str) -> Path:
+    if name == "../AUDIT_REPORT.md":
+        return Path(project_root) / "AUDIT_REPORT.md"
+    if name.startswith("../"):
+        return Path(project_root) / name[3:]
+    return scratchpad / name
+
+
+def _artifact_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _artifact_record(
+    scratchpad: Path,
+    project_root: str,
+    name: str,
+    *,
+    owner_phase: str,
+    status: str,
+) -> dict[str, Any] | None:
+    path = _artifact_path_for_name(scratchpad, project_root, name)
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        stat = path.stat()
+        sha256 = _artifact_sha256(path)
+    except Exception as exc:
+        log.debug("[artifact-state] could not stat/hash %s: %s", name, exc)
+        return None
+    return {
+        "path": name,
+        "owner_phase": owner_phase,
+        "status": status,
+        "mtime_ns": stat.st_mtime_ns,
+        "size": stat.st_size,
+        "sha256": sha256,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _materialized_artifact_names(
+    scratchpad: Path,
+    project_root: str,
+    patterns: list[str],
+) -> list[str]:
+    names: list[str] = []
+    for pattern in patterns:
+        if pattern == "AUDIT_REPORT.md":
+            pattern = "../AUDIT_REPORT.md"
+        if pattern == "../AUDIT_REPORT.md" or pattern.startswith("../"):
+            if _artifact_path_for_name(scratchpad, project_root, pattern).exists():
+                names.append(pattern)
+            continue
+        if any(ch in pattern for ch in "*?["):
+            names.extend(sorted(p.name for p in scratchpad.glob(pattern) if p.is_file()))
+        else:
+            p = scratchpad / pattern
+            if p.exists() and p.is_file():
+                names.append(pattern)
+    return sorted(set(names))
+
+
+def _record_phase_artifact_state(
+    scratchpad: Path,
+    project_root: str,
+    phases: list[Phase],
+    phase_name: str,
+    pipeline: str,
+    *,
+    status: str = "ACTIVE",
+) -> list[str]:
+    """Record durable ownership for artifacts materialized by a phase.
+
+    This is the runtime source of truth that separates a real containment
+    violation from stale downstream artifacts left by a prior run. File
+    presence alone is not provenance.
+    """
+    del phases  # ownership is keyed by pipeline/phase, not active mode order.
+    owned = _owned_artifact_patterns(pipeline, scratchpad).get(phase_name, [])
+    names = _materialized_artifact_names(scratchpad, project_root, owned)
+    if not names:
+        return []
+    state = _read_artifact_state(scratchpad)
+    artifacts = state.setdefault("artifacts", {})
+    for name in names:
+        record = _artifact_record(
+            scratchpad, project_root, name,
+            owner_phase=phase_name, status=status,
+        )
+        if record:
+            artifacts[name] = record
+    _write_artifact_state(scratchpad, state)
+    return names
+
+
+def _phase_artifacts_have_active_owner_state(
+    scratchpad: Path,
+    project_root: str,
+    phase_name: str,
+    pipeline: str,
+) -> tuple[bool, list[str]]:
+    """Return whether current phase artifacts have matching owner metadata.
+
+    Artifact recovery must not infer phase completion from file presence on a
+    dirty scratchpad. Only artifacts previously recorded by the same phase with
+    matching content hashes are eligible for auto-complete.
+    """
+    owned = _owned_artifact_patterns(pipeline, scratchpad).get(phase_name, [])
+    names = _materialized_artifact_names(scratchpad, project_root, owned)
+    if not names:
+        return False, ["no owned artifacts materialized"]
+    state = _read_artifact_state(scratchpad)
+    artifacts = state.get("artifacts", {})
+    issues: list[str] = []
+    for name in names:
+        rec = artifacts.get(name) if isinstance(artifacts, dict) else None
+        if not isinstance(rec, dict):
+            issues.append(f"{name}: no owner record")
+            continue
+        if rec.get("owner_phase") != phase_name or rec.get("status") != "ACTIVE":
+            issues.append(
+                f"{name}: owner={rec.get('owner_phase')} status={rec.get('status')}"
+            )
+            continue
+        path = _artifact_path_for_name(scratchpad, project_root, name)
+        try:
+            current_hash = _artifact_sha256(path)
+        except Exception as exc:
+            issues.append(f"{name}: unreadable for hash ({exc})")
+            continue
+        if rec.get("sha256") != current_hash:
+            issues.append(f"{name}: content hash changed since owner record")
+    return not issues, issues
+
+
+def _mark_artifacts_quarantined(
+    scratchpad: Path,
+    project_root: str,
+    phase_name: str,
+    names: list[str],
+) -> None:
+    if not names:
+        return
+    state = _read_artifact_state(scratchpad)
+    artifacts = state.setdefault("artifacts", {})
+    now = datetime.now(timezone.utc).isoformat()
+    for name in names:
+        prior = artifacts.get(name) if isinstance(artifacts.get(name), dict) else {}
+        artifacts[name] = {
+            **prior,
+            "path": name,
+            "owner_phase": prior.get("owner_phase") or phase_name,
+            "quarantined_by_phase": phase_name,
+            "status": "QUARANTINED",
+            "updated_at": now,
+        }
+    _write_artifact_state(scratchpad, state)
+
+
+def _owned_artifact_patterns(pipeline: str, scratchpad: Optional[Path] = None) -> dict[str, list[str]]:
+    """Return per-phase artifact ownership patterns for phase-containment checks."""
+    common_report = ["../AUDIT_REPORT.md"]
+    def _verify_output_names(rows: list[dict[str, str]]) -> list[str]:
+        names: list[str] = []
+        for row in rows:
+            fid = (row.get("finding id") or "").strip()
+            if not fid:
+                continue
+            names.append(f"verify_{fid}.md")
+        return names
+
+    if pipeline == "l1":
+        verify_shards = compute_verify_shards(scratchpad) if scratchpad else {
+            name: [] for name in L1_VERIFY_PHASE_NAMES
+        }
+        verify_names = {
+            phase_name: _verify_output_names(rows)
+            for phase_name, rows in verify_shards.items()
+        }
+        owned = {
+            "bake": ["primitive_status.md", "bake_validation.md"],
+            "recon": [
+                "recon_summary.md", "threat_model.md", "subsystem_map.md",
+                "attack_surface.md", "trust_boundaries.md",
+                "template_recommendations.md", "scope_leftover.md",
+                "file_coverage_ledger.md", "integration_points.md",
+            ],
+            "breadth": ["analysis_*.md"],
+            "graph_sweeps": [
+                "graph_sweep_summary.md", "coverage_fill_*.md",
+                "panic_audit_*.md", "panic_audit_summary.md",
+                "symmetric_pair_findings.md",
+                "field_validation_matrix.md",
+                "primitive_correctness_findings.md",
+                "network_amplification_findings.md",
+                "lifecycle_replay_findings.md",
+            ],
+            "inventory_prepare": [
+                "inventory_shard_plan.md", "inventory_chunk_a.manifest.md",
+                "inventory_chunk_b.manifest.md", "inventory_chunk_c.manifest.md",
+            ],
+            "inventory_chunk_a": ["findings_inventory_chunk_a.md"],
+            "inventory_chunk_b": ["findings_inventory_chunk_b.md"],
+            "inventory_chunk_c": ["findings_inventory_chunk_c.md"],
+            "inventory": [
+                "findings_inventory.md", "inventory_evidence_validation.md",
+                "inventory_merge_receipt.md",
+            ],
+            "location_recovery": ["location_recovery.md"],
+            "invariants": ["semantic_invariants.md"],
+            "depth": [
+                "depth_*_findings.md", "depth_iter2_*_findings.md",
+                "blind_spot_*_findings.md", "scanner_*_findings.md",
+                "da_*_findings.md", "confidence_scores.md",
+                "design_stress_findings.md", "perturbation_findings.md",
+                "skill_execution_gaps.md", "skill_execution_checklist.md",
+                "never_cut_checkpoint.md", "depth_exit.md",
+            ],
+            "rag_sweep": ["rag_validation.md"],
+            "chain": ["hypotheses.md", "finding_mapping.md", "enabler_results.md"],
+            "chain_agent2": ["chain_hypotheses.md", "composition_coverage.md", "synthesis_full.md"],
+            "semantic_dedup": [
+                "dedup_decisions.md", "verification_queue_deduped.md",
+            ],
+            "attention_repair": ["attention_repair_summary.md", "attention_repair_findings.md"],
+            "verify_queue": [
+                "verification_queue.md", "verification_queue_evidence_excluded.md",
+            ],
+            "verify_aggregate": ["verify_core.md"],
+            "crossbatch": ["cross_batch_consistency.md"],
+            "skeptic": ["skeptic_findings.md", "skeptic_judge_decisions.md"],
+            "report_index": [
+                "report_index.md", "report_coverage.md", "report_records.json",
+            ],
+            "report_body_writer_critical_high": ["report_critical_high.md"],
+            "report_body_writer_medium": ["report_medium.md"],
+            "report_body_writer_low_info": ["report_low_info.md"],
+            "report_critical_high": ["report_critical_high.md"],
+            "report_critical_high_merge": ["report_critical_high.md"],
+            "report_medium": ["report_medium.md"],
+            "report_medium_merge": ["report_medium.md"],
+            "report_low_info": ["report_low_info.md"],
+            "report_low_info_merge": ["report_low_info.md"],
+            "report_assemble": common_report,
+        }
+        # Dynamic tier shard entries based on actual manifests
+        if scratchpad:
+            manifest_dir = scratchpad / "body_manifests"
+            if manifest_dir.is_dir():
+                from plamen_types import _EXPANDABLE_TIERS, _valid_report_shard_suffix
+                for tier in _EXPANDABLE_TIERS:
+                    for f in sorted(manifest_dir.glob(f"report_{tier}_*.json")):
+                        suffix = f.stem[len(f"report_{tier}_"):]
+                        if _valid_report_shard_suffix(suffix):
+                            bw = f"report_body_writer_{tier}_{suffix}"
+                            owned[bw] = [f"report_{tier}_{suffix}.md"]
+                            owned[f"report_{tier}_{suffix}"] = [
+                                f"report_{tier}_{suffix}.md",
+                                f"report_{tier}_{suffix}_assignments.md",
+                            ]
+                    if not any(k.startswith(f"report_body_writer_{tier}") for k in owned):
+                        owned[f"report_body_writer_{tier}"] = [f"report_{tier}.md"]
+                        owned[f"report_{tier}"] = [f"report_{tier}.md"]
+        for phase_name, manifest in L1_VERIFY_SHARD_MANIFESTS.items():
+            owned[phase_name] = [manifest, *verify_names.get(phase_name, [])]
+        return owned
+    sc_verify_shards = compute_sc_verify_shards(scratchpad) if scratchpad else {
+        name: [] for name in SC_VERIFY_PHASE_NAMES
+    }
+    sc_verify_names = {
+        phase_name: _verify_output_names(rows)
+        for phase_name, rows in sc_verify_shards.items()
+    }
+    owned = {
+        "recon": [
+            "recon_summary.md", "design_context.md", "attack_surface.md",
+            "state_variables.md", "function_list.md", "contract_inventory.md",
+            "template_recommendations.md", "detected_patterns.md",
+            "setter_list.md", "emit_list.md", "build_status.md",
+        ],
+        "instantiate": ["spawn_manifest.md"],
+        "breadth": ["analysis_*.md"],
+        "rescan": ["analysis_rescan_*.md", "analysis_percontract_*.md"],
+        "inventory_prepare": [
+            "inventory_shard_plan.md", "inventory_chunk_a.manifest.md",
+            "inventory_chunk_b.manifest.md", "inventory_chunk_c.manifest.md",
+        ],
+        "inventory_chunk_a": ["findings_inventory_chunk_a.md"],
+        "inventory_chunk_b": ["findings_inventory_chunk_b.md"],
+        "inventory_chunk_c": ["findings_inventory_chunk_c.md"],
+        "inventory": [
+            "findings_inventory.md", "inventory_evidence_validation.md",
+            "inventory_merge_receipt.md",
+        ],
+        "invariants": ["semantic_invariants.md"],
+        "depth": [
+            "depth_*_findings.md", "depth_iter2_*_findings.md",
+            "blind_spot_*_findings.md", "scanner_*_findings.md",
+            "da_*_findings.md", "confidence_scores.md",
+            "design_stress_findings.md", "perturbation_findings.md",
+            "skill_execution_gaps.md", "skill_execution_checklist.md",
+            "never_cut_checkpoint.md", "depth_exit.md",
+        ],
+        "rag_sweep": ["rag_validation.md"],
+        "sc_semantic_dedup": ["dedup_decisions.md", "findings_inventory_deduped.md"],
+        "attention_repair": ["attention_repair_summary.md", "attention_repair_findings.md"],
+        "chain": ["hypotheses.md", "finding_mapping.md", "enabler_results.md"],
+        "chain_agent2": ["chain_hypotheses.md", "composition_coverage.md", "synthesis_full.md"],
+        "sc_verify_queue": [
+            "verification_queue.md", "verification_queue_evidence_excluded.md",
+        ],
+        "sc_verify_aggregate": ["verify_core.md"],
+        "skeptic": ["skeptic_findings.md", "skeptic_judge_decisions.md"],
+        "crossbatch": ["cross_batch_consistency.md"],
+        "report_index": ["report_index.md", "report_coverage.md"],
+        "report_body_writer_critical_high": ["report_critical_high.md"],
+        "report_body_writer_medium": ["report_medium.md"],
+        "report_body_writer_low_info": ["report_low_info.md"],
+        "report_critical_high": ["report_critical_high.md"],
+        "report_critical_high_merge": ["report_critical_high.md"],
+        "report_medium": ["report_medium.md"],
+        "report_medium_merge": ["report_medium.md"],
+        "report_low_info": ["report_low_info.md"],
+        "report_low_info_merge": ["report_low_info.md"],
+        "report_assemble": common_report,
+    }
+    if scratchpad:
+        manifest_dir = scratchpad / "body_manifests"
+        if manifest_dir.is_dir():
+            from plamen_types import _EXPANDABLE_TIERS, _valid_report_shard_suffix
+            for tier in _EXPANDABLE_TIERS:
+                for f in sorted(manifest_dir.glob(f"report_{tier}_*.json")):
+                    suffix = f.stem[len(f"report_{tier}_"):]
+                    if _valid_report_shard_suffix(suffix):
+                        owned[f"report_body_writer_{tier}_{suffix}"] = [
+                            f"report_{tier}_{suffix}.md"
+                        ]
+                        owned[f"report_{tier}_{suffix}"] = [
+                            f"report_{tier}_{suffix}.md",
+                            f"report_{tier}_{suffix}_assignments.md",
+                        ]
+    for phase_name, manifest in SC_VERIFY_SHARD_MANIFESTS.items():
+        owned[phase_name] = [manifest, *sc_verify_names.get(phase_name, [])]
+    return owned
+
+
+def _matches_any_pattern(name: str, patterns: list[str]) -> bool:
+    from fnmatch import fnmatch
+    return any(fnmatch(name, pat) for pat in patterns)
+
+
+def _detect_foreign_phase_writes(scratchpad: Path, project_root: str,
+                                 phases: list[Phase], phase_name: str,
+                                 pipeline: str,
+                                 before_state: dict[str, tuple[int, int]]) -> list[str]:
+    """Return later-phase artifacts created/modified by the current phase attempt."""
+    owned = _owned_artifact_patterns(pipeline, scratchpad)
+    phase_names = [p.name for p in phases]
+    try:
+        idx = phase_names.index(phase_name)
+    except ValueError:
+        return []
+
+    future_patterns: list[str] = []
+    for later_name in phase_names[idx + 1:]:
+        future_patterns.extend(owned.get(later_name, []))
+    future_patterns.extend(_protected_phase_write_patterns(phase_name))
+    # Phase E11: body-writer phase shares its tier file with the legacy
+    # tier phase that runs AFTER it (the legacy phase is now a deterministic
+    # confirmation handler). Don't flag the body writer's legitimate write
+    # as a "later-phase artifact" violation.
+    current_owned = set(owned.get(phase_name, []))
+    if current_owned:
+        future_patterns = [p for p in future_patterns if p not in current_owned]
+    # Report body writers produce peer tier files that are later confirmed by
+    # legacy tier phases. A writer shard must not be allowed to lose a valid
+    # already-written peer body just because the confirmation phase owns the
+    # same filename later in the expanded graph. Body quality is enforced by
+    # `_validate_tier_body_against_manifest`; containment here is only for
+    # true cross-phase artifacts, not tier-body handoff files.
+    if phase_name.startswith("report_body_writer_"):
+        future_patterns = [
+            p for p in future_patterns
+            if not re.fullmatch(
+                r"report_(?:critical_high|medium|low_info)(?:_[a-z])?\.md",
+                p,
+            )
+        ]
+    if not future_patterns:
+        return []
+
+    after_state = _snapshot_file_state(scratchpad, project_root)
+    offenders: list[str] = []
+    allowed_verify_overreach = set()
+    # v2.1.8: STRICT PHASE ISOLATION (revised v2.1.6 #1).
+    #
+    # The v2.1.6 blanket allowlist let verify produce skeptic/crossbatch/
+    # verify_core inline. This saved cost but degraded adversarial
+    # divergence for skeptic (per AD-2: same-context skeptic <50% divergence
+    # vs >99% for fresh-context). User explicitly chose "each phase
+    # isolated and seamless" over the cost optimization.
+    #
+    # New policy: only `verify_core.md` is permitted inline (it's a pure
+    # mechanical aggregate with no adversarial reasoning; fresh context
+    # adds nothing). All other inline-overreach files are quarantined to
+    # `{scratchpad}/_overflow/{phase}/` by `_quarantine_phase_overreach`,
+    # which runs BEFORE this foreign-write check. Quarantined files no
+    # longer satisfy the dedicated phase's gate, so skeptic and crossbatch
+    # phases run as separate subprocesses with fresh context.
+    if phase_name in {"verify", *L1_VERIFY_PHASE_NAMES, *SC_VERIFY_PHASE_NAMES}:
+        allowed_verify_overreach = {
+            "verify_core.md",  # mechanical aggregate; same-context is fine
+        }
+    for name, meta in after_state.items():
+        prev = before_state.get(name)
+        changed = prev is None or prev != meta
+        if not changed:
+            continue
+        # v2.1.6: glob-aware allowlist match (was set membership only).
+        if _matches_any_pattern(name, allowed_verify_overreach):
+            continue
+        if _matches_any_pattern(name, future_patterns):
+            offenders.append(name)
+    offenders.sort()
+    return offenders
+
+
+def _validate_verify_completion(scratchpad: Path, phase_name: str, *, min_bytes: int = 100) -> list[str]:
+    """Ensure a verify shard produced the expected verifier file set.
+
+    Accepts both `verify_{id}.md` and `verify_F-{id}.md` — the LLM prompt
+    uses the F- prefix convention in most places, but legacy callers may
+    emit the un-prefixed form. Either is considered valid.
+    """
+    if phase_name in SC_VERIFY_PHASE_NAMES:
+        shards = compute_sc_verify_shards(scratchpad)
+    else:
+        shards = compute_verify_shards(scratchpad)
+    expected_rows = shards.get(phase_name, [])
+    # For each finding id, accept either shape as present.
+    expected_ids = [row['finding id'] for row in expected_rows]
+    if not expected_ids:
+        return []
+
+    def _verify_names(fid: str) -> tuple[str, ...]:
+        return (
+            f"verify_{fid}.md",
+            f"verify_F-{fid}.md",
+            f"verify_F_{fid}.md",
+            f"verify_[{fid}].md",
+        )
+
+    def _present(fid: str) -> bool:
+        for name in _verify_names(fid):
+            p = scratchpad / name
+            if p.exists() and p.stat().st_size >= min_bytes:
+                return True
+        return False
+
+    present_ids = [fid for fid in expected_ids if _present(fid)]
+    actual = len(present_ids)
+    # Keep `expected_files` variable for downstream logging/schema checks
+    expected_files = set()
+    for fid in expected_ids:
+        for name in _verify_names(fid):
+            if (scratchpad / name).exists():
+                expected_files.add(name)
+    if actual < len(expected_ids):
+        missing_ids = [fid for fid in expected_ids if not _present(fid)]
+        sample = sorted(missing_ids)[:5]
+        extra = f" (+{len(missing_ids) - len(sample)} more)" if len(missing_ids) > len(sample) else ""
+        return [
+            f"verify completion: wrote {actual}/{len(expected_ids)} verifier files; "
+            f"missing: {sample}{extra}"
+        ]
+
+    row_by_file: dict[str, dict[str, str]] = {}
+    for row in expected_rows:
+        fid = row.get("finding id", "")
+        for name in _verify_names(fid):
+            row_by_file[name] = row
+
+    schema_issues = []
+    # v2.2.1 Fix 1: accept aliases observed in practice. Verifier prompts
+    # in the wild emit any of:
+    #   **Preferred Tag**:           (canonical, what the prompt asks for)
+    #   **Preferred Verification**:  (verifier-side paraphrase observed in Irys L1 v2.2.0)
+    #   **Evidence Tag**:            (verifier-side paraphrase observed in Irys L1 v2.2.0)
+    #   **Evidence Tags**:           (plural variant)
+    # Pre-v2.2.1 the strict-substring gate ("Preferred Tag" not in txt) failed
+    # twice on the same content → degraded → halted. Required manual recovery.
+    # The gate now accepts any of the four; the prompt-side hardening to emit
+    # the literal "Preferred Tag" form ships separately (rules/phase5*.md).
+    accepted_field_names = (
+        "Preferred Tag",
+        "Preferred Verification",
+        "Evidence Tag",
+        "Evidence Tags",
+    )
+    for name in sorted(expected_files):
+        p = scratchpad / name
+        if not p.exists():
+            continue
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        evidence = _field_from_markdown(txt, ("Evidence Tag", "Evidence Tags", "Evidence"))
+        preferred = _field_from_markdown(
+            txt, ("Preferred Tag", "Preferred Verification", "Preferred Evidence")
+        )
+        if evidence and not preferred:
+            txt = txt.rstrip() + f"\n\n**Preferred Tag**: {evidence}\n"
+            p.write_text(txt, encoding="utf-8")
+        missing_fields: list[str] = []
+        if not _field_from_markdown(txt, accepted_field_names):
+            missing_fields.append("Preferred Tag/Evidence Tag")
+        verdict = _field_from_markdown(txt, ("Verdict", "Final Verdict", "Status"))
+        if (
+            not verdict
+            or _verifier_status_from_text(f"**Verdict**: {verdict}")
+            == "SCHEMA_INVALID"
+        ):
+            missing_fields.append("Verdict")
+        row = row_by_file.get(name, {})
+        if (
+            not _field_from_markdown(txt, ("Severity", "Final Severity"))
+            and not row.get("severity")
+        ):
+            missing_fields.append("Severity")
+        if missing_fields:
+            schema_issues.append(f"{name} ({', '.join(missing_fields)})")
+    if schema_issues:
+        return [
+            "verify schema: missing required verifier fields in "
+            + ", ".join(schema_issues[:8])
+        ]
+    return []
+
+
+def _promote_depth_findings_to_inventory(scratchpad: Path, min_confidence: float = 0.70) -> list[str]:
+    """Append high-confidence depth-only findings to findings_inventory.md.
+
+    L1 inventory runs before depth. Without this bridge, DCI/DEC/DX/DN findings
+    can be real, scored, and then invisible to verify_queue/report_index. This
+    function is deterministic plumbing: it preserves depth IDs as Source IDs
+    and only appends IDs not already acknowledged by inventory.
+    """
+    inv = scratchpad / "findings_inventory.md"
+    if not inv.exists():
+        return []
+    try:
+        inv_text = inv.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    existing_ids = set(re.findall(r"\b" + _PROMOTABLE_FEEDER_ID_PATTERN + r"\b", inv_text))
+    next_n = max(
+        (int(x) for x in re.findall(r"###\s+Finding\s+\[INV-(\d+)\]", inv_text)),
+        default=0,
+    ) + 1
+    scores = _parse_depth_confidence_scores(scratchpad)
+
+    # Build location index from existing inventory for conservative dedup.
+    # Fires on EITHER high title overlap (≥0.80) OR location overlap
+    # (same file + line ranges within 15 lines).  Location overlap is the
+    # stronger signal — catches duplicates with completely different titles.
+    _existing_by_file: dict[str, list[tuple[str, tuple[int, int] | None]]] = {}
+    for _em in re.finditer(
+        r"###\s+Finding\s+\[INV-\d+\]:\s*(.+?)(?:\n|$)"
+        r"(?:.*\n)*?\*\*Location\*\*:\s*(\S+)",
+        inv_text, re.IGNORECASE,
+    ):
+        _etitle = _em.group(1).strip()
+        _eloc = _norm_loc(_em.group(2).strip())
+        _efile = re.sub(r":L?\d+.*$", "", _eloc)
+        _elines = _parse_line_range(_eloc)
+        if _efile:
+            _existing_by_file.setdefault(_efile, []).append((_etitle, _elines))
+
+    candidates: list[dict[str, str]] = []
+    dedup_skipped: list[tuple[str, str, str, float]] = []
+    for pat in _DEPTH_PROMOTION_FILES:
+        for p in sorted(scratchpad.glob(pat)):
+            for item in _parse_depth_finding_blocks(p):
+                fid = item["id"]
+                if fid in existing_ids:
+                    continue
+                score = scores.get(fid)
+                status = _verifier_status_from_text(f"**Verdict**: {item.get('verdict', '')}") if item.get("verdict") else ""
+                if status and not _is_reportable_verdict(status):
+                    continue
+                if status != "CONFIRMED" and score is not None and score < min_confidence:
+                    continue
+                # Tag likely duplicates: same file + (high title overlap OR
+                # location overlap).  Never blocks promotion — tags the
+                # finding so the LLM can make the semantic merge decision.
+                cand_loc = _norm_loc(item.get("location", ""))
+                cand_file = re.sub(r":L?\d+.*$", "", cand_loc)
+                cand_lines = _parse_line_range(cand_loc)
+                # v2.4.8: high-confidence duplicates are BLOCKED from promotion.
+                # Block when title overlap >= 0.90 (near-identical titles), OR
+                # when title overlap >= 0.50 AND location overlaps (same bug,
+                # slightly different phrasing). Low-title-overlap + location-overlap
+                # is tagged but promoted (different bug at same site).
+                # 0.80-0.89 title overlap without location match is tagged only.
+                _blocked = False
+                if cand_file and cand_file in _existing_by_file:
+                    for _et, _elines in _existing_by_file[cand_file]:
+                        _overlap = _titles_overlap_score(item["title"], _et)
+                        _loc_match = (
+                            cand_lines is not None
+                            and _elines is not None
+                            and _line_ranges_overlap(cand_lines, _elines)
+                        )
+                        if _overlap >= 0.90 or (_loc_match and _overlap >= 0.50):
+                            _reason = "location overlap" if _loc_match else f"score={_overlap:.2f}"
+                            item["_dup_tag"] = f"[LIKELY-DUP of \"{_et[:60]}\" {_reason}]"
+                            dedup_skipped.append((fid, item["title"], _et, _overlap))
+                            _blocked = True
+                            break
+                        if _overlap >= 0.80 or _loc_match:
+                            _reason = "location overlap" if _loc_match else f"score={_overlap:.2f}"
+                            item["_dup_tag"] = f"[LIKELY-DUP of \"{_et[:60]}\" {_reason}]"
+                            dedup_skipped.append((fid, item["title"], _et, _overlap))
+                            break
+                if _blocked:
+                    existing_ids.add(fid)
+                    continue
+                item["confidence"] = f"{score:.2f}" if score is not None else "n/a"
+                candidates.append(item)
+                existing_ids.add(fid)
+                # Register this candidate so later candidates dedup against it too
+                if cand_file:
+                    _existing_by_file.setdefault(cand_file, []).append(
+                        (item["title"], cand_lines)
+                    )
+    if not candidates and not dedup_skipped:
+        return []
+
+    promoted_ids: list[str] = []
+    if candidates:
+        additions = [
+            "",
+            "## Depth Promotion Supplement",
+            "",
+            "These findings were produced after the initial inventory phase and "
+            "promoted mechanically so verification/reporting cannot drop depth-channel outputs.",
+            "",
+        ]
+        for item in candidates:
+            inv_id = f"INV-{next_n:02d}"
+            next_n += 1
+            promoted_ids.append(item["id"])
+            dup_line = f"**Dedup Signal**: {item['_dup_tag']}\n" if item.get("_dup_tag") else ""
+            additions.extend([
+                f"### Finding [{inv_id}]: {item['title']}",
+                f"**Source IDs**: [{', '.join([item['id']] + item.get('_referenced_ids', []))}]",
+                f"**Severity**: {item['severity']}",
+                f"**Location**: {item['location']}",
+                f"**Preferred Tag**: {item['preferred_tag']}",
+                f"**Confidence**: {item['confidence']}",
+                f"**Primary Artifact**: {item['source_file']}",
+            ])
+            if dup_line:
+                additions.append(dup_line.rstrip())
+            additions.extend([
+                "",
+                f"**Description**: {item['description']}",
+                "",
+            ])
+        inv.write_text(inv_text.rstrip() + "\n" + "\n".join(additions), encoding="utf-8")
+
+    # Always write receipt so the validator can see blocked/tagged IDs
+    # even when no candidates survive dedup (fixes all-blocked-no-receipt halt).
+    receipt_lines = [
+        "# Depth Promotion Receipt\n",
+        f"Promoted {len(promoted_ids)} depth finding(s) into findings_inventory.md.\n",
+    ]
+    if promoted_ids:
+        receipt_lines.append("## Promoted\n")
+        receipt_lines.extend(f"- `{fid}`\n" for fid in promoted_ids)
+    if dedup_skipped:
+        receipt_lines.append("\n## Likely Duplicates\n")
+        for _dfid, _dtitle, _matched, _dscore in dedup_skipped:
+            receipt_lines.append(
+                f"- `{_dfid}` — \"{_dtitle[:60]}\" matched existing "
+                f"\"{_matched[:60]}\" (score={_dscore:.2f})\n"
+            )
+    (scratchpad / "depth_promotion_receipt.md").write_text(
+        "\n".join(receipt_lines), encoding="utf-8",
+    )
+    return promoted_ids
+
+
+_SEMANTIC_GAP_COUNTER_RE = re.compile(
+    r"^\s*[-*]?\s*(sync_gaps|accumulation_exposures|conditional_writes|cluster_gaps)"
+    r"\s*=\s*(\d+)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _semantic_gap_trigger_counts(scratchpad: Path) -> dict[str, int]:
+    """Return Phase 4a.5 semantic-gap trigger counts from semantic_invariants.md.
+
+    The semantic-gap niche agent is different from recon-time niche agents:
+    its trigger is produced by the invariants phase, after
+    template_recommendations.md has already been written.  This helper is the
+    mechanical bridge between that late signal and the depth phase contract.
+    """
+    p = scratchpad / "semantic_invariants.md"
+    if not p.exists():
+        return {}
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+    counts = {
+        "sync_gaps": 0,
+        "accumulation_exposures": 0,
+        "conditional_writes": 0,
+        "cluster_gaps": 0,
+    }
+    for key, value in _SEMANTIC_GAP_COUNTER_RE.findall(text):
+        counts[key.lower()] = max(counts.get(key.lower(), 0), int(value))
+    # Some invariant artifacts mention the flags without the summary footer.
+    # Treat explicit CONFIRMED flag occurrences as a conservative trigger.
+    fallback_flags = {
+        "sync_gaps": r"\bSYNC_GAP\b",
+        "accumulation_exposures": r"\bACCUMULATION_EXPOSURE\b",
+        "conditional_writes": r"\bCONDITIONAL(?:_WRITE)?\b",
+        "cluster_gaps": r"\b(?:CLUSTER_GAP|LIFECYCLE_GAP)\b",
+    }
+    for key, pat in fallback_flags.items():
+        if counts.get(key, 0) == 0 and re.search(pat, text, re.IGNORECASE):
+            counts[key] = 1
+    return counts
+
+
+def _semantic_gap_required(scratchpad: Path) -> bool:
+    counts = _semantic_gap_trigger_counts(scratchpad)
+    return any(counts.get(k, 0) > 0 for k in (
+        "sync_gaps",
+        "accumulation_exposures",
+        "conditional_writes",
+        "cluster_gaps",
+    ))
+
+
+def _validate_semantic_gap_niche(scratchpad: Path, mode: str) -> list[str]:
+    """Require semantic-gap niche output when Phase 4a.5 produced gap triggers."""
+    if mode not in ("core", "thorough"):
+        return []
+    if not _semantic_gap_required(scratchpad):
+        return []
+    out = scratchpad / "niche_semantic_gap_findings.md"
+    if out.exists() and out.stat().st_size >= 500:
+        return []
+    counts = _semantic_gap_trigger_counts(scratchpad)
+    counter_text = ", ".join(
+        f"{k}={v}" for k, v in counts.items() if v > 0
+    ) or "semantic gap flag present"
+    return [
+        "semantic-gap niche missing: semantic_invariants.md triggered "
+        f"SEMANTIC_GAP_INVESTIGATOR ({counter_text}); expected "
+        "niche_semantic_gap_findings.md"
+    ]
+
+
+def _validate_depth_promotion_receipt(scratchpad: Path, min_confidence: float = 0.70) -> list[str]:
+    inv = scratchpad / "findings_inventory.md"
+    if not inv.exists():
+        return []
+    inv_text = inv.read_text(encoding="utf-8", errors="replace")
+    scores = _parse_depth_confidence_scores(scratchpad)
+
+    # v2.4.9: read the promotion receipt to identify findings intentionally
+    # blocked as high-confidence duplicates. These should not be flagged as
+    # missing — the promoter already decided they overlap an existing entry.
+    blocked_ids: set[str] = set()
+    receipt = scratchpad / "depth_promotion_receipt.md"
+    if receipt.exists():
+        try:
+            receipt_text = receipt.read_text(encoding="utf-8", errors="replace")
+            # Extract only the "Likely Duplicates" section — these were
+            # intentionally blocked or tagged. Promoted IDs are NOT included
+            # (they should be in inventory; if removed later that's a real gap).
+            dup_sec = receipt_text.split("## Likely Duplicates")
+            if len(dup_sec) > 1:
+                dup_body = dup_sec[1].split("\n## ")[0]
+                for m in re.finditer(
+                    r"- `(" + _PROMOTABLE_FEEDER_ID_PATTERN + r")`", dup_body
+                ):
+                    blocked_ids.add(m.group(1))
+        except Exception:
+            pass
+
+    missing: list[str] = []
+    for pat in _DEPTH_PROMOTION_FILES:
+        for p in sorted(scratchpad.glob(pat)):
+            for item in _parse_depth_finding_blocks(p):
+                fid = item["id"]
+                if fid in blocked_ids:
+                    continue
+                score = scores.get(fid)
+                status = _verifier_status_from_text(f"**Verdict**: {item.get('verdict', '')}") if item.get("verdict") else ""
+                if status and not _is_reportable_verdict(status):
+                    continue
+                if status != "CONFIRMED" and score is not None and score < min_confidence:
+                    continue
+                # Closes F-PROM-01: word-boundary match. Plain substring
+                # match false-passed `DCI-1` whenever `DCI-12` was already
+                # present in inventory, hiding genuinely-missing promotions.
+                if not re.search(rf"\b{re.escape(fid)}\b", inv_text):
+                    missing.append(fid)
+    if missing:
+        return [
+            "depth promotion receipt: high-confidence depth findings missing "
+            "from findings_inventory.md: " + ", ".join(sorted(set(missing))[:12])
+        ]
+    return []
+
+
+def _validate_depth_promotion_dedup(scratchpad: Path) -> list[str]:
+    """Advisory validator: flags suspiciously high promotion inflation.
+
+    Warns (does NOT block) when depth promotion added >40% more findings
+    relative to the pre-promotion inventory AND the promoted findings
+    cover fewer than 3 distinct files. High inflation over few files
+    suggests duplicate clusters that the promotion gate's 0.80 threshold
+    did not catch.
+    """
+    inv = scratchpad / "findings_inventory.md"
+    if not inv.exists():
+        return []
+    inv_text = inv.read_text(encoding="utf-8", errors="replace")
+    pre_count = len(re.findall(
+        r"###\s+Finding\s+\[INV-\d+\]",
+        inv_text.split("## Depth Promotion Supplement")[0]
+        if "## Depth Promotion Supplement" in inv_text else inv_text,
+    ))
+    post_count = len(re.findall(r"###\s+Finding\s+\[INV-\d+\]", inv_text))
+    promoted_count = post_count - pre_count
+    if pre_count == 0 or promoted_count <= 0:
+        return []
+    ratio = promoted_count / pre_count
+    supplement = inv_text.split("## Depth Promotion Supplement")[1] if "## Depth Promotion Supplement" in inv_text else ""
+    promoted_files = set()
+    for loc_m in re.finditer(r"\*\*Location\*\*:\s*(\S+)", supplement, re.IGNORECASE):
+        f = re.sub(r":L?\d+.*$", "", _norm_loc(loc_m.group(1)))
+        if f:
+            promoted_files.add(f)
+    issues: list[str] = []
+    if ratio > 0.40 and len(promoted_files) < 3:
+        issues.append(
+            f"inflation advisory: depth promotion added {promoted_count} findings "
+            f"({ratio:.0%} of {pre_count} pre-existing) across only "
+            f"{len(promoted_files)} file(s). Review dedup_candidate_pairs.md "
+            f"for potential duplicates."
+        )
+    return issues
+
+
+def _validate_report_tier_completeness(scratchpad: Path, phase_name: str) -> list[str]:
+    """Ensure a report tier writer produced one ### section per assigned finding.
+
+    Complements the §6b.1 bash gate in commands/plamen-l1.md: that gate only
+    fires inside the LLM subprocess, and is bypassed when the Python driver
+    short-circuits to a placeholder write (count == 0 branch). This helper is
+    a Python-side backstop run against every tier phase after gate_passes()
+    succeeds — if the tier file exists but has fewer findings than the index
+    assigned, the assembler will invent placeholder rows like
+    "[Unverified Medium finding N]" in the final report.
+    """
+    _tier_m = re.match(r"^report_(critical_high|medium|low_info)(?:_[a-z])?$", phase_name)
+    if not _tier_m:
+        return []
+    filename = f"{phase_name}.md"
+    tier_base = _tier_m.group(1)
+
+    _shard_m = re.match(r"^report_(critical_high|medium|low_info)_[a-z]$", phase_name)
+    if _shard_m:
+        shards = ensure_report_tier_shards(scratchpad, tier_base)
+        expected = len(shards.get(phase_name, []))
+    else:
+        key = tier_base
+        counts = parse_report_index_counts(scratchpad)
+        if not counts or sum(counts.values()) == 0:
+            idx_path = scratchpad / "report_index.md"
+            if idx_path.exists() and idx_path.stat().st_size > 200:
+                return [
+                    f"tier completeness: parse_report_index_counts returned "
+                    f"all zeros despite report_index.md existing ({idx_path.stat().st_size}B) — "
+                    f"possible parse failure"
+                ]
+            return []
+        expected = counts.get(key, 0)
+
+    if expected == 0:
+        return []
+
+    tier_file = scratchpad / filename
+    if not tier_file.exists():
+        return [f"tier completeness: {filename} missing (expected {expected} findings)"]
+
+    try:
+        text = tier_file.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return [f"tier completeness: cannot read {filename}"]
+
+    actual = len(re.findall(r"(?m)^#{2,3}\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[[CHMLI]-\d+\]", text))
+    # Quality Observations megasection: findings as table rows (| I-03 | ... |)
+    qo_match = re.search(r"(?mi)^##\s+Quality\s+Observations", text)
+    if qo_match:
+        qo_text = text[qo_match.end():]
+        qo_end = re.search(r"(?m)^##\s+", qo_text)
+        if qo_end:
+            qo_text = qo_text[:qo_end.start()]
+        actual += len(re.findall(r"(?m)^\|\s*[CHMLI]-\d+\s*\|", qo_text))
+    if actual < expected:
+        return [
+            f"tier completeness: {filename} has {actual} findings "
+            f"but index assigns {expected}"
+        ]
+    return []
+
+
+def _scan_for_halt_and_gatefail(scratchpad: Path,
+                                violations_offset: int = 0) -> list[str]:
+    """Return depth-agent identifiers implicated by hard-stop policy signals.
+
+    Signals:
+    - A depth artifact whose first line starts with `[HALT]`
+    - New `violations.md` entries matching `[GATE FAIL] ... pre-baked reads`
+
+    violations_offset lets callers scan only the lines appended during the
+    current phase attempt, so stale violations from earlier attempts do not
+    poison retries.
+    """
+    offenders = set()
+
+    for p in scratchpad.glob("depth*_findings.md"):
+        try:
+            with p.open("r", encoding="utf-8", errors="replace") as f:
+                first = f.readline().strip()
+        except Exception:
+            continue
+        if first.startswith("[HALT]"):
+            offenders.add(p.stem.replace("_findings", ""))
+
+    vp = scratchpad / "violations.md"
+    if vp.exists():
+        try:
+            with vp.open("r", encoding="utf-8", errors="replace") as f:
+                if violations_offset > 0:
+                    f.seek(violations_offset)
+                text = f.read()
+        except Exception:
+            text = ""
+        gatefail_re = re.compile(
+            r"(?im)^\[GATE FAIL\]\s+([^:\n]+):.*pre-baked reads"
+        )
+        for m in gatefail_re.finditer(text):
+            offenders.add(m.group(1).strip())
+
+    return sorted(offenders)
+
+
+_NEVER_CUT_FILENAME_ALIASES = (
+    # (canonical, alias) — alias is the `depth_`-prefixed form some
+    # orchestrators emit when grouping iter1 supplementary outputs under
+    # the depth-findings naming convention. Auto-renamed to canonical so
+    # downstream consumers (chain analysis, report tier writers) find the
+    # file at the path methodology documents.
+    ("perturbation_findings.md", "depth_perturbation_findings.md"),
+    ("design_stress_findings.md", "depth_design_stress_findings.md"),
+)
+
+
+def _normalize_never_cut_filenames(scratchpad: Path) -> list[str]:
+    """Rename `depth_`-prefixed never-cut aliases to canonical names.
+
+    v2.3.4 — gate tolerance was insufficient: the orchestrator's choice of
+    `depth_perturbation_findings.md` over `perturbation_findings.md` halted
+    the L1 audit at the never-cut gate. Even with alternation accepted at
+    the gate, downstream consumers (~33 files reference the canonical name)
+    would still miss the artifact. Auto-rename canonicalizes once at gate
+    time so the rest of the pipeline sees the methodology-documented name.
+
+    No-op if canonical already exists OR alias doesn't exist. Same approach
+    as v2.1.2 A.5's `findings_breadth_*` -> `analysis_*` shim.
+    """
+    renamed: list[str] = []
+    for canonical, alias in _NEVER_CUT_FILENAME_ALIASES:
+        canon_p = scratchpad / canonical
+        alias_p = scratchpad / alias
+        if canon_p.exists() or not alias_p.exists():
+            continue
+        try:
+            alias_p.rename(canon_p)
+            renamed.append(f"{alias} -> {canonical}")
+        except Exception:
+            # Don't break the gate on rename failure; the alternation in
+            # NEVER_CUT_GROUPS still accepts the alias form as a fallback.
+            pass
+    if renamed:
+        try:
+            vp = scratchpad / "violations.md"
+            with vp.open("a", encoding="utf-8") as f:
+                f.write("\n## Never-cut filename normalization (v2.3.4)\n")
+                for r in renamed:
+                    f.write(f"- {r}\n")
+        except Exception:
+            pass
+    return renamed
+
+
+def _assert_never_cut_artifacts(
+    scratchpad: Path,
+    groups: Optional[list] = None,
+) -> list[str]:
+    """Return missing never-cut artifact groups for the depth phase.
+
+    When `groups` is None, defaults to L1_NEVER_CUT_ARTIFACT_GROUPS for
+    backwards compatibility. SC callers pass sc_never_cut_groups(mode).
+
+    v2.3.4: canonicalizes `depth_`-prefixed aliases first so downstream
+    consumers see the methodology-documented filename.
+    """
+    _normalize_never_cut_filenames(scratchpad)
+    if groups is None:
+        groups = L1_NEVER_CUT_ARTIFACT_GROUPS
+    missing = []
+    for group in groups:
+        if not any((scratchpad / name).exists() for name in group):
+            missing.append(" or ".join(group))
+    return missing
+
+
+def _match_label_status(text: str, label: str):
+    """Match `label: STATUS rest` in either bullet/plain OR markdown-table form.
+
+    Accepts any of:
+      * `depth-state-trace: SPAWNED path/to/file.md`
+      * `- depth-state-trace: SPAWNED path/to/file.md`
+      * `| depth-state-trace | SPAWNED | path/to/file.md |`
+
+    The driver can't force models to emit one specific shape; the
+    methodology prompt asks for plain `label: STATUS`, but models sometimes
+    normalize the block into a markdown table ("it looks like structured
+    metadata, so it belongs in a table"). Accepting both prevents a
+    false-positive gate failure on a semantically-correct artifact. Returns
+    (status, rest_of_line) or None.
+    """
+    _NC_STATUSES = r"SPAWNED|SKIPPED|COMPLETED|DONE|RAN|YES"
+    bullet = re.search(
+        rf"(?im)^\s*[-*]?\s*{re.escape(label)}\s*:\s*({_NC_STATUSES})\b\s*(.*)$",
+        text,
+    )
+    if bullet:
+        raw = bullet.group(1).upper()
+        status = "SPAWNED" if raw in ("COMPLETED", "DONE", "RAN", "YES") else raw
+        return status, (bullet.group(2) or "").strip()
+    table = re.search(
+        rf"(?im)^\s*\|\s*{re.escape(label)}\s*\|\s*({_NC_STATUSES})\b\s*\|?\s*([^|\n]*)\|?",
+        text,
+    )
+    if table:
+        raw = table.group(1).upper()
+        status = "SPAWNED" if raw in ("COMPLETED", "DONE", "RAN", "YES") else raw
+        return status, (table.group(2) or "").strip()
+    return None
+
+
+def _assert_never_cut_checkpoint(
+    scratchpad: Path, mode: str = "thorough"
+) -> list[str]:
+    """Validate never_cut_checkpoint.md emitted by the depth loop.
+
+    v2.6.3: mode-aware — design-stress, perturbation, and skill-execution-
+    checklist labels are only required in Thorough mode.
+    """
+    p = scratchpad / "never_cut_checkpoint.md"
+    if not p.exists():
+        return ["never_cut_checkpoint.md missing"]
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ["never_cut_checkpoint.md unreadable"]
+
+    issues = []
+    base_labels = [
+        "depth-consensus-invariant",
+        "depth-network-surface",
+        "depth-state-trace",
+        "depth-external",
+        "depth-edge-case",
+        "confidence-scoring",
+    ]
+    thorough_only_labels = [
+        "design-stress",
+        "perturbation",
+        "skill-execution-checklist",
+    ]
+    labels = list(base_labels)
+    if mode == "thorough":
+        labels = labels + thorough_only_labels
+    for label in labels:
+        result = _match_label_status(text, label)
+        if result is None:
+            issues.append(f"{label}: missing entry")
+            continue
+        status, rest = result
+        if status == "SKIPPED":
+            reason_match = re.search(r"\b([A-Z_]+)\b", rest)
+            reason = reason_match.group(1) if reason_match else ""
+            if not reason:
+                issues.append(f"{label}: SKIPPED without any reason")
+            elif reason not in _NEVER_CUT_SKIP_REASONS:
+                log.warning(
+                    "[_assert_never_cut_checkpoint] %s: SKIPPED with "
+                    "non-allowlisted reason %r (soft — structured skip "
+                    "intent accepted)", label, reason,
+                )
+    return issues
+
+
+def _validate_depth_iterations(scratchpad: Path, mode: str) -> list[str]:
+    """Soft validator for the depth iteration counter in adaptive_loop_log.md.
+
+    plamen.md line 899 already writes this artifact; line 946 already asserts
+    `iter >= 2 when uncertain Medium+ findings exist after iter 1`. The LLM
+    orchestrator frequently forgets self-assertions (the motivating failure
+    mode for V2), so we re-run a driver-side version of the same check.
+
+    Design choice — SOFT on missing file:
+    - Absent file returns []. Methodology owns file-existence enforcement;
+      duplicating it here would false-positive against Light mode (where the
+      loop may be skipped) and against in-flight audits from older driver
+      versions.
+    - Present-but-unparseable file returns []. LLM emission format is not
+      fixed; we never break the pipeline on our own parse failure.
+    - The hard check is thorough-mode-specific: iter 1 uncertain Medium+ > 0
+      AND total iterations < 2 → issue string.
+    """
+    p = scratchpad / "adaptive_loop_log.md"
+    if not p.exists():
+        return []
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+
+    # Total iterations — accept "iterations: 3", "Total iterations: 3",
+    # "| iterations | 3 |", "Iteration count: 3", or fall back to counting
+    # distinct "## Iteration N" / "### Iteration N" headers.
+    iter_count = None
+    for pattern in (
+        r"(?im)^\s*[-*]?\s*(?:total\s+)?iterations?\s*(?:count)?\s*:\s*(\d+)\b",
+        r"(?im)^\s*\|\s*(?:total\s+)?iterations?\s*(?:count)?\s*\|\s*(\d+)\b",
+        r"(?im)^\s*iteration\s+count\s*:\s*(\d+)\b",
+    ):
+        m = re.search(pattern, text)
+        if m:
+            iter_count = int(m.group(1))
+            break
+    if iter_count is None:
+        headers = re.findall(r"(?im)^\s*#{2,4}\s*iteration\s+(\d+)\b", text)
+        if headers:
+            iter_count = max(int(h) for h in headers)
+    if iter_count is None:
+        return []  # format not recognized — stay soft
+
+    if mode != "thorough":
+        return []
+
+    # Iter 1 uncertain Medium+ count. Accept several phrasings.
+    uncertain_medium_plus = None
+    for pattern in (
+        r"(?im)iter(?:ation)?\s*1[^\n]*?uncertain\s+medium\+?\s*:?\s*(\d+)\b",
+        r"(?im)uncertain\s+medium\+?\s+after\s+iter(?:ation)?\s*1\s*:?\s*(\d+)\b",
+        r"(?im)^\s*[-*]?\s*iter1_uncertain_medium_plus\s*:\s*(\d+)\b",
+        r"(?im)^\s*\|\s*iter1_uncertain_medium_plus\s*\|\s*(\d+)\b",
+    ):
+        m = re.search(pattern, text)
+        if m:
+            uncertain_medium_plus = int(m.group(1))
+            break
+    if uncertain_medium_plus is None:
+        return []  # can't apply the conditional assertion without this signal
+
+    if uncertain_medium_plus > 0 and iter_count < 2:
+        return [
+            f"adaptive_loop shows {iter_count} iteration(s) but iter 1 left "
+            f"{uncertain_medium_plus} uncertain Medium+ finding(s) — thorough "
+            f"mode requires iter >= 2 (plamen.md line 946)"
+        ]
+
+    # Fallback: if adaptive_loop_log didn't have parseable uncertain counts,
+    # try mechanical detection from confidence_scores.md + inventory severities.
+    if uncertain_medium_plus is None:
+        issues = _validate_confidence_iter2_mandatory(scratchpad)
+        if issues:
+            return issues
+
+    return []
+
+
+def _parse_confidence_scores_permissive(
+    scratchpad: Path,
+) -> dict[str, float]:
+    """Parse confidence_scores.md accepting ANY finding ID format.
+
+    Unlike _parse_depth_confidence_scores (which uses _PROMOTABLE_FEEDER_ID_PATTERN
+    and misses verbose LLM IDs like DEPTH-CONSENSUS-INVARIANT-1), this parser
+    accepts any non-empty text in the Finding ID column. Used by quality
+    validators where we care about score distribution, not ID format.
+    """
+    p = scratchpad / "confidence_scores.md"
+    if not p.exists():
+        return {}
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+
+    scores: dict[str, float] = {}
+    id_idx: int | None = None
+    composite_idx: int | None = None
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not (stripped.startswith("|") and stripped.endswith("|")):
+            if stripped:
+                id_idx = composite_idx = None
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if cells and all(set(c) <= {"-", ":"} for c in cells):
+            continue
+        norm = [re.sub(r"[^a-z0-9]+", "", c.lower()) for c in cells]
+        if "findingid" in norm and "composite" in norm:
+            id_idx = norm.index("findingid")
+            composite_idx = norm.index("composite")
+            continue
+        if (
+            id_idx is not None
+            and composite_idx is not None
+            and len(cells) > max(id_idx, composite_idx)
+        ):
+            fid = cells[id_idx].strip()
+            if not fid or fid.startswith("-"):
+                continue
+            m = re.search(
+                r"(?<![A-Za-z0-9.\-])(?:0?\.\d+|1\.0+)(?![A-Za-z0-9.])",
+                cells[composite_idx],
+            )
+            if m:
+                scores[fid] = float(m.group(0))
+    return scores
+
+
+def _validate_confidence_scores_quality(scratchpad: Path, mode: str) -> list[str]:
+    """Detect formulaic stub confidence scores (all identical composites).
+
+    When a Codex/LLM subprocess stamps every finding with the same score,
+    it treated confidence scoring as a checkbox rather than doing per-finding
+    analysis. This prevents proper iteration 2 routing.
+
+    Returns issues only in thorough mode and only when > 3 findings all share
+    the same composite score.
+    """
+    if mode != "thorough":
+        return []
+    scores = _parse_confidence_scores_permissive(scratchpad)
+    if len(scores) < 4:
+        return []
+    unique_values = set(scores.values())
+    if len(unique_values) == 1:
+        val = next(iter(unique_values))
+        return [
+            f"confidence_scores.md has {len(scores)} findings all with "
+            f"identical composite {val} — formulaic stub, not per-finding "
+            f"analysis. Iteration 2 routing is unreliable."
+        ]
+    if len(unique_values) <= 2 and len(scores) >= 8:
+        return [
+            f"confidence_scores.md has {len(scores)} findings with only "
+            f"{len(unique_values)} distinct composite value(s) "
+            f"({', '.join(f'{v:.3f}' for v in sorted(unique_values))}) — "
+            f"likely formulaic stub."
+        ]
+    return []
+
+
+def _validate_confidence_iter2_mandatory(scratchpad: Path) -> list[str]:
+    """Mechanical check: UNCERTAIN Medium+ findings exist but no iter2 artifacts.
+
+    Fallback for _validate_depth_iterations when adaptive_loop_log.md doesn't
+    contain parseable uncertain-medium-plus counts. Uses confidence_scores.md
+    and findings_inventory.md directly. Only fires in thorough mode (caller
+    in _validate_depth_iterations already gates on mode == "thorough").
+    """
+    scores = _parse_confidence_scores_permissive(scratchpad)
+    if not scores:
+        return []
+
+    uncertain_ids = {fid for fid, s in scores.items() if s < 0.7}
+    if not uncertain_ids:
+        return []
+
+    inv = scratchpad / "findings_inventory.md"
+    if not inv.exists():
+        return []
+    try:
+        inv_text = inv.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+
+    medium_plus_uncertain = 0
+    for fid in uncertain_ids:
+        esc = re.escape(fid)
+        m = re.search(esc, inv_text)
+        if not m:
+            continue
+        window = inv_text[m.start():m.start() + 500]
+        if re.search(
+            r"(?i)(?:\*\*)?Severity(?:\*\*)?\s*:?\s*(?:Critical|High|Medium)",
+            window,
+        ):
+            medium_plus_uncertain += 1
+
+    if medium_plus_uncertain == 0:
+        return []
+
+    da_files = list(scratchpad.glob("depth_da_*_findings.md")) + list(
+        scratchpad.glob("depth_iter2_*_findings.md")
+    )
+    if da_files:
+        return []
+
+    return [
+        f"confidence_scores.md shows {medium_plus_uncertain} uncertain "
+        f"Medium+ finding(s) (composite < 0.7) but no iter2/DA artifacts "
+        f"exist — thorough mode requires iteration 2"
+    ]
+
+
+def _validate_depth_coverage(scratchpad: Path, mode: str) -> list[str]:
+    """Soft validator for iter2 coverage of mechanical iter1 gaps.
+
+    AD-1 'Prior Path' is agent-written prose and can claim comprehensive iter1
+    coverage while iter1 actually produced zero Depth Evidence tags for many
+    in-scope locations. phase4b-da-iter2.md Pre-step 4 writes
+    `iter1_coverage_gap.md` as the set-based mechanical complement. This
+    validator catches the specific failure mode where iter2 re-states iter1
+    in different words ('ceremonial rewrite') without producing new Depth
+    Evidence tags for the mechanically-identified gap.
+
+    Design choice — SOFT on every failure mode (mirrors _validate_depth_iterations):
+    - Missing iter1_coverage_gap.md → []. Methodology owns that artifact;
+      we false-positive against Core mode and non-thorough configs otherwise.
+    - Empty gap file → []. Nothing to cover means nothing to violate.
+    - Missing depth_da_*_findings.md → []. DA iter2 was either skipped
+      (no Medium+ uncertain findings) or the methodology chose to pass.
+    - Files present but unparseable → []. Never break on own parse failure.
+
+    Hard check (thorough only): iter1_coverage_gap.md is non-empty AND at
+    least one depth_da_*_findings.md exists AND across ALL DA iter2 outputs
+    the combined Depth Evidence tag count is zero. This is the ceremonial-
+    rewrite signature.
+    """
+    if mode != "thorough":
+        return []
+    gap = scratchpad / "iter1_coverage_gap.md"
+    if not gap.exists():
+        return []
+    try:
+        gap_text = gap.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    gap_lines = [
+        ln for ln in gap_text.splitlines()
+        if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+    if not gap_lines:
+        return []
+
+    da_files = list(scratchpad.glob("depth_da_*_findings.md"))
+    if not da_files:
+        return []
+
+    from plamen_parsers import _DEPTH_EVIDENCE_TAG_RE
+    tag_pattern = _DEPTH_EVIDENCE_TAG_RE
+    total_tags = 0
+    for f in da_files:
+        try:
+            t = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        total_tags += len(tag_pattern.findall(t))
+
+    if total_tags == 0:
+        return [
+            f"iter2 DA agents produced 0 Depth Evidence tags across "
+            f"{len(da_files)} output file(s) while iter1_coverage_gap.md "
+            f"lists ~{len(gap_lines)} uncovered location(s) — probable "
+            f"ceremonial rewrite of iter1 rather than new analysis "
+            f"(phase4b-da-iter2.md AD-5: new-evidence-only re-scoring)"
+        ]
+    return []
+
+
+def _collect_scip_indexed_paths(scratchpad: Path) -> set[str]:
+    """Return the set of source paths the SCIP prebake recorded.
+
+    Reads `scratchpad/scip/repo_map.md` (or `repo_map_full.md` if present
+    and larger) — the prebake's deterministic per-file inventory. Each
+    `## <relative_path>` H2 header is a real indexed file.
+
+    If no SCIP prebake artifact exists, falls back to SC recon/inventory
+    artifacts (`contract_inventory.md`, `function_list.md`, `file_coverage.md`,
+    `file_coverage_ledger.md`). This gives SC the same coverage/attention
+    accounting as L1 without requiring a separate graph bake.
+    """
+    paths: set[str] = set()
+    scip_dir = scratchpad / "scip"
+    candidates: list[Path] = []
+    if scip_dir.is_dir():
+        full = scip_dir / "repo_map_full.md"
+        short = scip_dir / "repo_map.md"
+        if full.exists():
+            candidates.append(full)
+        if short.exists():
+            candidates.append(short)
+    fallback_candidates = (
+        scratchpad / "contract_inventory.md",
+        scratchpad / "function_list.md",
+        scratchpad / "file_coverage.md",
+        scratchpad / "file_coverage_ledger.md",
+    )
+    if not candidates:
+        candidates.extend(p for p in fallback_candidates if p.exists())
+    for f in candidates:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        found_in_file = 0
+        for m in re.finditer(r"^##\s+([^\n]+?)\s*$", text, re.MULTILINE):
+            p = m.group(1).strip().strip("`")
+            # repo_map_full.md uses absolute paths (Windows: C:/...). Strip
+            # leading drive prefix and project_root if present so we can
+            # match against relative cited paths.
+            if re.match(r"^[A-Za-z]:[/\\]", p):
+                # Take the substring after the first known crate-style
+                # prefix marker. Tolerant: accept "C:/Users/.../crates/..."
+                # → "crates/..."
+                m2 = re.search(
+                    r"(?:crates/|src/|cmd/|pkg/|core/|eth/|consensus/|p2p/|"
+                    r"actors/|types/|api-server/|storage/|reth-|"
+                    r"contracts/|test/|tests/|scripts/|programs/)",
+                    p,
+                )
+                if m2:
+                    p = p[m2.start():]
+            if not p:
+                continue
+            # v2.3.3: filter SCIP non-file tokens. Some SCIP indexers emit
+            # synthetic tokens like ``Crate Structure``, ``Module Tree``,
+            # ``Workspace`` as `## ...` headers in repo_map.md. These pollute
+            # the coverage-gap signal because they trivially never get cited
+            # (no file extension, no real path). Reject anything that looks
+            # like a synthetic label rather than a relative path.
+            if " " in p:
+                continue  # paths don't contain spaces
+            if "." not in p.rsplit("/", 1)[-1]:
+                continue  # leaf must look like a filename with extension
+            paths.add(p.rstrip("/"))
+            found_in_file += 1
+        # Some prebake repo maps are table/bullet based rather than H2 based.
+        # Fall back to harvesting source-path tokens from the whole file.
+        if found_in_file == 0:
+            path_re = re.compile(
+                r"\b([A-Za-z0-9_./\\-]+\.(?:rs|go|sol|move|py|c|cpp|cc|h|hpp|java|ts|js))\b"
+            )
+            for m in path_re.finditer(text):
+                p = m.group(1).replace("\\", "/").strip("`")
+                if re.match(r"^[A-Za-z]:/", p):
+                    m2 = re.search(
+                        r"(?:crates/|src/|cmd/|pkg/|core/|eth/|consensus/|p2p/|"
+                        r"actors/|types/|api-server/|storage/|reth-|"
+                        r"contracts/|test/|tests/|scripts/|programs/)",
+                        p,
+                    )
+                    if m2:
+                        p = p[m2.start():]
+                if " " in p or "." not in p.rsplit("/", 1)[-1]:
+                    continue
+                paths.add(p.rstrip("/"))
+    return paths
+
+
+def _collect_cited_paths(scratchpad: Path) -> set[str]:
+    """Return the set of source paths cited by depth/breadth/scanner/verify.
+
+    Harvests `path/to/file.ext:Lnn` and `path/to/file.ext` tokens from
+    every finding-class output. Used by both the coverage gap helper
+    (Bucket A) and the path-existence gate (Bucket C).
+    """
+    paths: set[str] = set()
+    citation_re = re.compile(
+        r"\b([a-zA-Z][a-zA-Z0-9_./\-]*?\."
+        r"(?:rs|go|sol|move|py|c|cpp|cc|h|hpp|java|ts|js))\b"
+    )
+    for pattern in _FINDING_GLOBS_FOR_CITATION:
+        for f in scratchpad.glob(pattern):
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            for m in citation_re.finditer(text):
+                paths.add(m.group(1))
+    return paths
+
+
+def _basenames(paths: set[str]) -> dict[str, set[str]]:
+    """Group full paths by their basename for coarse-match resolution."""
+    out: dict[str, set[str]] = {}
+    for p in paths:
+        bn = p.rsplit("/", 1)[-1]
+        out.setdefault(bn, set()).add(p)
+    return out
+
+
+def _is_spec_support_path(path: str) -> bool:
+    """True for tests/mocks/harnesses that are spec evidence, not prod surface."""
+    p = (path or "").replace("\\", "/").strip().lower()
+    if not p:
+        return False
+    wrapped = f"/{p.lstrip('/')}"
+    leaf = p.rsplit("/", 1)[-1]
+    support_markers = (
+        "/test/", "/tests/", "/testdata/",
+        "/mock/", "/mocks/", "/mocked/",
+        "/harness/", "/harnesses/",
+        "/fixture/", "/fixtures/",
+        "/example/", "/examples/",
+        "/script/", "/scripts/",
+        "/benches/", "/bench/",
+        "/vendor/", "/third_party/", "/node_modules/",
+    )
+    if any(marker in wrapped for marker in support_markers):
+        return True
+    if leaf.endswith((".t.sol", ".s.sol", "_test.go", "_tests.rs", ".test.ts", ".spec.ts")):
+        return True
+    if leaf.startswith(("mock", "stub", "fake")):
+        return True
+    if "harness" in leaf:
+        return True
+    return False
+
+
+def _first_production_location_for_validator(text: str, *fallbacks: str) -> str:
+    """Pick a production source location, never a PoC/test primary location.
+
+    Verifier artifacts often mention both vulnerable production files and test
+    files that prove them. Downstream manifests must use the production file as
+    the finding location; test/mock/harness paths are supporting evidence only.
+    """
+    candidates: list[str] = []
+    field = _field_from_markdown(
+        text or "",
+        ("Location", "Location(s)", "Primary Location", "Affected Location", "Affected Locations"),
+    )
+    for cand in (*fallbacks, field):
+        if cand and cand not in candidates:
+            candidates.append(cand)
+    for pattern in (
+        r"\b(?:src|contracts|programs|sources|move|crates|packages|modules)"
+        r"/[A-Za-z0-9_./-]+\.(?:cairo|move|hpp|cpp|tsx|jsx|sol|rs|go|py|cc|ts|js|vy|c|h)"
+        r"(?![A-Za-z0-9_])(?::L?\d+(?:[-:]\d+)?)?",
+        r"\b[A-Za-z0-9_./-]+\.(?:cairo|move|hpp|cpp|tsx|jsx|sol|rs|go|py|cc|ts|js|vy|c|h)"
+        r"(?![A-Za-z0-9_])(?::L?\d+(?:[-:]\d+)?)?",
+    ):
+        for m in re.finditer(pattern, text or "", re.IGNORECASE):
+            cand = m.group(0).strip("`")
+            if cand not in candidates:
+                candidates.append(cand)
+    for cand in candidates:
+        rel, _line = _parse_location_ref(cand)
+        path = rel or cand
+        if path and not _is_spec_support_path(path):
+            return cand.strip()
+    for cand in candidates:
+        if cand:
+            return cand.strip()
+    return ""
+
+
+def _compute_scip_coverage_sets(scratchpad: Path) -> dict[str, object]:
+    indexed = _collect_scip_indexed_paths(scratchpad)
+    cited = _collect_cited_paths(scratchpad)
+    cited_basenames = _basenames(cited)
+
+    spec_support_indexed = {p for p in indexed if _is_spec_support_path(p)}
+    prod_indexed = {
+        p for p in indexed
+        if p not in spec_support_indexed
+    }
+    indexed_basenames = _basenames(prod_indexed)
+
+    uncited: list[str] = []
+    covered: set[str] = set()
+    for p in sorted(prod_indexed):
+        bn = p.rsplit("/", 1)[-1]
+        if p in cited:
+            covered.add(p)
+            continue
+        if (
+            bn in cited_basenames
+            and len(cited_basenames.get(bn, set())) == 1
+            and len(indexed_basenames.get(bn, set())) == 1
+        ):
+            covered.add(p)
+            continue
+        uncited.append(p)
+
+    coverage_pct = 100.0 * len(covered) / max(1, len(prod_indexed))
+    return {
+        "indexed": indexed,
+        "prod_indexed": prod_indexed,
+        "spec_support_indexed": spec_support_indexed,
+        "cited": cited,
+        "covered": covered,
+        "uncited": uncited,
+        "coverage_pct": coverage_pct,
+    }
+
+
+def _materialize_sc_slither_flat_files(scratchpad: Path) -> list[str]:
+    """Create `scratchpad/slither/*` orientation files from recon artifacts.
+
+    EVM breadth/depth prompts already know how to consume
+    `{SCRATCHPAD}/slither/{call_graph,function_summary,...}.md` when
+    `primitive_status.md` contains `SLITHER_PREBAKE_COMPLETE: true`. Recon
+    often writes equivalent root-level artifacts; this adapter makes the
+    contract explicit and deterministic so agents grep flat files instead of
+    re-querying MCP or silently missing structural context.
+    """
+    mappings = {
+        "call_graph.md": ["call_graph.md", "caller_map.md", "callee_map.md"],
+        "function_summary.md": ["function_summary.md", "function_list.md"],
+        "state_write_map.md": ["state_write_map.md", "state_variables.md"],
+        "inheritance_tree.md": ["inheritance_tree.md", "contract_inventory.md"],
+        "access_control_map.md": ["access_control_map.md", "modifiers.md", "setter_list.md"],
+        "detector_findings.md": ["detector_findings.md", "static_analysis.md"],
+    }
+    slither_dir = scratchpad / "slither"
+    slither_dir.mkdir(parents=True, exist_ok=True)
+    generated: list[str] = []
+    for target, sources in mappings.items():
+        chunks: list[str] = [
+            f"# {target.replace('_', ' ').replace('.md', '').title()} (SC Flat Artifact)",
+            "",
+            "> Deterministically materialized from recon artifacts. Verify against source before treating as ground truth.",
+            "",
+        ]
+        for src in sources:
+            p = scratchpad / src
+            if not p.exists() or p.stat().st_size < 20:
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace").strip()
+            except Exception:
+                continue
+            if not text:
+                continue
+            chunks.extend([f"## Source: `{src}`", "", text[:200000], ""])
+        if len(chunks) <= 4:
+            continue
+        out = slither_dir / target
+        out.write_text("\n".join(chunks).rstrip() + "\n", encoding="utf-8")
+        generated.append(target)
+
+    if generated:
+        status = slither_dir / "primitive_status.md"
+        existing = ""
+        if status.exists():
+            try:
+                existing = status.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                existing = ""
+        lines = existing.rstrip().splitlines() if existing.strip() else [
+            "# SC Slither Flat Artifact Status", ""
+        ]
+        if not any("SLITHER_PREBAKE_COMPLETE" in line for line in lines):
+            lines.append("- SLITHER_PREBAKE_COMPLETE: true")
+        if not any("SLITHER_FLAT_FILES" in line for line in lines):
+            lines.append("- SLITHER_FLAT_FILES: " + ", ".join(generated))
+        status.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return generated
+
+
+def _compute_subsystem_coverage_gap(
+    scratchpad: Path, mode: str
+) -> list[str]:
+    """SCIP-driven generic coverage gap. Soft validator.
+
+    Generic mechanism (no per-codebase tuning):
+      1. Enumerate SCIP-indexed source files (`repo_map.md`).
+      2. Enumerate paths cited across depth/breadth/scanner/verify outputs.
+      3. Diff: indexed - cited = uncited.
+      4. Filter to "production code" (heuristic — skip test/, tests/,
+         testdata/, examples/, benches/, fixtures/, vendor/).
+      5. Write `subsystem_coverage_gap.md` listing uncited files for
+         iter2 / DA / next-phase consumption.
+
+    Mode-gated: thorough only. Light/Core skip.
+
+    Returns informational issue list on first round (v2.3.0 SOFT). Empty
+    issue list = either gap file written OR mode skip. Hard-gate is a
+    v2.3.1 decision contingent on next post-mortem.
+    """
+    gap_path = scratchpad / "subsystem_coverage_gap.md"
+
+    def _write_skip(reason: str) -> None:
+        try:
+            gap_path.write_text(
+                "# Subsystem Coverage Gap (v2.3.0 SCIP experiment)\n\n"
+                f"**Status**: SKIPPED — {reason}\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    if mode != "thorough":
+        _write_skip(f"mode={mode!r} (gate runs in thorough only)")
+        return []
+
+    indexed = _collect_scip_indexed_paths(scratchpad)
+    if not indexed:
+        _write_skip(
+            "no SCIP repo_map.md found in scratchpad/scip/ — bake phase "
+            "may have skipped (SC mode, or rust-analyzer/scip-go missing). "
+            "Coverage gap analysis requires the SCIP prebake."
+        )
+        return []
+
+    cov = _compute_scip_coverage_sets(scratchpad)
+    prod_indexed = cov["prod_indexed"]
+    uncited = cov["uncited"]
+    coverage_pct = cov["coverage_pct"]
+
+    try:
+        if uncited:
+            lines = [
+                "# Subsystem Coverage Gap (v2.3.0 SCIP experiment)",
+                "",
+                f"**Indexed prod files**: {len(prod_indexed)} | "
+                f"**Cited**: {len(prod_indexed) - len(uncited)} | "
+                f"**Uncited**: {len(uncited)} | "
+                f"**Coverage**: {coverage_pct:.1f}%",
+                "",
+                "Files below are recon-indexed via SCIP but received zero "
+                "citations across depth, breadth, scanner, niche, validation, "
+                "and verify outputs. iter2 / DA / next-phase agents SHOULD "
+                "read this file and route attention to uncited entries.",
+                "",
+                "| # | File |",
+                "|---|------|",
+            ]
+            for i, p in enumerate(uncited, 1):
+                lines.append(f"| {i} | `{p}` |")
+            gap_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        else:
+            gap_path.write_text(
+                "# Subsystem Coverage Gap (v2.3.0 SCIP experiment)\n\n"
+                f"**Coverage**: 100.0% ({len(prod_indexed)} indexed = "
+                f"cited). No subsystem skip.\n",
+                encoding="utf-8",
+            )
+    except Exception:
+        pass
+
+    # SOFT: report informational only. Hard-gating decision deferred to
+    # v2.3.1 post-measurement.
+    if uncited:
+        sample = ", ".join(uncited[:3])
+        more = f" (+{len(uncited)-3} more)" if len(uncited) > 3 else ""
+        return [
+            f"subsystem coverage: {len(uncited)} indexed prod file(s) "
+            f"uncited ({coverage_pct:.0f}% coverage). Sample: "
+            f"{sample}{more}. See subsystem_coverage_gap.md."
+        ]
+    return []
+
+
+def _parse_subsystem_coverage_gap(scratchpad: Path) -> dict[str, float]:
+    """Read subsystem_coverage_gap.md stats written by coverage helper."""
+    p = scratchpad / "subsystem_coverage_gap.md"
+    stats = {"indexed": 0.0, "cited": 0.0, "uncited": 0.0, "coverage": 100.0}
+    if not p.exists():
+        return stats
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return stats
+    m = re.search(
+        r"Indexed prod files\*\*:\s*(\d+).*?"
+        r"Cited\*\*:\s*(\d+).*?"
+        r"Uncited\*\*:\s*(\d+).*?"
+        r"Coverage\*\*:\s*([0-9.]+)%",
+        text,
+        re.DOTALL,
+    )
+    if not m:
+        return stats
+    return {
+        "indexed": float(m.group(1)),
+        "cited": float(m.group(2)),
+        "uncited": float(m.group(3)),
+        "coverage": float(m.group(4)),
+    }
+
+
+def _write_final_subsystem_coverage_summary(scratchpad: Path) -> None:
+    """Write final strict citation coverage after all phase outputs exist."""
+    if not _collect_scip_indexed_paths(scratchpad):
+        return
+    cov = _compute_scip_coverage_sets(scratchpad)
+    prod_indexed = cov["prod_indexed"]
+    cited = cov["cited"]
+    covered = cov["covered"]
+    uncited = cov["uncited"]
+    coverage_pct = cov["coverage_pct"]
+    coverage_fill_files = [
+        p for p in sorted(scratchpad.glob("coverage_fill_*.md"))
+        if p.stat().st_size >= 100
+    ]
+    lines = [
+        "# Final Subsystem Coverage (strict SCIP citation)",
+        "",
+        f"**Indexed prod files**: {len(prod_indexed)} | "
+        f"**Covered by source citation**: {len(covered)} | "
+        f"**Uncovered**: {len(uncited)} | "
+        f"**Coverage**: {coverage_pct:.1f}%",
+        "",
+        f"**Distinct cited source paths observed**: {len(cited)}",
+        f"**Coverage-fill shard files**: {len(coverage_fill_files)}",
+        "",
+        "This is the final strict source-citation metric after breadth, graph "
+        "sweeps, depth, verification, and report artifacts exist. It is not "
+        "the same as `file_coverage_ledger.md`, which may count acknowledged "
+        "or heuristic coverage.",
+    ]
+    if uncited:
+        lines.extend([
+            "",
+            "## Uncovered Production Files",
+            "",
+            "| # | File |",
+            "|---|------|",
+        ])
+        for i, p in enumerate(uncited, 1):
+            lines.append(f"| {i} | `{p}` |")
+    else:
+        lines.extend(["", "No uncovered production files under strict SCIP citation."])
+    try:
+        (scratchpad / "subsystem_coverage_final.md").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def _panic_sites_available(scratchpad: Path) -> bool:
+    """Return True when the L1 bake produced a non-empty panic work queue."""
+    p = scratchpad / "scip" / "panic_sites.md"
+    if not p.exists():
+        return False
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    meaningful = [
+        line for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    return len(meaningful) > 0
+
+
+def _scip_text_contains_any(scratchpad: Path, needles: tuple[str, ...]) -> bool:
+    """Return True when prebaked SCIP/context files mention any trigger token."""
+    scip_dir = scratchpad / "scip"
+    if not scip_dir.is_dir():
+        return False
+    files = (
+        "repo_map.md",
+        "repo_map_full.md",
+        "xref_map.md",
+        "type_hierarchy.md",
+        "call_graph_consensus.md",
+        "call_graph_p2p.md",
+        "call_graph_execution.md",
+        "concurrency_inventory.md",
+    )
+    lowered = tuple(n.lower() for n in needles)
+    for name in files:
+        p = scip_dir / name
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace").lower()
+        except Exception:
+            continue
+        if any(n in text for n in lowered):
+            return True
+    return False
+
+
+def _primitive_sweep_relevant(scratchpad: Path) -> bool:
+    return _scip_text_contains_any(
+        scratchpad,
+        (
+            "merkle", "proof", "validate_path", "validate_chunk",
+            "from_compact", "to_compact", "serialize", "deserialize",
+            "codec", "encoding", "decoding", "difficulty", "ema",
+            "log10", "pow", "round", "nonce", "replay", "signature",
+            "hash", "commitment",
+        ),
+    )
+
+
+def _field_validation_sweep_relevant(scratchpad: Path) -> bool:
+    return _scip_text_contains_any(
+        scratchpad,
+        (
+            "header", "block", "transaction", "tx", "commitment",
+            "signature", "signed", "verify", "validate", "nonce",
+            "height", "timestamp", "prev_", "parent", "hash",
+            "sidecar", "extension", "witness", "blob", "mweb",
+        ),
+    )
+
+
+def _network_amplification_sweep_relevant(scratchpad: Path) -> bool:
+    return _scip_text_contains_any(
+        scratchpad,
+        (
+            "gossip", "broadcast", "peer", "p2p", "network",
+            "handshake", "request", "response", "timeout",
+            "seen", "cache", "mempool", "chunk",
+        ),
+    )
+
+
+def _lifecycle_replay_sweep_relevant(scratchpad: Path) -> bool:
+    return _scip_text_contains_any(
+        scratchpad,
+        (
+            "cache", "seen", "pending", "pool", "mempool", "orphan",
+            "expiry", "expire", "ttl", "evict", "delete", "remove",
+            "nonce", "sequence", "replay", "signature", "txid",
+            "tx_hash", "peer_score", "reputation", "score",
+            "sidecar", "extension", "witness", "blob", "mutated",
+        ),
+    )
+
+
+def _graph_sweeps_needed(scratchpad: Path, mode: str) -> tuple[bool, str]:
+    """Decide whether the graph-sweep phase has real work.
+
+    Thorough L1 audits should convert baked graph artifacts into work queues
+    when either coverage is weak (<60%) or panic sites exist. This keeps the
+    phase cost bounded on small/well-covered projects while making the Irys
+    class of 50%+ uncited code mechanically impossible to ignore.
+    """
+    if mode != "thorough":
+        return False, f"mode={mode}; graph sweeps run in thorough only"
+    repo_indexed = bool(_collect_scip_indexed_paths(scratchpad))
+    if not repo_indexed and not _panic_sites_available(scratchpad):
+        return False, "no SCIP repo map or panic-site queue found"
+    stats = _parse_subsystem_coverage_gap(scratchpad)
+    low_coverage = stats["uncited"] > 0 and stats["coverage"] < 60.0
+    panic_sites = _panic_sites_available(scratchpad)
+    reasons: list[str] = []
+    if low_coverage:
+        reasons.append(
+            f"coverage={stats['coverage']:.1f}% with {int(stats['uncited'])} uncited files"
+        )
+    if panic_sites:
+        reasons.append("panic_sites.md non-empty")
+    if _field_validation_sweep_relevant(scratchpad):
+        reasons.append("field-validation surface detected")
+    if _primitive_sweep_relevant(scratchpad):
+        reasons.append("primitive/serialization surface detected")
+    if _network_amplification_sweep_relevant(scratchpad):
+        reasons.append("network-amplification surface detected")
+    if _lifecycle_replay_sweep_relevant(scratchpad):
+        reasons.append("lifecycle/replay surface detected")
+    if reasons:
+        return True, "; ".join(reasons)
+    return False, (
+        f"coverage={stats['coverage']:.1f}% and no panic-site queue requiring sweep"
+    )
+
+
+def _write_graph_sweeps_skip(scratchpad: Path, reason: str) -> None:
+    (scratchpad / "graph_sweep_summary.md").write_text(
+        "# Graph-Sharded Audit Sweeps\n\n"
+        f"**Status**: SKIPPED\n\nReason: {reason}\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_graph_sweeps(
+    scratchpad: Path, mode: str, *, min_bytes: int = 100,
+) -> tuple[list[str], list[str]]:
+    """Gate for graph-sweep phase when graph queues are present.
+
+    Returns ``(hard, soft)`` — hard issues block the phase (file existence,
+    byte size); soft issues are keyword-content checks on LLM prose (logged
+    as warnings, never block).
+
+    *min_bytes* is the caller-resolved artifact threshold (already halved for
+    Codex by ``_run_validators_and_enrichments``). Every size check in this
+    function uses it instead of a hardcoded constant.
+    """
+    needed, reason = _graph_sweeps_needed(scratchpad, mode)
+    if not needed:
+        return [], []
+    hard: list[str] = []
+    soft: list[str] = []
+    summary = scratchpad / "graph_sweep_summary.md"
+    if not summary.exists() or summary.stat().st_size < min_bytes:
+        hard.append("graph_sweep_summary.md missing or stub")
+
+    stats = _parse_subsystem_coverage_gap(scratchpad)
+    if stats["uncited"] > 0 and stats["coverage"] < 60.0:
+        coverage_files = [
+            p for p in scratchpad.glob("coverage_fill_*.md")
+            if p.stat().st_size >= min_bytes
+        ]
+        if not coverage_files:
+            hard.append(
+                "coverage_fill_*.md missing despite low subsystem coverage "
+                f"({reason})"
+            )
+
+    if _panic_sites_available(scratchpad):
+        panic_files = [
+            p for p in scratchpad.glob("panic_audit_*.md")
+            if p.stat().st_size >= min_bytes
+        ]
+        panic_summary = scratchpad / "panic_audit_summary.md"
+        if not panic_files and (
+            not panic_summary.exists() or panic_summary.stat().st_size < min_bytes
+        ):
+            hard.append("panic audit output missing despite non-empty panic_sites.md")
+    if _field_validation_sweep_relevant(scratchpad):
+        p = scratchpad / "field_validation_matrix.md"
+        if not p.exists() or p.stat().st_size < min_bytes:
+            hard.append("field_validation_matrix.md missing despite validation surface")
+    if _primitive_sweep_relevant(scratchpad):
+        p = scratchpad / "primitive_correctness_findings.md"
+        if not p.exists() or p.stat().st_size < min_bytes:
+            hard.append(
+                "primitive_correctness_findings.md missing despite primitive/serialization surface"
+            )
+    if _network_amplification_sweep_relevant(scratchpad):
+        p = scratchpad / "network_amplification_findings.md"
+        if not p.exists() or p.stat().st_size < min_bytes:
+            hard.append(
+                "network_amplification_findings.md missing despite network surface"
+            )
+        else:
+            text = p.read_text(encoding="utf-8", errors="replace").lower()
+            required_groups = (
+                ("ingress", "entry", "endpoint"),
+                ("dedup", "seen", "cache"),
+                ("validation", "validate"),
+                ("egress", "fanout", "loop", "broadcast", "multiplier"),
+                ("verdict",),
+                ("evidence",),
+            )
+            if not all(any(token in text for token in group) for group in required_groups):
+                soft.append(
+                    "network_amplification_findings.md lacks required ingress/dedup/"
+                    "validation/egress/verdict/evidence coverage"
+                )
+    if _lifecycle_replay_sweep_relevant(scratchpad):
+        p = scratchpad / "lifecycle_replay_findings.md"
+        if not p.exists() or p.stat().st_size < min_bytes:
+            hard.append(
+                "lifecycle_replay_findings.md missing despite cache/replay lifecycle surface"
+            )
+        else:
+            text = p.read_text(encoding="utf-8", errors="replace").lower()
+            required_groups = (
+                ("insert",),
+                ("consume", "use"),
+                ("evict", "delete", "remove", "expire"),
+                ("replay", "nonce", "sequence", "identity"),
+                ("verdict",),
+                ("evidence",),
+            )
+            if not all(any(token in text for token in group) for group in required_groups):
+                soft.append(
+                    "lifecycle_replay_findings.md lacks required insert/consume/"
+                    "evict/replay/verdict/evidence coverage"
+                )
+    return hard, soft
+
+
+def _validate_attention_repair(
+    scratchpad: Path, mode: str,
+) -> tuple[list[str], list[str]]:
+    """Returns ``(hard, soft)`` — hard issues block; soft are warnings."""
+    if mode != "thorough":
+        return [], []
+    queue = scratchpad / "attention_repair_queue.md"
+    if not queue.exists():
+        return [], []
+    try:
+        qtext = queue.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        qtext = ""
+    queued_rows = [ln for ln in qtext.splitlines() if re.match(r"^\|\s*\d+\s*\|", ln)]
+    if not queued_rows:
+        return [], []
+    summary = scratchpad / "attention_repair_summary.md"
+    if not summary.exists() or summary.stat().st_size < 100:
+        return ["attention_repair_summary.md missing or stub despite queued repair items"], []
+    summary_outputs: list[str] = []
+    rowshard_outputs: list[str] = []
+    for name in ("attention_repair_summary.md", "attention_repair_findings.md"):
+        p = scratchpad / name
+        if p.exists():
+            try:
+                summary_outputs.append(p.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                pass
+    for p in sorted(scratchpad.glob("attention_repair_rows_*.md")):
+        try:
+            rowshard_outputs.append(p.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            pass
+    blob = "\n".join(summary_outputs + rowshard_outputs)
+    summary_blob = "\n".join(summary_outputs)
+    rowshard_blob = "\n".join(rowshard_outputs)
+    soft: list[str] = []
+    if not re.search(r"(?i)\bverdict\b", blob) or not re.search(r"\b(SAFE|CONFIRMED|FINDING|EXPLOITABLE|FALSE_POSITIVE|NO_FINDING)\b", blob, re.I):
+        soft.append("attention repair output lacks per-item verdicts")
+    allowed_verdict_re = re.compile(
+        r"\b(SAFE|CONFIRMED|FINDING|EXPLOITABLE|FALSE_POSITIVE|NO_FINDING|NEEDS_HUMAN)\b",
+        re.IGNORECASE,
+    )
+    summary_receipts: set[int] = set()
+    for line in summary_blob.splitlines():
+        s = line.strip()
+        # Table row: | N | VERDICT | ... |
+        if re.match(r"^\|\s*\d+\s*\|", s):
+            cells = [c.strip().strip("`") for c in s.strip("|").split("|")]
+            if len(cells) >= 2 and any(allowed_verdict_re.search(c) for c in cells[1:]):
+                try:
+                    summary_receipts.add(int(cells[0]))
+                except ValueError:
+                    pass
+            continue
+        # Bullet fallback: - N: VERDICT ... or * N. VERDICT ...
+        bm = re.match(r"^[-*]\s*(\d+)\s*[:.]\s*(.+)$", s)
+        if bm and allowed_verdict_re.search(bm.group(2)):
+            try:
+                summary_receipts.add(int(bm.group(1)))
+            except ValueError:
+                pass
+    queue_numbers: list[int] = []
+    queued_paths: list[str] = []
+    for line in qtext.splitlines():
+        s = line.strip()
+        if not re.match(r"^\|\s*\d+\s*\|", s):
+            continue
+        cells = [c.strip().strip("`") for c in s.strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        try:
+            queue_numbers.append(int(cells[0]))
+        except ValueError:
+            pass
+        kind = cells[1].lower()
+        if any(token in kind for token in ("uncited", "notread", "file", "path")):
+            for cell in (cells[2], cells[-1]):
+                for p in _extract_gap_paths_from_markdown(cell):
+                    if p not in queued_paths:
+                        queued_paths.append(p)
+    missing_receipts = [n for n in queue_numbers if n not in summary_receipts]
+    if missing_receipts:
+        return [
+            "attention repair summary missing queue receipt row(s): "
+            + ", ".join(str(n) for n in missing_receipts[:12])
+        ], soft
+
+    def _attention_path_cited(path: str) -> bool:
+        norm_path = _norm_loc(path)
+        norm_full = _norm_loc(blob)
+        norm_rowshard = _norm_loc(rowshard_blob)
+        if norm_path and norm_path in norm_full:
+            return True
+        # Queue rows can contain host/user prefixes while agent outputs cite
+        # repo-relative paths. Match on the security-relevant suffix, not on
+        # the absolute prefix.
+        for marker in ("/crates/", "/src/", "/contracts/", "/programs/"):
+            if marker in norm_path:
+                suffix = norm_path[norm_path.index(marker) + 1:]
+                if suffix and suffix in norm_full:
+                    return True
+        basename = Path(norm_path).name
+        if not basename:
+            return False
+        # Closes F-INV-04 (laundering): when the queued path is multi-segment
+        # AND the basename appears ONLY in summary/findings (not in a
+        # structured row-shard table), require at least a 2-segment match.
+        # Row-shard files (`attention_repair_rows_*.md`) are tabular per-row
+        # review and are allowed lenient basename match by design (A3 test).
+        if "/" in norm_path and basename in norm_rowshard:
+            return True  # row-shard lenient
+        if "/" in norm_path:
+            parent = norm_path.rsplit("/", 1)[0].rsplit("/", 1)[-1]
+            two_seg = f"{parent}/{basename}" if parent else basename
+            return bool(two_seg and two_seg in norm_full)
+        return basename in norm_full
+
+    missing_paths = [p for p in queued_paths if not _attention_path_cited(p)]
+    if missing_paths:
+        return [
+            "attention repair did not cite queued path(s): "
+            + ", ".join(missing_paths[:8])
+        ], soft
+    return [], soft
+
+
+def _validate_cited_paths_in_verify(
+    scratchpad: Path
+) -> list[str]:
+    """Path-existence gate. Bucket C of v2.2.2 post-mortem.
+
+    For each verify_*.md file, harvest the **Location**: cited path and
+    check whether it resolves against:
+      (a) the SCIP-indexed file set (preferred), OR
+      (b) basename-only match against indexed files (lenient fallback).
+
+    Findings whose path resolves to NEITHER are flagged for the report
+    pipeline as `[PATH-UNRESOLVED]`. Soft v2.3.0 — informational only.
+
+    Returns a list of issue strings. Empty = all paths resolve OR no
+    SCIP index exists to validate against.
+    """
+    indexed = _collect_scip_indexed_paths(scratchpad)
+    if not indexed:
+        return []  # No SCIP → can't validate
+    indexed_basenames = _basenames(indexed)
+
+    location_re = re.compile(
+        r"^\s*(?:-\s+)?\*\*Location\*\*\s*:?\s*`?([^\n`]+?)`?\s*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+    path_with_line_re = re.compile(
+        r"^([a-zA-Z0-9_./\-]+\."
+        r"(?:rs|go|sol|move|py|c|cpp|cc|h|hpp|java|ts|js))"
+        r"(?::L?\d+(?:[-:]\d+)?)?$"
+    )
+
+    unresolved: list[tuple[str, str]] = []  # (verify_file, cited_path)
+    checked = 0
+    for f in sorted(scratchpad.glob("verify_*.md")):
+        if f.name in {"verify_core.md", "verify_core_full.md"}:
+            continue
+        if "skeptic" in f.name or "judge" in f.name:
+            continue
+        if f.name.endswith(_RETRY_HINT_SUFFIX):
+            continue
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for m in location_re.finditer(text):
+            cell = m.group(1).strip()
+            # Strip line-number suffix for path-only check.
+            pm = path_with_line_re.match(cell)
+            if not pm:
+                continue
+            path = pm.group(1)
+            # Verifier outputs may cite generated PoC/test/harness files in
+            # Execution Result or Error Trace sections. Those paths are
+            # evidence artifacts, not audited production locations, and they
+            # are often absent from SCIP repo_map because they were created
+            # during verification. Do not let them halt a verifier shard.
+            if _is_spec_support_path(path):
+                continue
+            checked += 1
+            bn = path.rsplit("/", 1)[-1]
+            if path in indexed or bn in indexed_basenames:
+                continue
+            unresolved.append((f.name, path))
+
+    if not unresolved:
+        try:
+            (scratchpad / "path_unresolved.md").unlink(missing_ok=True)
+        except Exception:
+            pass
+        return []
+    sample = "; ".join(
+        f"{vf}->{p}" for vf, p in unresolved[:3]
+    )
+    more = f" (+{len(unresolved)-3} more)" if len(unresolved) > 3 else ""
+    # Persist for downstream consumption (Index Agent / report pipeline).
+    out = scratchpad / "path_unresolved.md"
+    try:
+        lines = [
+            "# Path-Unresolved Findings (v2.3.0 SCIP experiment)",
+            "",
+            f"Verifier files cite paths that do NOT resolve against the "
+            f"SCIP-indexed file set ({len(unresolved)} of {checked} cited "
+            f"paths checked). Likely causes: path hallucination by "
+            f"recon/depth/breadth, or path drift between recon-time and "
+            f"verify-time. Index Agent SHOULD treat these as candidates "
+            f"for FALSE_POSITIVE / DUPLICATE / location-correction-needed "
+            f"rather than promoting unverified.",
+            "",
+            "| Verify File | Cited Path |",
+            "|-------------|------------|",
+        ]
+        for vf, p in unresolved:
+            lines.append(f"| {vf} | `{p}` |")
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    return [
+        f"path unresolved: {len(unresolved)} verify file(s) cite paths "
+        f"absent from SCIP repo_map: {sample}{more}. See path_unresolved.md."
+    ]
+
+
+def _synthesize_step_execution_trace(
+    scratchpad: Path, role: str
+) -> bool:
+    """Build a deterministic step_execution_trace_{role}.md from depth findings.
+
+    v2.3.3 — Replaces the LLM-emit-or-fail dependency with a driver-side
+    projection. Reads ``depth_{role}_findings.md`` and counts evidence-tag
+    occurrences. Each tag class becomes one (skill, step) row with
+    ``Executed=yes`` if ≥1 tag of that class appears. The first occurrence's
+    ``file:line`` (if any) goes into the Evidence cell so the ceremonial-yes
+    check still passes.
+
+    Returns True iff the role has a non-empty findings file (synthesis ran).
+    """
+    findings_path = scratchpad / f"depth_{role}_findings.md"
+    if not findings_path.exists():
+        return False
+    try:
+        text = findings_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    if not text.strip():
+        return False
+
+    # Count tag classes; sample one file:line per class for the Evidence cell.
+    tag_counts: dict[str, int] = {}
+    tag_samples: dict[str, str] = {}
+    file_line_re = re.compile(
+        r"([A-Za-z0-9_./\-]+\.(?:rs|go|sol|move|py|c|cpp|h|hpp|java|ts|js))"
+        r":L?(\d+)"
+    )
+    first_file_line = None
+    first_file_line_match = file_line_re.search(text)
+    if first_file_line_match:
+        first_file_line = (
+            f"{first_file_line_match.group(1)}:L{first_file_line_match.group(2)}"
+        )
+    for m in _DEPTH_EVIDENCE_TAG_RE.finditer(text):
+        tag = m.group(1).upper()
+        tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        if tag not in tag_samples:
+            window = text[max(0, m.start() - 500):m.start() + 500]
+            fm = file_line_re.search(window)
+            if fm:
+                tag_samples[tag] = f"{fm.group(1)}:L{fm.group(2)}"
+            elif first_file_line:
+                tag_samples[tag] = first_file_line
+    finding_count = len(re.findall(r"^###\s*(?:Finding\s*)?\[", text, re.MULTILINE))
+
+    out_path = scratchpad / f"step_execution_trace_{role}.md"
+    lines = [
+        f"# Step Execution Trace: {role}",
+        "",
+        f"> **Source**: synthesized from `depth_{role}_findings.md` "
+        f"({finding_count} finding(s)) by the driver. Driver-deterministic "
+        f"projection — does not depend on agent compliance with the "
+        f"§STEP-TRACE directive.",
+        "",
+        "| Skill | Step | Executed | Evidence | Result |",
+        "|-------|------|----------|----------|--------|",
+    ]
+    if not tag_counts:
+        lines.append(
+            "| (general) | depth analysis | no | - | "
+            "no evidence tags in findings |"
+        )
+    else:
+        # One row per tag class. Sorted for stable output.
+        for tag in sorted(tag_counts.keys()):
+            count = tag_counts[tag]
+            evidence = tag_samples.get(tag) or "-"
+            lines.append(
+                f"| (general) | `[{tag}:*]` | yes | {evidence} | "
+                f"{count} occurrence(s) |"
+            )
+    lines.append("")
+    try:
+        out_path.write_text("\n".join(lines), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _step_trace_has_ceremonial_yes(trace_path: Path) -> bool:
+    """Return True when a step trace claims Executed=yes without file:line.
+
+    Existing agent-emitted traces can be verbose and still fail the mechanical
+    contract by using finding IDs (for example `DCI-7`) as evidence. In that
+    case the deterministic synthesized trace is safer than preserving the
+    malformed trace, because it projects file:line evidence from the actual
+    depth finding body.
+    """
+    try:
+        text = trace_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return True
+    rows = _parse_step_trace_rows(text)
+    if not rows:
+        return True
+    for row in rows:
+        if row.get("executed", "").strip().lower() != "yes":
+            continue
+        ev = row.get("evidence", "").strip()
+        if (
+            not ev
+            or ev == "-"
+            or not re.search(r"[A-Za-z0-9_./\-]+\.[a-z]+:L?\d+", ev)
+        ):
+            return True
+    return False
+
+
+def _ensure_step_execution_traces(scratchpad: Path) -> int:
+    """Synthesize traces for any depth role that has findings but no
+    non-trivial agent-emitted trace. Preserves richer agent-emitted traces
+    only when they satisfy the non-ceremonial file:line evidence contract.
+
+    Returns count of traces synthesized (informational only).
+    """
+    synthesized = 0
+    for role in _expected_depth_agent_roles(scratchpad):
+        trace_path = scratchpad / f"step_execution_trace_{role}.md"
+        try:
+            ok = (
+                trace_path.exists()
+                and trace_path.stat().st_size > 200
+                and not _step_trace_has_ceremonial_yes(trace_path)
+            )
+        except Exception:
+            ok = False
+        if ok:
+            continue
+        if _synthesize_step_execution_trace(scratchpad, role):
+            synthesized += 1
+    return synthesized
+
+
+def _check_step_execution_traces(
+    scratchpad: Path, mode: str
+) -> list[str]:
+    """Validator: every Thorough depth agent has a step trace + non-ceremonial rows.
+
+    v2.3.3 — Auto-synthesizes traces from depth findings BEFORE running
+    checks, eliminating the agent-compliance dependency. The post-Irys-L1
+    post-mortem found that agents were not emitting traces at runtime;
+    the orchestrator was post-hoc reconstructing them inside the depth
+    subprocess to satisfy the gate. Moving that reconstruction into the
+    driver makes it deterministic and idempotent.
+
+    Checks (Thorough only):
+      1. Every depth_{role}_findings.md has a step_execution_trace_{role}.md
+         (auto-synthesized if missing).
+      2. Each trace contains at least one row with Executed=yes.
+      3. Each "yes" row has a non-empty Evidence cell.
+
+    Side effect: writes ``step_execution_gaps_mechanical.md`` for iter2.
+    """
+    if mode != "thorough":
+        return []
+    expected_roles = _expected_depth_agent_roles(scratchpad)
+    if not expected_roles:
+        return []
+    # v2.3.3: synthesize-first. Eliminates LLM-emit-or-fail risk.
+    _ensure_step_execution_traces(scratchpad)
+    gaps, agents_with_traces = _aggregate_step_execution_gaps(scratchpad)
+    issues: list[str] = []
+
+    # Check 1: trace presence
+    missing_traces = sorted(set(expected_roles) - set(agents_with_traces))
+    if missing_traces:
+        issues.append(
+            f"step trace missing: {len(missing_traces)} depth agent(s) "
+            f"emitted findings but no step_execution_trace_*.md file: "
+            f"{', '.join(missing_traces[:5])}"
+        )
+
+    # Check 2: ceremonial-yes detection — yes rows without evidence
+    cere_count = 0
+    cere_samples: list[str] = []
+    for f in sorted(scratchpad.glob(_STEP_TRACE_GLOB)):
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for row in _parse_step_trace_rows(text):
+            if row.get("executed", "").lower() == "yes":
+                ev = row.get("evidence", "").strip()
+                # Reject empty, just '-', or pure prose without file:line.
+                # v2.6.2: also accept comma-separated and "line N" formats
+                # (GPT models cite evidence differently from Claude).
+                has_citation = bool(
+                    ev
+                    and ev != "-"
+                    and (
+                        re.search(r"[A-Za-z0-9_./]+\.[a-z]+:L?\d+", ev)
+                        or re.search(r"[A-Za-z0-9_./]+\.[a-z]+,?\s*lines?\s*\d+", ev, re.IGNORECASE)
+                        or re.search(r"[A-Za-z0-9_./]+\.[a-z]+\s+L\d+", ev)
+                        or (re.search(r"\.[a-z]+\b", ev) and re.search(r"\d+", ev))
+                        or re.search(r"\[(BOUNDARY|VARIATION|TRACE|CROSS-DOMAIN-DEP|REGRESS|PERTURBATION|MEDUSA-PASS|POC-PASS|POC-FAIL)[:\]]", ev)
+                        or ev.startswith("(general)")
+                    )
+                )
+                if not has_citation:
+                    cere_count += 1
+                    if len(cere_samples) < 3:
+                        cere_samples.append(
+                            f"{f.name.replace('step_execution_trace_','').replace('.md','')}:"
+                            f" {row.get('skill','?')}/{row.get('step','?')}"
+                        )
+    if cere_count:
+        issues.append(
+            f"step trace ceremonial: {cere_count} row(s) marked Executed=yes "
+            f"without `file:line` Evidence: {'; '.join(cere_samples)}"
+        )
+
+    # Always write the mechanical gap aggregate (even when empty — clears
+    # stale data between runs).
+    gap_path = scratchpad / "step_execution_gaps_mechanical.md"
+    try:
+        if gaps:
+            lines = [
+                "# Step Execution Gaps (Mechanical Aggregate, v2.2.0 A.1)",
+                "",
+                f"Aggregated from {len(agents_with_traces)} depth-agent "
+                f"step_execution_trace_*.md file(s). Each row below is a "
+                f"(skill, step) where the agent reported Executed != yes.",
+                "",
+                "| Agent | Skill | Step | Executed | Evidence | Result |",
+                "|-------|-------|------|----------|----------|--------|",
+            ]
+            for g in gaps:
+                lines.append(
+                    f"| {g['agent']} | {g['skill']} | {g['step']} | "
+                    f"{g['executed']} | {g['evidence']} | {g['result']} |"
+                )
+            lines.append("")
+            lines.append(
+                "**iter2 / DA / skill-checklist directive**: Each row above "
+                "is a mandatory investigation target. An agent addressing "
+                "this list must EXECUTE the named step, cite `file:line` "
+                "evidence, and produce one finding OR an explicit "
+                "`<safe: justification>` per gap."
+            )
+            gap_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        else:
+            gap_path.write_text(
+                "# Step Execution Gaps (Mechanical Aggregate, v2.2.0 A.1)\n\n"
+                f"All {len(agents_with_traces)} depth-agent traces report "
+                f"Executed=yes for every inherited (skill, step). No gaps.\n",
+                encoding="utf-8",
+            )
+    except Exception:
+        pass
+
+    # IMPORTANT: do NOT return an issue for "gaps present." Gaps are the
+    # expected output of iter1 — iter2 consumes the gap file and closes
+    # them. A hard-fail on gaps-existing would loop iter1 forever, since
+    # the same agents would produce the same gaps. Only trace-missing
+    # and trace-ceremonial are gate-failure conditions; trace-with-gaps
+    # is the directive to the next phase.
+
+    return issues
+
+
+# --- Graph-artifact consumption gate (v2.5.0 P0) --------------------------
+
+_GRAPH_ARTIFACT_NAMES = frozenset({
+    "caller_map.md",
+    "callee_map.md",
+    "state_write_map.md",
+    "function_summary.md",
+})
+
+# Patterns that prove the agent consumed a graph artifact — either by reading
+# the file or acknowledging its unavailability.
+_GRAPH_REF_PATTERNS: dict[str, re.Pattern[str]] = {
+    name: re.compile(
+        # Match: "caller_map.md", "Read: caller_map", "[GRAPH-ARTIFACT: UNAVAILABLE:caller_map.md]"
+        rf"(?:caller_map|callee_map|state_write_map|function_summary)\.md"
+        if name.startswith("caller") else
+        rf"(?:caller_map|callee_map|state_write_map|function_summary)\.md",
+        re.IGNORECASE,
+    )
+    for name in _GRAPH_ARTIFACT_NAMES
+}
+
+# Single compiled regex matching any of the 4 artifact basenames.
+_GRAPH_ANY_REF_RE = re.compile(
+    r"(?:caller_map|callee_map|state_write_map|function_summary)(?:\.md)?",
+    re.IGNORECASE,
+)
+
+# Matches the UNAVAILABLE tag emitted per the depth template directive.
+_GRAPH_UNAVAILABLE_TAG_RE = re.compile(
+    r"\[GRAPH-ARTIFACT:\s*UNAVAILABLE[:\s]+"
+    r"(caller_map|callee_map|state_write_map|function_summary)",
+    re.IGNORECASE,
+)
+
+# Per-artifact reference regex (exact basename).
+_GRAPH_PER_ARTIFACT_RE: dict[str, re.Pattern[str]] = {
+    name: re.compile(
+        rf"{re.escape(name.replace('.md', ''))}(?:\.md)?",
+        re.IGNORECASE,
+    )
+    for name in _GRAPH_ARTIFACT_NAMES
+}
+
+_GRAPH_STUB_SIZE_THRESHOLD = 200  # bytes — below this the file is a stub
+
+
+def _check_graph_artifact_consumption(
+    scratchpad: Path, mode: str
+) -> list[str]:
+    """Validator: every Thorough-mode depth agent demonstrates graph-artifact reads.
+
+    v2.5.0 P0 — Depth templates across all 5 languages contain a MANDATORY
+    graph-artifact read directive. This gate mechanically verifies compliance.
+
+    For each depth_{role}_findings.md that is substantial (>200 bytes):
+      - Count distinct graph artifacts referenced (by filename mention or
+        [GRAPH-ARTIFACT: UNAVAILABLE:...] tag).
+      - If any produced graph artifact is not referenced → issue.
+
+    Precondition: at least one graph artifact file must exist in the scratchpad.
+    If recon did not produce any (e.g. no Slither, no grep fallback), the gate
+    is vacuously satisfied — you can't consume what doesn't exist.
+
+    Same exclusions as _check_step_execution_traces: coverage_* agents,
+    iter2/iter3/da variants are exempt.
+    """
+    if mode != "thorough":
+        return []
+
+    # Check if any graph artifacts were produced by recon.
+    graph_files_present = [
+        name for name in _GRAPH_ARTIFACT_NAMES
+        if (scratchpad / name).exists()
+    ]
+    if not graph_files_present:
+        return []
+
+    expected_roles = _expected_depth_agent_roles(scratchpad)
+    if not expected_roles:
+        return []
+
+    issues: list[str] = []
+    for role in expected_roles:
+        findings_path = scratchpad / f"depth_{role}_findings.md"
+        if not findings_path.exists():
+            continue
+        try:
+            size = findings_path.stat().st_size
+        except OSError:
+            continue
+        if size < _GRAPH_STUB_SIZE_THRESHOLD:
+            continue
+
+        try:
+            text = findings_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        # Count distinct artifacts referenced.
+        refs_found: set[str] = set()
+        for artifact_name, pat in _GRAPH_PER_ARTIFACT_RE.items():
+            if pat.search(text):
+                refs_found.add(artifact_name)
+        # Also check UNAVAILABLE tags.
+        for m in _GRAPH_UNAVAILABLE_TAG_RE.finditer(text):
+            refs_found.add(m.group(1) + ".md")
+
+        missing_refs = sorted(set(graph_files_present) - refs_found)
+        if missing_refs:
+            present_str = ", ".join(sorted(refs_found)) if refs_found else "none"
+            issues.append(
+                f"graph-artifact consumption: depth_{role} references only "
+                f"{len(refs_found)}/{len(graph_files_present)} graph artifacts "
+                f"(found: {present_str}; missing: {', '.join(missing_refs)}). "
+                f"MANDATORY directive requires reading every produced graph "
+                f"artifact or emitting [GRAPH-ARTIFACT: UNAVAILABLE:...] tags."
+            )
+
+    return issues
+
+
+def _check_notread_priority_coverage(
+    scratchpad: Path, mode: str
+) -> list[str]:
+    """Soft validator: NOTREAD files with zero citations in any finding output.
+
+    Mode-gated: runs in core/thorough only. Light skips (smaller budget,
+    smaller scope, less leverage from the gate).
+
+    Side effect: writes `{scratchpad}/notread_priority_gaps.md` listing the
+    uncovered files. The next phase's prompt SHOULD reference this file so
+    iter2/DA agents target it; this is a soft directive — no hard halt.
+    """
+    # v2.2.1 Fix 4: write a status note unconditionally on skip so the
+    # absence of `notread_priority_gaps.md` is unambiguous after a run.
+    # Pre-v2.2.1 the early-returns left no trace, making it impossible
+    # to tell from the scratchpad whether the gate ran-and-passed or
+    # never-ran. Now: file always exists when the function executes.
+    gap_path = scratchpad / "notread_priority_gaps.md"
+
+    def _write_skip(reason: str) -> None:
+        try:
+            gap_path.write_text(
+                "# NOTREAD priority coverage gaps (v2.2.0 A.4)\n\n"
+                f"**Status**: SKIPPED — {reason}\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    if mode not in ("core", "thorough"):
+        _write_skip(
+            f"mode={mode!r} (gate runs in core/thorough only)"
+        )
+        return []
+    # v2.2.3 widening: try BOTH scope_leftover.md AND file_coverage_ledger.md.
+    # Recon writes both; uncovered files may live in either depending on
+    # which schema the agent chose. Union the two sets.
+    sl = scratchpad / "scope_leftover.md"
+    fl = scratchpad / "file_coverage_ledger.md"
+    notread: list[str] = []
+    if sl.exists():
+        try:
+            notread.extend(_parse_notread_files(
+                _llm_norm(sl.read_text(encoding="utf-8", errors="replace"))
+            ))
+        except Exception:
+            pass
+    if fl.exists():
+        try:
+            notread.extend(_parse_uncovered_from_ledger(
+                _llm_norm(fl.read_text(encoding="utf-8", errors="replace"))
+            ))
+        except Exception:
+            pass
+    # Dedup while preserving order.
+    seen = set()
+    notread = [p for p in notread if not (p in seen or seen.add(p))]
+
+    if not sl.exists() and not fl.exists():
+        _write_skip(
+            "neither scope_leftover.md nor file_coverage_ledger.md exists "
+            "(recon may not have produced them; check recon agent L1-2 / "
+            "TASK 5a output)"
+        )
+        return []
+    if not notread:
+        _write_skip(
+            f"scope_leftover.md present={sl.exists()} / "
+            f"file_coverage_ledger.md present={fl.exists()} but parser "
+            f"found 0 uncovered rows (accepted schemas: scope_leftover "
+            f"NOTREAD/UNREAD/UNCOVERED status cell, scope_leftover empty "
+            f"Acknowledged column, file_coverage_ledger ## Uncovered Files "
+            f"section)"
+        )
+        return []
+
+    # Concatenate all finding outputs once for cheap citation check.
+    finding_text_parts: list[str] = []
+    for pattern in _NOTREAD_FINDING_GLOBS:
+        for f in scratchpad.glob(pattern):
+            try:
+                finding_text_parts.append(
+                    f.read_text(encoding="utf-8", errors="replace")
+                )
+            except Exception:
+                continue
+    finding_blob = "\n".join(finding_text_parts)
+
+    basename_counts: dict[str, int] = {}
+    for path in notread:
+        basename = path.replace("\\", "/").rsplit("/", 1)[-1]
+        if basename:
+            basename_counts[basename] = basename_counts.get(basename, 0) + 1
+
+    uncovered: list[str] = []
+    for path in notread:
+        # Citation = bare filename or full relative path appears anywhere in
+        # any finding output. Use basename only when unique in the NOTREAD set;
+        # otherwise basename collisions (`metadata.rs`, `lib.rs`, etc.) create
+        # false coverage and suppress required depth gap-fill.
+        norm_path = path.replace("\\", "/").strip("`")
+        basename = norm_path.rsplit("/", 1)[-1]
+        if norm_path in finding_blob:
+            continue
+        if basename and basename_counts.get(basename, 0) == 1 and basename in finding_blob:
+            continue
+        uncovered.append(path)
+
+    # Persist the gap list for iter2 phase to consume.
+    try:
+        gap_path = scratchpad / "notread_priority_gaps.md"
+        if uncovered:
+            lines = [
+                "# NOTREAD priority coverage gaps (v2.2.0 A.4)",
+                "",
+                "These files were flagged NOTREAD by recon and received zero",
+                "citations across depth, breadth, scanner, and niche finding",
+                "outputs after iter 1. The next iter MUST target each file.",
+                "",
+                "| # | File |",
+                "|---|------|",
+            ]
+            for i, p in enumerate(uncovered, 1):
+                lines.append(f"| {i} | `{p}` |")
+            gap_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        else:
+            # Clear stale gap files between runs.
+            if gap_path.exists():
+                gap_path.write_text(
+                    "# NOTREAD priority coverage gaps (v2.2.0 A.4)\n\n"
+                    "All NOTREAD priority files received depth coverage.\n",
+                    encoding="utf-8",
+                )
+    except Exception:
+        pass
+
+    if uncovered:
+        sample = ", ".join(uncovered[:3])
+        more = f" (+{len(uncovered)-3} more)" if len(uncovered) > 3 else ""
+        return [
+            f"NOTREAD priority gap: {len(uncovered)} file(s) flagged NOTREAD "
+            f"by recon received zero citations after iter 1: {sample}{more}. "
+            f"See notread_priority_gaps.md."
+        ]
+    return []
+
+
+def _validate_rc_parity(
+    phase: Phase, scratchpad: Path, rc: int, backend: str = "claude",
+) -> list[str]:
+    """Parity check for rc=-2 (timeout-killed) phases (A3).
+
+    Before v2.1.2, the driver's gate check was pure file-existence: if the
+    subprocess died via SIGKILL mid-write but the file existed with >= 100
+    bytes, the phase was marked complete. The AwesomeX postmortem surfaced
+    three consecutive silent acceptances (inventory, verify, report) that
+    each had correct-looking output but incomplete content.
+
+    This helper runs ONLY when `rc != 0` and applies phase-specific content
+    parity heuristics. On clean rc=0 exits it is a no-op. SOFT: unknown
+    phase names or unparseable files return [] — we don't false-alarm on
+    phases that don't have an obvious content signature.
+    """
+    if rc == 0:
+        return []
+    # rc is nonzero; rc=-2 is the timeout sentinel, other values are
+    # claude -p internal errors. Both warrant parity.
+    issues: list[str] = []
+    name = phase.name
+    try:
+        if name == "inventory":
+            p = scratchpad / "findings_inventory.md"
+            if p.exists():
+                text = p.read_text(encoding="utf-8", errors="replace")
+                # Expect at least N inventory ID rows. 79 was the AwesomeX
+                # count; a real small audit still produces >= 10 rows in
+                # core mode. <5 rows with rc!=0 is almost certainly
+                # truncation.
+                id_rows = len(re.findall(
+                    r"^\s*\|\s*\[[A-Z]{2,4}-\d+\]",
+                    text, re.MULTILINE,
+                ))
+                if id_rows < 5:
+                    issues.append(
+                        f"findings_inventory.md has only {id_rows} ID row(s) "
+                        f"with rc={rc} — likely truncated mid-write"
+                    )
+        elif name == "recon":
+            summary = scratchpad / "recon_summary.md"
+            build = scratchpad / "build_status.md"
+            min_summary_bytes = 200 if backend == "codex" else 512
+            min_build_bytes = 30 if backend == "codex" else 80
+            if not summary.exists():
+                issues.append("recon_summary.md missing after nonzero rc")
+            else:
+                text = summary.read_text(encoding="utf-8", errors="replace")
+                if summary.stat().st_size < min_summary_bytes:
+                    issues.append(
+                        "recon_summary.md is too small after nonzero rc "
+                        f"({summary.stat().st_size} bytes, min={min_summary_bytes})"
+                    )
+                if not re.search(
+                    r"(?im)^(?:#+\s+|\*\*).*(?:recon|summary|protocol|contract|"
+                    r"component|attack|risk|template|skill|overview|finding|scope)",
+                    text,
+                ):
+                    log.warning(
+                        "[_validate_rc_parity] recon_summary.md lacks "
+                        "recognizable heading keywords — LLM prose check (soft)"
+                    )
+            if not build.exists():
+                issues.append("build_status.md missing after nonzero rc")
+            else:
+                text = build.read_text(encoding="utf-8", errors="replace")
+                if build.stat().st_size < min_build_bytes:
+                    issues.append(
+                        "build_status.md is too small after nonzero rc "
+                        f"({build.stat().st_size} bytes, min={min_build_bytes})"
+                    )
+                elif not re.search(
+                    r"(?i)\b(?:build|compile|forge|hardhat|foundry|slither|"
+                    r"aderyn|opengrep|success|failed|unavailable|skipped|"
+                    r"status|compiled|ok|error|passed)\b",
+                    text,
+                ):
+                    log.warning(
+                        "[_validate_rc_parity] build_status.md lacks "
+                        "recognizable build keywords — LLM prose check (soft)"
+                    )
+        elif name.startswith("verify") or name in SC_VERIFY_PHASE_NAMES:
+            shard_issues = _validate_verify_completion(scratchpad, name)
+            if shard_issues:
+                issues.extend(shard_issues)
+            # Every hypothesis ID in hypotheses.md must have >=1
+            # verify_*.md file referencing it. Missing IDs after rc!=0
+            # suggest mid-phase termination.
+            #
+            # v2.3.5 P2: use the canonical `_INTERNAL_FINDING_ID_RE` (covers
+            # SC bare H-1, L1 prefixed L1-H-12, L1 tiered H-C01/H-M27/H-L07,
+            # CC-NN, F-NN). Pre-v2.3.5 used a hardcoded `\b(H-\d+|CH-\d+)\b`
+            # that missed every L1 ID format → the parity gate passed
+            # vacuously on every L1 timeout. False clean.
+            hp = scratchpad / "hypotheses.md"
+            is_verify_shard = name in L1_VERIFY_PHASE_NAMES or name in SC_VERIFY_PHASE_NAMES
+            if hp.exists() and not is_verify_shard:
+                hyp_text = hp.read_text(encoding="utf-8", errors="replace")
+                hyp_ids = set(_INTERNAL_FINDING_ID_RE.findall(hyp_text))
+                if hyp_ids:
+                    verified = set()
+                    for vf in scratchpad.glob("verify_*.md"):
+                        try:
+                            vt = vf.read_text(encoding="utf-8", errors="replace")
+                        except Exception:
+                            continue
+                        verified.update(_INTERNAL_FINDING_ID_RE.findall(vt))
+                    missing = sorted(hyp_ids - verified)
+                    if missing:
+                        issues.append(
+                            f"verify rc={rc}: {len(missing)} hypothesis ID(s) "
+                            f"unreferenced in any verify_*.md "
+                            f"(e.g. {', '.join(missing[:3])}...)"
+                        )
+        elif name in ("report", "report_assemble"):
+            # The monolithic or sharded assembler finished phase — check
+            # AUDIT_REPORT.md has body sections, not just a header stub.
+            pr = scratchpad.parent / "AUDIT_REPORT.md"
+            if pr.exists():
+                try:
+                    rtxt = pr.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    rtxt = ""
+                section_count = len(re.findall(
+                    r"^###\s*\[[CHMLI]-\d+\]", rtxt, re.MULTILINE
+                ))
+                if section_count < 3 and len(rtxt) < 5000:
+                    issues.append(
+                        f"AUDIT_REPORT.md has {section_count} finding "
+                        f"section(s) with rc={rc} — probable assembler stub"
+                    )
+    except Exception as exc:
+        log.warning(
+            f"[_validate_rc_parity] {phase.name}: internal error during "
+            f"parity check (soft-pass): {exc}"
+        )
+        return []
+    return issues
+
+
+def _canonicalize_summary_table(text: str, tier_counts: dict[str, int]) -> tuple[str, list[tuple[str, str]]]:
+    """Rewrite the `## Summary` count table inside a markdown report so
+    each `| Severity | N |` row reflects ``tier_counts``.
+
+    Returns ``(new_text, deltas)`` where ``deltas`` is a list of
+    ``(severity_name, "old->new")`` tuples for any row that was updated
+    (empty list = file already canonical).
+
+    v2.1.9 — body section counts are the authoritative source. The
+    Summary table is metadata derived from the body. Mismatches are
+    self-healed in place rather than treated as report failures.
+    """
+    deltas: list[tuple[str, str]] = []
+    new_text = text
+    for char, name in (
+        ("C", "Critical"), ("H", "High"), ("M", "Medium"),
+        ("L", "Low"), ("I", "Informational"),
+    ):
+        target = tier_counts.get(char, 0)
+        pattern = re.compile(
+            rf"^(\s*\|\s*{name}\s*\|\s*)(\d+)(\s*\|.*)$",
+            re.MULTILINE,
+        )
+        def _sub(m: re.Match, _t=target, _n=name) -> str:
+            current = int(m.group(2))
+            if current != _t:
+                deltas.append((_n, f"{current}->{_t}"))
+            return f"{m.group(1)}{_t}{m.group(3)}"
+        new_text = pattern.sub(_sub, new_text, count=1)
+    total_target = sum(tier_counts.get(c, 0) for c in "CHMLI")
+    total_pattern = re.compile(
+        r"^(\s*\|\s*(?:\*\*)?Total(?:\*\*)?\s*\|\s*(?:\*\*)?)(\d+)"
+        r"((?:\*\*)?\s*\|.*)$",
+        re.MULTILINE,
+    )
+    def _sub_total(m: re.Match) -> str:
+        current = int(m.group(2))
+        if current != total_target:
+            deltas.append(("Total", f"{current}->{total_target}"))
+        return f"{m.group(1)}{total_target}{m.group(3)}"
+    new_text = total_pattern.sub(_sub_total, new_text, count=1)
+    return new_text, deltas
+
+
+def _canonical_internal_id_key(raw: str) -> str:
+    """Canonical comparison key for internal finding IDs."""
+    fid = _normalize_finding_id(raw) or (raw or "").strip().upper()
+    if not fid:
+        return ""
+    return re.sub(r"-0+(\d)", r"-\1", fid)
+
+
+def _verify_filename_finding_id(path: Path) -> str:
+    m = re.match(r"verify_(?:F-)?([A-Z][A-Z0-9\-]*\d+)\.md$", path.name, re.IGNORECASE)
+    if not m:
+        return ""
+    return _normalize_finding_id(m.group(1)) or m.group(1).upper()
+
+
+def _collect_verify_promotion_receipts(scratchpad: Path) -> set[str]:
+    """Mine verify_*.md files for finding IDs that received CONFIRMED.
+
+    Strategy: per file, if `Verdict: CONFIRMED` appears anywhere, extract
+    every internal-finding-id token in the file. Conservative — false
+    positives in this set just mean we expect the finding in the report,
+    which is what we want.
+
+    Skip patterns whose files are non-finding (skeptic_judge_summary,
+    skeptic_findings — these reference IDs but don't author verdicts).
+    """
+    receipts: set[str] = set()
+    for f in scratchpad.glob("verify_*.md"):
+        # v2.3.2 F2: align filter with the other 3 verify_*.md globs
+        # (_collect_verify_hypothesis_ids, _validate_cited_paths_in_verify,
+        # _generate_verify_core_if_missing). Skipping the aggregate and
+        # retry-hint files prevents future double-count regressions if the
+        # CONFIRMED verdict regex is ever loosened to match table cells.
+        if f.name in {"verify_core.md", "verify_core_full.md"}:
+            continue
+        if f.name.endswith(_RETRY_HINT_SUFFIX):
+            continue
+        if "skeptic" in f.name or "judge" in f.name:
+            continue
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if _verifier_status_from_text(text) != "CONFIRMED":
+            continue
+        fid = _verify_filename_finding_id(f)
+        if fid:
+            receipts.add(fid)
+            continue
+        # Legacy fallback for malformed verifier filenames: accept only an
+        # explicit ID field, never arbitrary body references. Confirmed
+        # verifier prose often cites related source IDs (`DX-1`, `VS-7`) or
+        # standards (`EIP-20`); those are not independent promotion receipts.
+        for line in text[:2048].splitlines():
+            if re.match(r"^\s*(?:[*_`]*\s*)?(?:Finding|Hypothesis)\s+ID\s*[:|]", line, re.IGNORECASE):
+                fid = _normalize_finding_id(line)
+                if fid:
+                    receipts.add(fid)
+                    break
+    return receipts
+
+
+def _collect_report_promoted_ids(
+    audit_report_text: str, report_index_text: str
+) -> set[str]:
+    """Return the set of internal IDs that the report acknowledges.
+
+    Acknowledged = referenced in any of:
+      - AUDIT_REPORT.md body (any internal ID mention — usually in
+        Description/Evidence cross-refs or Internal-Hypothesis col)
+      - AUDIT_REPORT.md Appendix A (Internal Hypothesis column)
+      - report_index.md Master Finding Index (Internal Hypothesis column)
+      - report_index.md Excluded Findings table (Internal ID column)
+      - report_index.md Consolidation Map (Consolidated From column)
+    """
+    promoted: set[str] = set()
+    for txt in (audit_report_text, report_index_text):
+        if not txt:
+            continue
+        for m in _INTERNAL_FINDING_ID_RE.finditer(txt):
+            promoted.add(m.group(1))
+    return promoted
+
+
+_REPORT_COVERAGE_ACK_STATUSES = {
+    "PROMOTED",
+    "MERGED",
+    "MERGE_INTO",
+    "DUPLICATE",
+    "APPENDIX_ONLY",
+    "DROP_FALSE_POSITIVE",
+    "DROP_NON_SECURITY",
+    "DROP_DESIGN_CONFIRMATION",
+    "DROP_UNACTIONABLE_SPECULATION",
+    "FALSE_POSITIVE",
+    "DEFERRED",
+    "EXCLUDED",
+}
+
+
+def _collect_report_coverage_acknowledged_ids(scratchpad: Path) -> set[str]:
+    """Return candidate IDs explicitly accounted for by report_coverage.md.
+
+    `report_coverage.md` is an internal ledger emitted by report_index. It is
+    allowed to acknowledge source IDs that should not become standalone client
+    body sections because they were merged, duplicated, demoted to appendix, or
+    explicitly dropped. Do not treat header rows or UNACCOUNTED rows as a pass.
+    """
+    path = scratchpad / "report_coverage.md"
+    if not path.exists():
+        return set()
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return set()
+    acknowledged: set[str] = set()
+    id_col: int | None = None
+    status_cols: list[int] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("|") or re.fullmatch(r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?", line):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        lower_cells = [c.lower() for c in cells]
+        if any(kw in c for c in lower_cells for kw in ("candidate", "finding id", "internal id")):
+            for i, c in enumerate(lower_cells):
+                if any(kw in c for kw in ("candidate", "finding id", "internal id")):
+                    id_col = i
+                if any(kw in c for kw in ("status", "disposition", "report id", "reason", "refutation")):
+                    status_cols.append(i)
+            continue
+        if id_col is None:
+            if len(cells) >= 5:
+                id_cell = cells[1]
+                status_text = f"{cells[3]} {cells[4]}".upper()
+            elif len(cells) >= 3:
+                id_cell = cells[1]
+                status_text = cells[2].upper()
+            else:
+                continue
+        else:
+            if id_col >= len(cells):
+                continue
+            id_cell = cells[id_col]
+            if status_cols:
+                status_text = " ".join(cells[i] for i in status_cols if i < len(cells)).upper()
+            elif len(cells) >= 5:
+                status_text = f"{cells[3]} {cells[4]}".upper()
+            elif len(cells) >= 3:
+                status_text = cells[2].upper()
+            else:
+                continue
+        if re.search(r"\b(?:CANDIDATE|FINDING|INTERNAL)\s+ID\b", id_cell, re.IGNORECASE):
+            continue
+        if "UNACCOUNTED" in status_text or "AUTO_EXCLUDED" in status_text:
+            continue
+        if not any(status in status_text for status in _REPORT_COVERAGE_ACK_STATUSES):
+            continue
+        for m in _INTERNAL_FINDING_ID_RE.finditer(id_cell):
+            acknowledged.add(m.group(1))
+    return acknowledged
+
+
+def _ensure_report_consolidation_map(
+    scratchpad: Path, project_root: str
+) -> int:
+    """Write/update the internal source-ID consolidation map.
+
+    Verifier files often cite source IDs from depth/DA/graph passes inside a
+    consolidated `INV-*` finding. Those source IDs should not become duplicate
+    report body sections, but they must be traceable internally so promotion
+    symmetry can distinguish "consolidated" from "dropped". The client report
+    must not carry this map because it contains internal pipeline IDs.
+    """
+    records_path = scratchpad / "report_records.json"
+    records: dict[str, Any] = {}
+    if not records_path.exists():
+        records = {"active": []}
+    else:
+        try:
+            records = json.loads(records_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            records = {"active": []}
+    active_records = records.get("active", [])
+    active_titles = {
+        str(rec.get("report_id") or "").strip(): str(rec.get("title") or "").replace("|", "/").strip()
+        for rec in active_records
+        if str(rec.get("report_id") or "").strip()
+    }
+    try:
+        active_report_ids = set(active_titles)
+    except Exception:
+        active_report_ids = set()
+    rows: list[tuple[str, str, str]] = []
+    for rec in active_records:
+        fid = (rec.get("finding_id") or "").strip()
+        rid = (rec.get("report_id") or "").strip()
+        title = (rec.get("title") or "").replace("|", "/").strip()
+        if not fid or not rid:
+            continue
+        vp = _verify_file_for_id(scratchpad, fid)
+        try:
+            vtxt = vp.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if not _is_reportable_verdict(_verifier_status_from_text(vtxt)):
+            continue
+        for sid in sorted(set(_INTERNAL_FINDING_ID_RE.findall(vtxt))):
+            if sid == fid or sid.startswith("INV-"):
+                continue
+            rows.append((sid, rid, title))
+
+    coverage_path = scratchpad / "report_coverage.md"
+    if coverage_path.exists():
+        try:
+            coverage_text = coverage_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            coverage_text = ""
+        for raw in coverage_text.splitlines():
+            line = raw.strip()
+            if not line.startswith("|") or re.fullmatch(r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?", line):
+                continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) >= 5:
+                id_cell = cells[1]
+                status_text = f"{cells[3]} {cells[4]}".upper()
+                reason = cells[4]
+            elif len(cells) >= 3:
+                id_cell = cells[1]
+                status_text = cells[2].upper()
+                reason = cells[2]
+            else:
+                continue
+            if "UNACCOUNTED" in status_text:
+                continue
+            if not any(status in status_text for status in _REPORT_COVERAGE_ACK_STATUSES):
+                continue
+            source_ids = [m.group(1) for m in _INTERNAL_FINDING_ID_RE.finditer(id_cell)]
+            if not source_ids:
+                continue
+            report_ids = []
+            for rm in re.finditer(r"\b([CHMLI]-\d{1,3})\b", reason, re.IGNORECASE):
+                rid = _normalize_report_id(rm.group(1)) or rm.group(1).upper()
+                if not active_report_ids or rid in active_report_ids:
+                    report_ids.append(rid)
+            if not report_ids:
+                continue
+            for sid in source_ids:
+                for rid in report_ids:
+                    rows.append((sid, rid, active_titles.get(rid, "coverage-accounted finding")))
+    if not rows:
+        return 0
+    # Deduplicate while preserving stable order.
+    seen: set[tuple[str, str]] = set()
+    unique: list[tuple[str, str, str]] = []
+    for sid, rid, title in rows:
+        key = (sid, rid)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((sid, rid, title))
+
+    section_lines = [
+        "# Internal Consolidation Map",
+        "",
+        "This file is pipeline-internal and must not be copied into AUDIT_REPORT.md.",
+        "",
+        "## Consolidation Map",
+        "",
+        "| Source ID | Report ID | Report Title |",
+        "|-----------|-----------|--------------|",
+    ]
+    section_lines.extend(
+        f"| {sid} | {rid} | {title} |" for sid, rid, title in unique
+    )
+    section = "\n".join(section_lines) + "\n"
+    try:
+        (scratchpad / "report_consolidation_internal.md").write_text(
+            section, encoding="utf-8"
+        )
+    except Exception:
+        return 0
+    return len(unique)
+
+
+def _check_promotion_symmetry(
+    scratchpad: Path, project_root: str
+) -> list[str]:
+    """Diff verify-receipts against report-acknowledged IDs.
+
+    Returns a list of FAIL messages. Empty = all CONFIRMED verifier
+    findings reached the report (body, appendix, or consolidated).
+    """
+    pr = Path(project_root) / "AUDIT_REPORT.md"
+    ri = scratchpad / "report_index.md"
+    receipts = _collect_verify_promotion_receipts(scratchpad)
+    if not receipts:
+        return []
+    rtxt = ""
+    itxt = ""
+    if pr.exists():
+        try:
+            rtxt = pr.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            rtxt = ""
+    if ri.exists():
+        try:
+            itxt = ri.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            itxt = ""
+    promoted = _collect_report_promoted_ids(rtxt, itxt)
+    internal_ack_text = ""
+    for internal_path in (
+        scratchpad / "report_consolidation_internal.md",
+        scratchpad / "report_traceability_internal.md",
+    ):
+        if internal_path.exists():
+            try:
+                internal_ack_text += "\n" + internal_path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            except Exception:
+                pass
+    if internal_ack_text:
+        promoted.update(_collect_report_promoted_ids("", internal_ack_text))
+    promoted.update(_collect_report_coverage_acknowledged_ids(scratchpad))
+    records_path = scratchpad / "report_records.json"
+    if records_path.exists():
+        try:
+            records = json.loads(records_path.read_text(encoding="utf-8", errors="replace"))
+            for rec in records.get("active", []):
+                for fid in (rec.get("absorbed_finding_ids") or [rec.get("finding_id")]):
+                    if fid:
+                        promoted.add(str(fid))
+            for rec in records.get("excluded", []):
+                fid = rec.get("finding_id")
+                if fid:
+                    promoted.add(str(fid))
+        except Exception:
+            pass
+
+    # Stronger body-retention check: if an internal ID has a report-ID mapping,
+    # the corresponding `### [X-NN]` body section must exist unless the ID is
+    # explicitly excluded/consolidated. Merely appearing in report_index.md is
+    # not enough; that was the DCI-14 / graph-queue dropout class.
+    assignments, _source = get_tier_assignments(scratchpad)
+    promoted_keys = {_canonical_internal_id_key(p) for p in promoted}
+    internal_to_report = {
+        _canonical_internal_id_key(a["finding_id"]): a["report_id"]
+        for a in assignments
+        if a.get("finding_id") and a.get("report_id")
+    }
+    body_report_ids = set(re.findall(
+        r"^#{1,3}\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[([CHMLI]-\d+)\]", rtxt, re.MULTILINE
+    ))
+    explicitly_non_body: set[str] = set()
+    ri_text = itxt or ""
+    for section_name in (
+        r"Excluded\s+Findings",
+        r"Consolidation\s+Map",
+        r"Consolidated\s+Findings",
+    ):
+        m = re.search(
+            rf"(?im)^##\s+{section_name}.*?(?=^##\s|\Z)",
+            ri_text,
+            re.MULTILINE | re.DOTALL,
+        )
+        if m:
+            explicitly_non_body.update(
+                _canonical_internal_id_key(x.group(1))
+                for x in _INTERNAL_FINDING_ID_RE.finditer(m.group(0))
+            )
+
+    dropped: list[str] = []
+    for fid in sorted(receipts):
+        key = _canonical_internal_id_key(fid)
+        rid = internal_to_report.get(key)
+        if rid:
+            if rid not in body_report_ids and key not in explicitly_non_body:
+                dropped.append(fid)
+            continue
+        if key not in promoted_keys:
+            dropped.append(fid)
+    if not dropped:
+        return []
+    sample = ", ".join(dropped[:5])
+    more = f" (+{len(dropped)-5} more)" if len(dropped) > 5 else ""
+    return [
+        f"promotion dropout: {len(dropped)} CONFIRMED verifier finding(s) "
+        f"missing from report body / internal traceability / consolidation map: "
+        f"{sample}{more}"
+    ]
+
+
+# --- v2.2.2 Fix 2 + Fix 5: post-Index completeness + Excluded honesty -----
+#
+# Failure mode (Irys L1 v2.2.0 first run, RC-PIPELINE-DROPOUT — silent):
+# the Index Agent consumed only the crit/high verify shard and wrote
+# report_index.md with 33 entries while 31 verified Medium-shard
+# findings + 7 Low-tier hypotheses were silently dropped. The Excluded
+# Findings table read "None — all findings indexed." The v2.2.0 A.2
+# promotion-receipt gate failed to catch this because its regex
+# (`H-\d+`) didn't match L1 hypothesis IDs (`H-{S}\d+`) — fixed in
+# v2.2.2 Fix 1, but defense-in-depth requires a gate that fires
+# EARLIEST, post-Index and pre-tier-writer.
+#
+# A post-Index gate catches dropout BEFORE expensive tier writers run.
+# It also enforces the Excluded Findings table is honest: every
+# verify_*.md hypothesis ID must appear in either the Master Finding
+# Index Internal Hypothesis column OR the Excluded Findings table.
+# Generic across L1 and SC; reads only what already exists.
+def _collect_verify_hypothesis_ids(scratchpad: Path) -> set[str]:
+    """Return the set of hypothesis IDs from filesystem verify_*.md files.
+
+    Source of truth: filesystem glob, NOT verify_core.md. The whole
+    point of the post-Index gate is to detect when verify_core.md or
+    the Index Agent missed shards. Excludes verify_core / skeptic /
+    judge / retry-hint files.
+
+    Hypothesis ID is extracted from filename: `verify_H-C01.md` →
+    `H-C01`. Tolerates the `verify_F-{id}.md` legacy naming
+    (`verify_F-H-M27.md` → `H-M27`).
+    """
+    ids: set[str] = set()
+    for f in scratchpad.glob("verify_*.md"):
+        if f.name in {"verify_core.md", "verify_core_full.md"}:
+            continue
+        if f.name.endswith(_RETRY_HINT_SUFFIX):
+            continue
+        if "skeptic" in f.name or "judge" in f.name:
+            continue
+        # `verify_H-C01.md` or `verify_F-H-C01.md` or `verify_L1-H-12.md`
+        # Permissive: capture everything between `verify_(F-)?` and `.md`
+        # then accept if it ends in a digit (drops malformed names but
+        # tolerates SC `H-1` and L1 `H-C01` / `H-M27` / `H-L07` shapes).
+        m = re.match(
+            r"verify_(?:F-)?([A-Z][A-Z0-9\-]*\d+)\.md$",
+            f.name,
+        )
+        if m:
+            ids.add(m.group(1))
+    return ids
+
+
+def _collect_index_acknowledged_ids(
+    scratchpad: Path,
+) -> tuple[set[str], set[str], list[str]]:
+    """Return (master_ids, excluded_ids, master_id_list) from report_index.md.
+
+    master_ids: SET of internal-hypothesis-ID tokens in the Master Finding
+    Index section.
+    excluded_ids: SET of same in the Excluded Findings table.
+    master_id_list: LIST (with duplicates preserved) of every internal ID
+    occurrence in Master, for v2.2.3 uniqueness checking. The L1-H-08
+    duplicate-binding bug observed in v2.2.2 (one internal ID mapped to
+    TWO different report findings) requires checking occurrence count,
+    not just presence.
+
+    We harvest from the whole section by regex rather than column-positional
+    parsing because Index Agent column order varies (SC vs L1 schemas).
+    """
+    master: set[str] = set()
+    excluded: set[str] = set()
+    master_list: list[str] = []
+    p = scratchpad / "report_index.md"
+    if not p.exists():
+        return master, excluded, master_list
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return master, excluded, master_list
+
+    def _sections(name_re: str) -> str:
+        return "\n\n".join(
+            m.group(0)
+            for m in re.finditer(
+                rf"(?im)^##\s+{name_re}.*?(?=^##\s|\Z)",
+                text,
+                re.MULTILINE | re.DOTALL,
+            )
+        )
+
+    master_sec = _sections(r"(?:Master\s+Finding\s+Index|Promoted\s+Findings)")
+    excluded_sec = _sections(r"Excluded\s+Findings")
+
+    # For Master, walk row-by-row so each row contributes ONE internal-ID
+    # occurrence even if the row mentions cross-references. This is the
+    # uniqueness check substrate.
+    #
+    # ID-position heuristic: in both SC and L1 schemas, the Master Finding
+    # Index has the Report ID at column 0 (e.g., `H-06`) and the Internal
+    # Hypothesis ID late in the row (e.g., column N-2: `L1-H-08`). Taking
+    # the FIRST regex match would harvest the Report ID instead of the
+    # Internal Hypothesis ID — they share the `H-NN` shape after v2.2.2
+    # widening. Use the LAST match per row, which biases toward the
+    # Internal Hypothesis column.
+    for line in master_sec.splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        # Skip header / separator rows.
+        upper = s.upper()
+        if _is_separator_row(s) or (
+            "REPORT ID" in upper and "TITLE" in upper
+        ):
+            continue
+        # v2.5.0: strip parenthetical content before ID extraction.
+        # LLM violation of Rule 3/4 writes "CH-3 (H-2, H-27)" — the
+        # parenthetical constituents cause false duplicate-binding when
+        # H-27 also has its own standalone row. Stripping parens keeps
+        # the last-match heuristic clean: only CH-3 survives.
+        s_clean = re.sub(r"\([^)]*\)", "", s)
+        cells = [c.strip() for c in s_clean.strip("|").split("|")]
+        candidate_cells = list(reversed(cells[1:])) if len(cells) > 1 else [s_clean]
+        row_ids: list[str] = []
+        for cell in candidate_cells:
+            row_ids = [
+                m.group(1).upper()
+                for m in _INTERNAL_FINDING_ID_RE.finditer(cell)
+            ]
+            if row_ids:
+                break
+        if not row_ids:
+            continue
+        for tok in dict.fromkeys(row_ids):
+            master.add(tok)
+            master_list.append(tok)
+
+    for m in _INTERNAL_FINDING_ID_RE.finditer(excluded_sec):
+        excluded.add(m.group(1))
+    return master, excluded, master_list
+
+
+def _collect_consolidation_absorbed_ids(scratchpad: Path) -> set[str]:
+    """Return internal IDs explicitly absorbed by report_index Consolidation Map.
+
+    Consolidated findings should not be repaired back into the Master Finding
+    Index as duplicates. The Master row owns one canonical internal ID; the map
+    owns the absorbed siblings.
+    """
+    p = scratchpad / "report_index.md"
+    if not p.exists():
+        return set()
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return set()
+    m = re.search(
+        r"(?ims)^##\s+Consolidation\s+Map\b.*?(?=^##\s|\Z)",
+        text,
+    )
+    if not m:
+        return set()
+    section = m.group(0)
+    lines = [ln.strip() for ln in section.splitlines() if ln.strip().startswith("|")]
+    if not lines:
+        return set()
+    header_cells: list[str] = []
+    absorbed_cols: set[int] = set()
+    ids: set[str] = set()
+    for line in lines:
+        if _is_separator_row(line):
+            continue
+        cells = [c.strip().lower() for c in line.strip("|").split("|")]
+        if not header_cells:
+            header_cells = cells
+            for idx, cell in enumerate(cells):
+                if any(token in cell for token in (
+                    "absorbed", "consolidated from", "source", "source ids",
+                    "source findings",
+                )) and not any(token in cell for token in (
+                    "report id", "canonical", "representative", "title", "reason",
+                )):
+                    absorbed_cols.add(idx)
+            continue
+        if not absorbed_cols:
+            return set()
+        raw_cells = [c.strip() for c in line.strip("|").split("|")]
+        for idx in absorbed_cols:
+            if idx < len(raw_cells):
+                ids.update(m.group(1) for m in _INTERNAL_FINDING_ID_RE.finditer(raw_cells[idx]))
+    return ids
+
+
+def _check_index_completeness(
+    scratchpad: Path, project_root: str | None = None, write_retry_hint: bool = True
+) -> list[str]:
+    """Post-Index gate: every verify hypothesis ID must be indexed or excluded.
+
+    Generic across L1 and SC. Returns issue list; empty = pass.
+
+    On failure, writes a delta retry hint that names the missing IDs,
+    so the Index Agent retry sees an explicit checklist rather than
+    re-doing the same enumeration that just failed.
+    """
+    verify_ids = _collect_verify_hypothesis_ids(scratchpad)
+    if not verify_ids:
+        return []  # No verify outputs = nothing to validate against
+    master_ids, excluded_ids, master_list = _collect_index_acknowledged_ids(
+        scratchpad
+    )
+    absorbed_ids = _collect_consolidation_absorbed_ids(scratchpad)
+    if not master_ids and not excluded_ids:
+        ri = scratchpad / "report_index.md"
+        if ri.exists():
+            try:
+                ri_size = ri.stat().st_size
+            except Exception:
+                ri_size = 0
+            if ri_size > 200:
+                return [
+                    "index completeness: report_index.md exists "
+                    f"({ri_size} bytes) but parsed 0 master/excluded IDs — "
+                    "possible parse failure in _collect_index_acknowledged_ids"
+                ]
+        return []
+
+    issues: list[str] = []
+
+    # v2.2.3: dedup check. Each internal hypothesis ID must appear EXACTLY
+    # ONCE in the Master Finding Index. Live failure mode (Irys L1 v2.2.2):
+    # L1-H-08 was bound to two different report findings (H-06 + H-24);
+    # count-based gate satisfied because the ID appeared at least once,
+    # but the row-level binding was duplicated. Mechanical detection:
+    # any ID that appears 2+ times in the row-by-row master list is bound
+    # to multiple report findings.
+    from collections import Counter
+    master_counts = Counter(master_list)
+    duplicates = sorted(
+        i for i, c in master_counts.items() if c > 1
+    )
+    if duplicates:
+        sample = ", ".join(duplicates[:5])
+        more = f" (+{len(duplicates)-5} more)" if len(duplicates) > 5 else ""
+        issues.append(
+            f"index duplicate binding: {len(duplicates)} internal ID(s) "
+            f"appear in multiple Master Finding Index rows: {sample}{more}. "
+            "Each internal hypothesis ID MUST bind to exactly one report ID."
+        )
+
+    # Normalize leading zeros so H-1 matches H-01, INV-2 matches INV-002.
+    # LLM verifiers name files and Index Agent writes table rows independently;
+    # zero-padding mismatch is the #1 false-alarm class in completeness gates.
+    def _zn(s: str) -> str:
+        return re.sub(r"-0+(\d)", r"-\1", s)
+
+    norm_verify = {_zn(v): v for v in verify_ids}
+    coverage_ids = _collect_report_coverage_acknowledged_ids(scratchpad)
+    norm_indexed = {_zn(i) for i in (master_ids | excluded_ids | absorbed_ids | coverage_ids)}
+    dropped_norm = sorted(set(norm_verify) - norm_indexed)
+    dropped = [norm_verify[n] for n in dropped_norm]
+    if not dropped:
+        return issues
+    if not write_retry_hint:
+        sample = ", ".join(dropped[:5])
+        more = f" (+{len(dropped)-5} more)" if len(dropped) > 5 else ""
+        issues.append(
+            f"index dropout: {len(dropped)} verify_*.md hypothesis ID(s) "
+            f"absent from Master Finding Index, Excluded Findings, Consolidation Map, and report_coverage.md: "
+            f"{sample}{more}. See report_index{_RETRY_HINT_SUFFIX}."
+        )
+        return issues
+
+    # Write delta retry hint for the Index Agent.
+    try:
+        hint_path = scratchpad / f"report_index{_RETRY_HINT_SUFFIX}"
+        body = (
+            "## v2.2.2 — Index completeness retry hint\n\n"
+            f"The previous report_index attempt indexed {len(norm_indexed)} "
+            "hypothesis IDs but the filesystem has "
+            f"{len(verify_ids)} verify_*.md files. Specifically, these "
+            f"{len(dropped)} hypothesis ID(s) appear on disk as "
+            "`verify_<ID>.md` but are NEITHER in the Master Finding "
+            "Index, Excluded Findings table, Consolidation Map, nor report_coverage.md:\n\n"
+            + "\n".join(f"- `{i}`" for i in dropped)
+            + "\n\n"
+            "Read each missing `verify_<ID>.md` and either (a) assign "
+            "it a report ID in the Master Finding Index, or (b) place "
+            "it in the Excluded Findings table with a stated reason "
+            "(FALSE_POSITIVE / DUPLICATE OF X-NN / CONSOLIDATED INTO "
+            "X-NN). Silent omission is a workflow violation.\n"
+        )
+        hint_path.write_text(body, encoding="utf-8")
+    except Exception:
+        pass
+
+    sample = ", ".join(dropped[:5])
+    more = f" (+{len(dropped)-5} more)" if len(dropped) > 5 else ""
+    issues.append(
+        f"index dropout: {len(dropped)} verify_*.md hypothesis ID(s) "
+            f"absent from Master Finding Index, Excluded Findings, Consolidation Map, and report_coverage.md: "
+        f"{sample}{more}. See report_index{_RETRY_HINT_SUFFIX}."
+    )
+    return issues
+
+
+def _repair_report_index_dropouts(scratchpad: Path) -> list[str]:
+    """Mechanically index dropped verify IDs instead of degrading silently.
+
+    The recovery is deliberately conservative: it never invents analysis and
+    never blanket-marks missing IDs as false positives. It reads each existing
+    `verify_<ID>.md`; verifier-excluded IDs go to Excluded Findings, while
+    reportable verifier statuses receive deterministic report IDs in a
+    separate Master Finding Index recovery table.
+    """
+    idx_path = scratchpad / "report_index.md"
+    if not idx_path.exists():
+        return []
+    verify_ids = _collect_verify_hypothesis_ids(scratchpad)
+    master_ids, excluded_ids, _ = _collect_index_acknowledged_ids(scratchpad)
+    absorbed_ids = _collect_consolidation_absorbed_ids(scratchpad)
+    # v2.4.8: normalize leading zeros (same as _check_index_completeness)
+    # so repair doesn't inject duplicates when H-01 == H-1.
+    def _zn(s: str) -> str:
+        return re.sub(r"-0+(\d)", r"-\1", s)
+    coverage_ids = _collect_report_coverage_acknowledged_ids(scratchpad)
+    norm_indexed = {_zn(i) for i in (master_ids | excluded_ids | absorbed_ids | coverage_ids)}
+    dropped = sorted(v for v in verify_ids if _zn(v) not in norm_indexed)
+    if not dropped:
+        return []
+
+    queue_rows = {
+        (r.get("finding id") or "").strip(): r
+        for r in parse_verification_queue_rows(scratchpad)
+        if (r.get("finding id") or "").strip()
+    }
+    counters = _next_report_id_counters(scratchpad)
+    active_rows: list[str] = []
+    excluded_rows: list[str] = []
+    repaired: list[str] = []
+
+    for fid in dropped:
+        verify_path = _verify_file_for_id(scratchpad, fid)
+        try:
+            verify_text = verify_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            verify_text = ""
+        row = queue_rows.get(fid, {})
+        status = _verifier_status_from_text(verify_text)
+        title = (
+            row.get("title", "").strip()
+            or _first_heading_title(verify_text)
+            or "Recovered verified finding"
+        )
+        title = re.sub(r"\s+", " ", title).replace("|", "/").strip()
+        severity = _severity_name_from_text(verify_text, row)
+        location = (
+            _first_production_location_for_validator(
+                verify_text,
+                row.get("location", "").strip(),
+            )
+            or f"verify_{fid}.md"
+        ).replace("|", "/")
+        evidence = (
+            _field_from_markdown(verify_text, ("Evidence Tag", "Evidence Tags", "Evidence"))
+            or _field_from_markdown(verify_text, ("Preferred Tag", "Preferred Evidence"))
+            or row.get("preferred tag", "")
+            or "CODE-TRACE"
+        ).replace("|", "/")
+
+        if any(tok in status for tok in (
+            "APPENDIX_ONLY",
+            "DROP_FALSE_POSITIVE",
+            "DROP_NON_SECURITY",
+            "DROP_DESIGN_CONFIRMATION",
+            "DROP_UNACTIONABLE_SPECULATION",
+            "FALSE_POSITIVE",
+            "REFUTED",
+            "INFEASIBLE",
+        )):
+            excluded_rows.append(
+                f"| {fid} | {status} | Recovered from verify_{fid}.md; verifier marked non-reportable. |"
+            )
+            repaired.append(fid)
+            continue
+        if "DUPLICATE" in status or "CONSOLIDATED" in status:
+            excluded_rows.append(
+                f"| {fid} | {status} | Recovered from verify_{fid}.md; verifier marked duplicate/consolidated. |"
+            )
+            repaired.append(fid)
+            continue
+
+        prefix = _report_prefix_for_severity(severity)
+        counters[prefix] += 1
+        rid = f"{prefix}-{counters[prefix]:02d}"
+        active_rows.append(
+            f"| {rid} | {title} | {severity} | {location} | {evidence} | "
+            f"Mechanical index recovery from verify_{fid}.md |  | {fid} |"
+        )
+        repaired.append(fid)
+
+    if not repaired:
+        return []
+
+    try:
+        text = idx_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+
+    def _insert_rows_into_table(
+        source: str,
+        heading_re: str,
+        rows_to_insert: list[str],
+        fallback_section: str,
+    ) -> str:
+        if not rows_to_insert:
+            return source
+        heading = re.search(
+            rf"(?im)^##\s+{heading_re}\b[^\n]*$",
+            source,
+        )
+        if not heading:
+            cut = _find_report_index_cut_for_active_recovery(source)
+            return source[:cut].rstrip() + "\n\n" + fallback_section + "\n\n" + source[cut:]
+        section_start = heading.end()
+        next_heading = re.search(r"(?im)^##\s+", source[section_start:])
+        section_end = section_start + next_heading.start() if next_heading else len(source)
+        section = source[section_start:section_end]
+        table_lines = list(re.finditer(r"(?m)^\|.*\|\s*$", section))
+        if len(table_lines) < 2:
+            return (
+                source[:section_end].rstrip()
+                + "\n\n"
+                + fallback_section.split("\n", 1)[1].lstrip()
+                + "\n"
+                + source[section_end:]
+            )
+        insert_at = section_start + table_lines[-1].end()
+        return source[:insert_at].rstrip() + "\n" + "\n".join(rows_to_insert) + source[insert_at:]
+
+    if active_rows:
+        fallback_active = "\n".join([
+            "## Master Finding Index",
+            "| Report ID | Title | Severity | Location | Evidence Tag | Recovery Note | Trust Adj. | Internal Hypothesis ID |",
+            "|-----------|-------|----------|----------|--------------|---------------|------------|------------------------|",
+            *active_rows,
+        ])
+        text = _insert_rows_into_table(
+            text,
+            r"Master\s+Finding\s+Index",
+            active_rows,
+            fallback_active,
+        )
+
+    if excluded_rows:
+        fallback_excluded = "\n".join([
+            "## Excluded Findings",
+            "| Internal ID | Verdict | Reason |",
+            "|-------------|---------|--------|",
+            *excluded_rows,
+        ])
+        text = _insert_rows_into_table(
+            text,
+            r"Excluded\s+Findings",
+            excluded_rows,
+            fallback_excluded,
+        )
+
+    idx_path.write_text(text, encoding="utf-8")
+    return repaired
+
+
+def _is_substantive_body_evidence(value: str) -> bool:
+    """Return True when a verifier field/section can seed a body section."""
+    text = _llm_norm(value or "")
+    text = re.sub(r"(?s)```.*?```", " ", text)
+    text = re.sub(r"[*_`>#|\[\]()-]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return False
+    lowered = text.lower().strip(" .:;")
+    if lowered in {
+        "n/a", "na", "none", "nil", "null", "unknown", "todo", "tbd",
+        "missing", "not provided", "not available", "not applicable",
+        "omitted", "no description", "no recommendation", "see above",
+        "see verification artifact",
+    }:
+        return False
+    if re.fullmatch(
+        r"(?:no|none|missing|not\s+provided|not\s+available)\s+"
+        r"(?:description|summary|recommendation|fix|mitigation|narrative)s?",
+        lowered,
+    ):
+        return False
+    return bool(re.search(r"[A-Za-z0-9]", text))
+
+
+def _body_writer_evidence_fields(verify_text: str) -> tuple[str, str]:
+    """Extract verifier narrative fields for report body manifests.
+
+    Verifier outputs use both inline fields (`**Description**: ...`) and
+    section-headed markdown (`## Description\n...`). Body-writer gating must
+    treat those formats identically; otherwise real verifier narratives are
+    marked REPORT-BLOCKED and downstream writers receive empty seeds.
+    """
+    text = verify_text or ""
+    desc = _field_or_section(
+        text,
+        ("Description", "Finding Summary", "Summary", "Root Cause"),
+        ("Description", "Finding Summary", "Summary", "Analysis", "Code Trace", "Root Cause"),
+        fallback="",
+        max_chars=5000,
+    ).strip()
+    rec = _field_or_section(
+        text,
+        ("Recommendation", "Suggested Fix", "Suggested fix", "Fix", "Mitigation"),
+        ("Recommendation", "Suggested Fix", "Suggested fix", "Fix", "Mitigation"),
+        fallback="",
+        max_chars=5000,
+    ).strip()
+    return desc, rec
+
+
+def _is_evidence_missing_for_body(verify_text: str) -> bool:
+    """REPORT-BLOCKED triggers when a verify_*.md has no usable narrative.
+
+    Conservative test: both Description and Recommendation must be absent or
+    non-substantive. A single substantive field/section is enough for a body
+    writer to produce a section, while empty headings and N/A boilerplate stay
+    blocked.
+    """
+    desc, rec = _body_writer_evidence_fields(verify_text or "")
+    return not (
+        _is_substantive_body_evidence(desc)
+        or _is_substantive_body_evidence(rec)
+    )
+
+
+def _validate_report_body(body: str, manifest: dict) -> dict:
+    """Validate an LLM-written body file against its shard manifest.
+
+    Returns {"ok": bool, "missing": [...], "extras": [...], "integrity": [...],
+             "blocked_violations": [...], "unexpected_blocked": [...],
+             "duplicates": [...]}.
+    """
+    findings = manifest.get("findings", []) or []
+    expected_list = [f["report_id"].upper() for f in findings if f.get("report_id")]
+    body_id_list = _extract_report_ids_from_body(body)
+    expected_ids = set(expected_list)
+    body_ids = set(body_id_list)
+
+    missing = sorted(expected_ids - body_ids)
+    extras = sorted(body_ids - expected_ids)
+    from collections import Counter
+    duplicates = sorted(
+        rid for rid, n in Counter(body_id_list).items() if n > 1
+    )
+
+    integrity_errors: list[str] = []
+    blocked_violations: list[str] = []
+    for f in findings:
+        rid = f.get("report_id", "").upper()
+        if rid in missing:
+            continue
+        section = _section_for_report_id(body, rid)
+        # Location integrity: the manifest location must appear somewhere in
+        # the section (case-insensitive substring match - tolerates LLM
+        # rewording around it).
+        # v2.5.0: multi-range locations like "file.sol:L361-366,L381-386"
+        # may be split by the LLM into separate lines or table rows. Check
+        # the full string first; if that fails, check the base file path
+        # (before ':') as a relaxed match. The file path is the strongest
+        # identity signal — line ranges vary with LLM formatting.
+        loc = f.get("location", "").strip()
+        if loc and not _location_present_in_body(loc, section):
+            integrity_errors.append(
+                f"{rid}: location {loc!r} not present in body section"
+            )
+        if f.get("report_blocked"):
+            section_upper = section.upper()
+            severity = normalize_severity(str(f.get("severity", "") or "Medium"))
+            if (
+                severity in {"Critical", "High", "Medium"}
+                and
+                "[REPORT-BLOCKED" not in section_upper
+                and "VERIFICATION NOT EXECUTED" not in section_upper
+                and "[UNVERIFIED]" not in section_upper
+            ):
+                blocked_violations.append(
+                    f"{rid}: report_blocked but no [REPORT-BLOCKED tag in body"
+                )
+        elif "[REPORT-BLOCKED" in section.upper():
+            blocked_violations.append(
+                f"{rid}: body has [REPORT-BLOCKED] but manifest has verified evidence"
+            )
+
+    ok = not (missing or extras or duplicates or integrity_errors or blocked_violations)
+    return {
+        "ok": ok,
+        "missing": missing,
+        "extras": extras,
+        "duplicates": duplicates,
+        "integrity": integrity_errors,
+        "blocked_violations": blocked_violations,
+    }
+
+
+_SOURCE_FILE_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_./-]+\.(?:sol|rs|move|cairo|vy|py|js|ts|tsx|jsx|toml|yaml|yml|json|md))(?![A-Za-z0-9_./-])",
+    re.IGNORECASE,
+)
+_FUNCTION_TOKEN_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+
+def _location_present_in_body(expected_location: str, section: str) -> bool:
+    """Return True when a report body preserves the expected source location.
+
+    Body-writer manifests sometimes carry compact, human-authored locations
+    such as ``A.sol, B.sol:admin setters``. Requiring that exact phrase in the
+    body turns harmless wording differences into retries. The durable contract
+    is source identity: concrete source files and named functions/selectors
+    must survive the phase boundary.
+
+    Keep this strict for generic/non-source locations. A phrase like
+    ``Critical, [CODE-TRACE]`` contains no source token and must still be
+    copied exactly or fail.
+    """
+    loc = (expected_location or "").strip()
+    sec = section or ""
+    if not loc:
+        return True
+    loc_l = loc.lower()
+    sec_l = sec.lower()
+    if loc_l in sec_l:
+        return True
+
+    source_files = {
+        m.group(1).replace("\\", "/").split("/")[-1].lower()
+        for m in _SOURCE_FILE_TOKEN_RE.finditer(loc)
+    }
+    if source_files:
+        body_sources = {
+            m.group(1).replace("\\", "/").split("/")[-1].lower()
+            for m in _SOURCE_FILE_TOKEN_RE.finditer(sec)
+        }
+        functions = {
+            m.group(1).lower()
+            for m in _FUNCTION_TOKEN_RE.finditer(loc)
+            if len(m.group(1)) > 1
+        }
+        body_functions = {
+            m.group(1).lower()
+            for m in _FUNCTION_TOKEN_RE.finditer(sec)
+            if len(m.group(1)) > 1
+        }
+
+        # One concrete file token is enough for multi-file shorthand. If the
+        # body names source files but none match the manifest, fail even if a
+        # function token appears in the title; otherwise stale titles can mask
+        # a section copied from a different verified finding.
+        if source_files & body_sources:
+            return True
+        if body_sources:
+            return False
+        if functions and (functions & body_functions):
+            return True
+        return False
+
+    base_file = loc.split(":")[0].strip() if ":" in loc else ""
+    return bool(base_file and base_file.lower() in sec_l)
+
+
+def _maybe_skip_empty_body_writer(scratchpad: Path, phase_name: str) -> bool:
+    """Phase E11 follow-up #1: deterministic skip for empty-shard body writers.
+
+    When `_build_body_writer_manifests` produces no manifest for a shard
+    (because the tier has 0 findings after dedup + verdict filtering), the
+    body-writer phase has nothing to author. Calling the LLM is wasteful
+    and risks the LLM producing empty/stub output that fails the legacy
+    tier confirmation handler.
+
+    This helper:
+      - Returns False (don't skip) when a manifest exists for the shard.
+      - Returns True (do skip) and writes an authentic empty-tier note to
+        the tier file when the manifest is absent. The caller is expected
+        to mark the phase complete and continue.
+    """
+    if not phase_name.startswith("report_body_writer_"):
+        return False
+    shard_key = phase_name.replace("report_body_writer_", "report_")
+    manifests_dir = scratchpad / "body_manifests"
+    manifest_path = manifests_dir / f"{shard_key}.json"
+    if manifest_path.exists():
+        # Manifest emitted for this shard - LLM body writer must run.
+        return False
+    # Find any sharded variant (e.g. report_critical_high_a.json) that may
+    # have been emitted instead. If any exists, do NOT skip.
+    for cand in (scratchpad / "body_manifests").glob(f"{shard_key}_*.json"):
+        if cand.exists():
+            return False
+    expected_count = _expected_tier_assignment_count(scratchpad, shard_key)
+    if expected_count is None or expected_count != 0:
+        return False
+    # No manifest: emit an authentic empty-tier note so the legacy
+    # confirmation handler accepts the tier file as substantive.
+    out_name = f"{shard_key}.md"
+    pretty = shard_key.replace("report_", "").replace("_", " ").title()
+    note = (
+        f"# {pretty} Findings\n\n"
+        f"_No findings of this severity tier were produced by the "
+        "verification stage in this run. This is an authentic empty tier; "
+        "it is not a placeholder for a missing finding. The driver "
+        "deterministically skipped the body writer phase because the "
+        f"per-shard manifest at `body_manifests/{shard_key}.json` was "
+        "absent (zero reportable findings after Phase 5 / E1-E8 gates).\n\n"
+        f"## Provenance\n\n"
+        f"Phase: {phase_name} (skipped via empty-shard handler)\n"
+        f"Manifest: absent\n"
+        "Validator: soft-pass (no findings to validate)\n"
+        "Empty-Tier-Auth: PLAMEN-DRIVER-AUTHENTIC-EMPTY-TIER\n"
+    )
+    (scratchpad / out_name).write_text(note, encoding="utf-8")
+    try:
+        manifests_dir.mkdir(exist_ok=True)
+        (manifests_dir / f"{shard_key}.empty.json").write_text(
+            json.dumps(
+                {
+                    "auth": "PLAMEN-DRIVER-AUTHENTIC-EMPTY-TIER",
+                    "phase": phase_name,
+                    "shard": shard_key,
+                    "assigned_count": 0,
+                    "output": out_name,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+    return True
+
+
+def _expected_tier_assignment_count(scratchpad: Path, shard_key: str) -> int | None:
+    """Return current report-index assignment count for a tier/shard key."""
+    m = re.match(r"^report_(critical_high|medium|low_info)(?:_[a-z])?$", shard_key)
+    if not m:
+        return None
+    tier = m.group(1)
+    try:
+        if re.match(r"^report_(critical_high|medium|low_info)_[a-z]$", shard_key):
+            return len(compute_report_tier_shards(scratchpad, tier).get(shard_key, []))
+        rows, source = get_tier_assignments(scratchpad)
+        if source == "empty":
+            return 0
+        sevs = {
+            "critical_high": ("C", "H"),
+            "medium": ("M",),
+            "low_info": ("L", "I"),
+        }.get(tier, ())
+        return sum(1 for row in rows if (row.get("severity") or "") in sevs)
+    except Exception:
+        return None
+
+
+def _empty_tier_sidecar_valid(scratchpad: Path, shard_key: str, body_name: str) -> bool:
+    sidecar = scratchpad / "body_manifests" / f"{shard_key}.empty.json"
+    if not sidecar.exists():
+        return False
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    expected_count = _expected_tier_assignment_count(scratchpad, shard_key)
+    if expected_count is None or expected_count != 0:
+        return False
+    return (
+        data.get("auth") == "PLAMEN-DRIVER-AUTHENTIC-EMPTY-TIER"
+        and data.get("shard") == shard_key
+        and data.get("assigned_count") == 0
+        and data.get("output") == body_name
+    )
+
+
+def _generate_body_writer_retry_hint(scratchpad: Path, phase_name: str) -> str:
+    """Phase E11 follow-up #3: build a delta-aware retry hint for body writer.
+
+    When `_validate_tier_body_against_manifest` reports issues on attempt 1,
+    the retry must be specific. Generic prompts re-yield the same
+    hallucination/dropout pattern. This builds a hint enumerating:
+      - Missing report IDs (must add)
+      - Extra report IDs (must remove — likely hallucinations)
+      - Integrity errors (location drift)
+      - Report-blocked tag misses (must surface the [REPORT-BLOCKED: ...] tag)
+    """
+    shard_key = phase_name.replace("report_body_writer_", "report_")
+    body_path = scratchpad / f"{shard_key}.md"
+    if not body_path.exists():
+        return f"Body file `{shard_key}.md` is missing entirely. Re-author it."
+    manifests_dir = scratchpad / "body_manifests"
+    manifest_path = manifests_dir / f"{shard_key}.json"
+    if not manifest_path.exists():
+        for cand in manifests_dir.glob(f"{shard_key}_*.json"):
+            manifest_path = cand
+            break
+    if not manifest_path.exists():
+        return ""
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        body = body_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    result = _validate_report_body(body, manifest)
+    if result.get("ok"):
+        return ""
+    parts = ["## RETRY HINT — body writer attempt 1 failed validator"]
+    if result.get("missing"):
+        parts.append(
+            "\n### Missing report IDs (re-author from manifest)\n"
+            + "\n".join(f"- {rid}" for rid in result["missing"])
+        )
+    if result.get("extras"):
+        parts.append(
+            "\n### Extra / hallucinated report IDs (REMOVE — not in manifest)\n"
+            + "\n".join(f"- {rid}" for rid in result["extras"])
+        )
+    if result.get("integrity"):
+        parts.append(
+            "\n### Location / integrity violations (use the manifest's exact location string)\n"
+            + "\n".join(f"- {s}" for s in result["integrity"])
+        )
+    if result.get("blocked_violations"):
+        parts.append(
+            "\n### Report-blocked tag violations\n"
+            "- If the manifest row has `report_blocked: true`, prefix that heading with `[REPORT-BLOCKED: insufficient evidence]`.\n"
+            "- If the manifest row has verified evidence, REMOVE any stale `[REPORT-BLOCKED: ...]` prefix.\n"
+            + "\n".join(f"- {s}" for s in result["blocked_violations"])
+        )
+    parts.append(
+        "\n### Self-check before next attempt\n"
+        f"- The manifest at `body_manifests/{manifest_path.name}` is the "
+        "single source of truth.\n"
+        "- Every entry there must appear in your output, no more, no less.\n"
+        "- Use the manifest's `location` verbatim — do not paraphrase paths.\n"
+    )
+    return "\n".join(parts) + "\n"
+
+
+def _validate_tier_body_against_manifest(
+    scratchpad: Path, phase_name: str
+) -> list[str]:
+    """Phase E5 wiring: validate the tier file against its body-writer manifest.
+
+    Tier-phase names are mapped to manifest keys:
+        report_critical_high  -> body_manifests/report_critical_high.json
+        report_medium / _a / _b -> body_manifests/report_medium*.json
+        report_low_info       -> body_manifests/report_low_info.json
+
+    Returns issue strings if the body file fails coverage / no-extras /
+    location-integrity / report-blocked-tag checks. Fails closed for V2
+    report phases when the manifest is absent but a tier body exists.
+    """
+    _tier_m = re.match(
+        r"^report_(critical_high|medium|low_info)(?:_[a-z])?$", phase_name
+    )
+    if not _tier_m:
+        return []
+    body_files = [f"{phase_name}.md"]
+    manifest_keys = [phase_name]
+
+    manifests_dir = scratchpad / "body_manifests"
+    if not manifests_dir.exists():
+        body_path = scratchpad / f"{phase_name}.md"
+        if body_path.exists():
+            try:
+                existing_body = body_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                existing_body = ""
+            if (
+                not _extract_report_ids_from_body(existing_body)
+                and _empty_tier_sidecar_valid(scratchpad, phase_name, f"{phase_name}.md")
+            ):
+                return []
+            return [f"body validator: body_manifests missing for {phase_name}"]
+        expected = _expected_tier_assignment_count(scratchpad, phase_name)
+        if expected is not None and expected == 0:
+            return []
+        return [f"body validator: neither body_manifests dir nor {phase_name}.md exist"]
+    issues: list[str] = []
+    for body_name, mkey in zip(body_files, manifest_keys):
+        manifest_path = manifests_dir / f"{mkey}.json"
+        # When tier was sharded (e.g. report_critical_high split into _a/_b),
+        # find any matching shard manifest.
+        if not manifest_path.exists():
+            for cand in manifests_dir.glob(f"{mkey}_*.json"):
+                manifest_path = cand
+                break
+        if not manifest_path.exists():
+            body_path = scratchpad / body_name
+            if body_path.exists():
+                try:
+                    existing_body = body_path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    existing_body = ""
+                if (
+                    not _extract_report_ids_from_body(existing_body)
+                    and _empty_tier_sidecar_valid(scratchpad, mkey, body_name)
+                ):
+                    continue
+                issues.append(f"body validator: manifest {mkey}.json missing for {body_name}")
+            continue
+        body_path = scratchpad / body_name
+        if not body_path.exists():
+            issues.append(f"body validator: {body_name} missing")
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            body = body_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            issues.append(f"body validator: {body_name} unreadable ({exc})")
+            continue
+        result = _validate_report_body(body, manifest)
+        if not result.get("ok"):
+            parts = []
+            if result.get("missing"):
+                parts.append(f"missing {len(result['missing'])} report ID(s): "
+                             + ", ".join(result["missing"][:5]))
+            if result.get("extras"):
+                parts.append(f"extra {len(result['extras'])} hallucinated ID(s): "
+                             + ", ".join(result["extras"][:5]))
+            if result.get("duplicates"):
+                parts.append(f"duplicate {len(result['duplicates'])} report section(s): "
+                             + ", ".join(result["duplicates"][:5]))
+            if result.get("integrity"):
+                parts.append("integrity: " + "; ".join(result["integrity"][:3]))
+            if result.get("blocked_violations"):
+                parts.append("report-blocked tag missing: "
+                             + "; ".join(result["blocked_violations"][:3]))
+            issues.append(f"body validator [{body_name}] " + " | ".join(parts))
+    return issues
+
+
+# --- v2.2.1 Fix 2: UNRESOLVED authenticity cross-check -------------------
+#
+# Failure mode (Irys L1 v2.2.0): C-02's report body was tagged
+# `[UNRESOLVED — needs human review]` even though the Skeptic-Judge had
+# ruled it SKEPTIC CORRECT (not UNRESOLVED). Tier writer or assembler
+# widened the UNRESOLVED bucket — every body [UNRESOLVED] section MUST
+# correspond to a Judge UNRESOLVED entry. Driver-side cross-check.
+#
+# Generic across L1 and SC. Reads only Phase 5.1 outputs (skeptic_judge*
+# decisions) and the assembled report; no protocol-specific knowledge.
+def _collect_judge_unresolved_ids(scratchpad: Path) -> set[str]:
+    """Return finding IDs that the Skeptic-Judge ruled UNRESOLVED.
+
+    Reads `skeptic_judge_decisions.md` (or any `judge_*.md` if the
+    aggregate doesn't exist). Parses by H2 section (`## {ID}` or
+    `## Finding {ID}`) so each finding's verdict cleanly bounds which
+    IDs count as that finding's verdict scope. Falls back to whole-file
+    parse if no H2 sections exist.
+
+    Why per-section: a single skeptic_judge_decisions.md may contain
+    many adjacent findings. A windowed harvest would span into the
+    next finding's section and incorrectly attribute IDs across
+    section boundaries — observed live during v2.2.1 development.
+    """
+    ids: set[str] = set()
+    candidates: list[Path] = []
+    primary = scratchpad / "skeptic_judge_decisions.md"
+    if primary.exists():
+        candidates.append(primary)
+    else:
+        candidates.extend(scratchpad.glob("judge_*.md"))
+    if not candidates:
+        return ids
+    # v2.3.13: accept PARTIAL as UNRESOLVED-equivalent + tolerate bold
+    # decoration (`**Verdict**: PARTIAL` is the standard finding-output
+    # format; pre-v2.3.13 regex required a literal `Verdict:` without bold
+    # wrapper between label and colon, missing every bold-decorated row).
+    # Irys L1 v2.3.x: 5 PARTIAL verdicts on H-10/H-12/H-13/H-14/H-17
+    # → 0 [UNRESOLVED] body markers. Both tokens carry identical
+    # downstream semantics (demote 1 tier, retain in body, flag for
+    # human review).
+    verdict_re = re.compile(
+        r"(?:Verdict|Judge[ _]?Decision|Decision|Ruling)"
+        r"\*{0,2}\s*[:=]\s*\*{0,2}\s*[`]?"
+        r"(?:UNRESOLVED|PARTIAL)\b",
+        re.IGNORECASE,
+    )
+    section_split_re = re.compile(r"(?m)^##\s+", re.MULTILINE)
+    for f in candidates:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        # Split on H2 boundaries; first chunk is preamble (skip if no
+        # verdict in it). Each subsequent chunk is one finding's section.
+        parts = section_split_re.split(text)
+        if len(parts) <= 1:
+            # No H2 sections — parse whole file as one scope.
+            if verdict_re.search(text):
+                for m in _INTERNAL_FINDING_ID_RE.finditer(text):
+                    ids.add(m.group(1))
+            continue
+        for chunk in parts:
+            if not chunk.strip():
+                continue
+            if not verdict_re.search(chunk):
+                continue
+            for m in _INTERNAL_FINDING_ID_RE.finditer(chunk):
+                ids.add(m.group(1))
+    return ids
+
+
+def _collect_judge_downgrade_map(scratchpad: Path) -> dict[str, str]:
+    """Return {finding_id: target_severity} for DOWNGRADE rulings.
+
+    Reads `skeptic_judge_decisions.md` pipe-delimited table rows where
+    the Decision column is DOWNGRADE. Returns the Final Severity column
+    value normalised via `normalize_severity`. Non-DOWNGRADE rows
+    (KEEP, UNRESOLVED, PARTIAL) are handled by other consumers.
+    """
+    result: dict[str, str] = {}
+    primary = scratchpad / "skeptic_judge_decisions.md"
+    if not primary.exists():
+        return result
+    try:
+        text = primary.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return result
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.split("|")]
+        # pipe-split of "|a|b|c|" → ['', 'a', 'b', 'c', '']
+        cells = [c for c in cells if c]
+        if len(cells) < 4:
+            continue
+        # Skip header / separator rows
+        if cells[0].startswith("-") or cells[0].lower().startswith("finding"):
+            continue
+        fid = cells[0].strip()
+        decision = cells[3].strip().upper()
+        if decision != "DOWNGRADE":
+            continue
+        final_sev = normalize_severity(cells[2].strip())
+        if final_sev and fid:
+            result[fid] = final_sev
+    return result
+
+
+def _collect_body_unresolved_report_ids(audit_report_text: str) -> set[str]:
+    """Return report IDs of body sections tagged [UNRESOLVED ...].
+
+    Matches `### [X-NN] Title [UNRESOLVED ...]` headers across all
+    severity tiers (C/H/M/L/I).
+    """
+    ids: set[str] = set()
+    pattern = re.compile(
+        r"^###\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[([CHMLI]-\d+)\][^\n]*\[UNRESOLVED",
+        re.MULTILINE,
+    )
+    for m in pattern.finditer(audit_report_text):
+        ids.add(m.group(1))
+    return ids
+
+
+def _check_unresolved_authenticity(
+    scratchpad: Path, project_root: str
+) -> list[str]:
+    """Cross-check body [UNRESOLVED] sections against Judge UNRESOLVED rulings.
+
+    Two failure modes:
+      (a) Body has [UNRESOLVED] for a finding the Judge did NOT rule
+          UNRESOLVED → tier-writer or assembler widened the bucket.
+      (b) Judge ruled UNRESOLVED for a finding but the body has no
+          [UNRESOLVED] section → demote-keep-in-body rule was skipped.
+
+    Returns issues for both cases. Returns [] if Judge file is absent
+    (Skeptic-Judge phase didn't run — common for Light/Core modes).
+    """
+    pr = Path(project_root) / "AUDIT_REPORT.md"
+    if not pr.exists():
+        return []
+    try:
+        rtxt = pr.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+
+    # Skip-clean if Skeptic-Judge phase didn't run (no judge artifacts).
+    # Light/Core modes don't run Skeptic-Judge; we have no ground truth
+    # to validate body [UNRESOLVED] tags against, so don't flag.
+    has_judge_artifacts = (
+        (scratchpad / "skeptic_judge_decisions.md").exists()
+        or any(scratchpad.glob("judge_*.md"))
+    )
+    if not has_judge_artifacts:
+        return []
+
+    judge_unresolved = _collect_judge_unresolved_ids(scratchpad)
+    body_unresolved = _collect_body_unresolved_report_ids(rtxt)
+
+    if not judge_unresolved and not body_unresolved:
+        return []
+
+    # Index Agent's report_index.md maps internal IDs → report IDs.
+    # Build that map so we can check (a) against the right axis.
+    ri = scratchpad / "report_index.md"
+    internal_to_report: dict[str, str] = {}
+    if ri.exists():
+        try:
+            itxt = ri.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            itxt = ""
+        # Each Master Finding Index row contains a report ID in col 0
+        # and an internal ID somewhere later in the row. Reuse the
+        # tolerant assignment parser that already handles this.
+        assignments, _source = get_tier_assignments(scratchpad)
+        for a in assignments:
+            if a.get("finding_id"):
+                internal_to_report[a["finding_id"]] = a["report_id"]
+
+    issues: list[str] = []
+
+    # Case (a): body [UNRESOLVED] without Judge UNRESOLVED ruling
+    judge_promoted_to_report = {
+        internal_to_report.get(i) for i in judge_unresolved
+    }
+    judge_promoted_to_report.discard(None)
+    phantom = body_unresolved - judge_promoted_to_report
+    if phantom:
+        sample = ", ".join(sorted(phantom)[:5])
+        issues.append(
+            f"unresolved phantom: {len(phantom)} body section(s) tagged "
+            f"[UNRESOLVED] without a corresponding Judge UNRESOLVED "
+            f"ruling: {sample}. Tier-writer / assembler widened the "
+            f"bucket; verify against skeptic_judge_decisions.md."
+        )
+
+    # Case (b): Judge UNRESOLVED but body lacks [UNRESOLVED] tag
+    if internal_to_report and judge_unresolved:
+        missing_in_body = judge_promoted_to_report - body_unresolved
+        # Filter out IDs that are absent from the body entirely (those
+        # are caught by the promotion-receipt gate, not this one).
+        present_ids = set(re.findall(
+            r"^###\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[([CHMLI]-\d+)\]", rtxt, re.MULTILINE
+        ))
+        missing_tag = missing_in_body & present_ids
+        if missing_tag:
+            sample = ", ".join(sorted(missing_tag)[:5])
+            issues.append(
+                f"unresolved untagged: {len(missing_tag)} report ID(s) "
+                f"with Judge UNRESOLVED ruling appear in body without "
+                f"[UNRESOLVED] flag: {sample}. v2.2.0 A.3 "
+                f"demote-keep-in-body rule skipped."
+            )
+
+    return issues
+
+
+def _write_promotion_dropout_retry_hint(
+    scratchpad: Path, dropped_ids: list[str]
+) -> Path | None:
+    """Write a retry hint for report_assemble naming the missing IDs.
+
+    Pairs with the v2.1.6 retry-hint mechanism — the next attempt's
+    prompt sees this file and is told exactly which IDs to add.
+    """
+    if not dropped_ids:
+        return None
+    hint_path = scratchpad / f"report_assemble{_RETRY_HINT_SUFFIX}"
+    try:
+        body = (
+            "## v2.2.0 A.2 — promotion dropout retry hint\n\n"
+            f"The previous report_assemble attempt dropped {len(dropped_ids)} "
+            "CONFIRMED verifier finding(s) from the body, Appendix A, and "
+            "the Consolidation Map. Add a body section OR an Appendix A row "
+            "(FALSE_POSITIVE/DUPLICATE) OR a Consolidation Map entry for "
+            "each of:\n\n"
+            + "\n".join(f"- `{i}`" for i in dropped_ids)
+            + "\n"
+        )
+        hint_path.write_text(body, encoding="utf-8")
+        return hint_path
+    except Exception:
+        return None
+
+
+def _run_report_quality_gate(
+    scratchpad: Path, project_root: str
+) -> list[str]:
+    """Mechanical post-assembly quality gate (A4).
+
+    Runs after `report_assemble` completes. Replaces the LLM-written
+    quality check that the AwesomeX monolithic assembler was supposed to
+    produce but timed out before emitting. Pure Python, sub-second.
+
+    Writes `{SCRATCHPAD}/report_quality.md` with PASS/FAIL per check and
+    returns the list of FAIL messages (empty = all pass).
+
+    v2.1.9 — Summary table self-heal:
+    Body section counts are canonical. The `## Summary` tables in both
+    `AUDIT_REPORT.md` and `report_index.md` are rewritten in place to
+    match `tier_counts` before the count check runs. This eliminates the
+    Q83 false-alarm class observed in the Irys L1 v2.1.7 run, where
+    body and summary disagreed on Medium count by 1 and the gate
+    trip-wired despite the body being correct.
+
+    v2.2.0 A.2 — promotion-receipt symmetry:
+    After self-heal, diff the set of CONFIRMED verifier verdicts against
+    the set of IDs acknowledged by the report (body + Appendix A +
+    Consolidation Map). Any dropouts → gate fail with a delta retry
+    hint pinning the missing IDs.
+    """
+    pr = Path(project_root) / "AUDIT_REPORT.md"
+    ri = scratchpad / "report_index.md"
+    if not pr.exists():
+        return ["AUDIT_REPORT.md missing"]
+    try:
+        rtxt = pr.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ["AUDIT_REPORT.md unreadable"]
+
+    issues: list[str] = []
+    checks: list[tuple[str, str, str]] = []  # (check, status, detail)
+
+    # Check 1: finding section count per severity tier. Use the body parser as
+    # the single source of truth for section IDs; private header regexes have
+    # repeatedly drifted from the validator contract.
+    body_end_for_counts = rtxt.find("## Appendix A")
+    report_body_for_counts = rtxt[:body_end_for_counts] if body_end_for_counts > 0 else rtxt
+    body_report_ids_for_counts = _extract_report_ids_from_body(report_body_for_counts)
+    from collections import Counter
+    body_report_id_counter = Counter(body_report_ids_for_counts)
+    tier_counts = {
+        tier_char: sum(
+            1 for rid in body_report_ids_for_counts
+            if rid.startswith(tier_char + "-")
+        )
+        for tier_char in ("C", "H", "M", "L", "I")
+    }
+    total_sections = sum(tier_counts.values())
+
+    # v2.1.9 self-heal: canonicalize the AUDIT_REPORT.md Summary table from
+    # body counts before checking. Body is authoritative.
+    rtxt_new, report_deltas = _canonicalize_summary_table(rtxt, tier_counts)
+    if report_deltas:
+        try:
+            pr.write_text(rtxt_new, encoding="utf-8")
+            rtxt = rtxt_new
+            checks.append((
+                "summary_selfheal_report",
+                "INFO",
+                "rewrote AUDIT_REPORT.md Summary: " + ", ".join(
+                    f"{name} {delta}" for name, delta in report_deltas
+                ),
+            ))
+        except Exception as e:
+            checks.append((
+                "summary_selfheal_report", "WARN",
+                f"rewrite failed: {e}",
+            ))
+    else:
+        checks.append((
+            "summary_selfheal_report", "PASS", "summary already canonical",
+        ))
+
+    assignments, assignment_source = get_tier_assignments(scratchpad)
+    if assignments and total_sections != len(assignments):
+        if total_sections > len(assignments):
+            # v2.5.4: Body has MORE sections than assignments — extra
+            # coverage from promotion recovery (_repair_promotion_dropouts)
+            # or assembler self-heal. Body is authoritative (v2.1.9
+            # principle). WARN, not FAIL — missing sections (body < index)
+            # is the real error class.
+            checks.append((
+                "body_assignment_count", "WARN",
+                f"body sections={total_sections} > assignments="
+                f"{len(assignments)} from {assignment_source} "
+                f"(+{total_sections - len(assignments)} via "
+                f"promotion recovery, body is authoritative)",
+            ))
+        else:
+            detail = (
+                f"body sections={total_sections}, expected assignments="
+                f"{len(assignments)} from {assignment_source}"
+            )
+            shortfall = len(assignments) - total_sections
+            if shortfall > max(2, int(len(assignments) * 0.20)):
+                checks.append(("body_assignment_count", "FAIL", detail))
+                issues.append("report body count mismatch: " + detail)
+            else:
+                checks.append(("body_assignment_count", "WARN",
+                                detail + f" (shortfall={shortfall}, within tolerance)"))
+                log.warning(
+                    "[_run_report_quality_gate] body_assignment_count: %s "
+                    "(shortfall=%d, within tolerance — soft check)",
+                    detail, shortfall,
+                )
+    else:
+        checks.append((
+            "body_assignment_count", "PASS",
+            f"body sections={total_sections}, assignments={len(assignments)} "
+            f"source={assignment_source}",
+        ))
+
+    # Also canonicalize report_index.md Summary Counts so downstream
+    # consumers see consistent metadata.
+    if ri.exists():
+        try:
+            itxt = ri.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            itxt = ""
+        if itxt:
+            itxt_new, idx_deltas = _canonicalize_summary_table(itxt, tier_counts)
+            if idx_deltas:
+                try:
+                    ri.write_text(itxt_new, encoding="utf-8")
+                    checks.append((
+                        "summary_selfheal_index",
+                        "INFO",
+                        "rewrote report_index.md Summary: " + ", ".join(
+                            f"{name} {delta}" for name, delta in idx_deltas
+                        ),
+                    ))
+                except Exception as e:
+                    checks.append((
+                        "summary_selfheal_index", "WARN",
+                        f"rewrite failed: {e}",
+                    ))
+            else:
+                checks.append((
+                    "summary_selfheal_index", "PASS",
+                    "index summary already canonical",
+                ))
+
+    # The legacy "tier_count_C/H/M/L/I" check now trivially PASSes because
+    # both files were rewritten from body counts. Recorded for forensics.
+    for char, name in (
+        ("C", "Critical"), ("H", "High"), ("M", "Medium"),
+        ("L", "Low"), ("I", "Informational"),
+    ):
+        actual = tier_counts.get(char, 0)
+        checks.append((
+            f"tier_count_{char}", "PASS",
+            f"body sections={actual} (canonical)",
+        ))
+
+    mapped = _ensure_report_consolidation_map(scratchpad, project_root)
+    if mapped:
+        try:
+            rtxt = pr.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        checks.append((
+            "consolidation_map_selfheal", "INFO",
+            f"wrote {mapped} source-ID consolidation row(s)",
+        ))
+
+    # Check 2: no internal IDs leaked into AUDIT_REPORT.md.
+    # `_ID_ALL_NONHYPO` excludes H/CH because H-01 is also a report ID. Add
+    # explicit privacy patterns for chain IDs and non-report-shaped hypothesis
+    # IDs while preserving valid C/H/M/L/I-NN report section IDs.
+    from plamen_parsers import _ID_ALL_NONHYPO
+    internal_id_patterns = [
+        rf"\b(?:{_ID_ALL_NONHYPO})\b",
+        r"\bCH-\d+\b",
+        r"\bH-[CHMLI]\d+\b",
+        r"\bH-(?:[1-9]|\d{3,})\b",
+        r"\bverify_[A-Za-z0-9_\-\[\].]+\.md\b",
+    ]
+    # Body-only checks still exclude Appendix A for finding-section accounting.
+    # Internal-ID privacy is stricter: the delivered report must not contain
+    # pipeline trace IDs anywhere. Internal traceability belongs in
+    # report_index.md/report_coverage.md.
+    body_end = rtxt.find("## Appendix A")
+    body = rtxt[:body_end] if body_end > 0 else rtxt
+    body_report_ids = _extract_report_ids_from_body(body)
+    duplicate_report_ids = sorted(
+        rid for rid, n in body_report_id_counter.items() if n > 1
+    )
+    if duplicate_report_ids:
+        checks.append((
+            "duplicate_report_sections", "FAIL",
+            f"duplicate body section IDs: {duplicate_report_ids[:10]}",
+        ))
+        issues.append(
+            "duplicate report body sections: " + ", ".join(duplicate_report_ids[:10])
+        )
+    else:
+        checks.append(("duplicate_report_sections", "PASS", "none"))
+
+    if assignments:
+        expected_report_ids = {
+            (a.get("report_id") or "").upper()
+            for a in assignments
+            if a.get("report_id")
+        }
+        actual_report_ids = {rid.upper() for rid in body_report_ids}
+        missing_report_ids = sorted(expected_report_ids - actual_report_ids)
+        extra_report_ids = sorted(actual_report_ids - expected_report_ids)
+        if missing_report_ids:
+            checks.append((
+                "body_assignment_exact_ids", "FAIL",
+                f"missing={missing_report_ids[:10]} extra={extra_report_ids[:10]}",
+            ))
+            issues.append(
+                "report body ID set mismatch: "
+                f"missing={missing_report_ids[:10]} extra={extra_report_ids[:10]}"
+            )
+        elif extra_report_ids:
+            checks.append((
+                "body_assignment_exact_ids", "WARN",
+                f"extra={extra_report_ids[:10]} (promotion recovery)",
+            ))
+        else:
+            checks.append(("body_assignment_exact_ids", "PASS", "exact set"))
+
+    leaked = []
+    valid_report_ids = {rid.upper() for rid in body_report_ids}
+    for pat in internal_id_patterns:
+        hits = re.findall(pat, rtxt, flags=re.IGNORECASE)
+        if hits:
+            leaked.extend(h for h in set(hits) if h.upper() not in valid_report_ids)
+    if leaked:
+        leaked = sorted(set(leaked))[:10]
+        checks.append(("internal_id_leak", "FAIL", f"found {len(leaked)}: {leaked}"))
+        issues.append(f"internal IDs leaked into AUDIT_REPORT.md: {leaked}")
+    else:
+        checks.append(("internal_id_leak", "PASS", "none"))
+
+    excluded_body_hits = sorted(set(re.findall(
+        r"(?m)^\s*\*{0,2}(?:Verdict|Status|Exclusion)\*{0,2}\s*:\s*.*(FALSE_POSITIVE|REFUTED|INFEASIBLE)",
+        body,
+        flags=re.IGNORECASE,
+    )))
+    if excluded_body_hits:
+        checks.append((
+            "excluded_verdict_body_leak", "FAIL",
+            f"active body contains excluded verdict tokens: {excluded_body_hits}",
+        ))
+        issues.append(
+            "active body contains FALSE_POSITIVE/REFUTED/INFEASIBLE markers"
+        )
+    else:
+        checks.append(("excluded_verdict_body_leak", "PASS", "none"))
+
+    # Check 3: basic stub-guard
+    if total_sections == 0:
+        checks.append(("stub_guard", "FAIL", "0 finding sections in body"))
+        issues.append("AUDIT_REPORT.md is a stub (0 finding sections)")
+    else:
+        checks.append(("stub_guard", "PASS", f"{total_sections} sections"))
+
+    if total_sections > 0:
+        # v2.5.2: preserve tier prefix per section so PoC Result is only
+        # required for C/H/M (report-template.md: optional for L/I).
+        _section_header_re = re.compile(
+            r"^###\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[([CHMLI])-\d+\]",
+            re.MULTILINE,
+        )
+        section_pairs: list[tuple[str, str]] = []  # (tier_char, section_body)
+        headers = list(_section_header_re.finditer(body))
+        for i, hm in enumerate(headers):
+            start = hm.end()
+            end = headers[i + 1].start() if i + 1 < len(headers) else len(body)
+            section_pairs.append((hm.group(1), body[start:end]))
+        sections = [(t, s) for t, s in section_pairs if s.strip()]
+        heading_titles: dict[str, str] = {}
+        for hm in re.finditer(
+            r"(?im)^###\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[([CHMLI]-\d+)\]\s*([^\n]*)",
+            body,
+        ):
+            rid = hm.group(1).upper()
+            title = re.sub(r"\[[A-Z][^\]]*\]", " ", hm.group(2) or "")
+            title = re.sub(r"\s+", " ", title).strip(" -:|")
+            heading_titles[rid] = title
+        placeholder_title_ids: list[str] = []
+        for rid, title in heading_titles.items():
+            title_l = title.lower()
+            if not title_l:
+                placeholder_title_ids.append(rid)
+                continue
+            if "upstream finding" in title_l:
+                placeholder_title_ids.append(rid)
+                continue
+            if re.search(
+                r"\b(?:unverified|verified)\b.*\b(?:severity|finding)\b.*"
+                r"(?:CH|H|INV|VS|BLIND|SE|EN|SLITHER|[A-Z]{2,})-\d+\b",
+                title,
+                re.IGNORECASE,
+            ):
+                placeholder_title_ids.append(rid)
+                continue
+        bad_location_ids: list[str] = []
+        title_location_pairs: dict[tuple[str, str], list[str]] = {}
+        for idx, (_tier, section) in enumerate(sections):
+            rid = body_report_ids[idx] if idx < len(body_report_ids) else f"section-{idx + 1}"
+            loc = _field_from_markdown(section, ("Location", "Locations")) or ""
+            loc_rel, _loc_line = _parse_location_ref(loc)
+            if loc and not loc_rel and re.search(
+                r"\b(?:Critical|High|Medium|Low|Informational|Info)\b"
+                r".*\[(?:POC|CODE|MEDUSA|PROD|TRACE|CONFIRMED)",
+                loc,
+                re.IGNORECASE,
+            ):
+                bad_location_ids.append(rid)
+            title_key = re.sub(r"[^a-z0-9]+", " ", heading_titles.get(rid, "").lower()).strip()
+            loc_key = re.sub(r"\s+", " ", (loc or "").strip().lower())
+            if title_key and loc_key:
+                title_location_pairs.setdefault((title_key, loc_key), []).append(rid)
+        duplicate_title_location = [
+            ids for ids in title_location_pairs.values() if len(ids) > 1
+        ]
+        thin_sections = [
+            body_report_ids[i] if i < len(body_report_ids) else f"section-{i + 1}"
+            for i, (_, s) in enumerate(sections)
+            if len(s.strip()) < 400
+        ]
+        boilerplate = sum(
+            1 for _, s in sections
+            if (
+                "tier writer omitted the assigned body section" in s
+                or "Python assembler restored the assigned section" in s
+                or "Review the cited location and apply the mitigation" in s
+                or "Impact was not separately summarized by the verifier" in s
+            )
+        )
+        blocked_ids: list[str] = []
+        for hm in re.finditer(r"(?im)^###[^\n]*\[REPORT-BLOCKED[^\]]*\][^\n]*$", body):
+            rid_m = re.search(r"\[([CHMLI]-\d+)\]", hm.group(0), re.IGNORECASE)
+            if rid_m:
+                blocked_ids.append(rid_m.group(1).upper())
+        stub_recovered_ids = re.findall(
+            r"(?im)^###[^\n]*\[([CHMLI]-\d+)\][^\n]*\[STUB-RECOVERED\]",
+            body,
+        )
+        blocked_ch = [rid for rid in blocked_ids if rid[:1].upper() in ("C", "H")]
+        stub_ch = [rid for rid in stub_recovered_ids if rid[:1].upper() in ("C", "H")]
+        blocked_limit = max(3, math.ceil(total_sections * 0.20))
+        stub_limit = max(2, math.ceil(total_sections * 0.10))
+        evidence_quality_issues: list[str] = []
+        if blocked_ch:
+            evidence_quality_issues.append(
+                f"{len(blocked_ch)} Critical/High REPORT-BLOCKED section(s): {blocked_ch[:10]}"
+            )
+        if len(blocked_ids) >= blocked_limit:
+            evidence_quality_issues.append(
+                f"{len(blocked_ids)}/{total_sections} REPORT-BLOCKED section(s)"
+            )
+        if stub_ch:
+            evidence_quality_issues.append(
+                f"{len(stub_ch)} Critical/High STUB-RECOVERED section(s): {stub_ch[:10]}"
+            )
+        if len(stub_recovered_ids) >= stub_limit:
+            evidence_quality_issues.append(
+                f"{len(stub_recovered_ids)}/{total_sections} STUB-RECOVERED section(s)"
+            )
+        internal_marker_leaks = re.findall(
+            r"\[(?:REPORT-BLOCKED|STUB-RECOVERED)[^\]]*\]",
+            body,
+            flags=re.IGNORECASE,
+        )
+        if internal_marker_leaks:
+            evidence_quality_issues.append(
+                f"{len(internal_marker_leaks)} internal report marker(s) leaked into client report"
+            )
+        quality_heading_count = len(
+            re.findall(r"(?im)^##\s+Quality\s+Observations\s*$", body)
+        )
+        if quality_heading_count > 1:
+            evidence_quality_issues.append(
+                f"{quality_heading_count} duplicate Quality Observations sections"
+            )
+        if evidence_quality_issues:
+            detail = "; ".join(evidence_quality_issues)
+            checks.append(("evidence_quality", "FAIL", detail))
+            issues.append("report body evidence quality blocked: " + detail)
+        else:
+            checks.append((
+                "evidence_quality",
+                "PASS",
+                f"REPORT-BLOCKED={len(blocked_ids)}, STUB-RECOVERED={len(stub_recovered_ids)}",
+            ))
+        if placeholder_title_ids:
+            checks.append((
+                "title_quality",
+                "WARN",
+                "placeholder/generated titles: " + ", ".join(placeholder_title_ids[:10]),
+            ))
+            log.warning(
+                "[_run_report_quality_gate] title_quality: placeholder titles %s",
+                placeholder_title_ids[:10],
+            )
+        else:
+            checks.append(("title_quality", "PASS", "finding headings are specific"))
+        if bad_location_ids:
+            checks.append((
+                "location_quality",
+                "FAIL",
+                "metadata used as source location: " + ", ".join(bad_location_ids[:10]),
+            ))
+            issues.append(
+                "report body contains severity/evidence metadata as Location: "
+                + ", ".join(bad_location_ids[:10])
+            )
+        else:
+            checks.append(("location_quality", "PASS", "no metadata-as-location fields"))
+        if duplicate_title_location:
+            detail = "; ".join(", ".join(ids) for ids in duplicate_title_location[:5])
+            checks.append((
+                "duplicate_title_location",
+                "WARN",
+                detail,
+            ))
+            log.warning(
+                "[_run_report_quality_gate] duplicate_title_location: %s",
+                detail,
+            )
+        else:
+            checks.append(("duplicate_title_location", "PASS", "none"))
+        def _section_field_substantive(
+            section: str,
+            field_labels: tuple[str, ...],
+            section_labels: tuple[str, ...],
+        ) -> bool:
+            value = _field_or_section(
+                section,
+                field_labels,
+                section_labels,
+                fallback="",
+                max_chars=2500,
+            )
+            return _is_substantive_body_evidence(value)
+
+        missing_impact_ids = [
+            body_report_ids[i] if i < len(body_report_ids) else f"section-{i + 1}"
+            for i, (_, s) in enumerate(sections)
+            if not _section_field_substantive(
+                s,
+                ("Impact", "Security Impact", "Risk"),
+                ("Impact", "Security Impact", "Risk"),
+            )
+        ]
+        # PoC Result is required for C/H/M only; optional for L/I per
+        # report-template.md ("PoC Result field optional for Informational",
+        # "Recommendation field optional for Low").
+        missing_poc_ids = [
+            body_report_ids[i] if i < len(body_report_ids) else f"section-{i + 1}"
+            for i, (t, s) in enumerate(sections)
+            if t in ("C", "H", "M")
+            and "VERIFICATION NOT EXECUTED" not in s.upper()
+            and not _section_field_substantive(
+                s,
+                ("PoC Result", "Execution Output", "Test Output", "Proof",
+                 "Evidence Tag", "Evidence"),
+                ("PoC Result", "Execution Output", "Test Output", "Proof",
+                 "Reproduction", "Evidence Tag", "Evidence"),
+            )
+        ]
+        if boilerplate > max(0, int(total_sections * 0.05)):
+            checks.append((
+                "content_authenticity", "FAIL",
+                f"{boilerplate}/{total_sections} sections contain report-stub boilerplate",
+            ))
+            issues.append("report body is dominated by boilerplate/stub sections")
+        elif missing_impact_ids or missing_poc_ids:
+            checks.append((
+                "content_authenticity", "WARN",
+                "missing/non-substantive Impact in "
+                f"{missing_impact_ids[:10]}, PoC Result in {missing_poc_ids[:10]} "
+                "(C/H/M only)",
+            ))
+            log.warning(
+                "[_run_report_quality_gate] content_authenticity: missing Impact "
+                "in %s, PoC Result in %s (C/H/M only, soft check)",
+                missing_impact_ids[:10], missing_poc_ids[:10],
+            )
+        elif thin_sections and len(thin_sections) > max(1, int(total_sections * 0.15)):
+            checks.append((
+                "content_authenticity", "WARN",
+                f"{len(thin_sections)}/{total_sections} sections below 400 chars: "
+                f"{thin_sections[:10]}",
+            ))
+            log.warning(
+                "[_run_report_quality_gate] %d/%d sections below 400 chars "
+                "— LLM output quality check (soft): %s",
+                len(thin_sections), total_sections, thin_sections[:10],
+            )
+        else:
+            checks.append((
+                "content_authenticity", "PASS",
+                "sections include Impact and PoC Result (C/H/M) without stub boilerplate",
+            ))
+
+        defined_report_ids = set(body_report_ids)
+        referenced_ids = set()
+        reference_re = re.compile(
+            r"(?i)\b(?:see|related to|duplicate of|duplicates|same as|"
+            r"cross-reference|cross reference|absorbed by|absorbs)\b"
+            r"[^\n]{0,120}?(?:\[\s*)?([CHMLI]-\d{1,3})(?:\s*\])?"
+        )
+        for m in reference_re.finditer(body):
+            referenced_ids.add(_normalize_report_id(m.group(1)))
+        dangling_refs = sorted(referenced_ids - defined_report_ids)
+        if dangling_refs:
+            checks.append((
+                "report_cross_references", "WARN",
+                f"undefined report ID references: {dangling_refs[:10]}",
+            ))
+            log.warning(
+                "[_run_report_quality_gate] dangling cross-references: %s",
+                dangling_refs[:10],
+            )
+        else:
+            checks.append(("report_cross_references", "PASS", "none"))
+
+    # v2.5.2: Components Audited is best-effort — WARN when absent
+    # (upstream data may not exist), only FAIL when it was available
+    # but not included.
+    if total_sections > 0 and "### Components Audited" not in rtxt:
+        checks.append(("components_audited", "WARN", "missing Components Audited block"))
+    else:
+        checks.append(("components_audited", "PASS", "present or no finding sections"))
+
+    # Check 4: runtime metadata sanity — Codex/Claude branding not leaked.
+    # Only flag clear branding strings, not generic words.
+    forbidden = [
+        "claude.ai", "anthropic", "Claude Code", "Claude Opus",
+        "Claude Sonnet", "Claude Haiku",
+    ]
+    meta_leaks = [s for s in forbidden if s.lower() in body.lower()]
+    if meta_leaks:
+        checks.append(("metadata_leak", "FAIL", f"{meta_leaks}"))
+        issues.append(f"runtime-metadata branding leaked: {meta_leaks}")
+    else:
+        checks.append(("metadata_leak", "PASS", "clean"))
+
+    # Check 6 (v2.2.1 Fix 2): UNRESOLVED authenticity. Body [UNRESOLVED]
+    # sections must correspond to Judge UNRESOLVED rulings. Catches the
+    # Irys L1 v2.2.0 C-02 phantom-flag class (tier writer or assembler
+    # widened the bucket).
+    unresolved_issues = _check_unresolved_authenticity(
+        scratchpad, project_root
+    )
+    if unresolved_issues:
+        for u in unresolved_issues:
+            checks.append(("unresolved_authenticity", "FAIL", u))
+        issues.extend(unresolved_issues)
+    else:
+        checks.append((
+            "unresolved_authenticity", "PASS",
+            "body [UNRESOLVED] sections match Judge UNRESOLVED rulings",
+        ))
+
+    # Check 5 (v2.2.0 A.2): promotion-receipt symmetry. Every CONFIRMED
+    # verifier verdict must reach the report (body, Appendix A, or
+    # consolidation map). Dropouts trigger a delta retry hint so the
+    # next attempt knows exactly what to add.
+    promotion_issues = _check_promotion_symmetry(scratchpad, project_root)
+    if promotion_issues:
+        # Extract dropped IDs from the issue message for the retry hint.
+        dropped_match = re.search(
+            r"missing from report .*?: (.*?)(?:\s*\(\+|$)",
+            promotion_issues[0],
+        )
+        if dropped_match:
+            dropped_ids = [
+                s.strip() for s in dropped_match.group(1).split(",")
+                if s.strip()
+            ]
+            _write_promotion_dropout_retry_hint(scratchpad, dropped_ids)
+        checks.append(("promotion_receipt", "FAIL", promotion_issues[0]))
+        issues.extend(promotion_issues)
+    else:
+        checks.append(("promotion_receipt", "PASS",
+                        "all CONFIRMED verifier IDs reached report"))
+
+    # Write report_quality.md
+    qp = scratchpad / "report_quality.md"
+    try:
+        lines = [
+            "# Report Quality Gate (v2.1.2 mechanical)",
+            "",
+            f"- Total sections: {total_sections} "
+            f"(C={tier_counts.get('C',0)}, H={tier_counts.get('H',0)}, "
+            f"M={tier_counts.get('M',0)}, L={tier_counts.get('L',0)}, "
+            f"I={tier_counts.get('I',0)})",
+            "",
+            "| Check | Status | Detail |",
+            "|-------|--------|--------|",
+        ]
+        for name, status, detail in checks:
+            lines.append(f"| {name} | {status} | {detail} |")
+        lines.append("")
+        lines.append(
+            "Overall: " + ("PASS" if not issues else f"FAIL ({len(issues)})")
+        )
+        qp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    return issues
+
+
+def _snapshot_report_timestamped(project_root: str) -> str | None:
+    """Write a timestamped `AUDIT_REPORT-YYYYMMDD-HHMM.md` copy on success.
+
+    Returns the snapshot path on success, None on failure. SOFT: never
+    raises; logs warning on failure.
+    """
+    import shutil
+    from datetime import datetime
+    src = Path(project_root) / "AUDIT_REPORT.md"
+    if not src.exists():
+        return None
+    try:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M")
+        dst = Path(project_root) / f"AUDIT_REPORT-{stamp}.md"
+        shutil.copy2(src, dst)
+        return str(dst)
+    except Exception as e:
+        log.warning(f"timestamped report snapshot failed: {e}")
+        return None
+
+
+# --- end v2.1.2 helpers ------------------------------------------------------
+# --- v2.1.6: deterministic-retry + checkpoint-integrity helpers -------------
+#
+# Problem observed in AwesomeX SC and Irys L1 runs: when a completeness gate
+# fails (tier writer short, assembler count mismatch), the driver re-spawns
+# the same prompt without telling the LLM WHICH specific items were missing.
+# LLMs routinely re-produce identical wrong output on hollow retries, burning
+# $5–$40 per retry. Research-backed fix: inject delta-specific retry hints.
+# (Wei et al. 2023 on recency + action-grounding: per-call instructions with
+# concrete deltas drive ~99% adherence; re-asking generically drives <50%.)
+_RETRY_HINT_SUFFIX = "_retry_hint.md"
+
+
+def _compute_tier_completeness_delta(
+    scratchpad: Path, phase_name: str
+) -> tuple[list[str], list[str]]:
+    """Return (expected_ids, produced_ids) for a report tier phase.
+
+    expected_ids: IDs the Index Agent assigned to this tier per
+    `report_index.md` Master Finding Index.
+    produced_ids: IDs actually present as `### [X-NN]` sections in the
+    corresponding tier file on disk.
+
+    Returns ([], []) on any parse failure (SOFT — caller decides).
+    """
+    # Map phase to tier filename and acceptable ID prefixes.
+    _TIER_PREFIXES: dict[str, set[str]] = {
+        "critical_high": {"C", "H"},
+        "medium": {"M"},
+        "low_info": {"L", "I"},
+    }
+    tier_map: dict[str, tuple[str, set[str]]] = {
+        "report_critical_high": ("report_critical_high.md", {"C", "H"}),
+        "report_medium": ("report_medium.md", {"M"}),
+        "report_low_info": ("report_low_info.md", {"L", "I"}),
+    }
+    _shard_m = re.match(r"^report_(critical_high|medium|low_info)_[a-z]$", phase_name)
+    if _shard_m:
+        tier_map[phase_name] = (f"{phase_name}.md", _TIER_PREFIXES[_shard_m.group(1)])
+    if phase_name not in tier_map:
+        return [], []
+    tier_file, prefixes = tier_map[phase_name]
+
+    tier = scratchpad / tier_file
+    if not tier.exists():
+        return [], []
+    try:
+        tier_text = tier.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return [], []
+
+    # v2.3.3: derive expected IDs from `get_tier_assignments` (single source of
+    # truth) instead of a private table-only regex over `report_index.md`.
+    # Pre-v2.3.3 this function had its own strict regex, which silently returned
+    # 0 expected IDs when the Index Agent emitted bullet-list narrative — the
+    # same bug class that produced the 42-byte AUDIT_REPORT.md on Irys L1.
+    rows, _source = get_tier_assignments(scratchpad)
+    expected = [
+        a["report_id"] for a in rows
+        if a["report_id"][:1].upper() in prefixes
+    ]
+
+    # Produced = report-ID section headers in the tier file. Use the same
+    # parser as the body validator instead of a private `###`-only regex;
+    # otherwise a body that passes `_validate_report_body` can fail retry-hint
+    # accounting solely because it used `## [X-NN]`.
+    produced = [
+        fid for fid in _extract_report_ids_from_body(tier_text)
+        if fid[:1].upper() in prefixes
+    ]
+
+    return expected, produced
+
+
+def _compute_assemble_count_delta(
+    scratchpad: Path, project_root: str
+) -> dict[str, tuple[int, int]]:
+    """Return per-tier (summary_count, body_count) from AUDIT_REPORT.md.
+
+    Used by the report_assemble quality gate's delta-aware retry hint so
+    the retry prompt can say "summary says 22 Medium, body has 25, fix one
+    side" instead of re-asking generically.
+    """
+    pr = Path(project_root) / "AUDIT_REPORT.md"
+    if not pr.exists():
+        return {}
+    try:
+        text = pr.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+    summary = {}
+    for char, name in (
+        ("C", "Critical"), ("H", "High"), ("M", "Medium"),
+        ("L", "Low"), ("I", "Informational"),
+    ):
+        m = re.search(
+            rf"^\s*\|\s*{name}\s*\|\s*(\d+)\s*\|",
+            text, re.MULTILINE,
+        )
+        summary[char] = int(m.group(1)) if m else 0
+
+    body = {}
+    body_end = text.find("## Appendix A")
+    body_text = text[:body_end] if body_end > 0 else text
+    body_ids = _extract_report_ids_from_body(body_text)
+    for char in ("C", "H", "M", "L", "I"):
+        body[char] = sum(1 for rid in body_ids if rid.startswith(char + "-"))
+
+    return {c: (summary.get(c, 0), body.get(c, 0)) for c in "CHMLI"}
+
+
+def _write_retry_hint(
+    scratchpad: Path, phase_name: str, hint: str
+) -> None:
+    """Write a retry-hint file consumed by `build_phase_prompt` on attempt 2.
+
+    The hint file is deleted after attempt 2 to prevent stale hints from
+    affecting unrelated future runs.
+    """
+    try:
+        p = scratchpad / f"{phase_name}{_RETRY_HINT_SUFFIX}"
+        p.write_text(hint, encoding="utf-8")
+    except Exception as e:
+        log.warning(f"[{phase_name}] retry hint write failed: {e}")
+
+
+def _read_retry_hint(scratchpad: Path, phase_name: str) -> str:
+    """Return retry-hint text for this phase, or '' if none."""
+    p = scratchpad / f"{phase_name}{_RETRY_HINT_SUFFIX}"
+    if not p.exists():
+        return ""
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+        # v2.6.x: depth confidence scoring is an in-scope never-cut artifact.
+        # Older halted runs may still have a retry hint that told attempt 3
+        # not to execute "scoring", making the repair prompt self-contradictory.
+        if phase_name == "depth" and "verification, scoring, or report work" in text:
+            text = text.replace(
+                "Phase 4b.5/RAG, chain analysis, verification, scoring, or report work",
+                "Phase 4b.5/RAG, final_scoring, chain analysis, verification, or report work",
+            )
+            if "Initial confidence scoring is part of the depth phase" not in text:
+                patched = text.replace(
+                    "- Do NOT write rag_validation.md or any later-phase artifact.\n",
+                    "- Do NOT write rag_validation.md or any later-phase artifact.\n"
+                    "- Initial confidence scoring is part of the depth phase in Core/Thorough. "
+                    "If confidence_scores.md is missing or too small, spawn the Phase 4b "
+                    "Confidence Scoring Agent and write confidence_scores.md before returning.\n",
+                )
+                if patched == text:
+                    patched = (
+                        text.rstrip()
+                        + "\n- Initial confidence scoring is part of the depth phase in Core/Thorough. "
+                        "If confidence_scores.md is missing or too small, spawn the Phase 4b "
+                        "Confidence Scoring Agent and write confidence_scores.md before returning.\n"
+                    )
+                text = patched
+        return text
+    except Exception:
+        return ""
+
+
+def _clear_retry_hint(scratchpad: Path, phase_name: str) -> None:
+    """Remove the retry-hint file for this phase (post-retry cleanup)."""
+    p = scratchpad / f"{phase_name}{_RETRY_HINT_SUFFIX}"
+    try:
+        if p.exists():
+            p.unlink()
+    except Exception:
+        pass
+
+
+def _generate_tier_retry_hint(
+    scratchpad: Path, phase_name: str
+) -> str | None:
+    """Compute a delta-aware retry hint for a report tier phase.
+
+    Returns a human-readable multi-line prompt suffix listing the SPECIFIC
+    missing IDs, or None if no delta exists / helper cannot determine one.
+    """
+    expected, produced = _compute_tier_completeness_delta(scratchpad, phase_name)
+    if not expected:
+        return None
+    missing = [fid for fid in expected if fid not in set(produced)]
+    if not missing:
+        return None
+    sample = ", ".join(f"`{fid}`" for fid in missing[:20])
+    return (
+        "## RETRY HINT — delta-aware (v2.1.6)\n"
+        "\n"
+        "Your previous attempt produced an incomplete tier file. The Index "
+        "Agent assigned "
+        f"{len(expected)} finding(s) to this tier, but your tier file "
+        f"contains only {len(produced)}. The following "
+        f"{len(missing)} finding(s) are MISSING from your output and "
+        "MUST be written in this attempt:\n"
+        "\n"
+        f"  {sample}\n"
+        "\n"
+        "Treat the existing tier file as baseline — APPEND the missing "
+        "findings at the correct severity position, do NOT rewrite the "
+        "findings that are already present. Use `report_index.md` as the "
+        "authoritative source for each missing finding's title, location, "
+        "severity, and internal-hypothesis cross-reference.\n"
+    )
+
+
+def _generate_assemble_retry_hint(
+    scratchpad: Path, project_root: str
+) -> str | None:
+    """Compute a delta-aware retry hint for report_assemble quality gate.
+
+    Returns a prompt suffix listing per-tier (summary_count, body_count)
+    mismatches, or None if counts reconcile.
+    """
+    deltas = _compute_assemble_count_delta(scratchpad, project_root)
+    mismatches = [
+        (c, s, b) for c, (s, b) in deltas.items() if s != b
+    ]
+    if not mismatches:
+        return None
+    lines = [
+        "## RETRY HINT — assembler count reconciliation (v2.1.6)",
+        "",
+        "Your previous assembled AUDIT_REPORT.md has a mismatch between "
+        "the Summary table counts and the actual `### [X-NN]` body "
+        "sections. Per-tier deltas:",
+        "",
+        "| Tier | Summary says | Body has |",
+        "|------|--------------|----------|",
+    ]
+    name_map = {"C": "Critical", "H": "High", "M": "Medium",
+                "L": "Low", "I": "Informational"}
+    for c, s, b in mismatches:
+        lines.append(f"| {name_map[c]} | {s} | {b} |")
+    lines.extend([
+        "",
+        "Resolution: the body is the source of truth (each section is "
+        "authored by a tier writer). Update the Summary table to match "
+        "the body count. Do NOT add or remove body sections — those came "
+        "from the tier writers and are canonical.",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def _generate_recon_retry_hint(missing: list[str]) -> str:
+    """Build a targeted retry hint for recon gate failures.
+
+    Handles two failure classes:
+    1. Stub-only/missing artifacts — specific files need content written.
+    2. Coverage failures — substantial modules uncited in recon output.
+    """
+    if not missing:
+        return ""
+    text = "\n".join(str(x) for x in missing)
+
+    # --- Class 1: stub-only or missing artifacts ---
+    stub_artifacts: list[str] = []
+    for item in missing:
+        m = re.match(r"^(\S+\.md)\s*\(stub only\)$", str(item))
+        if m:
+            stub_artifacts.append(m.group(1))
+        elif str(item).endswith(".md") and "coverage" not in str(item).lower() and "content" not in str(item).lower():
+            stub_artifacts.append(str(item).split()[0])
+
+    if stub_artifacts:
+        lines = [
+            "## RETRY HINT - recon artifacts missing or empty",
+            "",
+            "The previous attempt wrote some recon files but left these "
+            "empty or too small. The other recon artifacts are complete — "
+            "do NOT rewrite them.",
+            "",
+            "ONLY produce these files (read existing complete artifacts "
+            "for context, do NOT modify them):",
+        ]
+        for name in stub_artifacts:
+            lines.append(f"- {name}")
+        lines.extend([
+            "",
+            "IMPORTANT: Work sequentially on each file. Do NOT spawn "
+            "parallel sub-agents — process one file at a time to avoid "
+            "capacity issues.",
+        ])
+        # If there are also coverage failures, append them
+        coverage_items = [
+            item for item in missing
+            if "coverage" in str(item).lower()
+        ]
+        if coverage_items:
+            lines.extend(["", "Additionally fix these coverage gaps:"])
+            for item in coverage_items:
+                lines.append(f"- {item}")
+        return "\n".join(lines) + "\n"
+
+    # --- Class 2: coverage failures only ---
+    modules: list[str] = []
+    m = re.search(
+        r"recon missed substantial modules .*?:\s*(.+)$",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        modules = [
+            x.strip()
+            for x in re.split(r",\s*", m.group(1))
+            if x.strip()
+        ][:12]
+    lines = [
+        "## RETRY HINT - recon coverage gate failed",
+        "",
+        "The previous recon attempt produced artifacts but failed the "
+        "mechanical coverage gate. Do not treat existing recon files as "
+        "complete until this delta is fixed.",
+        "",
+        "Required action:",
+        "1. For each missed substantial module below, cite at least one "
+        "real in-scope source file path from that module in a recon artifact.",
+        "2. If a module is intentionally out of scope, add rows to "
+        "scope_leftover.md with ACKNOWLEDGED status for the skipped files.",
+        "3. Keep existing recon content; append the missing coverage rather "
+        "than rewriting everything.",
+        "",
+        "Gate failure:",
+    ]
+    for item in missing:
+        lines.append(f"- {item}")
+    if modules:
+        lines.extend(["", "Missed modules to cover or ACKNOWLEDGE:"])
+        for mod in modules:
+            lines.append(f"- {mod}")
+    return "\n".join(lines) + "\n"
+
+
+def _generate_breadth_retry_hint(scratchpad: Path, missing: list[str]) -> str:
+    expected = parse_breadth_manifest_outputs(scratchpad) or []
+    open_outputs: list[str] = []
+    min_bytes = 200
+    for name in expected:
+        p = scratchpad / name
+        if not p.exists() or p.stat().st_size < min_bytes:
+            open_outputs.append(name)
+    if not open_outputs and not missing:
+        return ""
+    lines = [
+        "## RETRY HINT - breadth manifest completion failed",
+        "",
+        "The previous breadth attempt returned before all manifest-derived "
+        "`analysis_<focus_area>.md` outputs were substantial. Do not proceed "
+        "to later phases, and do not count non-manifest analysis files.",
+        "",
+        "Required completion loop:",
+        "1. Read `spawn_manifest.md` and derive the expected breadth outputs.",
+        "2. Re-list those expected files in the scratchpad. File existence/size "
+        "is authoritative; ignore stale COMPLETE/PENDING text in the manifest "
+        "Status column.",
+        f"3. Spawn ONLY rows whose output is missing or below {min_bytes} bytes.",
+        "4. Use batches of at most 6 parallel Task calls.",
+        "5. After each batch returns, repeat steps 2-4.",
+        "6. Exit only when no expected output is missing or stub.",
+        "",
+    ]
+    if open_outputs:
+        lines.append("Open manifest outputs:")
+        for name in open_outputs[:30]:
+            lines.append(f"- {name}")
+        if len(open_outputs) > 30:
+            lines.append(f"- ... (+{len(open_outputs) - 30} more)")
+        lines.append("")
+    if missing:
+        lines.append("Gate failure:")
+        for item in missing:
+            lines.append(f"- {item}")
+    return "\n".join(lines) + "\n"
+
+
+def _sync_degraded_sentinels_to_checkpoint(
+    scratchpad: Path, checkpoint: "Checkpoint"
+) -> list[str]:
+    """Scan scratchpad for `*.degraded` sentinels and append to checkpoint.
+
+    Fixes the Irys L1 observation: `_v2_checkpoint.json.degraded == []`
+    disagrees with 3 `.degraded` files on disk. Readers of the checkpoint
+    JSON get a falsely-clean picture. This helper reconciles — called at
+    pipeline shutdown.
+
+    Returns the list of sentinel phase names added.
+    """
+    added: list[str] = []
+    for p in sorted(scratchpad.glob("*.degraded")):
+        phase_name = p.name[:-len(".degraded")]
+        if phase_name in checkpoint.completed:
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
+            continue
+        if phase_name and phase_name not in checkpoint.degraded:
+            checkpoint.degraded.append(phase_name)
+            added.append(phase_name)
+    return added
+
+
+def _generate_verify_core_if_missing(scratchpad: Path) -> bool:
+    """Mechanical aggregation of verify_*.md into verify_core.md.
+
+    v2.2.2 Fix 3 — ALWAYS rebuild. Pre-v2.2.2 this helper was a
+    "if missing or <100 bytes" fallback. Live failure mode (Irys L1
+    v2.2.0): the LLM-written verify_core.md existed and was >100 bytes
+    but contained ONLY the crit/high shard — the medium shard's 31
+    verifier rows were missing. The fallback didn't fire, the Index
+    Agent read the incomplete aggregate, and 31 verified findings were
+    silently dropped from the report (analytical baseline of 18/74
+    recall regressed to 7/74 visible).
+
+    The fix: always rebuild from filesystem `verify_*.md` glob. The
+    LLM doesn't add semantic value to a one-row-per-finding aggregate;
+    the per-finding semantics live in the individual verify files. The
+    aggregate is a deterministic projection — own it deterministically.
+
+    Returns True if the file was written here, False if no verify_*.md
+    files exist to aggregate.
+    """
+    target = scratchpad / "verify_core.md"
+    verify_files = sorted(
+        f for f in scratchpad.glob("verify_*.md")
+        if f.name != "verify_core.md"
+        and not f.name.endswith(_RETRY_HINT_SUFFIX)
+        # Skeptic / judge files are NOT verifier outputs.
+        and "skeptic" not in f.name
+        and "judge" not in f.name
+    )
+    if not verify_files:
+        if not target.exists():
+            target.write_text(
+                "# Verification Core (Auto-Generated)\n\n"
+                "No `verify_*.md` files found. "
+                "All verification shards may have been skipped.\n\n"
+                "| Finding | Verdict | Evidence | Severity |\n"
+                "|---------|---------|----------|----------|\n",
+                encoding="utf-8",
+            )
+        return False
+
+    rows: list[tuple[str, str, str, str]] = []
+    for vf in verify_files:
+        try:
+            t = vf.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        # Extract finding ID from filename: verify_H-03.md, verify_F-L1-C-01.md,
+        # verify_H-C01.md (L1 tiered), verify_H-M27.md, verify_H-L07.md.
+        # v2.3.2 F1: align with _collect_verify_hypothesis_ids' permissive
+        # regex. The prior `-\d+` trailing requirement rejected L1 tiered
+        # IDs (H-C01 / H-M27 / H-L07) — same bug class as v2.2.2 Fix 1, just
+        # in a different gate. Falling back to vf.stem produced garbage
+        # `verify_H-C01` rows in the verify_core.md aggregate.
+        fid_match = re.search(
+            r"verify_(?:F-)?([A-Z][A-Z0-9\-]*\d+)", vf.stem
+        )
+        fid = fid_match.group(1) if fid_match else vf.stem
+        verdict_field = _field_from_markdown(
+            t, ("Verdict", "Final Verdict", "Status")
+        )
+        verdict = (
+            _verifier_status_from_text(f"Verdict: {verdict_field}")
+            if verdict_field else ""
+        ) or "-"
+        tag_field = _field_from_markdown(
+            t, ("Evidence Tag", "Evidence Tags", "Evidence")
+        )
+        tag_match = re.search(
+            r"\[(" + EVIDENCE_TAG_NAMES_RE + r")\b",
+            tag_field or t,
+        )
+        tag = f"[{tag_match.group(1)}]" if tag_match else (tag_field or "-")
+        loc_field = _field_from_markdown(t, ("Location", "Location(s)"))
+        loc = (loc_field.strip(" *`") if loc_field else "-")[:80]
+        rows.append((fid, verdict, tag, loc))
+
+    rows.sort(key=lambda r: r[0])
+    lines = [
+        "# verify_core.md (mechanical aggregate — v2.2.2)",
+        "",
+        f"> Aggregated from {len(rows)} `verify_*.md` file(s) by the "
+        "driver. v2.2.2 always rebuilds (was: fallback if missing or "
+        "<100 bytes) — the prior conditional logic let an LLM-written "
+        "incomplete aggregate slip past the threshold and silently "
+        "dropped a whole verify shard. See individual `verify_*.md` "
+        "files for full per-finding verification detail.",
+        "",
+        "| Finding ID | Verdict | Evidence Tag | Location |",
+        "|------------|---------|--------------|----------|",
+    ]
+    for fid, verdict, tag, loc in rows:
+        lines.append(f"| {fid} | {verdict} | {tag} | {loc} |")
+    lines.append("")
+    try:
+        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return True
+    except Exception as e:
+        log.warning(f"verify_core mechanical fallback write failed: {e}")
+        return False
+
+
+def _validate_verify_content_quality(
+    scratchpad: Path, max_thin_ratio: float = 0.40
+) -> list[str]:
+    """Detect when too many verify_*.md files are content-thin.
+
+    Closes Codex gap #5: a verify file that has only `**Verdict**: CONFIRMED`
+    with no Description / Impact / Recommendation cannot produce a useful
+    report section. The renderer falls back to thin boilerplate. If too many
+    verify files are thin, the report is silently shallow even though every
+    queue ID is "verified."
+
+    Threshold: >40% of verify files thin -> flag. Configurable via
+    `max_thin_ratio` for stricter modes.
+
+    A verify file is considered "thin" if it lacks at least 2 of the 4 key
+    sections: Description, Impact, PoC Result, Recommendation. Skips
+    skeptic/judge/aggregate files.
+    """
+    verify_files = sorted(
+        f for f in scratchpad.glob("verify_*.md")
+        if f.name not in {"verify_core.md", "verify_core_full.md"}
+        and not f.name.endswith(_RETRY_HINT_SUFFIX)
+        and "skeptic" not in f.name and "judge" not in f.name
+    )
+    if not verify_files:
+        return []
+    thin: list[str] = []
+    section_re = re.compile(
+        r"(?im)^#{2,4}\s+(?:Description|Impact|PoC Result|Recommendation|"
+        r"Finding Summary|Analysis|Code Trace|Mitigation|Fix|"
+        r"Assessment|Consequences|Testing|Suggested\s+Changes?|Proof|"
+        r"Exploit|Severity|Root\s+Cause|Vulnerability|Overview|"
+        r"Evidence|Details|Summary)\b",
+    )
+    for vf in verify_files:
+        try:
+            text = _llm_norm(vf.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            text = ""
+        # Count distinct section headings present (label only, no `###` prefix).
+        sections = set()
+        for m in section_re.finditer(text):
+            label_only = re.sub(r"^#+\s+", "", m.group(0)).lower()
+            sections.add(label_only)
+        # Also accept inline `**Field**:` form for non-shard verifiers.
+        for label in ("Description", "Impact", "PoC Result", "Recommendation",
+                       "Assessment", "Consequences", "Severity", "Evidence",
+                       "Root Cause", "Fix", "Mitigation", "Analysis"):
+            if _field_from_markdown(text, (label,)):
+                sections.add(label.lower())
+        if len(sections) < 2:
+            thin.append(vf.name)
+    if not thin:
+        return []
+    ratio = len(thin) / len(verify_files)
+    if ratio < max_thin_ratio:
+        return []
+    sample = ", ".join(thin[:5])
+    more = f" (+{len(thin) - 5} more)" if len(thin) > 5 else ""
+    return [
+        f"verify content quality: {len(thin)}/{len(verify_files)} ({ratio:.0%}) "
+        f"verify_*.md files are content-thin (<2 of Description/Impact/PoC/"
+        f"Recommendation sections); the report will be shallow. Files: "
+        f"{sample}{more}"
+    ]
+
+
+def _validate_crossbatch_quality(scratchpad: Path) -> list[str]:
+    """Promote crossbatch warnings into gate signal (v2.1.6).
+
+    The Irys L1 run exposed that `cross_batch_consistency.md` frequently
+    reports "Overall: ISSUES FOUND" with 21 findings missing evidence
+    tags etc., but the driver did not halt. Those issues mean downstream
+    verdicts lack mechanical proof tags — a substance problem.
+
+    This helper returns gate issues when the crossbatch file reports
+    missing-evidence above a threshold. SOFT: returns [] when file
+    missing or unparseable.
+    """
+    p = scratchpad / "cross_batch_consistency.md"
+    if not p.exists():
+        return []
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    # Look for explicit counts. Pattern: "21 findings missing evidence tags"
+    issues: list[str] = []
+    m = re.search(
+        r"(\d+)\s+findings?\s+missing\s+evidence\s+tags?",
+        text, re.IGNORECASE,
+    )
+    if m:
+        n = int(m.group(1))
+        # 20+ missing evidence tags is suspicious; 5+ in a small audit is too.
+        # Use percentage-of-total when we can find the "Files checked: N" line.
+        total_m = re.search(
+            r"Files?\s+checked\s*:?\s*(\d+)", text, re.IGNORECASE,
+        )
+        total = int(total_m.group(1)) if total_m else None
+        if total and total > 0:
+            pct = (n / total) * 100
+            if pct >= 30:
+                issues.append(
+                    f"crossbatch: {n}/{total} ({pct:.0f}%) findings missing "
+                    "evidence tags — verify shards should re-attach"
+                )
+        elif n >= 20:
+            issues.append(
+                f"crossbatch: {n} findings missing evidence tags — "
+                "verify shards should re-attach"
+            )
+    _fail_signal_patterns = (
+        r"overall\b[^:]*:\s*(?:fail|issues)",
+        r"status\b[^:]*:\s*fail",
+        r"schema\s+violations?",
+        r"severity\s+mismatches?",
+        r"missing\s+severity\s+field",
+        r"evidence[- ]?tag\s+mismatches?",
+    )
+    lowered = text.lower()
+    expected_ids = _collect_verify_hypothesis_ids(scratchpad)
+    checked_total = None
+    checked_patterns = (
+        r"Verifiers?\s+Checked\s*:?\s*(\d+)",
+        r"Verify\s+Files\s+Checked\s*:?\s*(\d+)",
+        r"Files?\s+checked\s*:?\s*(\d+)",
+        r"Checked\s*:?\s*(\d+)\s*/\s*(\d+)",
+    )
+    for pat in checked_patterns:
+        cm = re.search(pat, text, re.IGNORECASE)
+        if not cm:
+            continue
+        checked_total = int(cm.group(1))
+        if len(cm.groups()) >= 2 and cm.group(2):
+            declared_total = int(cm.group(2))
+            if expected_ids and declared_total < len(expected_ids):
+                issues.append(
+                    f"crossbatch: declared scope {declared_total} below "
+                    f"{len(expected_ids)} verify file(s)"
+                )
+        break
+    # ID coverage is checked separately by _validate_crossbatch_full_coverage
+    # (which accepts affirmation phrases, range patterns, and enumeration).
+    # This quality gate focuses on substance: evidence-tag rates + fail signals.
+    # The prior redundant coverage check here used a stricter format requirement
+    # than the full-coverage gate, causing false failures when haiku wrote
+    # honest summaries without literal `Checked: N/M` patterns.
+    if any(re.search(pat, lowered) for pat in _fail_signal_patterns):
+        issues.append(
+            "crossbatch: consistency/schema issues reported; see "
+            "cross_batch_consistency.md"
+        )
+    return issues
+
+
+def _crossbatch_verify_file_ids(scratchpad: Path) -> list[tuple[str, str]]:
+    """Return `(finding_id, filename)` rows for real verifier artifacts."""
+    rows: list[tuple[str, str]] = []
+    for p in sorted(scratchpad.glob("verify_*.md")):
+        if p.name.endswith(_RETRY_HINT_SUFFIX):
+            continue
+        stem = p.stem
+        if stem.startswith("verify_F-"):
+            fid = stem[len("verify_F-"):]
+        elif stem.startswith("verify_F_"):
+            fid = stem[len("verify_F_"):]
+        elif stem.startswith("verify_"):
+            tok = stem[len("verify_"):]
+            if tok in {"core", "queue", "aggregate", "NONE"}:
+                continue
+            fid = tok.strip("[]")
+        else:
+            continue
+        if fid:
+            rows.append((fid, p.name))
+    return rows
+
+
+def _crossbatch_manifest_rows(scratchpad: Path) -> list[dict[str, str]]:
+    """Return the canonical crossbatch scope rows."""
+    queue_by_id = {
+        (row.get("finding id") or "").strip(): row
+        for row in parse_verification_queue_rows(scratchpad)
+        if (row.get("finding id") or "").strip()
+    }
+    rows: list[dict[str, str]] = []
+    for fid, filename in _crossbatch_verify_file_ids(scratchpad):
+        p = scratchpad / filename
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            text = ""
+        qrow = queue_by_id.get(fid, {})
+        verdict = _verifier_status_from_text(text) or "-"
+        severity = _severity_name_from_text(text, qrow) if text else (
+            qrow.get("severity") or "-"
+        )
+        evidence = (
+            _field_from_markdown(text, ("Evidence Tag", "Evidence Tags", "Evidence"))
+            or qrow.get("preferred tag")
+            or "-"
+        )
+        title = (
+            _field_from_markdown(text, ("Title", "Finding", "Finding Title"))
+            or qrow.get("title")
+            or "-"
+        )
+        rows.append({
+            "finding_id": fid,
+            "verify_file": filename,
+            "verdict": verdict,
+            "severity": severity,
+            "evidence_tag": evidence,
+            "title": title,
+        })
+    return rows
+
+
+def _write_crossbatch_manifest(scratchpad: Path) -> list[dict[str, str]]:
+    """Write the manifest that makes crossbatch scope explicit."""
+    rows = _crossbatch_manifest_rows(scratchpad)
+    payload = {
+        "phase": "crossbatch",
+        "required_count": len(rows),
+        "findings": rows,
+    }
+    target = scratchpad / "crossbatch_manifest.json"
+    content = json.dumps(payload, indent=2)
+    try:
+        if target.exists() and target.read_text(encoding="utf-8") == content:
+            return rows
+    except Exception:
+        pass
+    target.write_text(content, encoding="utf-8")
+    return rows
+
+
+def _crossbatch_expected_rows(scratchpad: Path) -> list[tuple[str, str]]:
+    """Return expected `(finding_id, verify_file)` rows for crossbatch."""
+    current_rows = _crossbatch_verify_file_ids(scratchpad)
+    if current_rows:
+        return current_rows
+    manifest = scratchpad / "crossbatch_manifest.json"
+    if manifest.exists():
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        rows = []
+        for item in data.get("findings", []) or []:
+            fid = str(item.get("finding_id") or "").strip()
+            filename = str(item.get("verify_file") or "").strip()
+            if fid:
+                rows.append((fid, filename))
+        return rows
+    return []
+
+
+def _append_crossbatch_coverage_ledger(scratchpad: Path) -> list[str]:
+    """Append missing verify IDs to the crossbatch coverage ledger.
+
+    The crossbatch LLM owns contradiction analysis. The driver owns the
+    transition invariant that every verifier artifact is explicitly accounted
+    for. If the LLM writes valid consistency prose but omits some IDs, append
+    a truthful coverage-only ledger so downstream gates do not force a retry
+    for an ID-list omission.
+    """
+    cb = scratchpad / "cross_batch_consistency.md"
+    if not cb.exists():
+        return []
+    try:
+        cb_text = cb.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    verify_rows = _crossbatch_expected_rows(scratchpad)
+    if not verify_rows:
+        return []
+    cb_ids = _extract_finding_ids_from_text(cb_text)
+    missing_rows = [
+        (fid, filename)
+        for fid, filename in verify_rows
+        if fid not in cb_ids and fid not in cb_text
+    ]
+    if not missing_rows:
+        return []
+
+    lines = [
+        "",
+        "## Verify Coverage Ledger (Driver Completion)",
+        "",
+        "The crossbatch agent did not explicitly list every manifest verifier ID. "
+        "The driver appended this coverage-only ledger to preserve the phase "
+        "transition contract. Rows below mean the verifier file exists and no "
+        "cross-batch contradiction was reported for that ID by the agent.",
+        "",
+        "| Finding ID | Verify Artifact | Cross-Batch Status | Notes |",
+        "|------------|-----------------|--------------------|-------|",
+    ]
+    for fid, filename in missing_rows:
+        lines.append(
+            f"| {fid} | {filename} | NO_CONTRADICTION_REPORTED_BY_AGENT | "
+            "DRIVER_COVERAGE_COMPLETION; verifier artifact present. |"
+        )
+    lines.append("")
+    try:
+        cb.write_text(cb_text.rstrip() + "\n" + "\n".join(lines), encoding="utf-8")
+    except Exception:
+        return []
+    return [fid for fid, _filename in missing_rows]
+
+
+def _skeptic_manifest_ids(scratchpad: Path) -> list[str]:
+    """Return current skeptic scope IDs, falling back to old manifests only.
+
+    Stale `skeptic_manifest.json` files caused critical/high verifier outputs
+    created after queue regeneration to escape skeptic coverage. The current
+    verifier/queue state is the contract; the manifest is just a prompt aid.
+    """
+    current = [r["finding_id"] for r in _skeptic_expected_findings(scratchpad)]
+    if current:
+        return list(dict.fromkeys(current))
+    path = scratchpad / "skeptic_manifest.json"
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    out: list[str] = []
+    for item in payload.get("findings", []):
+        if not isinstance(item, dict):
+            continue
+        fid = str(item.get("finding_id") or "").strip()
+        if fid:
+            out.append(fid)
+    return out
+
+
+def _validate_skeptic_scope(scratchpad: Path) -> list[str]:
+    """Ensure the dedicated skeptic phase covers every Critical/High finding."""
+    manifest_ids = _skeptic_manifest_ids(scratchpad)
+    if manifest_ids:
+        expected = set(manifest_ids)
+    else:
+        expected: set[str] = set()
+        queue_rows = parse_verification_queue_rows(scratchpad)
+        for row in queue_rows:
+            fid = (row.get("finding id") or "").strip()
+            if not fid:
+                continue
+            if _severity_bucket(row.get("severity", "")) not in {"critical", "high"}:
+                continue
+            vp = _verify_file_for_id(scratchpad, fid)
+            try:
+                vtxt = vp.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                vtxt = ""
+            if _is_reportable_verdict(_verifier_status_from_text(vtxt)):
+                expected.add(fid)
+    if not expected:
+        return []
+
+    texts: list[str] = []
+    for name in ("skeptic_findings.md", "skeptic_judge_decisions.md"):
+        p = scratchpad / name
+        if p.exists():
+            try:
+                texts.append(p.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                pass
+    for p in sorted(scratchpad.glob("judge_*.md")):
+        try:
+            texts.append(p.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            pass
+    if not texts:
+        return [f"skeptic scope: missing skeptic/judge artifacts for {len(expected)} C/H finding(s)"]
+    combined = "\n".join(texts)
+    covered = set(_INTERNAL_FINDING_ID_RE.findall(combined))
+
+    # Closes Codex gap #3: skeptic files often reference report IDs (C-01,
+    # H-03) instead of internal finding IDs (INV-001). Resolve via the
+    # Master Finding Index mapping so a legitimately-thorough skeptic
+    # review using only report IDs doesn't false-flag.
+    internal_to_report: dict[str, str] = {}
+    report_to_internal: dict[str, str] = {}
+    try:
+        for a in get_tier_assignments(scratchpad)[0]:
+            fid = a.get("finding_id", "")
+            rid = a.get("report_id", "")
+            if fid and rid:
+                internal_to_report[fid] = rid
+                report_to_internal[rid] = fid
+    except Exception:
+        pass
+    if internal_to_report:
+        # Treat report IDs in skeptic text as covering their mapped internal IDs.
+        for rid in list(covered):
+            mapped = report_to_internal.get(rid)
+            if mapped:
+                covered.add(mapped)
+    missing = sorted(expected - covered)
+    if missing:
+        sample = ", ".join(missing[:8])
+        more = f" (+{len(missing)-8} more)" if len(missing) > 8 else ""
+        return [
+            f"skeptic scope: reviewed {len(expected)-len(missing)}/{len(expected)} "
+            f"Critical/High finding(s); missing {sample}{more}"
+        ]
+    return []
+
+
+# --- end v2.1.6 helpers -----------------------------------------------------
+# --- v2.1.8: strict phase-isolation via quarantine --------------------------
+#
+# Some phases' subagents produce later-phase artifacts inline as an
+# optimization. v2.1.6 accepted these via an allowlist. v2.1.8 refines:
+# adversarial-class artifacts (skeptic, judge, crossbatch) MUST be produced
+# in their dedicated phases with fresh context per AD-2 (rules/phase4-
+# confidence-scoring.md), so we quarantine them out of the way and let the
+# dedicated phases run. Mechanical-aggregate artifacts (verify_core.md)
+# remain allowed inline.
+# Files that must be produced ONLY by their dedicated phase. If they appear
+# during a different phase's subprocess, we move them aside rather than
+# halt — keeps the pipeline seamless while preserving phase isolation.
+_QUARANTINE_PATTERNS_BY_PHASE: dict[str, tuple[str, ...]] = {
+    # Verify phases must NOT produce skeptic/crossbatch artifacts inline.
+    # Same-context production loses adversarial divergence (skeptic) and
+    # cross-shard independence (crossbatch). verify_core.md is exempt — it's
+    # mechanical aggregation, no adversarial reasoning.
+    "verify": (
+        "skeptic_*.md", "judge_*.md",
+        "cross_batch_consistency*.md", "scanner_validation_*.md",
+    ),
+    "verify_crithigh": (
+        "skeptic_*.md", "judge_*.md",
+        "cross_batch_consistency*.md",
+    ),
+    "verify_medium_a": (
+        "skeptic_*.md", "judge_*.md",
+        "cross_batch_consistency*.md",
+    ),
+    "verify_medium_b": (
+        "skeptic_*.md", "judge_*.md",
+        "cross_batch_consistency*.md",
+    ),
+}
+for _verify_phase_name in L1_VERIFY_PHASE_NAMES:
+    _QUARANTINE_PATTERNS_BY_PHASE.setdefault(_verify_phase_name, (
+        "skeptic_*.md", "judge_*.md", "cross_batch_consistency*.md",
+    ))
+for _verify_phase_name in SC_VERIFY_PHASE_NAMES:
+    _QUARANTINE_PATTERNS_BY_PHASE.setdefault(_verify_phase_name, (
+        "skeptic_*.md", "judge_*.md", "cross_batch_consistency*.md",
+    ))
+
+
+def _quarantine_phase_overreach(
+    scratchpad: Path, phase_name: str, file_state_before: dict
+) -> list[str]:
+    """Move later-phase artifacts written by this phase into `_overflow/`.
+
+    Strict phase isolation, seamless mode: the dedicated downstream phase
+    will produce its canonical output with fresh context. The quarantined
+    file is preserved for forensics — operator can inspect after run.
+
+    Returns the list of (relative) filenames moved.
+    """
+    patterns = _QUARANTINE_PATTERNS_BY_PHASE.get(phase_name)
+    if not patterns:
+        return []
+    overflow_dir = scratchpad / "_overflow" / phase_name
+    moved: list[str] = []
+    for pat in patterns:
+        for src in scratchpad.glob(pat):
+            # Only quarantine files that this phase actually produced or
+            # modified — i.e., not present in `file_state_before` snapshot
+            # OR mtime/size differs.
+            try:
+                st = src.stat()
+                cur_meta = (st.st_mtime_ns, st.st_size)
+            except Exception:
+                continue
+            prev_meta = file_state_before.get(src.name)
+            changed = prev_meta is None or prev_meta != cur_meta
+            if not changed:
+                continue
+            try:
+                overflow_dir.mkdir(parents=True, exist_ok=True)
+                dst = overflow_dir / src.name
+                # If dst already exists from a prior run, append a suffix.
+                if dst.exists():
+                    import time as _t
+                    dst = overflow_dir / f"{src.stem}.{int(_t.time())}{src.suffix}"
+                src.rename(dst)
+                moved.append(src.name)
+            except Exception as e:
+                log.warning(
+                    f"[{phase_name}] quarantine of {src.name} failed: {e}"
+                )
+    if moved:
+        # Log to violations.md so the operator sees this in post-run.
+        try:
+            vp = scratchpad / "violations.md"
+            with vp.open("a", encoding="utf-8") as f:
+                f.write(
+                    f"\n## v2.1.8 phase-isolation quarantine "
+                    f"({phase_name})\n"
+                )
+                f.write(
+                    "Inline production of dedicated-phase artifacts. Moved "
+                    "to `_overflow/` so the dedicated phase can run with "
+                    "fresh context (AD-2 adversarial divergence).\n"
+                )
+                for name in moved:
+                    f.write(f"- {name} -> _overflow/{phase_name}/\n")
+        except Exception:
+            pass
+    return moved
+
+
+# --- v2.3.14: stale artifact quarantine before retry ----------------------------
+# Phase-specific dynamic artifact patterns that should be quarantined on retry
+# but are NOT in the phase's expected_artifacts (they're produced dynamically).
+_RETRY_QUARANTINE_EXTRAS: dict[str, list[str]] = {
+    "crossbatch": ["cross_batch_consistency.md"],
+    "verify_aggregate": ["verify_core.md"],
+    "graph_sweeps": ["graph_*.md"],
+    "report_index": ["report_index.md", "report_coverage.md"],
+    "skeptic": ["skeptic_findings.md", "skeptic_judge_decisions.md", "judge_*.md"],
+}
+
+
+_ACCUMULATE_ON_RETRY_PHASES: frozenset[str] = frozenset({
+    "breadth", "rescan", "depth",
+})
+"""Phases where substantial attempt-1 artifacts should be KEPT on retry.
+
+For these phases, the gate failure is a quorum shortfall (not enough files),
+not a content problem. Existing substantial files are correct work products.
+The RESUMPTION PROTOCOL sees them and only spawns agents for the missing
+outputs — accumulating results across attempts instead of restarting from
+scratch.
+"""
+
+
+def _retry_quarantine_dir(scratchpad: Path, phase_name: str) -> Path:
+    return scratchpad / "_retry_quarantine" / phase_name
+
+
+def _quarantine_stale_on_retry(
+    scratchpad: Path, phase: Phase, missing: list[str]
+) -> list[str]:
+    """Rename stale phase outputs so the RESUMPTION PROTOCOL won't skip them.
+
+    On retry after a gate failure, artifacts exist on disk but have wrong
+    content. The RESUMPTION PROTOCOL sees >=500 bytes and tells the LLM
+    "already done, skip." This function moves them under
+    `_retry_quarantine/{phase}/` so the retry LLM cannot accidentally read and
+    copy the known-bad output as source material.
+
+    Only quarantines the phase's OWN outputs (expected_artifacts + dynamic
+    extras). Never touches earlier-phase inputs.
+
+    v2.4.5: phases in _ACCUMULATE_ON_RETRY_PHASES skip quarantine entirely.
+    Their substantial files are correct partial work; the RESUMPTION PROTOCOL
+    accumulates them across retry attempts.
+
+    Returns list of renamed filenames (for logging).
+    """
+    if phase.name in _ACCUMULATE_ON_RETRY_PHASES:
+        return []
+
+    renamed: list[str] = []
+
+    # Collect all patterns to quarantine: expected_artifacts + dynamic extras
+    patterns: list[str] = list(phase.expected_artifacts or [])
+    extras = _RETRY_QUARANTINE_EXTRAS.get(phase.name, [])
+    patterns.extend(extras)
+
+    # For skeptic, exclude skeptic_judge_decisions.md (it's a downstream
+    # artifact consumed by report_index, not a skeptic-phase own output
+    # in the same sense).
+    exclude = set()
+    if phase.name == "skeptic":
+        exclude.add("skeptic_judge_decisions.md")
+
+    for pattern in patterns:
+        if pattern == "AUDIT_REPORT.md":
+            # AUDIT_REPORT.md lives in project_root, not scratchpad
+            continue
+        is_glob = any(ch in pattern for ch in "*?[")
+        if is_glob:
+            matches = list(scratchpad.glob(pattern))
+        else:
+            p = scratchpad / pattern
+            matches = [p] if p.exists() else []
+
+        for src in matches:
+            if src.name in exclude:
+                continue
+            try:
+                if src.stat().st_size < 500:
+                    continue  # stub, not stale — leave for RESUMPTION
+                qdir = _retry_quarantine_dir(scratchpad, phase.name)
+                qdir.mkdir(parents=True, exist_ok=True)
+                dst = qdir / src.name
+                # Don't overwrite a prior backup from the same phase.
+                if dst.exists():
+                    continue
+                src.rename(dst)
+                renamed.append(src.name)
+            except Exception as e:
+                log.debug(
+                    f"[{phase.name}] quarantine-on-retry of "
+                    f"{src.name} failed: {e}"
+                )
+    return renamed
+
+
+def _restore_quarantined_on_retry_failure(
+    scratchpad: Path, phase: Phase
+) -> None:
+    """Restore retry-quarantine backups when retry also fails (degraded).
+
+    The stale content is better than nothing for downstream phases.
+    """
+    patterns: list[str] = list(phase.expected_artifacts or [])
+    patterns.extend(_RETRY_QUARANTINE_EXTRAS.get(phase.name, []))
+
+    for pattern in patterns:
+        if pattern == "AUDIT_REPORT.md":
+            continue
+        is_glob = any(ch in pattern for ch in "*?[")
+        backups: list[Path] = []
+        qdir = _retry_quarantine_dir(scratchpad, phase.name)
+        if is_glob:
+            if qdir.exists():
+                backups.extend(qdir.glob(pattern))
+            backups.extend(scratchpad.glob(pattern + ".attempt1"))
+        else:
+            bp = qdir / pattern
+            if bp.exists():
+                backups.append(bp)
+            legacy_bp = scratchpad / (pattern + ".attempt1")
+            if legacy_bp.exists():
+                backups.append(legacy_bp)
+
+        for backup in backups:
+            original = scratchpad / backup.name
+            if backup.parent == scratchpad and backup.name.endswith(".attempt1"):
+                original = scratchpad / backup.name.removesuffix(".attempt1")
+            # Only restore if the retry didn't produce a replacement
+            if not original.exists() or original.stat().st_size < 100:
+                try:
+                    backup.rename(original)
+                except Exception:
+                    pass
+            else:
+                # Retry produced its own version; discard backup
+                try:
+                    backup.unlink()
+                except Exception:
+                    pass
+
+
+def _cleanup_quarantine_backups(
+    scratchpad: Path, phase: Phase
+) -> None:
+    """Delete retry-quarantine backups after a successful retry.
+
+    The retry produced valid replacements; the backups are no longer needed.
+    """
+    patterns: list[str] = list(phase.expected_artifacts or [])
+    patterns.extend(_RETRY_QUARANTINE_EXTRAS.get(phase.name, []))
+
+    for pattern in patterns:
+        if pattern == "AUDIT_REPORT.md":
+            continue
+        is_glob = any(ch in pattern for ch in "*?[")
+        backups: list[Path] = []
+        qdir = _retry_quarantine_dir(scratchpad, phase.name)
+        if is_glob:
+            if qdir.exists():
+                backups.extend(qdir.glob(pattern))
+            backups.extend(scratchpad.glob(pattern + ".attempt1"))
+        else:
+            bp = qdir / pattern
+            if bp.exists():
+                backups.append(bp)
+            legacy_bp = scratchpad / (pattern + ".attempt1")
+            if legacy_bp.exists():
+                backups.append(legacy_bp)
+
+        for backup in backups:
+            try:
+                backup.unlink()
+            except Exception:
+                pass
+    qdir = _retry_quarantine_dir(scratchpad, phase.name)
+    try:
+        if qdir.exists() and not any(qdir.iterdir()):
+            qdir.rmdir()
+            parent = qdir.parent
+            if parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+    except Exception:
+        pass
+
+
+# --- end v2.3.14 quarantine helpers -------------------------------------------
+def _quarantine_foreign_phase_writes(
+    scratchpad: Path,
+    project_root: str,
+    phase_name: str,
+    offenders: list[str],
+) -> list[str]:
+    """Move foreign later-phase artifacts aside after containment detection.
+
+    `_quarantine_phase_overreach` handles a narrow allowlist before the
+    containment check. This helper handles the general case, including
+    `../AUDIT_REPORT.md` in the project root. Leaving a rogue project-root
+    report in place made an earlier verifier-authored report look published
+    even though the real report phases never ran.
+    """
+    if not offenders:
+        return []
+    overflow_dir = scratchpad / "_overflow" / phase_name
+    moved: list[str] = []
+    for name in offenders:
+        if name == "../AUDIT_REPORT.md":
+            src = Path(project_root) / "AUDIT_REPORT.md"
+        elif name.startswith("../"):
+            src = Path(project_root) / name[3:]
+        else:
+            src = scratchpad / name
+        if not src.exists() or not src.is_file():
+            continue
+        try:
+            overflow_dir.mkdir(parents=True, exist_ok=True)
+            dst = overflow_dir / src.name
+            if dst.exists():
+                import time as _t
+                dst = overflow_dir / f"{src.stem}.{int(_t.time())}{src.suffix}"
+            src.rename(dst)
+            moved.append(name)
+        except Exception as e:
+            log.warning(
+                f"[{phase_name}] quarantine of foreign artifact {name} "
+                f"failed: {e}"
+            )
+    if moved:
+        _mark_artifacts_quarantined(scratchpad, project_root, phase_name, moved)
+        try:
+            vp = scratchpad / "violations.md"
+            with vp.open("a", encoding="utf-8") as f:
+                f.write(
+                    f"\n## phase-containment foreign-artifact quarantine "
+                    f"({phase_name})\n"
+                )
+                for name in moved:
+                    f.write(f"- {name} -> _overflow/{phase_name}/\n")
+        except Exception:
+            pass
+    return moved
+
+
+def _quarantine_report_without_completed_assemble(
+    scratchpad: Path,
+    project_root: str,
+    checkpoint: "Checkpoint",
+) -> Optional[Path]:
+    """Quarantine project-root AUDIT_REPORT.md unless assemble completed.
+
+    A report is authoritative only if `report_assemble` completed in the
+    checkpoint. This startup guard catches reports left behind by older driver
+    versions or interrupted rogue phases before a resume can treat them as
+    published output.
+    """
+    report = Path(project_root) / "AUDIT_REPORT.md"
+    if not report.exists() or "report_assemble" in checkpoint.completed:
+        return None
+    overflow = scratchpad / "_overflow" / "startup_report_guard"
+    try:
+        overflow.mkdir(parents=True, exist_ok=True)
+        dst = overflow / report.name
+        if dst.exists():
+            import time as _t
+            dst = overflow / f"{report.stem}.{int(_t.time())}{report.suffix}"
+        report.rename(dst)
+        try:
+            with (scratchpad / "violations.md").open("a", encoding="utf-8") as f:
+                f.write(
+                    "\n## startup report quarantine\n"
+                    "Moved project-root AUDIT_REPORT.md because "
+                    "`report_assemble` is not completed in _v2_checkpoint.json.\n"
+                    f"- ../AUDIT_REPORT.md -> {dst.relative_to(scratchpad)}\n"
+                )
+        except Exception:
+            pass
+        return dst
+    except Exception as e:
+        log.warning(
+            "[startup] failed to quarantine AUDIT_REPORT.md without completed "
+            f"report_assemble: {e}"
+        )
+        return None
+
+
+def _rewind_completed_after_overflow(
+    scratchpad: Path,
+    checkpoint: "Checkpoint",
+    phases: list[Phase],
+) -> list[str]:
+    """Rewind checkpoint when a completed phase has overflow artifacts.
+
+    `_overflow/<phase>/` means that phase wrote artifacts owned by later
+    phases. Even if a retry later passed, the safest resume behavior is to
+    rerun that phase and every completed downstream phase under the current
+    driver/prompt. This prevents an old contaminated `verify_low_c` from
+    being reused after a phase-containment fix lands.
+    """
+    phase_order = [p.name for p in phases]
+    completed = list(checkpoint.completed or [])
+    contaminated: list[str] = []
+    overflow = scratchpad / "_overflow"
+    if not overflow.exists():
+        return contaminated
+    for phase_name in completed:
+        phase_dir = overflow / phase_name
+        if phase_dir.exists() and any(phase_dir.iterdir()):
+            contaminated.append(phase_name)
+    if not contaminated:
+        return []
+    indices = [phase_order.index(name) for name in contaminated if name in phase_order]
+    if not indices:
+        return []
+    first_idx = min(indices)
+    removed = [
+        name for name in completed
+        if name in phase_order and phase_order.index(name) >= first_idx
+    ]
+    if removed:
+        checkpoint.completed = [
+            name for name in completed
+            if name not in removed
+        ]
+        checkpoint.degraded = [
+            name for name in (checkpoint.degraded or [])
+            if name not in removed
+        ]
+    # Archive consumed overflow dirs so the next resume doesn't re-detect
+    # them and rewind again (infinite loop).
+    for phase_name in contaminated:
+        phase_dir = overflow / phase_name
+        if phase_dir.exists():
+            archive = overflow / f"{phase_name}_rewound_{int(time.time())}"
+            try:
+                phase_dir.rename(archive)
+            except OSError:
+                import shutil
+                shutil.move(str(phase_dir), str(archive))
+    return removed
+
+
+def _skeptic_expected_findings(scratchpad: Path) -> list[dict[str, str]]:
+    """Return reportable Critical/High findings the skeptic must cover."""
+    queue_rows = parse_verification_queue_rows(scratchpad)
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in queue_rows:
+        fid = (row.get("finding id") or "").strip()
+        if not fid or fid in seen:
+            continue
+        vp = _verify_file_for_id(scratchpad, fid)
+        try:
+            vtxt = vp.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            vtxt = ""
+        status = _verifier_status_from_text(vtxt)
+        if not _is_reportable_verdict(status):
+            continue
+        severity = _severity_name_from_text(vtxt, row)
+        if _severity_bucket(severity) not in {"critical", "high"}:
+            continue
+        seen.add(fid)
+        title = (
+            _field_from_markdown(vtxt, ("Title", "Finding", "Finding Title"))
+            or row.get("title")
+            or ""
+        )
+        location = _first_production_location_for_validator(
+            vtxt,
+            row.get("location") or "",
+        ).strip(" *`")
+        evidence = _field_from_markdown(
+            vtxt, ("Evidence Tag", "Evidence Tags", "Evidence")
+        )
+        out.append({
+            "finding_id": fid,
+            "title": title,
+            "severity": severity,
+            "location": location,
+            "verify_file": vp.name,
+            "evidence_tag": evidence,
+        })
+    return out
+
+
+def _write_skeptic_manifest(scratchpad: Path) -> list[dict[str, str]]:
+    """Write the manifest that makes skeptic scope explicit and retryable."""
+    rows = _skeptic_expected_findings(scratchpad)
+    path = scratchpad / "skeptic_manifest.json"
+    payload = {
+        "phase": "skeptic",
+        "required_count": len(rows),
+        "findings": rows,
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return rows
+
+
+def _generate_skeptic_retry_hint(scratchpad: Path) -> str:
+    rows = _skeptic_expected_findings(scratchpad)
+    required = {r["finding_id"] for r in rows}
+    texts: list[str] = []
+    for p in sorted(scratchpad.glob("skeptic_*.md")) + sorted(scratchpad.glob("judge_*.md")):
+        try:
+            texts.append(p.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            pass
+    covered = _extract_finding_ids_from_text("\n".join(texts))
+    missing = sorted(required - covered)
+    if not missing:
+        return ""
+    lines = [
+        "## RETRY HINT - skeptic coverage gate failed",
+        "",
+        f"The skeptic phase must cover every ID in `skeptic_manifest.json` "
+        f"({len(required)} total). The previous attempt missed:",
+        "",
+    ]
+    lines.extend(f"- {fid}" for fid in missing)
+    lines.extend([
+        "",
+        "Required action: rewrite `skeptic_findings.md` and "
+        "`skeptic_judge_decisions.md` so every missing ID appears explicitly.",
+        "Do not use range wording unless the range covers every manifest ID.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+# --- end v2.1.8 helpers -----------------------------------------------------
+# --- v2.3.14: retry hint generators for all validator-gated phases -----------
+def _generate_crossbatch_retry_hint(scratchpad: Path) -> str:
+    """Build retry hint for crossbatch coverage failures."""
+    cb = scratchpad / "cross_batch_consistency.md"
+    verify_ids: list[str] = []
+    for p in sorted(scratchpad.glob("verify_*.md")):
+        stem = p.stem
+        if stem.startswith("verify_F-"):
+            verify_ids.append(stem[len("verify_F-"):])
+        elif stem.startswith("verify_F_"):
+            verify_ids.append(stem[len("verify_F_"):])
+        elif stem.startswith("verify_"):
+            tok = stem[len("verify_"):]
+            if tok in {"core", "queue", "aggregate", "NONE"}:
+                continue
+            verify_ids.append(tok.strip("[]"))
+    if not verify_ids:
+        return ""
+    lines = [
+        "## RETRY HINT — crossbatch coverage gate (v2.3.14)",
+        "",
+        "Your `cross_batch_consistency.md` must explicitly mention EVERY "
+        f"verify finding ID ({len(verify_ids)} total). The previous "
+        "attempt missed some. Each ID must appear literally in the file.",
+        "",
+        "Required IDs:",
+    ]
+    for fid in verify_ids:
+        lines.append(f"- {fid}")
+    lines.append("")
+    lines.append(
+        "For each ID use a format like: "
+        "'`{ID}`: consistent across batches / discrepancy noted'. "
+        "Do NOT assume prior output files are correct — "
+        "they have been quarantined."
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _generate_verify_aggregate_retry_hint(issues: list[str]) -> str:
+    """Build retry hint for verify_aggregate evidence tag failures."""
+    if not issues:
+        return ""
+    lines = [
+        "## RETRY HINT — verify_aggregate quality gate (v2.3.14)",
+        "",
+        "Your previous attempt failed these verification quality checks:",
+        "",
+    ]
+    for issue in issues:
+        lines.append(f"- {issue}")
+    lines.extend([
+        "",
+        "Each verify file MUST contain an evidence tag in one of these "
+        "formats: `[POC-PASS]`, `[POC-FAIL]`, `[CODE-TRACE]`, "
+        "`[MEDUSA-PASS]`, or a Preferred Tag / Evidence Tag field.",
+        "",
+        "Do NOT assume prior output files are correct — "
+        "they have been quarantined.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def _generate_graph_sweeps_retry_hint(issues: list[str]) -> str:
+    """Build retry hint for graph_sweeps validation failures."""
+    if not issues:
+        return ""
+    lines = [
+        "## RETRY HINT — graph_sweeps quality gate (v2.3.14)",
+        "",
+        "Your previous attempt failed these graph sweep quality checks:",
+        "",
+    ]
+    for issue in issues:
+        lines.append(f"- {issue}")
+    lines.extend([
+        "",
+        "Produce output that satisfies ALL of the above. "
+        "Do NOT assume prior output files are correct — "
+        "they have been quarantined.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def _generate_attention_repair_retry_hint(issues: list[str]) -> str:
+    """Build retry hint for attention_repair validation failures."""
+    if not issues:
+        return ""
+    lines = [
+        "## RETRY HINT — attention_repair quality gate (v2.3.14)",
+        "",
+        "Your previous attempt failed these attention repair checks:",
+        "",
+    ]
+    for issue in issues:
+        lines.append(f"- {issue}")
+    lines.extend([
+        "",
+        "Ensure every uncited path from the NOTREAD priority list is "
+        "either cited in a depth/scanner artifact or explicitly "
+        "acknowledged. Rewrite attention_repair_summary.md as a receipt "
+        "table with one row per attention_repair_queue.md row. Copy Queue #, "
+        "Kind, and Target exactly from the queue. For path targets, include "
+        "the full relative path in Target and cite the same path again in "
+        "Evidence with file:line support, or mark NEEDS_HUMAN if the source "
+        "is unavailable. Do NOT assume prior output files are correct — they "
+        "have been quarantined.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def _generate_inventory_retry_hint(issues: list[str]) -> str:
+    """Build retry hint for inventory parity/structure failures."""
+    if not issues:
+        return ""
+    lines = [
+        "## RETRY HINT — inventory quality gate (v2.3.14)",
+        "",
+        "Your previous attempt failed these inventory quality checks:",
+        "",
+    ]
+    for issue in issues:
+        lines.append(f"- {issue}")
+    lines.extend([
+        "",
+        "Ensure findings_inventory.md covers ALL findings from breadth "
+        "analysis files and follows the required table structure. "
+        "Do NOT assume prior output files are correct — "
+        "they have been quarantined.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def _read_inventory_merge_receipt(scratchpad: Path) -> dict[str, int]:
+    receipt = scratchpad / "inventory_merge_receipt.md"
+    if not receipt.exists():
+        return {}
+    try:
+        text = receipt.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+    out: dict[str, int] = {}
+    for key, pattern in {
+        "chunks": r"Chunk files\s*:\s*(\d+)",
+        "parsed": r"Parsed chunk findings\s*:\s*(\d+)",
+        "merged": r"Merged inventory findings\s*:\s*(\d+)",
+    }.items():
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            out[key] = int(m.group(1))
+    return out
+
+
+def _inventory_parity_artifact(scratchpad: Path) -> Path:
+    """Return the immutable inventory artifact that the merge receipt covers."""
+    for name in (
+        "findings_inventory_base.md",
+        "findings_inventory_pre_dedup.md",
+        "findings_inventory.md",
+    ):
+        path = scratchpad / name
+        if path.exists():
+            return path
+    return scratchpad / "findings_inventory.md"
+
+
+def _write_inventory_base_snapshot(scratchpad: Path) -> bool:
+    """Snapshot the original inventory merge output before downstream mutation."""
+    current = scratchpad / "findings_inventory.md"
+    if not current.exists():
+        return False
+    base = scratchpad / "findings_inventory_base.md"
+    try:
+        shutil.copy2(current, base)
+        return True
+    except Exception as exc:
+        log.warning("[inventory] failed to write base inventory snapshot: %s", exc)
+        return False
+
+
+def _read_depth_promotion_receipt_count(scratchpad: Path) -> int:
+    receipt = scratchpad / "depth_promotion_receipt.md"
+    if not receipt.exists():
+        return 0
+    try:
+        text = receipt.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return 0
+    m = re.search(r"Promoted\s+(\d+)\s+depth finding", text, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    promoted_section = re.search(
+        r"(?is)^##\s+Promoted\b(.*?)(?=^##\s+|\Z)", text, re.MULTILINE,
+    )
+    if not promoted_section:
+        return 0
+    return len(re.findall(r"(?m)^\s*[-*]\s*`?([A-Z0-9_-]+-\d+)`?", promoted_section.group(1)))
+
+
+def _count_depth_promotion_inventory_blocks(inv_text: str) -> int:
+    section = re.search(
+        r"(?is)^##\s+Depth Promotion Supplement\b(.*?)(?=^##\s+|\Z)",
+        _llm_norm(inv_text),
+        re.MULTILINE,
+    )
+    if not section:
+        return 0
+    return len(_inventory_blocks(section.group(1)))
+
+
+def _generate_verify_queue_retry_hint(issues: list[str]) -> str:
+    """Build retry hint for verify_queue parity failures."""
+    if not issues:
+        return ""
+    lines = [
+        "## RETRY HINT — verify_queue parity gate (v2.3.14)",
+        "",
+        "Your previous attempt failed these verification queue checks:",
+        "",
+    ]
+    for issue in issues:
+        lines.append(f"- {issue}")
+    lines.extend([
+        "",
+        "The verification_queue.md must include every finding from "
+        "findings_inventory.md. Do NOT assume prior output files are "
+        "correct — they have been quarantined.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def _generate_depth_retry_hint(
+    issues: list[str], *, backend: str = "claude"
+) -> str:
+    """Build retry hint for depth execution-boundary and quality failures."""
+    if not issues:
+        return ""
+    lines = [
+        "## RETRY HINT — depth quality gate (v2.3.14)",
+        "",
+        "Your previous attempt failed these depth quality checks:",
+        "",
+    ]
+    for issue in issues:
+        lines.append(f"- {issue}")
+    lines.extend([
+        "",
+        "Repair rules:",
+        "- Stay inside the depth phase only. Do NOT execute Phase 4b.5/RAG, final_scoring, chain analysis, verification, or report work.",
+        "- Do NOT write rag_validation.md or any later-phase artifact.",
+        "- Initial confidence scoring is part of the depth phase in Core/Thorough. If confidence_scores.md is missing or too small, spawn the Phase 4b Confidence Scoring Agent and write confidence_scores.md before returning.",
+        "- If semantic_invariants.md triggered SEMANTIC_GAP_INVESTIGATOR, spawn that niche agent now and write niche_semantic_gap_findings.md. Do not collapse missing-write/lifecycle-gap signals into generic snapshot prose.",
+        "- For every graph-artifact issue, update the named depth output so it references every produced graph artifact, or add an explicit [GRAPH-ARTIFACT: UNAVAILABLE:<file>] tag for unavailable artifacts.",
+        "- For every SC subsystem coverage issue, read and cite the exact missing files named above, or add explicit [SCOPE-COVERED: <file>] tags after reviewing them.",
+        "- If confidence_scores.md has all identical composite values, REDO scoring: read each finding's depth output and assign per-finding Evidence/Consensus/Quality scores based on actual depth evidence tags ([BOUNDARY], [VARIATION], [TRACE]) present.",
+        "- If iter2 is flagged as missing: after fixing confidence_scores.md, check if any Medium+ findings are UNCERTAIN (composite < 0.7). If yes, spawn a DA iteration 2 agent for those findings and write depth_da_*_findings.md or depth_iter2_*_findings.md.",
+        "",
+        "Ensure ALL never-cut artifacts are produced and all depth "
+        "agents include step execution traces. Prior output files "
+        "are still on disk — re-read and fix quality issues in place. "
+        "Only re-spawn agents whose output is missing or too small.",
+    ])
+    if backend == "codex":
+        # Extract specific missing artifact filenames from never-cut issues
+        missing_files = []
+        for issue in issues:
+            if "never-cut" in issue.lower():
+                for part in issue.split(","):
+                    part = part.strip()
+                    if part.endswith(".md"):
+                        # Extract just the filename
+                        fname = part.split("/")[-1].split(" or ")[0].strip()
+                        missing_files.append(fname)
+        lines.extend([
+            "",
+            "## Codex spawn_agent repair plan",
+            "",
+            "For each missing artifact below, use spawn_agent to create it.",
+            "Each spawn_agent call should include the file's full methodology",
+            "from the V1 prompt section. Use wait_agent after each spawn.",
+            "",
+        ])
+        if missing_files:
+            for fname in missing_files:
+                lines.append(f"- MISSING: `{fname}` → spawn_agent with targeted prompt")
+        else:
+            lines.append("- Check the MANDATORY DEPTH ARTIFACT CHECKLIST above for the full spawn plan.")
+        lines.extend([
+            "",
+            "Do NOT return until every artifact in the checklist exists and",
+            "is ≥200 bytes. The gate checks file existence mechanically.",
+        ])
+    return "\n".join(lines) + "\n"
+
+
+def _generate_report_index_retry_hint(issues: list[str]) -> str:
+    """Build retry hint for report_index completeness failures."""
+    if not issues:
+        return ""
+    lines = [
+        "## RETRY HINT — report_index completeness gate (v2.5.0)",
+        "",
+        "Your previous attempt failed these report index checks:",
+        "",
+    ]
+    for issue in issues:
+        lines.append(f"- {issue}")
+    lines.extend([
+        "",
+        "Every hypothesis in hypotheses.md must map to a report ID in "
+        "the Master Finding Index, be listed in the Excluded Findings "
+        "table, or be consolidated into another report finding. "
+        "Do NOT assume prior output files are correct — "
+        "they have been quarantined.",
+        "",
+        "### Common failure: duplicate binding",
+        "If an internal ID appears in multiple rows, the most common cause is:",
+        "- A chain hypothesis row (CH-N) lists constituent IDs in "
+        "parentheses. Use the "
+        "chain ID when `verify_CH-3.md` exists, or `H-2+H-27` when only "
+        "constituent verifier files exist.",
+        "- A finding that was consolidated into another report finding still "
+        "has its own standalone row. Remove the standalone row and record the "
+        "consolidation in the Consolidation Map.",
+        "Each Internal Hypothesis cell MUST contain one parseable ID token "
+        "or a plus-joined consolidated list such as `H-2+H-27`.",
+    ])
+    if any("severity provenance" in issue.lower() for issue in issues):
+        lines.extend([
+            "",
+            "### Common failure: silent severity change",
+            "For every Master Finding Index row, compare the row's final "
+            "Severity / Report ID tier against the severity in the mapped "
+            "`verify_<ID>.md` file and `verification_queue.md` row.",
+            "",
+            "If the final report severity differs, you MUST do one of:",
+            "- Restore the row to the upstream verifier/queue severity and "
+            "move it to the matching report tier; OR",
+            "- Keep the changed severity ONLY when a canonical adjustment "
+            "applies, and write the reason in `Trust Adj.` / `Severity Trail`.",
+            "",
+            "Accepted canonical adjustment reasons:",
+            "- `TRUSTED-ACTOR(original_sev)`",
+            "- `UNRESOLVED(original_sev)` or `PARTIAL(original_sev)`",
+            "- `POC-FAIL(original_sev)`",
+            "- `PROVEN(original_sev)` only when PROVEN_ONLY=true",
+            "- `CHAIN-UPGRADE(original_sev)` / `CHAIN-DOWNGRADE(original_sev)` "
+            "with the chain ID and enabling relation.",
+            "",
+            "Do NOT silently place a Medium verified finding in a Low row, "
+            "and do NOT silently upgrade an Informational finding to Low. "
+            "A bare `-` / `—` Trust Adj. is valid only when final severity "
+            "equals upstream severity.",
+        ])
+    return "\n".join(lines) + "\n"
+
+
+def _generate_verify_shard_retry_hint(issues: list[str]) -> str:
+    """Build retry hint for L1 verify shard completion failures."""
+    if not issues:
+        return ""
+    lines = [
+        "## RETRY HINT — verify shard completion gate (v2.3.14)",
+        "",
+        "Your previous attempt failed these verify shard checks:",
+        "",
+    ]
+    for issue in issues:
+        lines.append(f"- {issue}")
+    lines.extend([
+        "",
+        "Each finding assigned to your shard must have a corresponding "
+        "verify_{id}.md file with verdict and evidence tag. "
+        "Do NOT assume prior output files are correct — "
+        "they have been quarantined.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+# --- end v2.3.14 retry hint generators --------------------------------------
+def _validate_depth_exit(scratchpad: Path) -> list[str]:
+    """Validate structured depth-exit metadata emitted by the depth loop.
+
+    Accepts YAML-style, bullet list, OR markdown-table emission. See
+    `_match_label_status` for the reasoning behind format tolerance.
+    """
+    p = scratchpad / "depth_exit.md"
+    if not p.exists():
+        return ["depth_exit.md missing"]
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ["depth_exit.md unreadable"]
+
+    issues = []
+
+    # criterion: YAML/bullet form `criterion: 1` OR table row `| criterion | 1 |`
+    crit_m = re.search(r"(?im)^\s*[-*]?\s*criterion\s*:\s*([1-4])\b", text)
+    if not crit_m:
+        crit_m = re.search(
+            r"(?im)^\s*\|\s*criterion\s*\|\s*([1-4])\b", text
+        )
+    criterion = int(crit_m.group(1)) if crit_m else None
+    if criterion is None:
+        issues.append("criterion missing/invalid")
+
+    # rationale: YAML/bullet form OR table row
+    rationale_m = re.search(r"(?im)^\s*[-*]?\s*rationale\s*:\s*(.+?)\s*$", text)
+    if not rationale_m:
+        rationale_m = re.search(
+            r"(?im)^\s*\|\s*rationale\s*\|\s*([^|\n]+?)\s*\|", text
+        )
+    if not rationale_m or not rationale_m.group(1).strip():
+        issues.append("rationale missing")
+
+    # explored_paths: list bullets `- path one` OR table rows under the
+    # explored_paths header `| explored | path one |`. Strip the YAML header
+    # line itself so `- explored_paths:` isn't counted as a path.
+    _DEPTH_EXIT_META_PREFIXES = (
+        "explored_paths", "criterion", "rationale", "phase",
+        "iteration", "confidence", "findings", "reason",
+    )
+    explored = [
+        m.group(1).strip()
+        for m in re.finditer(r"(?im)^\s*-\s+(.+?)\s*$", text)
+        if not any(
+            m.group(1).strip().lower().startswith(p)
+            for p in _DEPTH_EXIT_META_PREFIXES
+        )
+    ]
+    if not explored:
+        # Legacy table form: `| explored | path one |` (column 1 literal).
+        explored = re.findall(
+            r"(?im)^\s*\|\s*(?:explored(?:_path)?s?)?\s*\|\s*([^|\n]+?)\s*\|",
+            text,
+        )
+        explored = [e.strip() for e in explored if e.strip()]
+    if not explored:
+        # Section-scoped table form: under `## explored_paths`, scan any
+        # 2-column rows until the next `##` header. This accepts arbitrary
+        # column-1 content (path names), not just the literal "explored*".
+        sec_m = re.search(
+            r"(?im)^\s*##\s*explored(?:_paths?)?\s*$", text
+        )
+        if sec_m:
+            after = text[sec_m.end():]
+            next_hdr = re.search(r"(?im)^\s*##\s", after)
+            section = after[: next_hdr.start()] if next_hdr else after
+            for row in re.finditer(
+                r"(?m)^\s*\|\s*([^|\n]+?)\s*\|\s*[^|\n]+?\s*\|",
+                section,
+            ):
+                col1 = row.group(1).strip()
+                if not col1:
+                    continue
+                if col1.lower() in ("path", "paths", "field", "name"):
+                    continue
+                if set(col1) <= set("-: "):
+                    continue
+                explored.append(col1)
+    if not explored:
+        issues.append("explored_paths missing")
+    elif criterion == 4 and len(explored) < 3:
+        issues.append("criterion 4 requires >=3 explored_paths")
+
+    return issues
+
+
+def _validate_inventory_evidence(
+    scratchpad: Path,
+    project_root: str,
+    apply_safe_recovery: bool = True,
+) -> dict[str, dict[str, str]]:
+    """Validate inventory locations/provenance and write a triage ledger.
+
+    This is a cheap pre-verification guard. It does not refute findings; it
+    identifies evidence defects and safely rewrites only unique-basename
+    location recoveries.
+    """
+    inv = scratchpad / "findings_inventory.md"
+    if not inv.exists():
+        return {}
+    try:
+        text = inv.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+    source_index = _project_source_index(project_root)
+    records: dict[str, dict[str, str]] = {}
+    recovered: dict[str, str] = {}
+
+    for item in _inventory_blocks(text):
+        fid = item["id"]
+        loc_status, resolved, loc_reason = _resolve_inventory_location(
+            project_root, source_index, item.get("location", "")
+        )
+        source_tokens = _split_source_id_tokens(item.get("source_ids", ""))
+        source_statuses = []
+        source_reasons = []
+        for tok in source_tokens:
+            st, reason = _validate_source_token(tok, scratchpad)
+            source_statuses.append(st)
+            if st != "OK":
+                source_reasons.append(f"{tok}: {reason}")
+        if not source_tokens:
+            source_statuses.append("SOURCE_MISSING")
+            source_reasons.append("no Source IDs field")
+        if all(s == "OK" for s in source_statuses):
+            source_status = "OK"
+        elif any(s in ("OK", "SOURCE_UNVERIFIED") for s in source_statuses):
+            source_status = "SOURCE_UNVERIFIED"
+        else:
+            source_status = "SOURCE_INVALID"
+        if loc_status == "RECOVERED_BASENAME" and resolved:
+            recovered[fid] = resolved
+        records[fid] = {
+            "id": fid,
+            "title": item.get("title", ""),
+            "location_status": loc_status,
+            "resolved_location": resolved,
+            "location_reason": loc_reason,
+            "source_status": source_status,
+            "source_reason": "; ".join(source_reasons[:4]) or "all source tokens resolved",
+        }
+
+    if apply_safe_recovery and recovered:
+        new_text = text
+        for fid, loc in recovered.items():
+            new_text = _replace_inventory_location(new_text, fid, loc)
+        if new_text != text:
+            inv.write_text(new_text, encoding="utf-8")
+
+    lines = [
+        "# Inventory Evidence Validation",
+        "",
+        "| Finding ID | Location Status | Resolved Location | Location Reason | Source Status | Source Reason |",
+        "|------------|-----------------|-------------------|-----------------|---------------|---------------|",
+    ]
+    for fid in sorted(records, key=lambda x: [int(n) if n.isdigit() else n for n in re.split(r"(\d+)", x)]):
+        r = records[fid]
+        lines.append(
+            f"| {fid} | {r['location_status']} | {r['resolved_location']} | "
+            f"{r['location_reason'].replace('|', '/')} | {r['source_status']} | "
+            f"{r['source_reason'].replace('|', '/')} |"
+        )
+    invalid = [
+        fid for fid, r in records.items()
+        if r["location_status"] not in ("OK", "RECOVERED_BASENAME")
+        or r["source_status"] != "OK"
+    ]
+    lines.extend([
+        "",
+        f"Summary: {len(records)} checked, {len(recovered)} basename-recovered, {len(invalid)} with unresolved evidence.",
+        "",
+    ])
+    (scratchpad / "inventory_evidence_validation.md").write_text(
+        "\n".join(lines), encoding="utf-8"
+    )
+    return records
+
+
+def _parse_inventory_evidence_validation(scratchpad: Path) -> dict[str, dict[str, str]]:
+    p = scratchpad / "inventory_evidence_validation.md"
+    if not p.exists():
+        return {}
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+    headers, rows = _parse_markdown_table(text, ["finding id", "location status", "source status"])
+    if not headers:
+        return {}
+    keys = [_norm_key(h) for h in headers]
+    out: dict[str, dict[str, str]] = {}
+    for row in rows:
+        d = {keys[i]: row[i].strip() for i in range(min(len(keys), len(row)))}
+        fid = _normalize_finding_id(d.get("finding id", "")) or d.get("finding id", "")
+        if fid:
+            out[fid] = d
+    return out
+
+
+def _filter_verification_queue_by_evidence(scratchpad: Path) -> list[str]:
+    """Remove obvious evidence-hallucination rows before expensive verify.
+
+    Conservative policy: only suppress a row when both location and provenance
+    are unresolved/invalid. Rows with one usable evidence anchor still proceed
+    to verifier/location recovery.
+    """
+    records = _parse_inventory_evidence_validation(scratchpad)
+    if not records:
+        return []
+    rows = parse_verification_queue_rows(scratchpad)
+    if not rows:
+        return []
+    kept: list[dict[str, str]] = []
+    removed: list[dict[str, str]] = []
+    for row in rows:
+        fid = _normalize_finding_id(row.get("finding id") or "") or (row.get("finding id") or "").strip()
+        rec = records.get(fid)
+        if not rec:
+            kept.append(row)
+            continue
+        loc_bad = rec.get("location status") not in ("OK", "RECOVERED_BASENAME")
+        src_bad = rec.get("source status") in ("SOURCE_INVALID", "SOURCE_MISSING")
+        if loc_bad and src_bad:
+            row = dict(row)
+            row["exclusion reason"] = (
+                f"Evidence invalid: location_status={rec.get('location status')}; "
+                f"source_status={rec.get('source status')}"
+            )
+            removed.append(row)
+        else:
+            kept.append(row)
+    if not removed:
+        return []
+    existing_removed: list[dict[str, str]] = []
+    excluded_path = scratchpad / "verification_queue_evidence_excluded.md"
+    if excluded_path.exists():
+        try:
+            text = excluded_path.read_text(encoding="utf-8", errors="replace")
+            headers, existing_rows = _parse_markdown_table(text, ["severity"])
+            keys = [_norm_key(h) for h in headers]
+            for raw_row in existing_rows:
+                d = {
+                    keys[i]: raw_row[i].strip()
+                    for i in range(min(len(keys), len(raw_row)))
+                }
+                fid_existing = (
+                    _normalize_finding_id(d.get("finding id", ""))
+                    or d.get("finding id", "")
+                )
+                if fid_existing:
+                    existing_removed.append({
+                        "finding id": fid_existing,
+                        "severity": d.get("severity", ""),
+                        "title": d.get("title", ""),
+                        "exclusion reason": (
+                            d.get("exclusion reason", "")
+                            or "Previously excluded from active verification"
+                        ),
+                    })
+        except Exception:
+            existing_removed = []
+    merged_removed: dict[str, dict[str, str]] = {}
+    for row in existing_removed + removed:
+        fid = _normalize_finding_id(row.get("finding id", "")) or row.get("finding id", "")
+        if fid:
+            row = dict(row)
+            row["finding id"] = fid
+            merged_removed[fid] = row
+    for idx, row in enumerate(kept, start=1):
+        row["queue #"] = str(idx)
+    _write_queue_subset_manifest(scratchpad / "verification_queue.md", kept)
+    _write_queue_excluded_manifest(excluded_path, list(merged_removed.values()))
+    return [(r.get("finding id") or "").strip() for r in removed if r.get("finding id")]
+
+
+def _validate_inventory_parity(scratchpad: Path) -> list[str]:
+    """Detect findings_inventory.md that is truncated relative to source.
+
+    Hook: defends against the SIGKILL-at-timeout failure mode where the
+    inventory agent is killed mid-write. The partial file can still satisfy
+    the byte-size gate (it was growing when cut), but has been observed to
+    contain only 5-20% of the findings that the breadth/scanner/niche agents
+    actually produced. Downstream depth/chain/verify then cascade on the
+    truncated set and the final report silently drops most findings.
+
+    Signal: set-difference on finding signals parsed from source agent
+    outputs vs. the inventory. Primary signal is bracketed finding IDs;
+    fallback is heading-derived IDs and Location-line tags so that breadth
+    agents that skip the `[XX-N]` prefix still produce evidence. If both
+    the inventory file exists AND every upstream source artifact is empty
+    of signals, the gate FAILS loudly rather than passing vacuously —
+    that state is itself evidence that upstream phases did not produce
+    the expected artifacts.
+    """
+    inv_path = _inventory_parity_artifact(scratchpad)
+    if not inv_path.exists():
+        return ["findings_inventory.md missing"]
+    try:
+        inv_text = inv_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ["findings_inventory.md unreadable"]
+
+    # In sharded inventory mode, final `findings_inventory.md` is a merge of
+    # `findings_inventory_chunk_*.md`, not a fresh merge over raw breadth and
+    # graph artifacts. The parity source must match the phase contract,
+    # otherwise legitimate deduplication looks like truncation.
+    chunk_sources = sorted(scratchpad.glob("findings_inventory_chunk_*.md"))
+    if chunk_sources:
+        source_files = chunk_sources
+        source_label = "inventory chunks"
+    else:
+        source_files = []
+        for pat in _INVENTORY_SOURCE_PATTERNS:
+            source_files.extend(sorted(scratchpad.glob(pat)))
+        source_label = "upstream artifacts"
+    source_ids: set[str] = set()
+    source_blocks = 0
+    parsed_chunk_entries = 0
+    observed_chunk_blocks = 0
+    source_files_seen = 0
+    for p in source_files:
+        if p.name in {"findings_inventory.md", "hypotheses.md",
+                      "chain_hypotheses.md"}:
+            continue
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        source_files_seen += 1
+        if chunk_sources:
+            # In chunk mode, the parser used by the mechanical merge is the
+            # authoritative contract. The loose signal regex is diagnostic only:
+            # using it for hard parity recreates the parser/gate mismatch that
+            # caused permanent inventory retry loops.
+            entries = _parse_inventory_chunk(p)
+            parsed_chunk_entries += len(entries)
+            _, loose_blocks = _extract_finding_signals(txt)
+            observed_chunk_blocks += loose_blocks
+            for entry in entries:
+                local_id = _normalize_finding_id(str(entry.get("local_id", "")))
+                if local_id:
+                    source_ids.add(local_id)
+                for sid in entry.get("source_ids", []) or []:
+                    norm = _normalize_finding_id(str(sid))
+                    if norm:
+                        source_ids.add(norm)
+            source_blocks = parsed_chunk_entries
+        else:
+            ids, blocks = _extract_finding_signals(txt)
+            source_ids |= ids
+            source_blocks += blocks
+
+    if chunk_sources and not source_ids and source_blocks == 0 and observed_chunk_blocks == 0:
+        # Some tests/light paths create chunk placeholders with no findings.
+        # Empty chunk files are not authoritative; fall back to raw artifacts.
+        source_files = []
+        for pat in _INVENTORY_SOURCE_PATTERNS:
+            source_files.extend(sorted(scratchpad.glob(pat)))
+        source_label = "upstream artifacts"
+        source_ids = set()
+        source_blocks = 0
+        source_files_seen = 0
+        for p in source_files:
+            if p.name in {"findings_inventory.md", "hypotheses.md",
+                          "chain_hypotheses.md"}:
+                continue
+            try:
+                txt = p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            source_files_seen += 1
+            ids, blocks = _extract_finding_signals(txt)
+            source_ids |= ids
+            source_blocks += blocks
+
+    inv_ids, loose_inv_blocks = _extract_finding_signals(inv_text)
+    # For the inventory artifact itself, the block count contract is the
+    # canonical finding-section parser. `_extract_finding_signals()` also
+    # counts table ID rows as loose blocks, which is useful for upstream
+    # breadth/chunk diagnostics but wrong for the final inventory: source-ID
+    # traceability tables can contain many IDs without being additional
+    # inventory findings. Comparing the merge receipt against that loose count
+    # caused permanent retry loops such as `receipt merged=79` vs
+    # `inventory blocks=111`.
+    canonical_inv_blocks = len(_inventory_blocks(inv_text))
+    inv_blocks = canonical_inv_blocks or loose_inv_blocks
+
+    issues: list[str] = []
+
+    # Gate path A: zero source signal + inventory body indicates a problem.
+    # A non-trivial inventory cannot be satisfied by zero upstream findings.
+    inv_body_len = len(inv_text.strip())
+    if not source_ids and source_blocks == 0:
+        if source_files_seen == 0 and inv_body_len < 512:
+            # No upstream artifacts AND inventory is essentially empty
+            # (e.g., Light mode with zero findings). Treat as vacuous OK.
+            return []
+        issues.append(
+            "inventory parity: zero finding signals in upstream artifacts "
+            f"({source_files_seen} {source_label} scanned) but inventory has "
+            f"{len(inv_ids)} IDs / {inv_blocks} heading blocks — upstream "
+            "breadth/scanner outputs may be missing or empty; cannot "
+            "validate parity"
+        )
+        return issues
+
+    # Gate path B: set-difference on IDs.
+    coverage = 1.0
+    if source_ids:
+        covered = source_ids & inv_ids
+        missing = source_ids - inv_ids
+        coverage = len(covered) / len(source_ids)
+        if coverage < 0.45:
+            sample = sorted(missing)[:8]
+            issues.append(
+                f"inventory parity: coverage {coverage:.0%} "
+                f"({len(covered)}/{len(source_ids)} source IDs from {source_label}); "
+                f"truncation suspected; missing sample: {sample}"
+            )
+
+    receipt = _read_inventory_merge_receipt(scratchpad)
+    promoted_inventory_blocks = _count_depth_promotion_inventory_blocks(inv_text)
+    promoted_receipt_count = _read_depth_promotion_receipt_count(scratchpad)
+    accounted_promotions = max(promoted_inventory_blocks, promoted_receipt_count)
+    expected_inventory_blocks = (
+        receipt.get("merged", 0) + accounted_promotions
+        if receipt else 0
+    )
+    receipt_accounts_for_merge = bool(
+        chunk_sources
+        and receipt.get("parsed") == parsed_chunk_entries
+        and receipt.get("merged", -1) > 0
+        and (
+            receipt.get("merged") == inv_blocks
+            or (
+                accounted_promotions > 0
+                and expected_inventory_blocks == inv_blocks
+            )
+        )
+    )
+    if chunk_sources and receipt and not receipt_accounts_for_merge:
+        issues.append(
+            "inventory parity: mechanical merge receipt mismatch "
+            f"(receipt parsed={receipt.get('parsed')}, merged={receipt.get('merged')}; "
+            f"parsed chunk entries={parsed_chunk_entries}, "
+            f"observed loose source blocks={observed_chunk_blocks or source_blocks}, "
+            f"promoted inventory blocks={promoted_inventory_blocks}, "
+            f"promotion receipt count={promoted_receipt_count}, "
+            f"inventory blocks={inv_blocks})"
+        )
+
+    # Gate path C: block count sanity. If source had N heading blocks but
+    # inventory collapses them into far fewer blocks, flag even when ID text
+    # still appears somewhere in the inventory. A list of absorbed IDs is not
+    # a substitute for retained finding bodies.
+    block_retention = inv_blocks / max(source_blocks, 1)
+    chunk_exact_merge_accounted = bool(
+        chunk_sources and (
+            (source_ids and coverage >= 0.95 and inv_blocks > 0)
+            or receipt_accounts_for_merge
+        )
+    )
+    if (
+        source_blocks >= 5
+        and block_retention < 0.45
+        and not chunk_exact_merge_accounted
+    ):
+        issues.append(
+            f"inventory parity: inventory contains {inv_blocks} finding "
+            f"blocks vs {source_blocks} in {source_label} "
+            f"({block_retention:.0%} retention); "
+            "truncation suspected"
+        )
+
+    return issues
+
+
+def _validate_inventory_chunk_structure(scratchpad: Path, phase_name: str) -> list[str]:
+    """Validate an inventory shard artifact as a chunk, not just a file.
+
+    Inventory chunks are direct synthesis phases. A table-only artifact is not
+    enough: the mechanical inventory merge and later report provenance need
+    per-finding detail blocks that preserve source IDs, locations, verdicts,
+    descriptions, and impacts. This catches the old prompt contradiction where
+    the subprocess wrote a Master Table, then spun until timeout without
+    writing detail blocks.
+    """
+    out = scratchpad / f"findings_{phase_name}.md"
+    if not out.exists():
+        return [f"{out.name} missing"]
+    try:
+        text = out.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return [f"{out.name} unreadable: {exc}"]
+
+    issues: list[str] = []
+
+    def has_field(block: str, label: str) -> bool:
+        return bool(re.search(
+            rf"(?im)^\s*\*\*{re.escape(label)}\*\*\s*:"
+            rf"|^\s*{re.escape(label)}\s*:",
+            block,
+        ))
+
+    detail_matches = list(re.finditer(
+        r"(?m)^###\s+(?:Finding\s+)?\[(CC-\d+)\]\s*:?\s*(.+?)\s*$",
+        text,
+    ))
+    parsed_entries = _parse_inventory_chunk(out)
+    if parsed_entries and not detail_matches:
+        issues.append(
+            f"inventory chunk has {len(parsed_entries)} parsed table row(s) "
+            "but 0 per-finding detail block(s)"
+        )
+    if detail_matches and len(parsed_entries) < len(detail_matches):
+        issues.append(
+            f"inventory chunk parser retained {len(parsed_entries)} finding(s) "
+            f"but artifact has {len(detail_matches)} detail heading(s)"
+        )
+
+    _has_detail_section = bool(re.search(
+        r"(?im)^##\s+(?:Per[- ]Finding\s+)?Detail",
+        text,
+    ))
+    if not _has_detail_section and detail_matches:
+        issues.append("inventory chunk detail headings exist without `## Per-Finding Detail` section")
+    elif parsed_entries and not _has_detail_section:
+        issues.append("inventory chunk missing `## Per-Finding Detail` section")
+
+    required_field_groups: list[tuple[str, ...]] = [
+        ("Source IDs", "Source ID", "Sources", "Agent Sources"),
+        ("Severity", "Risk Level", "Level"),
+        ("Location", "Code Location", "File", "Where"),
+        ("Preferred Tag", "Evidence Tag", "Evidence Tags",
+         "Preferred Verification", "Evidence", "Verification Method"),
+        ("Verdict", "Final Verdict", "Status"),
+        ("Root Cause",),
+        ("Description",),
+        ("Impact", "Security Impact", "Risk"),
+    ]
+    chunk_field_warnings = 0
+    for idx, match in enumerate(detail_matches):
+        start = match.end()
+        end = detail_matches[idx + 1].start() if idx + 1 < len(detail_matches) else len(text)
+        block = text[start:end]
+        missing = [
+            group[0] for group in required_field_groups
+            if not any(has_field(block, alias) for alias in group)
+        ]
+        if missing:
+            chunk_field_warnings += 1
+            log.warning(
+                "[_validate_inventory_chunk_structure] %s missing field(s): "
+                "%s — LLM prose format check (soft)",
+                match.group(1), ", ".join(missing),
+            )
+            if chunk_field_warnings >= 8:
+                break
+
+    return issues
+
+
+# =============================================================================
+# Phase E1-E4 / E6: live pipeline enforcement gates.
+#
+# Each helper returns a list of issues; an empty list means PASS. The driver's
+# gate runner promotes a non-empty issue list into a hard halt (critical=True
+# for the phase that calls the gate, or via a missing-artifact path).
+# =============================================================================
+def _verify_file_present_for_id(scratchpad: Path, fid: str, *, min_bytes: int = 100) -> bool:
+    """Return True when a usable verify file exists for the finding id."""
+    candidates = (
+        f"verify_{fid}.md",
+        f"verify_F-{fid}.md",
+        f"verify_F_{fid}.md",
+        f"verify_[{fid}].md",
+    )
+    for name in candidates:
+        p = scratchpad / name
+        if p.exists() and p.stat().st_size >= min_bytes:
+            return True
+    return False
+
+
+def _verification_queue_schema_issue(scratchpad: Path) -> str | None:
+    """Return a fail-closed issue when verification_queue.md exists but parses empty.
+
+    A genuinely empty queue is represented by driver-owned N/A artifacts such as
+    verify_NONE.md, or by the canonical queue footer `Total: 0 findings`.
+    Anything else means the queue parser and downstream validators checked zero
+    items because the markdown contract drifted.
+    """
+    q = scratchpad / "verification_queue.md"
+    if not q.exists():
+        return None
+    try:
+        text = q.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return f"verification_queue.md unreadable ({exc})"
+    if parse_verification_queue_rows(scratchpad):
+        return None
+    normalized = _llm_norm(text)
+    if re.search(r"\bTotal:\s*0\s+findings\b", normalized, re.IGNORECASE):
+        return None
+    if not normalized.strip():
+        return "verification_queue.md exists but is empty"
+    return "verification_queue.md schema invalid: no parseable finding rows"
+
+
+def _validate_verify_files_for_queue(scratchpad: Path, *, min_bytes: int = 100) -> list[str]:
+    """E1: aggregate-level queue<->verify parity.
+
+    For every active row in `verification_queue.md`, ensure a verify file
+    exists. Per-shard gates already cover their own slices; this gate catches
+    the "queue had 206, verify had 131" pattern at the aggregate boundary —
+    the point where crossbatch / report_index / report_assemble would
+    otherwise read from an incomplete set.
+    """
+    schema_issue = _verification_queue_schema_issue(scratchpad)
+    if schema_issue:
+        return [schema_issue]
+    rows = parse_verification_queue_rows(scratchpad)
+    if not rows:
+        return []
+    expected_ids: list[str] = []
+    for r in rows:
+        fid = (r.get("finding id") or "").strip()
+        if fid:
+            expected_ids.append(fid)
+    missing = [fid for fid in expected_ids if not _verify_file_present_for_id(scratchpad, fid, min_bytes=min_bytes)]
+    if not missing:
+        return []
+    sample = ", ".join(missing[:8])
+    msg = (
+        f"verify-output parity: queue has {len(expected_ids)} active row(s), "
+        f"only {len(expected_ids) - len(missing)} verify file(s) on disk; "
+        f"{len(missing)} missing — sample: {sample}"
+    )
+    return [msg]
+
+
+def _validate_report_index_inputs(scratchpad: Path) -> list[str]:
+    """E2: report_index must reject unverified queue rows.
+
+    Same set-difference as E1 but framed for the report_index gate so the halt
+    message is specific to the index phase. Belt-and-suspenders with E1.
+    """
+    issues = _validate_verify_files_for_queue(scratchpad)
+    if issues:
+        return ["report_index: " + issues[0] + " — refuse to write report_index.md"]
+    out = _validate_report_index_severity_provenance(scratchpad)
+    triage = _validate_report_index_triage_safety(scratchpad)
+    if triage:
+        import logging as _logging
+        _logging.getLogger("plamen.validators").warning(
+            "[report_index] triage safety (WARNING, non-blocking): %s",
+            "; ".join(triage),
+        )
+    return out
+
+
+def _validate_report_index_prewrite_inputs(scratchpad: Path) -> list[str]:
+    """Validate inputs before a deterministic report_index rewrite.
+
+    This intentionally does not inspect an existing `report_index.md`; on
+    resume that file can be stale or known-bad from a prior attempt. Content
+    validators run only after the current phase has written the new index.
+    """
+    issues = _validate_verify_files_for_queue(scratchpad)
+    if issues:
+        return ["report_index: " + issues[0] + " - refuse to write report_index.md"]
+    if issues:
+        return ["report_index: " + issues[0] + " â€” refuse to write report_index.md"]
+    return []
+
+
+def _severity_from_report_cell(value: str, fallback_letter: str = "") -> str:
+    text = _llm_norm(value or "")
+    m = re.search(
+        r"\b(Critical|High|Medium|Low|Informational|Info)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return normalize_severity(m.group(1))
+    letter = (fallback_letter or "")[:1].upper()
+    return {
+        "C": "Critical", "H": "High", "M": "Medium",
+        "L": "Low", "I": "Informational",
+    }.get(letter, "")
+
+
+def _validate_report_index_triage_safety(scratchpad: Path) -> list[str]:
+    """Reject unsafe client-worthiness triage for Medium+ findings."""
+    idx_path = scratchpad / "report_index.md"
+    if not idx_path.exists():
+        return []
+    try:
+        text = _llm_norm(idx_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    m = re.search(r"(?ims)^##\s+Excluded\s+Findings\b.*?(?=^##\s|\Z)", text)
+    if not m:
+        return []
+    headers, rows = _parse_markdown_table(m.group(0), [])
+    if not headers:
+        return []
+    keys = [_norm_key(h) for h in headers]
+
+    def _cell(row: list[str], *names: str) -> str:
+        for name in names:
+            if name in keys:
+                i = keys.index(name)
+                if i < len(row):
+                    return row[i].strip()
+        return ""
+
+    allowed_medium_plus = (
+        "DROP_FALSE_POSITIVE",
+        "FALSE_POSITIVE",
+        "REFUTED",
+        "INFEASIBLE",
+        "UNRESOLVED_EVIDENCE",
+        "EVIDENCE_UNRESOLVED",
+        "INSUFFICIENT_EVIDENCE",
+        "NEAR_ZERO_EVIDENCE",
+        "ZERO_EVIDENCE",
+        "NO_REPRODUCIBLE_PATH",
+        "NO_REPRODUCIBLE_CODE_PATH",
+        "NO_REACHABLE_PATH",
+        "NO_TRACE",
+        "CONTESTED",
+        "LOW_CONFIDENCE",
+        "DROP_NON_SECURITY",
+        "DROP_DESIGN_CONFIRMATION",
+        "DROP_UNACTIONABLE_SPECULATION",
+        "MERGE_INTO",
+        "MERGED",
+        "DUPLICATE",
+        "CONSOLIDATED",
+        "APPENDIX_ONLY",
+        "AUTO_EXCLUDED",
+    )
+
+    def _medium_plus_exclusion_allowed(reason: str) -> bool:
+        reason_norm = re.sub(r"[\s\-]+", "_", (reason or "").upper())
+        if any(tok in reason_norm for tok in allowed_medium_plus):
+            return True
+        text = _llm_norm(reason or "").lower()
+        if not text:
+            return False
+        # Structural evidence/refutation basis. This deliberately avoids a
+        # finite list of report-index prose variants: any Medium+ exclusion is
+        # allowed only when the reason is clearly about failure to establish a
+        # reachable, reproducible, evidenced issue, not merely "not client
+        # worthy" or "appendix only".
+        evidence_failure = bool(re.search(
+            r"(?:"
+            r"(?:insufficient|weak|missing|minimal|near[-\s]*zero|zero|no)\s+"
+            r"(?:evidence|support|proof|trace|code\s+trace)"
+            r"|(?:evidence|support|proof|trace|code\s+trace)\s+"
+            r"(?:unresolved|insufficient|weak|missing|absent)"
+            r"|no\s+(?:reproducible\s+)?(?:code\s+)?path"
+            r"|no\s+(?:reachable\s+)?(?:entry|route|path|trace)"
+            r"|cannot\s+(?:reproduce|reach|trace)"
+            r"|unresolved\s+after\s+\w+"
+            r"|confidence\s+0\.\d+"
+            r"|low\s+confidence"
+            r"|contested"
+            r")",
+            text,
+        ))
+        return evidence_failure
+
+    unsafe: list[str] = []
+    for row in rows:
+        sev = normalize_severity(_cell(row, "severity"))
+        if sev not in ("Critical", "High", "Medium"):
+            continue
+        raw_id = _cell(row, "internal id", "internal hypothesis id", "finding id", "id")
+        fid = _normalize_finding_id(raw_id) or raw_id or "unknown"
+        reason = _cell(row, "exclusion reason", "reason", "verdict", "status")
+        if not _medium_plus_exclusion_allowed(reason):
+            unsafe.append(f"{fid}:{sev}:{reason or 'missing reason'}")
+    if not unsafe:
+        return []
+    sample = "; ".join(unsafe[:5])
+    more = f"; ... (+{len(unsafe)-5} more)" if len(unsafe) > 5 else ""
+    return [
+        "report_index triage safety: Medium+ excluded finding(s) lack an "
+        "allowed non-body reason (DROP_FALSE_POSITIVE / DROP_NON_SECURITY / "
+        "INFEASIBLE / UNRESOLVED_EVIDENCE / MERGE_INTO / DUPLICATE / "
+        f"CONSOLIDATED): {sample}{more}"
+    ]
+
+
+def _report_index_adjustment_reason_present(*values: str) -> bool:
+    text = _llm_norm(" ".join(v or "" for v in values)).strip()
+    if not text:
+        return False
+    stripped = re.sub(r"[\s`*_|\-–—:;,.]+", "", text).lower()
+    if stripped in {"", "none", "na", "n/a", "no", "notapplicable"}:
+        return False
+    return bool(re.search(
+        r"trust|actor|assumption|proven|poc|fail|cap|unresolved|partial|"
+        r"chain|upgrade|downgrade|demot|human|contest|was|from|->|=>",
+        text,
+        re.IGNORECASE,
+    ))
+
+
+def _poc_demotion_caps_for_validator(scratchpad: Path) -> dict[str, str]:
+    path = scratchpad / "poc_demotions.md"
+    if not path.exists():
+        return {}
+    try:
+        text = _llm_norm(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    caps: dict[str, str] = {}
+    headers, rows = _parse_markdown_table(text, ["finding id", "capped at"])
+    if not headers:
+        return caps
+    keys = [_norm_key(h) for h in headers]
+    for row in rows:
+        d = {keys[i]: row[i].strip() for i in range(min(len(keys), len(row)))}
+        fid = _normalize_finding_id(d.get("finding id", "")) or d.get("finding id", "")
+        cap = normalize_severity(d.get("capped at", ""))
+        if fid and cap:
+            caps[fid] = cap
+    return caps
+
+
+def _cap_report_index_severity(severity: str, cap: str) -> str:
+    order = ["Critical", "High", "Medium", "Low", "Informational"]
+    sev = normalize_severity(severity)
+    capped = normalize_severity(cap)
+    if order.index(sev) < order.index(capped):
+        return capped
+    return sev
+
+
+def _expected_report_index_severities(scratchpad: Path) -> dict[str, str]:
+    caps = _poc_demotion_caps_for_validator(scratchpad)
+    out: dict[str, str] = {}
+    for row in parse_verification_queue_rows(scratchpad):
+        fid = (row.get("finding id") or "").strip()
+        if not fid:
+            continue
+        vf = _verify_file_for_id(scratchpad, fid)
+        try:
+            vtxt = _llm_norm(vf.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            vtxt = ""
+        sev = _enforce_severity_matrix(vtxt, row)
+        status = _verifier_status_from_text(vtxt)
+        if any(tok in status for tok in ("UNRESOLVED", "PARTIAL")):
+            sev = _demote_severity_once(sev)
+        if fid in caps:
+            sev = _cap_report_index_severity(sev, caps[fid])
+        out[fid] = sev
+    return out
+
+
+def _report_index_rows_for_severity_audit(scratchpad: Path) -> list[dict[str, str]]:
+    idx = scratchpad / "report_index.md"
+    if not idx.exists():
+        return []
+    try:
+        text = _llm_norm(idx.read_text(encoding="utf-8", errors="replace"))
+        text = _report_index_reportable_text(text)
+        text = _report_index_assignment_text(text)
+    except Exception:
+        return []
+    headers, rows = _parse_markdown_table(text, ["report id"])
+    if not headers:
+        return []
+    keys = [_norm_key(h) for h in headers]
+    out: list[dict[str, str]] = []
+    for row in rows:
+        d = {keys[i]: row[i].strip() for i in range(min(len(keys), len(row)))}
+        rid = _normalize_report_id(d.get("report id", "")) or d.get("report id", "")
+        if not re.fullmatch(r"[CHMLI]-\d+", rid or "", re.IGNORECASE):
+            continue
+        internal = (
+            d.get("internal hypothesis")
+            or d.get("internal hypothesis id")
+            or d.get("hypothesis")
+            or d.get("finding id")
+            or d.get("internal id")
+            or ""
+        )
+        trust = (
+            d.get("trust adj")
+            or d.get("trust adjustment")
+            or d.get("severity trail")
+            or d.get("sev trail")
+            or d.get("adjustment")
+            or d.get("reason")
+            or ""
+        )
+        out.append({
+            "report_id": rid.upper(),
+            "severity": d.get("severity", ""),
+            "verification": d.get("verification", ""),
+            "trust_adj": trust,
+            "internal": internal,
+        })
+    return out
+
+
+def _validate_report_index_severity_provenance(scratchpad: Path) -> list[str]:
+    """Reject silent severity changes in LLM-authored report_index.md."""
+    expected_by_id = _expected_report_index_severities(scratchpad)
+    if not expected_by_id:
+        return []
+    rows = _report_index_rows_for_severity_audit(scratchpad)
+    if not rows:
+        return []
+    issues: list[str] = []
+    rank = {s: i for i, s in enumerate(["Critical", "High", "Medium", "Low", "Informational"])}
+    for row in rows:
+        rid = row["report_id"]
+        final = _severity_from_report_cell(row.get("severity", ""), rid[:1])
+        tier = _severity_from_report_cell("", rid[:1])
+        if final and tier and final != tier:
+            issues.append(
+                f"report_index severity/tier mismatch: {rid} table severity "
+                f"{final} conflicts with report ID tier {tier}"
+            )
+            continue
+        ids = [
+            _normalize_finding_id(fid) or fid
+            for fid in _INTERNAL_FINDING_ID_RE.findall(row.get("internal", ""))
+        ]
+        expected = [expected_by_id[fid] for fid in ids if fid in expected_by_id]
+        if not expected:
+            continue
+        source = min(expected, key=lambda sev: rank.get(sev, 99))
+        if final == source:
+            continue
+        if _report_index_adjustment_reason_present(
+            row.get("trust_adj", ""),
+            row.get("verification", ""),
+            row.get("severity", ""),
+        ):
+            continue
+        issues.append(
+            f"report_index severity provenance: {rid} maps {', '.join(ids)} "
+            f"from {source} to {final} with no Trust Adj./Severity Trail reason"
+        )
+    if not issues:
+        return []
+    sample = "; ".join(issues[:5])
+    return [sample + ("; ..." if len(issues) > 5 else "")]
+
+
+def _validate_report_coverage_accounting(scratchpad: Path) -> list[str]:
+    """Fail report_index when any raw candidate ID is left unaccounted.
+
+    `report_coverage.md` is the mechanical receipt that maps every raw
+    candidate ID to one of: promoted, excluded, or consolidated. An
+    `UNACCOUNTED` disposition means the report index silently lost a candidate
+    after verification/indexing, so downstream report writers must not proceed.
+    """
+    coverage_path = scratchpad / "report_coverage.md"
+    if not coverage_path.exists():
+        return ["report_index: missing report_coverage.md accounting ledger"]
+    try:
+        text = coverage_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return [f"report_index: cannot read report_coverage.md: {exc}"]
+
+    unaccounted: list[tuple[str, str]] = []
+    in_ledger = False
+    disposition_idx: int | None = None
+    source_idx = 0
+    candidate_idx = 1
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.match(r"(?i)^##\s+(?:Raw\s+)?(?:Candidate|Coverage|Promotion)\s+Ledger\b", stripped):
+            in_ledger = True
+            disposition_idx = None
+            continue
+        if in_ledger and re.match(r"^##\s+", stripped):
+            break
+        if not in_ledger or not line.lstrip().startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        if set(cells[0]) <= {"-"}:
+            continue
+        lower_cells = [c.lower() for c in cells]
+        _disp_idx = next(
+            (i for i, c in enumerate(lower_cells)
+             if "status" in c or "disposition" in c),
+            None,
+        )
+        if _disp_idx is not None:
+            source_idx = 0
+            candidate_idx = 1
+            disposition_idx = _disp_idx
+            continue
+        idx = disposition_idx if disposition_idx is not None else 2
+        if idx >= len(cells):
+            continue
+        if cells[idx].upper() == "UNACCOUNTED":
+            source = cells[source_idx] if source_idx < len(cells) else cells[0]
+            candidate = cells[candidate_idx] if candidate_idx < len(cells) else "n/a"
+            unaccounted.append((candidate, source))
+
+    if not unaccounted:
+        return []
+    sample = ", ".join(
+        f"{fid} from {source}" for fid, source in unaccounted[:8]
+    )
+    more = f" (+{len(unaccounted) - 8} more)" if len(unaccounted) > 8 else ""
+    return [
+        "report_index: raw candidate ledger has "
+        f"{len(unaccounted)} UNACCOUNTED candidate(s): {sample}{more}"
+    ]
+
+
+def _clear_stale_degraded_sentinels(scratchpad: Path) -> list[str]:
+    """Checkpoint-aware sentinel cleanup. Returns cleared paths only.
+
+    Sentinels whose phase still appears in `checkpoint.degraded` are
+    PRESERVED so the operator sees the prior halt reason on resume.
+    Stale (phase completed) and orphan (no checkpoint mention) sentinels
+    are removed.
+    """
+    cleared: list[str] = []
+    if not scratchpad.exists():
+        return cleared
+    checkpoint = Checkpoint.load(scratchpad)
+    degraded_phases = set(checkpoint.degraded or [])
+    seen: set[Path] = set()
+    for pattern in _DEGRADED_SENTINEL_GLOBS:
+        for p in scratchpad.glob(pattern):
+            if p in seen:
+                continue
+            seen.add(p)
+            phase_name = _phase_name_from_sentinel(p.name)
+            if phase_name in degraded_phases:
+                # Live signal — preserve so operator can read it.
+                continue
+            try:
+                p.unlink()
+                cleared.append(str(p.name))
+            except Exception as e:
+                log.warning(f"failed to clear stale sentinel {p}: {e}")
+    return cleared
+
+
+def _validate_crossbatch_full_coverage(scratchpad: Path) -> list[str]:
+    """E3: crossbatch must list every verify finding ID.
+
+    Reads `cross_batch_consistency.md` and confirms every existing verify file
+    is referenced. If the file is missing OR partial, return issues. Soft pass
+    only when there are zero verify files (vacuous).
+    """
+    cb = scratchpad / "cross_batch_consistency.md"
+    if not cb.exists():
+        return []
+    try:
+        cb_text = cb.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    verify_ids = {fid for fid, _filename in _crossbatch_expected_rows(scratchpad)}
+    if not verify_ids:
+        # Phase E14 guardrail: empty expected set IS the only soft-pass
+        # branch. An "Overall: PASS" affirmation alone never substitutes
+        # for ID coverage when verify files exist on disk. (Old failure
+        # mode "checked 41 of 203 but said PASS" closed.)
+        return []
+    # Phase E11 follow-up #2: robust ID extraction from crossbatch text
+    # (handles ranges, markdown links, brackets, comma lists). Falls back
+    # to substring search if a verify ID has an unusual prefix the
+    # extractor doesn't classify as a finding ID.
+    cb_ids = _extract_finding_ids_from_text(cb_text)
+    missing = [
+        fid for fid in sorted(verify_ids)
+        if fid not in cb_ids and fid not in cb_text
+    ]
+    if not missing:
+        return []
+    sample = ", ".join(missing[:5])
+    return [
+        f"crossbatch coverage: {len(missing)}/{len(verify_ids)} verify file(s) "
+        f"absent from cross_batch_consistency.md — sample: {sample}"
+    ]
+
+
+def _validate_skeptic_full_ch_coverage(scratchpad: Path) -> list[str]:
+    """E3: skeptic must cover every Critical/High reportable verify file.
+
+    Reads verify files, filters to CONFIRMED + (Critical|High), and confirms
+    each ID appears in both aggregate skeptic artifacts.
+    """
+    ch_ids: list[str] = list(dict.fromkeys(_skeptic_manifest_ids(scratchpad)))
+    if not ch_ids:
+        skeptic_files = list(scratchpad.glob("skeptic_*.md"))
+        if not skeptic_files:
+            # Skeptic is Thorough-only; absence is allowed when phase did not run.
+            return []
+        for p in scratchpad.glob("verify_*.md"):
+            stem = p.stem
+            if stem in ("verify_core", "verify_queue", "verify_aggregate"):
+                continue
+            try:
+                txt = p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            status = _verifier_status_from_text(txt)
+            if not _is_reportable_verdict(status):
+                continue
+            sev = _severity_name_from_text(txt, {})
+            if sev not in ("Critical", "High"):
+                continue
+            # Recover finding id from filename.
+            if stem.startswith("verify_F-"):
+                fid = stem[len("verify_F-"):]
+            elif stem.startswith("verify_F_"):
+                fid = stem[len("verify_F_"):]
+            else:
+                fid = stem[len("verify_"):]
+            ch_ids.append(fid.strip("[]"))
+    if not ch_ids:
+        # Phase E14 guardrail: empty expected C/H set is the only
+        # soft-pass branch. AGREE phrase alone is not enough when C/H
+        # findings exist on disk.
+        return []
+    issues: list[str] = []
+    for name in ("skeptic_findings.md", "skeptic_judge_decisions.md"):
+        p = scratchpad / name
+        if not p.exists():
+            issues.append(f"{name} missing for {len(ch_ids)} Critical/High finding(s)")
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            text = ""
+        file_ids = _extract_finding_ids_from_text(text)
+        file_missing = [fid for fid in ch_ids if fid not in file_ids and fid not in text]
+        if file_missing:
+            sample = ", ".join(file_missing[:5])
+            issues.append(
+                f"{name} missing {len(file_missing)}/{len(ch_ids)} Critical/High "
+                f"finding(s) — sample: {sample}"
+            )
+    if not issues:
+        return []
+    return ["skeptic coverage: " + "; ".join(issues)]
+
+
+def _validate_assemble_not_degraded(scratchpad: Path) -> list[str]:
+    """E4: a `report_assemble.degraded` sentinel must halt the pipeline.
+
+    The driver previously emitted the sentinel and continued; the report then
+    shipped with stubs / FP leakage / missing severity sections. This gate
+    promotes the sentinel into a hard halt so the user sees the failure
+    instead of a degraded-but-shipped report.
+    """
+    sentinel = scratchpad / "report_assemble.degraded"
+    if not sentinel.exists():
+        return []
+    try:
+        body = sentinel.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        body = ""
+    msg = "report_assemble: degraded sentinel present — halt instead of ship"
+    if body:
+        msg += f"; reasons: {body[:300]}"
+    return [msg]
+
+
+def _validate_verify_evidence_tags(scratchpad: Path, *, min_bytes: int = 100) -> list[str]:
+    """E6: each verify file must carry a Preferred Tag / Evidence Tag.
+
+    Missing tag is a schema failure. Per-shard gates may have allowed the
+    file through with size >= 100B but the substance gate must catch a
+    tagless body before report_index reads it.
+    """
+    schema_issue = _verification_queue_schema_issue(scratchpad)
+    if schema_issue:
+        return [schema_issue]
+    rows = parse_verification_queue_rows(scratchpad)
+    if not rows:
+        return []
+    missing: list[str] = []
+    for r in rows:
+        fid = (r.get("finding id") or "").strip()
+        if not fid:
+            continue
+        if not _verify_file_present_for_id(scratchpad, fid, min_bytes=min_bytes):
+            continue
+        # Find the actual file.
+        for name in (
+            f"verify_{fid}.md",
+            f"verify_F-{fid}.md",
+            f"verify_F_{fid}.md",
+            f"verify_[{fid}].md",
+        ):
+            p = scratchpad / name
+            if p.exists():
+                try:
+                    txt = p.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    txt = ""
+                tag = (
+                    _field_from_markdown(
+                        txt,
+                        ("Preferred Tag", "Preferred Verification",
+                         "Preferred Evidence", "Evidence Tag", "Evidence Tags",
+                         "Evidence"),
+                    )
+                    or ""
+                ).strip()
+                if not tag:
+                    missing.append(fid)
+                break
+    if not missing:
+        return []
+    sample = ", ".join(missing[:8])
+    return [
+        f"verify evidence tags: {len(missing)} verify file(s) missing "
+        f"Preferred/Evidence Tag — sample: {sample}"
+    ]
+
+
+def _validate_inventory_structure(scratchpad: Path) -> list[str]:
+    inv_path = scratchpad / "findings_inventory.md"
+    if not inv_path.exists():
+        return ["findings_inventory.md missing"]
+    try:
+        text = inv_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ["findings_inventory.md unreadable"]
+
+    issues: list[str] = []
+    blocks = _inventory_blocks(text)
+    block_count = len(blocks)
+
+    claimed_total = None
+    m = _TOTAL_FINDINGS_RE.search(text)
+    if m:
+        try:
+            claimed_total = int(m.group(1))
+        except Exception:
+            claimed_total = None
+
+    if claimed_total and block_count < max(5, int(claimed_total * 0.70)):
+        issues.append(
+            f"inventory structure: file claims {claimed_total} findings but only "
+            f"{block_count} parseable finding blocks were written"
+        )
+
+    if not blocks:
+        if claimed_total:
+            issues.append("inventory structure: no parseable finding blocks found")
+        return issues
+
+    def _has_field(block: str, *labels: str) -> bool:
+        """Check if block contains any of the given field labels (format-tolerant)."""
+        block_lc = block.lower()
+        for label in labels:
+            if re.search(
+                r"\*{0,2}" + re.escape(label.lower()) + r"\*{0,2}\s*:", block_lc
+            ):
+                return True
+        return False
+
+    missing_fields = 0
+    # Preserve the legacy smoke/resume tolerance for titleless stub findings
+    # such as `### Finding F-01`; those are enough to route severity-only
+    # empty-verify paths but are not the canonical inventory body contract.
+    # Detailed titled blocks, including `## Finding [INV-001]: title`, still
+    # get the required-field check through the shared inventory parser.
+    field_checked_blocks = [item for item in blocks if item.get("title")]
+    for item in field_checked_blocks:
+        block = item.get("block", "")
+        has_source_ids = _has_field(block, "Source IDs", "Source ID", "Sources", "Agent Sources")
+        has_severity = _has_field(block, "Severity", "Risk Level", "Level")
+        has_location = _has_field(block, "Location", "Code Location", "File", "Where")
+        has_tag = _has_field(
+            block, "Preferred Tag", "Evidence Tags", "Evidence Tag",
+            "Preferred Verification", "Evidence", "Verification Method",
+        )
+        if not (has_source_ids and has_severity and has_location and has_tag):
+            missing_fields += 1
+
+    checked_count = len(field_checked_blocks)
+    if checked_count and missing_fields > max(2, int(checked_count * 0.40)):
+        issues.append(
+            f"inventory structure: {missing_fields}/{checked_count} finding blocks "
+            "are missing one or more required fields (Source IDs / Severity / "
+            "Location / Preferred Tag)"
+        )
+    elif checked_count and missing_fields > max(1, int(checked_count * 0.20)):
+        log.warning(
+            "[_validate_inventory_structure] %d/%d finding blocks missing "
+            "required fields — LLM prose format check (soft)",
+            missing_fields, checked_count,
+        )
+
+    return issues
+
+
+def _validate_sc_subsystem_coverage(
+    scratchpad: Path, mode: str, min_bucket_files: int = 4
+) -> list[str]:
+    """Hard SC coverage gate from contract inventory / Slither flat files.
+
+    This is the SC equivalent of the L1 subsystem coverage guard: if a
+    substantial contract/program bucket is indexed by recon but never cited by
+    breadth/depth/scanner/verify outputs and not explicitly ACKNOWLEDGED, the
+    pipeline must not treat the run as coverage-complete.
+    """
+    if mode != "thorough":
+        return []
+    indexed = {
+        p for p in _collect_scip_indexed_paths(scratchpad)
+        if p.endswith((".sol", ".move", ".rs"))
+    }
+    if not indexed:
+        return []
+
+    test_markers = (
+        "/test/", "/tests/", "/script/", "/scripts/", "/mock", "/mocks/",
+        "/fixture/", "/fixtures/", ".t.sol", ".s.sol", "_test.rs",
+        "/interface/", "/interfaces/",
+    )
+    # Also match paths that START with these non-auditable prefixes
+    # (indexed paths may lack a leading slash).
+    non_auditable_prefixes = (
+        "test/", "tests/", "script/", "scripts/", "mock/", "mocks/",
+        "fixture/", "fixtures/", "interface/", "interfaces/",
+    )
+    prod = {
+        p for p in indexed
+        if not any(t in p.lower() for t in test_markers)
+        and not any(p.lower().startswith(pfx) for pfx in non_auditable_prefixes)
+    }
+    if not prod:
+        return []
+
+    cited = _collect_cited_paths(scratchpad)
+    ack_paths: set[str] = set()
+    for name in ("scope_leftover.md", "subsystem_coverage_gap.md", "sc_subsystem_coverage.md"):
+        p = scratchpad / name
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for line in text.splitlines():
+            if "ACKNOWLEDGED" not in line.upper():
+                continue
+            for m in re.finditer(
+                r"\b([A-Za-z0-9_./\\-]+\.(?:sol|move|rs))\b", line
+            ):
+                ack_paths.add(m.group(1).replace("\\", "/").lstrip("./"))
+            for m in re.finditer(
+                r"\b([A-Za-z0-9_][A-Za-z0-9_./\\-]*[A-Za-z0-9_])\b", line
+            ):
+                seg = m.group(1).replace("\\", "/").lstrip("./")
+                if "/" in seg and not seg.endswith((".sol", ".move", ".rs")):
+                    ack_paths.add(seg)
+
+    def covered(path: str) -> bool:
+        if path in cited or path in ack_paths:
+            return True
+        for c in cited:
+            c = c.replace("\\", "/").lstrip("./")
+            if path.endswith("/" + c) or c.endswith("/" + path):
+                return True
+        for a in ack_paths:
+            if path.endswith("/" + a) or a.endswith("/" + path):
+                return True
+            if path.startswith(a + "/") or ("/" + a + "/") in path:
+                return True
+        return False
+
+    buckets: dict[str, set[str]] = {}
+    for p in prod:
+        buckets.setdefault(_sc_contract_module_key(p), set()).add(p)
+
+    uncovered: list[str] = []
+    uncovered_details: dict[str, list[str]] = {}
+    for key, files in sorted(buckets.items()):
+        if len(files) < min_bucket_files:
+            continue
+        if not any(covered(f) for f in files):
+            file_list = sorted(files)
+            uncovered.append(f"{key} ({len(file_list)} files)")
+            uncovered_details[key] = file_list
+
+    out = scratchpad / "sc_subsystem_coverage.md"
+    lines = [
+        "# SC Subsystem Coverage",
+        "",
+        f"**Indexed prod files**: {len(prod)}",
+        f"**Buckets**: {len(buckets)}",
+        f"**Uncovered substantial buckets**: {len(uncovered)}",
+        "",
+    ]
+    if uncovered:
+        lines += ["| Bucket | Missing Files |", "|--------|---------------|"]
+        for key, files in uncovered_details.items():
+            lines.append(f"| {key} ({len(files)} files) | {', '.join(files)} |")
+    else:
+        lines += ["All substantial SC source buckets have at least one citation or ACKNOWLEDGED row."]
+    try:
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    if uncovered:
+        exact_files = [
+            f for key in sorted(uncovered_details) for f in uncovered_details[key]
+        ]
+        sample = ", ".join(exact_files[:24])
+        suffix = " ..." if len(exact_files) > 24 else ""
+        return [
+            "SC subsystem coverage missed substantial buckets: "
+            + ", ".join(uncovered[:8])
+            + f"; missing files: {sample}{suffix}"
+        ]
+    if not cited:
+        return ["SC subsystem coverage: zero source citations across finding artifacts"]
+    return []
+
+
+def _validate_recon_coverage(scratchpad: Path, project_root: str,
+                             language: str,
+                             subsystem_scope: str | None = None,
+                             backend: str = "claude") -> list[str]:
+    """Post-recon: assert every substantial module is cited.
+
+    The failure mode this catches (Heimdallr arxiv 2601.17833, named as a
+    core LLM-audit failure): recon produces an `attack_surface.md` that
+    feels thorough but only covers the most obvious entry points; whole
+    subsystems go uncited; downstream breadth/depth agents analyze only
+    what recon flagged; the report silently omits the uncovered subsystems.
+
+    Signal: group in-scope source files by 2-segment module key (see
+    `_module_key`). For each module with >=10 files, require at least one
+    file from that module to appear as a full relative-path citation
+    somewhere in recon artifacts. Modules explicitly ACKNOWLEDGED in
+    `scope_leftover.md` are exempt. Modules with <10 files are exempt
+    (recon can legitimately skip small helpers). Path matching is by
+    suffix-match on relative paths, never by basename — duplicate
+    basenames across modules no longer false-cover each other.
+    """
+    lang_key = (language or "").lower()
+    exts = {
+        "evm": [".sol"], "solana": [".rs"], "soroban": [".rs"],
+        "aptos": [".move"], "sui": [".move"],
+        "go": [".go"], "rust": [".rs"],
+        "l1": [".go", ".rs"], "mixed": [".go", ".rs"],
+    }.get(lang_key, [".sol", ".rs", ".move", ".go"])
+    skip_tokens = ("vendor", "target", "node_modules", ".git", "out",
+                   "build", "dist", ".idea", ".vscode")
+    root = Path(project_root)
+    scope_prefix = _normalize_subsystem_scope(subsystem_scope)
+    if not root.exists():
+        return []
+
+    # v2.4.x: scope-narrowed walk. When subsystem_scope is set we only
+    # need to enumerate files under the scope prefix — files outside the
+    # prefix are auto-exempt by `_path_in_subsystem_scope` further down,
+    # so walking them is wasted I/O on huge repos. Falls back to full
+    # rglob from project root when no scope is set.
+    walk_roots: list[Path] = []
+    if scope_prefix:
+        scope_root = root / scope_prefix
+        if scope_root.exists() and scope_root.is_dir():
+            walk_roots.append(scope_root)
+        else:
+            # Configured scope path doesn't exist on disk -> fall back to
+            # full walk so the validator can still flag the situation.
+            walk_roots.append(root)
+    else:
+        walk_roots.append(root)
+
+    # modules: key -> set of relative paths (POSIX form)
+    modules: dict[str, set[str]] = {}
+    for ext in exts:
+        for walk_root in walk_roots:
+            for p in walk_root.rglob(f"*{ext}"):
+                try:
+                    rel = p.relative_to(root).as_posix()
+                except Exception:
+                    continue
+                parts = rel.split("/")
+                if any(tok in parts for tok in skip_tokens):
+                    continue
+                if scope_prefix and not _path_in_subsystem_scope(rel, scope_prefix):
+                    # Belt-and-suspenders: scope walk guarantees this is
+                    # already true, but a broken symlink or fallback path
+                    # could violate it.
+                    continue
+                key = _module_key(rel)
+                modules.setdefault(key, set()).add(rel)
+
+    if not modules:
+        return []
+
+    recon_files = [
+        "recon_summary.md", "subsystem_map.md", "attack_surface.md",
+        "integration_points.md", "opengrep_hits_ranked.md",
+        "file_coverage_ledger.md", "detected_patterns.md",
+        "function_list.md", "state_variables.md", "contract_inventory.md",
+        "threat_model.md", "trust_boundaries.md",
+    ]
+    # Match anything that looks like a file reference. Don't require a
+    # trailing `:` or whitespace — citations sometimes appear at end of
+    # line, inside backticks, or inside bullet lists.
+    cite_re = re.compile(
+        r"([A-Za-z0-9_][A-Za-z0-9_/.\\-]*?\.(?:sol|rs|move|go))"
+    )
+    cited_paths: set[str] = set()
+    for name in recon_files:
+        p = scratchpad / name
+        if not p.exists():
+            continue
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for m in cite_re.finditer(txt):
+            raw = m.group(1).replace("\\", "/").lstrip("./")
+            if raw:
+                cited_paths.add(raw)
+
+    # ACKNOWLEDGED rows in scope_leftover.md — track full file paths.
+    ack_paths: set[str] = set()
+    lp = scratchpad / "scope_leftover.md"
+    if lp.exists():
+        try:
+            lt = lp.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            lt = ""
+        for line in lt.splitlines():
+            s = line.strip()
+            if not s.startswith("|") or _is_separator_row(s):
+                continue
+            s_up = s.upper()
+            if "FILE" in s_up and ("STATUS" in s_up or "PATH" in s_up or "SCOPE" in s_up):
+                continue
+            parts = [x.strip() for x in s.strip("|").split("|")]
+            if len(parts) >= 2 and any(p.upper().startswith("ACKNOWLEDGED") for p in parts[1:]):
+                raw = parts[0].replace("\\", "/").lstrip("./")
+                if raw:
+                    ack_paths.add(raw)
+
+    def _is_covered(rel_path: str) -> bool:
+        # Direct match, or suffix match (citation can be abbreviated to a
+        # shorter path as long as the source path ends with it).
+        if rel_path in cited_paths or rel_path in ack_paths:
+            return True
+        for c in cited_paths:
+            if rel_path.endswith("/" + c) or c.endswith("/" + rel_path):
+                return True
+        for a in ack_paths:
+            if rel_path.startswith(a + "/") or rel_path == a:
+                return True
+            if rel_path.endswith("/" + a) or a.endswith("/" + rel_path):
+                return True
+        return False
+
+    uncovered = []
+    for mod, files in modules.items():
+        if len(files) < 10:
+            continue
+        if not any(_is_covered(f) for f in files):
+            uncovered.append(f"{mod} ({len(files)} files)")
+
+    issues = []
+    if uncovered:
+        # Stable order, cap the reported list.
+        uncovered.sort()
+        issues.append(
+            "recon missed substantial modules (no file cited; not "
+            "ACKNOWLEDGED in scope_leftover): " + ", ".join(uncovered[:8])
+        )
+    if not cited_paths:
+        if backend == "codex":
+            log.warning(
+                "recon emitted zero file-path citations across all artifacts "
+                "(Codex backend — GPT models may cite by function/module name "
+                "instead of file path; treating as soft warning)"
+            )
+        else:
+            issues.append(
+                "recon emitted zero file-path citations across all artifacts"
+            )
+    return issues
+
+
+_RECON_PLACEHOLDER_RE = re.compile(
+    r"(?:\(\s*stub\s*\)|\bstub\s+(?:artifact|only|content|"
+    r"placeholder|summary|file)\b|\b(?:placeholder|tbd|todo|"
+    r"llm to|fill later|deferred during enrichment)\b)",
+    re.IGNORECASE,
+)
+
+
+def _has_live_placeholder_language(text: str) -> str | None:
+    """Return the offending line if live placeholder/stub content is found.
+
+    Returns None when no live placeholder content is detected.
+    Recon summaries often include gate-status statements such as
+    "No placeholder markers remain."  The old whole-file regex treated those
+    negated cleanup statements as actual placeholders and forced pointless
+    retries after a valid recon.  Evaluate line-by-line and ignore explicit
+    absence/replacement statements while still catching real TODO/stub bodies.
+    """
+    for raw in _llm_norm(text).splitlines():
+        line = raw.strip().lower()
+        if not line or not _RECON_PLACEHOLDER_RE.search(line):
+            continue
+        # Negation: explicit cleanup / absence statements
+        if re.search(
+            r"\b(no|without|not|never|absent|removed|removes|free of|"
+            r"clean of|replaces|replaced|overwrites|overwrote|enriched)\b"
+            r".{0,80}\b(stub|placeholder|todo|tbd|llm to|fill later)\b",
+            line,
+        ):
+            continue
+        if re.search(
+            r"\b(stub|placeholder|todo|tbd|llm to|fill later)\b"
+            r".{0,80}\b(absent|removed|remain|remaining|free of|"
+            r"replaced|overwritten)\b",
+            line,
+        ):
+            continue
+        # Negation: security analysis context — the target code contains
+        # placeholders/stubs, the recon is describing them (not being one)
+        if re.search(
+            r"\b(uses?|contains?|has|implement|call|address|value|"
+            r"function|contract|module|variable|parameter|argument|"
+            r"code|codebase|protocol|program)\b"
+            r".{0,40}\b(stub|placeholder|todo|tbd)\b",
+            line,
+        ):
+            continue
+        # Negation: code-reference context — line cites source file paths,
+        # line numbers, or backticked code near the matched word, indicating
+        # recon is describing target-code TODOs/stubs (not being a placeholder
+        # itself).  v2.1.7: fixes false recon degradation on L1 codebases
+        # where recon quotes source-code TODO comments verbatim.
+        if re.search(
+            r"(?:"
+            # file-extension patterns (.rs: .go: .sol: .ts:)
+            r"\.\w{1,4}[:`\s,)]"
+            # crate / source directory paths
+            r"|(?:crates|src|cmd|pkg|internal|contracts)/"
+            # "at line N" / "line 146" / "L120"
+            r"|(?:at\s+)?line\s+\d+\b|\bL\d+\b"
+            # recon structural prefixes
+            r"|code\s+path\s*:|bug\s+class\s*:"
+            # backticked code within 60 chars of the matched term
+            r"|`[^`]+`.{0,60}\b(?:stub|todo|tbd)\b"
+            r"|\b(?:stub|todo|tbd)\b.{0,60}`[^`]+`"
+            r")",
+            line,
+        ):
+            continue
+        # Negation: "the/that TODO" followed by a descriptor word —
+        # recon is referencing a code-level artifact ("the TODO about
+        # staked address check"), not being a placeholder itself.
+        # Requires a follow-on word (about/for/in/regarding/...) to
+        # distinguish "the TODO about X" from "TODO: fill later".
+        # v2.7.1: fixes false recon retry on Irys L1 where
+        # trust_boundaries wrote "the TODO about staked address check".
+        if re.search(
+            r"\b(?:the|that|said|above|aforementioned|existing"
+            r"|incomplete|missing|unimplemented|remaining|open)\s+"
+            r"(?:stub|placeholder|todo|tbd)\s+"
+            r"(?:about|for|in|at|from|on|regarding|concerning|related"
+            r"|around|check|comment|item|note|marker|issue|task|block"
+            r"|where|which|that|mentioned|listed|described|identified)\b",
+            line,
+        ):
+            continue
+        # Negation: parenthesized status annotation in table rows —
+        # recon tables use "(todo)" or "(tbd)" as status markers on
+        # findings/entry-points, not as placeholder content.
+        # v2.7.3: fixes false recon retry on Irys L1 attack_surface.md
+        # where table cells contained "(todo)" as issue status.
+        if re.search(r"^\s*\|", raw.strip()) and re.search(
+            r"\(\s*(?:todo|tbd|stub)\s*\)", line
+        ):
+            continue
+        return line
+    return None
+
+
+def _validate_recon_content_structure(
+    scratchpad: Path, backend: str = "claude",
+) -> tuple[list[str], list[str]]:
+    """Check that critical recon artifacts have required structural sections.
+
+    Returns (hard_issues, soft_issues).
+    hard_issues: design_context Operational Implications / Key Invariants,
+        recon_summary byte minimum — downstream agents depend on these.
+    soft_issues: heading format checks for attack_surface, recon_summary,
+        build_status — format-dependent, non-blocking warnings.
+    """
+    hard: list[str] = []
+    soft: list[str] = []
+    def _read_artifact(name: str) -> tuple[str, str]:
+        path = scratchpad / name
+        if not path.exists():
+            return "", ""
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            text = ""
+        return text, _llm_norm(text).lower()
+
+    # design_context.md: must contain Operational Implications (Rule 14)
+    dc = scratchpad / "design_context.md"
+    if dc.exists():
+        txt, _ = _read_artifact("design_context.md")
+        if not re.search(
+            r"(?im)^#+\s+.*(?:operational\s+implications|implications.*(?:operational|design|system)"
+            r"|practical\s+implications|operational\s+impact|how.*invariants.*(?:affect|impact)"
+            r"|implications\b)",
+            txt,
+        ):
+            hard.append(
+                "design_context.md missing '## Operational Implications' section "
+                "(Rule 14 — breadth/depth agents need it)"
+            )
+        if not re.search(
+            r"(?im)^#+\s+.*(?:(?:key|protocol|core|safety|system|critical)\s+)?invariant",
+            txt,
+        ):
+            hard.append(
+                "design_context.md missing Key Invariants section "
+                "(downstream agents derive analysis from invariant formulas)"
+            )
+
+    # attack_surface.md: heading format (non-blocking)
+    atk = scratchpad / "attack_surface.md"
+    if atk.exists():
+        txt, _ = _read_artifact("attack_surface.md")
+        if not re.search(
+            r"(?im)^#+\s+.*(?:entry|external|public|attack|surface|function"
+            r"|interface|method|endpoint|vector|risk|threat|accessible|exposed)",
+            txt,
+        ):
+            soft.append(
+                "attack_surface.md has no recognizable section headers "
+                "(expected entry-point or attack-surface headings)"
+            )
+
+    summary = scratchpad / "recon_summary.md"
+    if summary.exists():
+        txt, norm = _read_artifact("recon_summary.md")
+        min_summary_bytes = 200 if backend == "codex" else 512
+        if summary.stat().st_size < min_summary_bytes:
+            hard.append(
+                "recon_summary.md is too small to be a clean handoff "
+                f"({summary.stat().st_size} bytes, min={min_summary_bytes})"
+            )
+        if not re.search(
+            r"(?im)^(?:#+\s+|\*\*).*(?:recon|summary|protocol|contract|component|"
+            r"attack|risk|template|skill|overview|finding|scope)",
+            txt,
+        ):
+            soft.append(
+                "recon_summary.md lacks recognizable recon summary sections"
+            )
+    build = scratchpad / "build_status.md"
+    if build.exists():
+        try:
+            txt = build.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            txt = ""
+        min_build_bytes = 30 if backend == "codex" else 80
+        if build.stat().st_size < min_build_bytes or not re.search(
+            r"(?i)\b(?:build|compile|forge|hardhat|foundry|cargo|move|sui|"
+            r"stellar|slither|aderyn|opengrep|success|failed|unavailable|"
+            r"skipped|status|compiled|ok|error|passed)\b",
+            txt,
+        ):
+            soft.append(
+                "build_status.md is not a substantive build/static status "
+                "artifact"
+            )
+
+    return hard, soft
+
+
+def _validate_scope_leftover(
+    scratchpad: Path,
+    subsystem_scope: str | None = None,
+    backend: str = "claude",
+) -> list[str]:
+    """Return uncovered large-file rows from scope_leftover.md."""
+    p = scratchpad / "scope_leftover.md"
+    if not p.exists():
+        if backend == "codex":
+            try:
+                p.write_text(
+                    "# Scope Leftover\n\nAll modules covered.\n",
+                    encoding="utf-8",
+                )
+                log.info(
+                    "[scope_leftover] auto-generated for Codex backend "
+                    "(GPT models may not produce this Claude-convention file)"
+                )
+            except OSError:
+                pass
+            return []
+        return ["scope_leftover.md missing"]
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ["scope_leftover.md unreadable"]
+
+    issues = []
+    scope_prefix = _normalize_subsystem_scope(subsystem_scope)
+
+    # Detect column positions from header row rather than assuming fixed order.
+    col_file = 0
+    col_loc = 1
+    col_reason = 2
+    col_ack = 3
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("|") and not _is_separator_row(s):
+            hdr_cells = [c.strip().lower() for c in s.strip("|").split("|")]
+            if any("file" in c or "path" in c or "component" in c for c in hdr_cells):
+                for idx, c in enumerate(hdr_cells):
+                    if "file" in c or "path" in c or "component" in c:
+                        col_file = idx
+                    elif "loc" in c or "line" in c or "size" in c:
+                        col_loc = idx
+                    elif "reason" in c or "why" in c:
+                        col_reason = idx
+                    elif "ack" in c or "status" in c or "cover" in c:
+                        col_ack = idx
+                break
+
+    for line in text.splitlines():
+        s = line.strip()
+        if not s.startswith("|") or _is_separator_row(s):
+            continue
+        parts = [x.strip() for x in s.strip("|").split("|")]
+        # Skip header rows (contain column-label keywords).
+        parts_lc = " ".join(parts).lower()
+        if "file" in parts_lc and ("status" in parts_lc or "loc" in parts_lc or "ack" in parts_lc):
+            continue
+        if len(parts) < 3:
+            continue
+        file_name = parts[col_file] if col_file < len(parts) else ""
+        loc_s = parts[col_loc] if col_loc < len(parts) else "0"
+        reason = parts[col_reason] if col_reason < len(parts) else ""
+        ack = parts[col_ack] if col_ack < len(parts) else ""
+        if scope_prefix and not _path_in_subsystem_scope(file_name, scope_prefix):
+            continue
+        # v2.1.7: only extract LOC when the cell looks numeric ("420",
+        # "1.8k", "500 LOC").  Previously, description text like "First
+        # 420 lines read" was parsed as LOC=420 because digits were
+        # extracted from natural language.  This caused IN_SCOPE_PARTIAL
+        # rows (which have no LOC column) to be spuriously flagged.
+        if re.match(r"^\s*[\d,.]+\s*(?:[kKmM]?\s*(?:LOC|loc|lines?)?)?\s*$", loc_s):
+            try:
+                loc = int(re.sub(r"[^\d]", "", loc_s) or "0")
+            except Exception:
+                loc = 0
+        else:
+            loc = 0
+        ack_lc = ack.lower()
+        ack_ok = (
+            ack.upper().startswith("ACKNOWLEDGED:")
+            or "cited" in ack_lc
+            or (
+                "covered" in ack_lc
+                and "not covered" not in ack_lc
+                and "uncovered" not in ack_lc
+            )
+            or "✓" in ack
+            or "[x]" in ack_lc
+            or "check" in ack_lc
+            # v2.1.6: honor `LEFTOVER-ACK:` convention used by L1 recon.
+            # Observed Irys L1 run: recon correctly acknowledged
+            # crates/macros/src/lib.rs as a proc-macro leftover via
+            # `LEFTOVER-ACK: proc-macro / no runtime surface` but the
+            # gate ignored it. Prefix-match on any ACK-family token.
+            or "leftover-ack" in ack_lc
+            or ack_lc.strip().startswith("ack:")
+            or ack_lc.strip().startswith("ack ")
+        )
+        # v2.1.7: treat coverage-description language as implicit ack.
+        # Scope leftover tables (especially IN_SCOPE_PARTIAL) may describe
+        # analysis already performed ("full file read", "N lines read")
+        # without an explicit ACK column.  When the ack column is empty
+        # or missing, scan all columns for evidence the file was analyzed.
+        if not ack_ok:
+            all_cols_lc = " ".join(parts).lower()
+            if re.search(
+                r"\bfull(?:y)?\s+(?:file\s+)?read\b"
+                r"|\bfully\s+analyzed\b"
+                r"|\bno\s+additional\s+(?:partial\s+)?read\s+needed\b"
+                r"|\b\d+\s+lines?\s+read\b"
+                r"|\bfully\s+(?:covered|examined|reviewed)\b",
+                all_cols_lc,
+            ):
+                ack_ok = True
+        # v2.1.2: auto-acknowledge files under known out-of-scope library
+        # directories (Foundry / npm / vendored deps). Prevents the AwesomeX
+        # false recon degradation where forge-std / v2-periphery / v3-core
+        # tripped the gate despite being conventionally out of scope.
+        if not ack_ok and _is_whitelisted_lib_path(file_name):
+            ack_ok = True
+        if loc > 200 and not ack_ok:
+            issues.append(f"{file_name} ({loc} LOC, reason={reason})")
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# v2.4.0: PoC classification gates (post-verify, pre-report)
+# ---------------------------------------------------------------------------
+
+def _find_verify_file(scratchpad: Path, fid: str) -> Optional[Path]:
+    """Find the verify_*.md file for a given finding ID."""
+    def _canon_id(value: str) -> str:
+        return re.sub(r"[^A-Z0-9]+", "", value.upper())
+
+    fid = (fid or "").strip()
+    if not fid:
+        return None
+    normalized = fid.replace(" ", "_").replace("-", "_")
+    candidates = [
+        scratchpad / f"verify_{fid}.md",
+        scratchpad / f"verify_{normalized}.md",
+        scratchpad / f"verify_F_{fid}.md",
+        scratchpad / f"verify_F-{fid}.md",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+
+    # Do not use broad glob substring matching here: F-1 must not resolve to
+    # verify_F-10.md. The fallback accepts only a unique canonical ID match.
+    target = _canon_id(fid)
+    matches: list[Path] = []
+    for p in sorted(scratchpad.glob("verify_*.md"), key=lambda x: x.name.lower()):
+        raw = p.stem[len("verify_"):]
+        raw = raw.strip("[]")
+        if _canon_id(raw) == target:
+            matches.append(p)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _validate_poc_attempt_coverage(scratchpad: Path, mode: str) -> list[str]:
+    """Post-verification soft gate: check verifiers attempted PoCs for testable findings.
+
+    Returns list of warning strings (soft — logged to violations.md, not halt).
+    """
+    if mode == "light":
+        return []
+
+    rows = parse_verification_queue_rows(scratchpad)
+    if not rows:
+        return []
+
+    warnings: list[str] = []
+    for row in rows:
+        poc_class = row.get("poc class", "structural").strip().lower()
+        severity = (row.get("severity") or "").strip().lower()
+        fid = row.get("finding id", "")
+
+        if mode == "core":
+            if poc_class != "unit":
+                continue
+            if severity not in ("critical", "high"):
+                continue
+        else:  # thorough
+            if poc_class not in ("unit", "property"):
+                continue
+
+        verify_path = _find_verify_file(scratchpad, fid)
+        if not verify_path:
+            continue
+
+        try:
+            content = verify_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        has_poc_section = bool(re.search(
+            r"(?im)^#{2,4}\s+(?:PoC\s+Attempt|Execution\s+Result|PoC\s+Result"
+            r"|PoC\s+Execution)\b",
+            content,
+        ))
+        has_poc_pass = has_mechanical_proof(content)
+        attempted_no = bool(re.search(r"Attempted\s*:\s*NO\b", content, re.IGNORECASE))
+        compiled_na = bool(re.search(
+            r"Compiled\s*:\s*(?:N/?A|NOT_APPLICABLE|NO)\b", content, re.IGNORECASE
+        ))
+        not_executed = bool(re.search(
+            r"Result\s*:\s*(?:NOT_EXECUTED|N/?A|NOT_APPLICABLE)\b", content, re.IGNORECASE
+        ))
+        no_test_written = bool(re.search(
+            r"(?:no\s+(?:foundry|hardhat|cargo|move|unit|integration)?\s*test\s+written|"
+            r"no\s+test\s+(?:was\s+)?written|"
+            r"not\s+attempted|"
+            r"skipped\s+(?:po?c|test|execution))",
+            content,
+            re.IGNORECASE,
+        ))
+        _SKIP_CODES = (
+            r"NO_BUILD_ENVIRONMENT|EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS|"
+            r"DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL|PURE_SPEC_OR_DOCS_ONLY|"
+            r"STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION"
+        )
+        allowed_skip = bool(re.search(
+            r"(?:PoC\s+Not\s+Attempted\s+Because"
+            r"|Not\s+Attempted\s+Because"
+            r"|PoC\s+[Ss]kip(?:\s+[Rr]eason)?"
+            r"|[Ss]kip\s+[Rr]eason"
+            r"|PoC\s+not\s+attempted)"
+            r"\s*:\s*(?:" + _SKIP_CODES + r")",
+            content,
+            re.IGNORECASE,
+        ))
+
+        if has_poc_pass:
+            continue
+
+        if not has_poc_section:
+            warnings.append(
+                f"POC_ATTEMPT_MISSING: {fid} (poc_class={poc_class}, severity={severity}) "
+                f"— no ### PoC Attempt section in verify file"
+            )
+        else:
+            if attempted_no or compiled_na or not_executed or no_test_written:
+                if not allowed_skip:
+                    warnings.append(
+                        f"POC_ATTEMPT_SKIPPED: {fid} (poc_class={poc_class}, severity={severity}) "
+                        f"— Attempted: NO without structural justification"
+                    )
+
+    return warnings
+
+
+def _apply_poc_fail_demotions(scratchpad: Path, mode: str) -> list[dict[str, str]]:
+    """Demote findings where PoC mechanically disproved the claimed harm.
+
+    For poc_class=unit findings with [POC-FAIL]: cap at Informational.
+    For poc_class=property findings with [POC-FAIL]: cap at Low.
+
+    Returns list of demotion records.
+    """
+    if mode == "light":
+        return []
+
+    rows = parse_verification_queue_rows(scratchpad)
+    if not rows:
+        return []
+
+    demotions: list[dict[str, str]] = []
+    for row in rows:
+        poc_class = row.get("poc class", "structural")
+        if poc_class not in ("unit", "property"):
+            continue
+
+        fid = row.get("finding id", "")
+        severity = (row.get("severity") or "").strip()
+
+        verify_path = _find_verify_file(scratchpad, fid)
+        if not verify_path:
+            continue
+
+        try:
+            content = verify_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        poc_section_match = re.search(
+            r"#{2,3}\s*(?:PoC Attempt|Execution Result)(.*?)(?=\n#{2,3}\s|\Z)", content, re.DOTALL
+        )
+        poc_section = poc_section_match.group(1) if poc_section_match else ""
+        if "[POC-FAIL]" not in poc_section:
+            evidence_line = re.search(r"Evidence\s*Tag\s*:\s*\[POC-FAIL\]", content, re.IGNORECASE)
+            if not evidence_line:
+                continue
+
+        if has_mechanical_proof(content):
+            continue
+
+        if poc_class == "unit":
+            new_sev = "Informational"
+            reason = "POC-FAIL on unit-testable finding — claimed harm mechanically disproved"
+        else:
+            new_sev = "Low"
+            reason = "POC-FAIL on property-testable finding — invariant violation not reproduced"
+
+        demotions.append({
+            "finding_id": fid,
+            "original_severity": severity,
+            "new_severity": new_sev,
+            "poc_class": poc_class,
+            "reason": reason,
+        })
+
+    if demotions:
+        lines = [
+            "# PoC Fail Demotions\n\n",
+            "Findings mechanically disproved by executed PoCs. Index Agent MUST respect these severity caps.\n\n",
+            "| Finding ID | Original Severity | Capped At | PoC Class | Reason |\n",
+            "|-----------|-------------------|-----------|-----------|--------|\n",
+        ]
+        for d in demotions:
+            lines.append(
+                f"| {d['finding_id']} | {d['original_severity']} | {d['new_severity']} "
+                f"| {d['poc_class']} | {d['reason']} |\n"
+            )
+        (scratchpad / "poc_demotions.md").write_text("".join(lines), encoding="utf-8")
+
+    return demotions
+
+
+_TRIVIAL_ASSERT_STRS = [
+    "assert!(true)", "assert_eq!(1, 1)", "assert_eq!(true, true)",
+    "assert!(1 == 1)", "assert!(1==1)",
+]
+
+_NONTRIVIAL_ASSERT_RE = re.compile(
+    r"#\[should_panic|"
+    r"\.unwrap_err\(\)|"
+    r"\.is_err\(\)|"
+    r"\.is_none\(\)|"
+    r"assert(?:_eq|_ne|_matches)?!\s*\([^)]*(?:result|output|value|balance|state|err|len|count|sum)|"
+    r"assert\s*\.\s*(?:True|False|Equal|NotEqual)|"
+    r"t\.Fatal|t\.Error|"
+    r"require\.",
+    re.IGNORECASE,
+)
+
+_ANY_ASSERT_RE = re.compile(
+    r"assert(?:_eq|_ne|_matches)?!\s*\(|"
+    r"#\[should_panic|"
+    r"\.unwrap_err\(\)|"
+    r"assert\s*\.\s*(?:True|False|Equal|NotEqual)|"
+    r"t\.Fatal|t\.Error|"
+    r"require\.",
+    re.IGNORECASE,
+)
+
+
+def _validate_poc_pass_integrity(scratchpad: Path) -> list[dict[str, str]]:
+    """Sanity-check [POC-PASS] claims for basic validity.
+
+    Catches trivial assertions (assert!(true)) and missing assertions.
+    Returns list of findings to downgrade from [POC-PASS] -> [CODE-TRACE].
+    """
+    rows = parse_verification_queue_rows(scratchpad)
+    if not rows:
+        return []
+
+    downgrades: list[dict[str, str]] = []
+    for row in rows:
+        fid = row.get("finding id", "")
+        poc_class = row.get("poc class", "structural")
+
+        verify_path = _find_verify_file(scratchpad, fid)
+        if not verify_path:
+            continue
+        try:
+            content = verify_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        has_mechanical_tag = has_mechanical_proof(content)
+        if not has_mechanical_tag:
+            continue
+
+        code_blocks = re.findall(r"```(?:rust|go|python|solidity|javascript|typescript|move|toml)?\s*\n(.*?)```", content, re.DOTALL)
+        if not code_blocks:
+            continue
+
+        all_code = "\n".join(code_blocks)
+
+        has_any_assert = bool(_ANY_ASSERT_RE.search(all_code))
+
+        if not has_any_assert:
+            if "#[should_panic]" not in all_code and "should_panic" not in all_code:
+                downgrades.append({
+                    "finding_id": fid,
+                    "reason": "No assertion found in PoC code — downgrade to [CODE-TRACE]",
+                    "poc_class": poc_class,
+                })
+            continue
+
+        has_nontrivial = bool(_NONTRIVIAL_ASSERT_RE.search(all_code))
+        if not has_nontrivial:
+            code_normalized = re.sub(r"\s+", "", all_code.lower())
+            is_trivial = any(
+                t.replace(" ", "") in code_normalized for t in _TRIVIAL_ASSERT_STRS
+            )
+            if is_trivial:
+                downgrades.append({
+                    "finding_id": fid,
+                    "reason": "Trivial assertion only (assert!(true) or equivalent) — downgrade to [CODE-TRACE]",
+                    "poc_class": poc_class,
+                })
+
+    return downgrades

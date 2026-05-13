@@ -59,7 +59,7 @@ Spawn highest-priority domains first within remaining budget. This ensures a Cri
 1. **Hard iteration cap**: Maximum 3 iterations (iteration 1 = full coverage, iterations 2-3 = targeted)
 2. **Dynamic spawn cap**: `depth_floor = 12 + max(0, 5 - actual_breadth_count)`, then:
    ```
-   niche_injectable_count = len(niche_agents) + len(injectable_agents)
+   niche_injectable_count = len(niche_agents)
    niche_overflow = max(0, niche_injectable_count - 3)
    thorough_bonus = 5 if MODE == THOROUGH else 0
    hard_cap = 20 + niche_overflow + thorough_bonus
@@ -155,7 +155,7 @@ Each finding card sent to iteration 2+ agents contains ONLY:
 1. **Monotonic confidence**: Confidence can only increase or stay flat between iterations. Evidence from prior iterations is preserved.
 2. **New evidence required**: Score increase requires at least one NEW evidence tag not present in the previous iteration's scoring input.
 3. **No self-referential scoring**: The scoring agent scores based on evidence artifacts in the scratchpad files, not on the depth agent's self-reported confidence.
-4. **Scoring agent model**: Always haiku (mechanical task - formula application, not reasoning).
+4. **Scoring agent model**: Always sonnet (formula application with per-finding differentiation — haiku produces binary-bucket stubs on large audits).
 
 ---
 

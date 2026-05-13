@@ -4,16 +4,18 @@
 > Replace `{path}`, `{scratchpad}`, `{docs_path_or_url_if_provided}`, `{network_if_provided}`, `{scope_file_if_provided}`, `{scope_notes_if_provided}` with actual values. Omit lines for empty placeholders.
 >
 > **ORCHESTRATOR SPLIT DIRECTIVE**: Do NOT spawn a single monolithic recon agent.
-> Split into **4 parallel agents** to prevent timeout (confirmed failure on 22-contract projects):
+> Split into **5 parallel agents** to prevent timeout and avoid overloading the
+> patterns/templates lane:
 >
 > | Agent | Tasks | Model | Why Separate |
 > |-------|-------|-------|-------------|
 > | **1A: RAG-only** | TASK 0 steps 1-5 (vuln-db + Solodit) | **sonnet** | MCP calls can be slow; isolate from file I/O. Sonnet sufficient - mechanical query+format task. |
 > | **1B: Docs + External + Fork** | TASK 0 step 6 (fork ancestry), TASK 3, TASK 11 | opus | Tavily web search can hang; separate from RAG |
 > | **2: Build + Slither + Tests** | TASK 1, 2, 8, 9 | **sonnet** | Build/compile is blocking; Slither is fail-fast. Sonnet sufficient - tool execution + output formatting. |
-> | **3: Patterns + Surface + Templates** | TASK 4, 5, 6, 7, 10 | opus | Pure codebase analysis, no external deps. Opus needed - attack surface + template selection requires reasoning. |
+> | **3A: Inventory + Patterns** | TASK 4, 5 | opus | Narrow reasoning slice; should emit early structured artifacts. |
+> | **3B: Surface + Flags + Templates** | TASK 6, 7, 10 | opus | Attack surface + template synthesis remains heavy; isolate it from inventory extraction. |
 >
-> **CRITICAL - RAG TIMEOUT POLICY (v9.9.6)**:
+> **CRITICAL - RAG TIMEOUT POLICY**:
 > Agent 1A is **FIRE-AND-FORGET**. The orchestrator MUST NOT block on Agent 1A completion.
 > - Spawn Agent 1A with `run_in_background: true`
 > - **DO NOT await Agent 1A** before proceeding to Phase 2. Wait ONLY for Agents 1B, 2, and 3.
@@ -24,9 +26,10 @@
 >
 > Agent 1A writes: `meta_buffer.md`
 > Agent 1B writes: `design_context.md`, `external_production_behavior.md`, fork section of `meta_buffer.md`
-> Agent 2 writes: `build_status.md`, `function_list.md`, `call_graph.md`, `state_variables.md`, `modifiers.md`, `event_definitions.md`, `external_interfaces.md`, `static_analysis.md`, `test_results.md`
-> Agent 3 writes: `contract_inventory.md`, `attack_surface.md`, `detected_patterns.md`, `setter_list.md`, `emit_list.md`, `constraint_variables.md`, `template_recommendations.md`
-> Orchestrator writes: `recon_summary.md` (after Agents 1B, 2, 3 complete - NOT waiting for 1A)
+> Agent 2 writes: `build_status.md`, `function_list.md`, `call_graph.md`, `state_variables.md`, `modifiers.md`, `event_definitions.md`, `external_interfaces.md`, `static_analysis.md`, `test_results.md`, `caller_map.md`, `callee_map.md`, `state_write_map.md`, `function_summary.md`
+> Agent 3A writes: `contract_inventory.md`, `detected_patterns.md`
+> Agent 3B writes: `attack_surface.md`, `setter_list.md`, `emit_list.md`, `constraint_variables.md`, `template_recommendations.md`
+> Orchestrator writes: `recon_summary.md` (after Agents 1B, 2, 3A, 3B complete - NOT waiting for 1A)
 
 ```
 Task(subagent_type="general-purpose", prompt="
@@ -44,6 +47,7 @@ SCOPE_NOTES: {scope_notes_if_provided}
 2. **Web search (Tavily/Solodit) fails?** → Note "UNAVAILABLE - web search failed" in output and CONTINUE. Analysis agents will compensate.
 3. **Write-first principle**: Before making any slow external call (MCP, web), write whatever results you already have to the scratchpad file FIRST. This ensures partial results survive if the agent is killed.
 4. **No task is blocking**: If any task is stuck, skip it, document why, and move to the next. Partial recon is better than no recon.
+5. **Task-local writes are mandatory**: As soon as you finish one assigned task, write its output file immediately before moving to the next task. Do not hold multiple completed outputs in memory.
 
 Execute these tasks IN ORDER:
 
@@ -123,7 +127,13 @@ Use this output format:
 
 ## TASK 1: Build Environment
 
-> **PATH note**: On Windows, `forge`/`anvil`/`cast` may not be in Claude Code's default PATH. Prefix Bash calls with: `export PATH="$HOME/.foundry/bin:$HOME/.cargo/bin:$PATH" &&` if `forge` is not found on first attempt.
+> **PATH note**:
+> On Windows, `forge`/`anvil`/`cast` may not be in the default PowerShell PATH.
+> If `forge` is not found on first attempt:
+> 1. try `$env:Path += ";$HOME\\.foundry\\bin"`
+> 2. if still missing, call the explicit binary path such as
+>    `~/.foundry/bin/forge`
+> 3. record the fallback used in `build_status.md`
 
 1. Check for foundry.toml or hardhat.config.js
 2. If Hardhat only: create minimal foundry.toml scaffold
@@ -174,6 +184,16 @@ Include: `REPO_SHAPE: squashed_import` if `git rev-list --count HEAD` returns 1,
 ### Slither Fail-Fast Policy
 Slither can crash on projects with namespace imports (`import X as Y`), mixed compiler versions, or unusual AST structures. Do NOT retry endlessly.
 
+**Call-graph artifact hygiene (Codex)**:
+- If any CLI fallback or auxiliary analysis generates `*.call-graph.dot`,
+  `all_contracts.call-graph.dot`, or other call-graph DOT files in the project
+  root, move them into `{path}/artifacts/call-graphs/` immediately.
+- Create `{path}/artifacts/call-graphs/` if it does not exist.
+- `call_graph.md` should reference that folder as the location of raw DOT
+  artifacts. Do NOT leave generated graph files in the project root.
+- If no DOT artifacts are generated, still keep `call_graph.md` in the
+  scratchpad as the canonical textual summary.
+
 **Procedure**:
 1. Make ONE probe call: `mcp__slither-analyzer__list_contracts(path={path})`
 2. If the probe **succeeds** → proceed with all MCP calls below
@@ -194,6 +214,9 @@ Slither can crash on projects with namespace imports (`import X as Y`), mixed co
 - Grep state variable declarations → {SCRATCHPAD}/state_variables.md
 - Note "Call graph unavailable - Slither failed" in {SCRATCHPAD}/call_graph.md
 - Append to {SCRATCHPAD}/build_status.md: "SLITHER: UNAVAILABLE - {error message}. Grep fallback used. Depth agents must compensate for missing static analysis."
+- If any prior fallback step produced root-level DOT graph files, move them to
+  `{path}/artifacts/call-graphs/` and note that relocation in
+  `{SCRATCHPAD}/call_graph.md`.
 
 **Farofino fallback**: When SLITHER_AVAILABLE = false, also run:
 - mcp__farofino__aderyn_audit(contract_path={path_with_forward_slashes}) → append results to {SCRATCHPAD}/static_analysis.md under "## Aderyn Static Analysis"
@@ -206,6 +229,111 @@ Farofino's contract resolution fails with backslash paths on Windows.
 If farofino tools also fail, document and continue with grep-only fallback.
 
 Grep interfaces directory → {SCRATCHPAD}/external_interfaces.md (always, regardless of Slither status)
+
+### TASK 2.1: Derived Graph Artifacts (depth-agent inputs)
+
+Produce four uniform-schema derived artifacts that downstream phases consume
+via Read (NOT via MCP). Depth/verify phases run under the V2 driver with MCP
+disabled; freezing these as files at recon time means every later phase has
+the same caller/callee/state-write context deterministically.
+
+**Schema contract — ALL 5 LANGUAGES emit identical structure.** Every file
+opens with a status header so the driver and downstream agents can cheap-
+check availability with a single grep:
+
+```
+> **Status**: POPULATED | UNAVAILABLE: {reason}
+> **Source**: {Slither MCP | grep fallback}
+> **Generated**: {timestamp UTC}
+```
+
+#### Artifact 1: `caller_map.md`
+
+For every function in scope, list its callers. Sorted by `Callee` then `Caller`.
+
+| Callee | Caller | Call Site |
+|--------|--------|-----------|
+| `Contract.fn(sig)` | `Contract.fn(sig)` | `file.sol:L123` |
+
+**Generation (SLITHER_AVAILABLE = true)**: Iterate over `function_list.md`.
+For each function F, call `mcp__slither-analyzer__list_function_callers(path, F)`.
+Emit one row per caller.
+
+**Generation (SLITHER_AVAILABLE = false)**: For each function name in
+`function_list.md`, grep `\bfnName\s*\(` across all .sol files in scope
+(excluding mocks/, node_modules/, test/). Record the containing function
+and line. Accept that grep fallback is approximate — note limitation in
+status header: `UNAVAILABLE: Slither down, grep fallback is approximate`.
+
+Write to `{SCRATCHPAD}/caller_map.md`.
+
+#### Artifact 2: `callee_map.md`
+
+Inverse direction. Sorted by `Caller` then `Callee`.
+
+| Caller | Callee | Call Site |
+|--------|--------|-----------|
+| `Contract.fn(sig)` | `Contract.fn(sig)` | `file.sol:L145` |
+
+**Generation (SLITHER_AVAILABLE = true)**: For each function F, call
+`mcp__slither-analyzer__list_function_callees(path, F)`. Include both
+internal and external callees — external callees use the form
+`<External>.fn(sig)` or `<low-level-call>` where the target is not known
+statically.
+
+**Generation (fallback)**: Parse each function body in the source and grep
+for `\.\w+\s*\(` patterns. Approximate.
+
+Write to `{SCRATCHPAD}/callee_map.md`.
+
+#### Artifact 3: `state_write_map.md`
+
+For every state variable, list every function that writes it. The `Access`
+column distinguishes set / delete / increment / decrement / assembly-sstore.
+
+| State Variable | Writer Function | Write Site | Access |
+|----------------|-----------------|------------|--------|
+| `Pool.totalBorrows` | `Pool.borrow(uint256)` | `Pool.sol:L89` | inc |
+
+**Generation (SLITHER_AVAILABLE = true)**: From `state_variables.md`
+(already produced above via `analyze_state_variables`), cross-reference
+each variable against every function's state-writes set. Slither's
+`FunctionModel` includes state writes directly; aggregate by variable.
+
+**Generation (fallback)**: Grep assignment patterns per state variable:
+`\bvarName\s*(=|\+=|-=|\*=|/=|\.pop\(|\.push\(|delete\s+varName)`. Each
+match is a writer.
+
+Write to `{SCRATCHPAD}/state_write_map.md`.
+
+#### Artifact 4: `function_summary.md`
+
+One-line-per-function dense context. This is the **primary depth-agent
+input** — when a depth agent inspects a finding at `Pool.deposit`, it can
+grep this file for that row and immediately see visibility, modifiers,
+caller count, callee count, state-var touch set.
+
+| Function | Visibility | Modifiers | #Callers | #Callees | State Reads | State Writes |
+|----------|-----------|-----------|----------|----------|-------------|--------------|
+| `Pool.deposit(uint256)` | external | nonReentrant,whenNotPaused | 3 | 5 | balance,totalSupply | balance,shares |
+
+**Generation (SLITHER_AVAILABLE = true)**: Aggregate per-function from
+`function_list.md` + `modifiers.md` + the caller/callee/state-write maps
+produced above. `#Callers` = row count in `caller_map.md` for that
+callee. `#Callees` = row count in `callee_map.md` for that caller.
+State Reads/Writes are comma-separated variable names (deduplicated).
+
+**Generation (fallback)**: Same aggregation from the grep-produced artifacts.
+
+Write to `{SCRATCHPAD}/function_summary.md`.
+
+### Driver gating (informational)
+
+The four derived artifacts are NOT in `never_cut`. If Slither is unavailable
+and grep fallback is used, the status header must state so — downstream
+agents treat `UNAVAILABLE` status as "use source code Read tool for caller
+lookups" and record the degradation in `violations.md`. Empty files are
+equivalent to missing for the purpose of the UNAVAILABLE check.
 
 ## TASK 3: Documentation Context
 1. Read README.md, docs/ folder, or fetch provided URL
@@ -285,7 +413,7 @@ Grep for these patterns (exclude lib/, test/, mocks/):
 | Pattern | Flag |
 |---------|------|
 | `interval\|epoch\|period\|duration` | TEMPORAL |
-| `oracle\|latestRoundData\|TWAP\|chainlink` | ORACLE |
+| `oracle\|latestRoundData\|TWAP\|chainlink\|slot0\|sqrtPrice\|getSlot0` | ORACLE |
 | `random\|keccak256.*block\|prevrandao\|VRF` | RANDOMNESS_WEAK_SOURCE |
 | `keccak256.*%\|uint.*%.*length\|modulo\|select.*index\|pick.*winner` | RANDOMNESS_DETERMINISTIC_SELECTION |
 | `flashLoan\|flash\|callback.*amount` | FLASH_LOAN |
@@ -340,6 +468,12 @@ Write grep results to {SCRATCHPAD}/static_analysis.md with header: "SLITHER UNAV
 
 Also grep for unused struct fields (defined but never read) → append to static_analysis.md
 Write to {SCRATCHPAD}/static_analysis.md
+
+**OpenGrep PRE-CHECK (v2.5.0)**: The Python recon prepass may have run OpenGrep
+(cross-ecosystem SARIF scanner). Check if `{SCRATCHPAD}/opengrep_findings.md`
+exists. If it does, read it and APPEND its findings to `static_analysis.md`
+under `## OpenGrep Findings`. This is complementary to Slither — do not skip
+grep-based analysis even if OpenGrep produced results.
 
 ## TASK 9: Run Test Suite
 Detect framework and run: `forge test` or `npx hardhat test`

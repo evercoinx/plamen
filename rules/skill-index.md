@@ -198,3 +198,50 @@
 | Spawns new agent? | No | No | **Yes** (1 budget slot) |
 | Depth of analysis | Surface scan | Medium (enriches existing agent) | **Deep** (entire agent focused on one concern) |
 | Use when | Quick check, low FP risk | Protocol-type-specific methodology | Concern needs dedicated focus, scanner sub-check is insufficient |
+
+## L1 Skills (`~/.claude/agents/skills/injectable/l1/`)
+
+> **Status**: Experimental — loaded only when `/plamen l1` mode is invoked.
+> **Trigger detection**: Recon agent sets `L1_PATTERN=true` when it detects an L1 / node-client codebase (Go or Rust) via imports such as `reth-*`, `libp2p`, `cometbft`, `cosmos-sdk`, `beacon-chain/`, `eth/protocols`, `fork_choice`, `x/staking`. Subsystem flags (CONSENSUS, P2P, MEMPOOL, LIGHT_CLIENT, RPC, BLS, STATE_SYNC, EXECUTION, XENV, VALIDATOR_LIFECYCLE, HARDFORK) are set per detected module.
+> **Injection**: Skills are APPENDED to `depth-consensus-invariant` or `depth-network-surface` (new agent roles defined in `~/.claude/agents/depth-consensus-invariant.md` and `~/.claude/agents/depth-network-surface.md`). They do NOT spawn new agents per the Plamen injectable-skill convention.
+> **Severity**: All L1 findings use the matrix in `docs/l1-mode/severity-matrix.md`, not the smart-contract matrix in `rules/report-template.md`.
+
+| Skill | Trigger Pattern | Inject Into |
+|-------|-----------------|-------------|
+| CONSENSUS_SAFETY_INVARIANTS | `CONSENSUS` flag (always on for L1) | depth-consensus-invariant |
+| CONSENSUS_MATH_CORRECTNESS | `CONSENSUS` flag + `adjust_difficulty` / `difficulty_adjust` / `ema` / `moving_average` / `reward_curve` / `target_time` detected | depth-consensus-invariant, depth-edge-case |
+| FORK_CHOICE_AUDIT | `CONSENSUS` + `fork_choice/` / `ghost/` / `lmd/` / `choice.rs` detected | depth-consensus-invariant |
+| P2P_DOS_AND_ECLIPSE | `P2P` flag (`p2p/`, `network/`, `discovery/`, `libp2p`, `devp2p`, `discv5`) | depth-network-surface |
+| MEMPOOL_ASYMMETRIC_DOS | `MEMPOOL` flag (`txpool/`, `mempool/`, `blob_pool`) | depth-network-surface, depth-state-trace |
+| LIGHT_CLIENT_PROOF_VERIFICATION | `LIGHT_CLIENT` flag (`light_client/`, `ics23/`, `merkle/`, `ibc/`) | depth-consensus-invariant, depth-external |
+| RPC_SURFACE_AUDIT | `RPC` flag (`rpc/`, `jsonrpc`, `engine_api`, `eth/api`) | depth-network-surface |
+| BLS_AGGREGATION_AUDIT | `BLS` flag (`bls/`, `blst`, `milagro`, `pairing`, `proof_of_possession`) | depth-consensus-invariant, depth-external |
+| STATE_SYNC_PRUNING | `STATE_SYNC` flag (`sync/`, `snap_sync`, `statesync`, `pruning`, `snapshot/`) | depth-state-trace, depth-edge-case |
+| EXECUTION_CLIENT_HARDENING | `EXECUTION` flag (`core/vm/`, `revm`, `interpreter`, `svm/`, `move-vm`) | depth-state-trace, depth-consensus-invariant |
+| CROSS_ENVIRONMENT_SEMANTIC_DRIFT | `XENV` flag (fork of EVM client OR L2 rollup OR EVM-on-non-EVM OR precompile wrapping native host) | depth-external, depth-state-trace |
+| VALIDATOR_LIFECYCLE_AND_SLASHING | `VALIDATOR_LIFECYCLE` flag (`x/staking`, `x/slashing`, `validator/`, `unbonding`) | depth-state-trace, depth-consensus-invariant |
+| HARDFORK_ACTIVATION_AND_PROTOCOL_UPGRADE | `HARDFORK` flag (`fork_rules`, `chain_config`, `x/upgrade`, `ActivationHeight`) | depth-state-trace, depth-consensus-invariant |
+| GO_CONCURRENCY_SAFETY | Always on for L1 + `LANGUAGE=go` | every L1 agent on Go code |
+| RUST_UNSAFE_AUDIT | Always on for L1 + `LANGUAGE=rust` | every L1 agent on Rust code |
+| DEPENDENCY_AUDIT_NODECLIENT | Always on for L1 (extends existing dependency-audit skill) | recon agent + every breadth agent |
+| DATA_AVAILABILITY_ENFORCEMENT | Protocol-type trigger: `data_availability` / `storage` / `da_chain` / `blob_storage` (Arweave/Filecoin/Irys/Crust/Celestia/EigenDA class) | depth-consensus-invariant, depth-state-trace |
+| PEER_SCORING_CORRECTNESS | `P2P` flag + `score_peer` / `peer_score` / `reputation` / `ban_peer` detected | depth-network-surface |
+| GOSSIP_CACHE_INVARIANCE | `P2P` flag + `seen_cache` / `message_cache` / `tx_cache` / `gossipsub` detected | depth-network-surface, depth-consensus-invariant |
+| CONSENSUS_TX_IDENTITY_INVARIANTS | `CONSENSUS` flag + `txid` / `tx_hash` / `nonce` / `sequence` / `signature` across modules | depth-consensus-invariant, depth-state-trace |
+| CONFIG_CORRECTNESS | `L1_PATTERN` + `config/` / `settings` / constants / docs or comments with protocol bounds | depth-edge-case, depth-state-trace |
+| WRITE_ERROR_DIVERGENCE | `STORAGE` or `DATABASE_TX` flag + file/DB write APIs (`write_all`, `fs::write`, `rename`, `commit`, `batch`, `transaction`) | depth-state-trace, depth-edge-case |
+
+### L1 depth agent roles (new in L1 mode)
+
+Two new depth agents are added for L1 mode, living alongside the existing `depth-token-flow`, `depth-state-trace`, `depth-edge-case`, `depth-external`:
+
+- **`depth-consensus-invariant`** — consensus safety/liveness invariants, non-determinism sweeps, Byzantine-scenario reasoning, cross-client differential. Definition: `~/.claude/agents/depth-consensus-invariant.md`.
+- **`depth-network-surface`** — p2p/RPC/mempool attack surface enumeration, pre-auth panic sweeps, asymmetric cost analysis, eclipse-vector check, rate-limit audit. Definition: `~/.claude/agents/depth-network-surface.md`.
+
+Existing depth agents that remain useful in L1 mode: `depth-state-trace` (storage/pruning), `depth-external` (dependency audits, cross-client), `depth-edge-case` (boundary conditions). `depth-token-flow` does NOT load in L1 mode (no in-scope DeFi token flow).
+
+### L1 pipeline differences
+
+- **Phase 4c (chain analysis) is REMOVED** for L1 mode. L1 bugs are point vulnerabilities; enabler enumeration and postcondition→precondition matching do not apply. See `docs/l1-mode/design.md` Section 4.
+- **Phase 5 verification** uses new evidence tags: `[DIFF-PASS]`, `[CONFORMANCE-PASS]`, `[NON-DET-PASS]`, `[FUZZ-PASS]`, `[LSP-TRACE]` alongside the existing `[CODE-TRACE]`. See `prompts/l1/phase5-verification-prompt.md`.
+- **Phase 0.5 Bake** runs `scip-go` / `rust-analyzer scip` / `opengrep` once per audit. See `docs/l1-mode/design.md` Section 5.2.

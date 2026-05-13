@@ -113,6 +113,10 @@ Identify all structs with NO abilities:
 - [ ] Is the hot potato created and consumed within a single PTB (Programmable Transaction Block)?
 - [ ] Can the consumption function be called by anyone, or only specific callers?
 - [ ] Does the consumption function validate the hot potato's contents match expectations?
+- [ ] If the hot potato is a receipt/ticket/flash-loan proof, does it store the source object ID (order_id, pool_id, position_id, loan_id) that created it?
+- [ ] Does every consumption function assert the stored source ID matches `object::id()` of the object being repaid, settled, claimed, or mutated?
+- [ ] Does the consumption function validate all relevant fields, not just that the receipt exists (type pair, amount, fee, epoch/deadline, pool/order/position identity)?
+- [ ] Can any alternate consume/repay/settle path skip the source-ID or field validation?
 - [ ] Can an attacker create a fake hot potato of the same type from a different module? (NO -- Move type system prevents cross-module struct creation.)
 - [ ] Can the hot potato be stored if someone adds `store` via a wrapper? (Check: is there a public wrapper that accepts arbitrary `store` types.)
 - [ ] **Transaction abort impact**: If the hot potato cannot be consumed (e.g., consumption function reverts), the entire PTB aborts. Can this be used for griefing? (e.g., attacker causes the consumption precondition to fail after the hot potato is created.)
@@ -124,6 +128,7 @@ create: module::start_action() -> HotPotato
 consume: module::finish_action(potato: HotPotato)
 ```
 If any code path creates a hot potato without a guaranteed consumption path -> FINDING (transaction will always abort on that path).
+If a receipt enforces consumption but is not bound to the source object it came from -> FINDING (the receipt can settle the wrong order/pool/position).
 
 ## 6. Transfer Restriction Analysis
 

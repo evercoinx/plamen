@@ -20,12 +20,13 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import Prompt, Resource, ResourceTemplate, TextContent, Tool
 import httpx
 
 from .database import get_db, VulnerabilityDB
 
 server = Server("unified-vuln-db")
+server.experimental.enable_tasks()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -611,6 +612,28 @@ Requires SOLODIT_API_KEY environment variable.
             },
         ),
     ]
+
+
+@server.list_resources()
+async def list_resources() -> list[Resource]:
+    """Return no static resources.
+
+    Codex probes optional MCP discovery methods during startup. Returning an empty
+    list here avoids spurious startup failures from "method not found".
+    """
+    return []
+
+
+@server.list_resource_templates()
+async def list_resource_templates() -> list[ResourceTemplate]:
+    """Return no resource templates."""
+    return []
+
+
+@server.list_prompts()
+async def list_prompts() -> list[Prompt]:
+    """Return no prompts."""
+    return []
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

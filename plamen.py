@@ -91,9 +91,9 @@ def _check_claude_md_version():
     if marker not in content:
         return  # no injection found
     injected = content[content.index(marker):]
-    # Extract version from "# Plamen - Web3 Security Auditor (vX.Y.Z)"
+    # Extract version from "# Plamen - Security Auditor (vX.Y.Z)"
     import re
-    m = re.search(r"Web3 Security Auditor \(v([0-9]+\.[0-9]+\.[0-9]+)\)", injected)
+    m = re.search(r"Security Auditor \(v([0-9]+\.[0-9]+\.[0-9]+)\)", injected)
     if not m:
         return
     injected_ver = m.group(1)
@@ -109,12 +109,30 @@ def _check_claude_md_version():
 _BACK = "__back__"
 _MAX_LINE = 48  # max visible chars for any prompt line (W - 4)
 
+# ── Back-navigation: clear screen + compact re-render ──────
+_breadcrumbs: list[tuple[str, str]] = []
+
+def _crumb_set(crumbs: list[tuple[str, str]]) -> None:
+    """Replace breadcrumbs with [(label, value), ...]."""
+    _breadcrumbs.clear()
+    _breadcrumbs.extend(crumbs)
+
+def _clear_and_rebanner() -> None:
+    """Clear terminal + reprint full banner + breadcrumbs of prior answers."""
+    os.system("cls" if sys.platform == "win32" else "clear")
+    show_banner()
+    if _breadcrumbs:
+        for label, value in _breadcrumbs:
+            sys.stdout.write(f"  {_C_GREEN}✓{_RST} {_DIM}{label}: {value}{_RST}\n")
+        sys.stdout.write("\n")
+    sys.stdout.flush()
+
 _STYLE = InquirerPyStyle({
-    "questionmark": "#ff7800 bold",
-    "pointer":      "#ff7800 bold",
+    "questionmark": "#7030FF bold",
+    "pointer":      "#7030FF bold",
     "highlighted":  "#ffffff bold bg:#101018",
-    "selected":     "#00af00",
-    "answer":       "#ff7800 bold",
+    "selected":     "#22C72E",
+    "answer":       "#7030FF bold",
     "question":     "#ffffff",
     "input":        "#ffffff",
 })
@@ -126,18 +144,47 @@ _RST  = "\x1b[0m"
 _BOLD = "\x1b[1m"
 _DIM  = "\x1b[2m"
 
-# Colors
-_C_ORANGE    = "\x1b[38;2;255;140;66m"
-_C_BLUE      = "\x1b[38;2;100;149;237m"
-_C_GREEN     = "\x1b[38;2;0;175;0m"
-_C_RED       = "\x1b[38;2;200;60;60m"
-_C_WHITE     = "\x1b[38;2;255;255;255m"
-_C_GRAY      = "\x1b[38;2;100;100;100m"
-_C_DARK_GRAY = "\x1b[38;2;60;60;60m"
-_C_BOX       = "\x1b[38;2;24;24;32m"
+def _has_truecolor() -> bool:
+    """Detect 24-bit color support. macOS Terminal.app only does 256."""
+    ct = os.environ.get("COLORTERM", "")
+    if ct in ("truecolor", "24bit"):
+        return True
+    term_prog = os.environ.get("TERM_PROGRAM", "")
+    if term_prog in ("iTerm.app", "WezTerm", "Hyper", "vscode"):
+        return True
+    if sys.platform == "win32":
+        return True  # Windows Terminal / ConPTY supports truecolor
+    return False
 
-# ── Fire palette (256-color) ─────────────────────────────────
-_FIRE = [160, 166, 202, 208, 214, 220]
+_TRUECOLOR = _has_truecolor()
+
+def _c(r: int, g: int, b: int, fallback_256: int) -> str:
+    """Return truecolor or 256-color escape depending on terminal support."""
+    if _TRUECOLOR:
+        return f"\x1b[38;2;{r};{g};{b}m"
+    return f"\x1b[38;5;{fallback_256}m"
+
+# Colors — brand: green #22C72E, purple #7030FF
+_C_ACCENT    = _c(112, 48, 255, 99)       # #7030FF purple → 256: 99
+_C_ORANGE    = _C_ACCENT                   # alias for 60+ existing call sites
+_C_BLUE      = _c(100, 149, 237, 111)      # cornflower → 256: 111
+_C_GREEN     = _c(34, 199, 46, 40)         # #22C72E → 256: 40
+_C_RED       = _c(200, 60, 60, 160)        # → 256: 160
+_C_WHITE     = _c(255, 255, 255, 231)      # → 256: 231
+_C_GRAY      = _c(100, 100, 100, 242)      # → 256: 242
+_C_DARK_GRAY = _c(60, 60, 60, 239)         # → 256: 239
+_C_BOX       = _c(24, 24, 32, 235)         # → 256: 235
+
+# ── Banner gradient: green → purple ──────────────────────────
+# 6 rows interpolated from #22C72E to #7030FF
+_BANNER_GRAD = [
+    _c(34, 199, 46, 40),     # row 0: #22C72E → green
+    _c(50, 169, 88, 35),     # row 1: #32A958 → green-teal
+    _c(65, 139, 130, 73),    # row 2: #418B82 → teal
+    _c(81, 108, 171, 104),   # row 3: #516CAB → blue
+    _c(96, 78, 213, 98),     # row 4: #604ED5 → indigo
+    _c(112, 48, 255, 99),    # row 5: #7030FF → purple
+]
 _ART_FULL = [
     " ██████╗ ██╗      █████╗ ███╗   ███╗███████╗███╗   ██╗",
     " ██╔══██╗██║     ██╔══██╗████╗ ████║██╔════╝████╗  ██║",
@@ -174,6 +221,11 @@ MODES = {
     "core":     {"label": "Core Audit",     "agents": "30-50",    "scope": "ALL severities"},
     "thorough": {"label": "Thorough Audit", "agents": "40-100",   "scope": "ALL severities"},
     "compare":  {"label": "Compare",        "agents": "variable", "scope": "DELTA report"},
+}
+L1_MODES = {
+    "light":    {"label": "L1 Light",    "agents": "15-20",  "scope": "Quick scan"},
+    "core":     {"label": "L1 Core",     "agents": "25-40",  "scope": "Standard L1 depth"},
+    "thorough": {"label": "L1 Thorough", "agents": "35-55",  "scope": "Iterative + re-scan"},
 }
 
 
@@ -214,6 +266,72 @@ def _find_bin(name: str, extra_paths: list = None) -> str:
             if os.path.isfile(full):
                 return full
     return ""
+
+
+def _find_claude_bin() -> str:
+    """Find Claude Code CLI, honoring explicit override env first."""
+    explicit = os.environ.get("CLAUDE_BIN", "").strip()
+    if explicit:
+        return explicit
+    return _find_bin("claude")
+
+
+def _find_codex_bin() -> str:
+    """Find Codex CLI, honoring explicit override env first."""
+    explicit = os.environ.get("CODEX_BIN", "").strip()
+    if explicit:
+        return explicit
+    return _find_bin("codex")
+
+
+def _detect_cli_backends() -> list[str]:
+    """Return installed AI runtimes in stable preference order."""
+    backends: list[str] = []
+    if _find_claude_bin():
+        backends.append("claude")
+    if _find_codex_bin():
+        backends.append("codex")
+    return backends
+
+
+def _ambient_backend(backends: list[str]) -> str:
+    """Pick the backend implied by the current command/model context."""
+    forced = os.environ.get("PLAMEN_CLI_BACKEND", "").strip().lower()
+    if forced in ("claude", "codex"):
+        return forced
+    if "codex" in backends and (
+        os.environ.get("CODEX_HOME")
+        or os.environ.get("CODEX_SANDBOX")
+    ):
+        return "codex"
+    if "claude" in backends:
+        return "claude"
+    return backends[0] if backends else "claude"
+
+
+def _skip_backend_prompt() -> bool:
+    """True when invoked by a slash-command wizard already inside a model."""
+    return os.environ.get("PLAMEN_SKIP_BACKEND_PROMPT", "").strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
+def _wizard_model_summary(backend: str, mode: str = "") -> str:
+    """Short model line for the launch summary."""
+    backend = (backend or "claude").strip().lower()
+    mode = (mode or "").strip().lower()
+    if backend == "codex":
+        sonnet = os.environ.get("PLAMEN_CODEX_SONNET_MODEL", "gpt-5.4").strip()
+        if mode == "light":
+            return f"Codex CLI / {sonnet}"
+        opus = os.environ.get("PLAMEN_CODEX_OPUS_MODEL", "gpt-5.5").strip()
+        haiku = os.environ.get("PLAMEN_CODEX_HAIKU_MODEL", "gpt-5.4-nano").strip()
+        haiku_label = "nano" if haiku == "gpt-5.4-nano" else haiku
+        return f"Codex CLI / {opus}, {sonnet}, {haiku_label}"
+    if mode == "light":
+        return "Claude Code / sonnet"
+    opus = os.environ.get("PLAMEN_OPUS_MODEL", "claude-opus-4-6").strip()
+    return f"Claude Code / {opus}, sonnet, haiku"
 
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
@@ -393,8 +511,9 @@ def check_dependencies() -> bool:
     ok = True
 
     # ── Probe all tools ─────────────────────────────────────
+    backends = _detect_cli_backends()
     required = [
-        ("claude",  _find_bin("claude")),
+        ("claude/codex",  backends[0] if backends else ""),
         ("python",  _find_bin("python", _python_extra_paths()) or _find_bin("python3")),
         ("npx",     _find_bin("npx")),
         ("npm",     _find_bin("npm")),
@@ -427,6 +546,15 @@ def check_dependencies() -> bool:
                                               "C:/Program Files/Stellar CLI"])),
             ("scout",   _find_bin("cargo-scout-audit", ["~/.cargo/bin"])),
         ]),
+        ("L1 (Go)", [
+            ("go",       _find_bin("go", _GO_PATHS)),
+            ("scip-go",  _find_bin("scip-go", _GO_PATHS)),
+            ("opengrep", _find_bin("opengrep") or _find_bin("semgrep")),
+        ]),
+        ("L1 (Rust)", [
+            ("cargo",          _find_bin("cargo", _CARGO_PATHS)),
+            ("rust-analyzer",  _find_bin("rust-analyzer", _CARGO_PATHS)),
+        ]),
     ]
 
     # ── Draw box ────────────────────────────────────────────
@@ -453,6 +581,12 @@ def check_dependencies() -> bool:
             if not binary:
                 _box_row(w, bx, W,
                          f"    {_C_RED}✗ {name} not found{_RST}")
+
+    # Alternative backend row
+    codex_bin = _find_bin("codex")
+    _box_row(w, bx, W,
+             f"  {_C_GRAY}Backend{_RST}   {_check_tool('claude', _find_bin('claude'))}  "
+             f"{_check_tool('codex', codex_bin)}")
 
     w(f"  {bx}├{'─' * W}┤{_RST}\n")
 
@@ -796,6 +930,21 @@ def _scout_soroban_cmds():
     return ['cargo install cargo-scout-audit']
 
 
+def _scip_go_cmds():
+    return ['go install github.com/sourcegraph/scip-go/cmd/scip-go@latest']
+
+
+def _opengrep_cmds():
+    if _has_bash():
+        return ['curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash']
+    # fallback: pip-installable semgrep works on all platforms (opengrep-compatible)
+    return [' '.join(_pip_install_args()) + ' semgrep']
+
+
+def _rust_analyzer_cmds():
+    return ['rustup component add rust-analyzer']
+
+
 _INSTALL_RECIPES = {
     "EVM": [
         ("Foundry (forge+anvil+cast)",
@@ -863,6 +1012,34 @@ _INSTALL_RECIPES = {
          _scout_soroban_cmds,
          ["cargo-scout-audit"], "~2-3 min",
          ["~/.cargo/bin"], "rust"),
+    ],
+
+    "L1 (Go)": [
+        ("scip-go (SCIP semantic index)",
+         lambda: _find_bin("scip-go", _GO_PATHS),
+         _scip_go_cmds,
+         ["scip-go"], "~30s",
+         ["~/go/bin"], "go"),
+
+        ("opengrep / semgrep (static analysis)",
+         lambda: _find_bin("opengrep") or _find_bin("semgrep"),
+         _opengrep_cmds,
+         ["opengrep", "semgrep"], "~30s",
+         [], None),
+    ],
+
+    "L1 (Rust)": [
+        ("rust-analyzer (SCIP semantic index)",
+         lambda: _find_bin("rust-analyzer", _CARGO_PATHS),
+         _rust_analyzer_cmds,
+         ["rust-analyzer"], "~15s",
+         ["~/.cargo/bin"], "rust"),
+
+        ("opengrep / semgrep (static analysis)",
+         lambda: _find_bin("opengrep") or _find_bin("semgrep"),
+         _opengrep_cmds,
+         ["opengrep", "semgrep"], "~30s",
+         [], None),
     ],
 }
 
@@ -1167,7 +1344,9 @@ def _build_rag_db(w):
 
 def _quick_check_required() -> bool:
     """Silent check for required tools. Returns True if all present."""
-    for name in ("claude", "python", "npx", "npm", "git"):
+    if not _detect_cli_backends():
+        return False
+    for name in ("python", "npx", "npm", "git"):
         if name == "python":
             if not (_find_bin("python", _python_extra_paths()) or _find_bin("python3")):
                 return False
@@ -1422,6 +1601,25 @@ def _safe_link(src, dst, w):
         return False
 
 
+def _clean_dangling_plamen_links(directory, w):
+    """Remove symlinks in directory that point into PLAMEN_HOME but whose target no longer exists."""
+    if not os.path.isdir(directory):
+        return
+    cleaned = 0
+    for entry in os.listdir(directory):
+        path = os.path.join(directory, entry)
+        if not os.path.islink(path):
+            continue
+        target = os.readlink(path)
+        if not os.path.isabs(target):
+            target = os.path.normpath(os.path.join(directory, target))
+        if os.path.normpath(PLAMEN_HOME) in os.path.normpath(target) and not os.path.exists(target):
+            os.remove(path)
+            cleaned += 1
+    if cleaned:
+        w(f"  {_C_GRAY}  cleaned {cleaned} dangling symlink(s) in {os.path.basename(directory)}/{_RST}\n")
+
+
 def _run_symlink_install(w):
     """Create symlinks from Plamen repo into ~/.claude/ for Claude Code discovery."""
     os.makedirs(CLAUDE_HOME, exist_ok=True)
@@ -1435,6 +1633,7 @@ def _run_symlink_install(w):
         dst = os.path.join(agents_dir, os.path.basename(f))
         if _safe_link(f, dst, w):
             installed.append(dst)
+    _clean_dangling_plamen_links(agents_dir, w)
 
     # 2. Skills directory (Plamen-only)
     skills_src = os.path.join(PLAMEN_HOME, "agents", "skills")
@@ -1444,26 +1643,30 @@ def _run_symlink_install(w):
         if _safe_link(skills_src, skills_dst, w):
             installed.append(skills_dst)
 
-    # 3. Slash command (individual — user may have own commands)
+    # 3. Slash commands (all .md files in commands/)
     commands_dir = os.path.join(CLAUDE_HOME, "commands")
     os.makedirs(commands_dir, exist_ok=True)
-    cmd_src = os.path.join(PLAMEN_HOME, "commands", "plamen.md")
-    if os.path.isfile(cmd_src):
-        w(f"  {_C_ORANGE}>{_RST} Linking /plamen command\n")
-        dst = os.path.join(commands_dir, "plamen.md")
-        if _safe_link(cmd_src, dst, w):
-            installed.append(dst)
+    cmd_files = sorted(glob.glob(os.path.join(PLAMEN_HOME, "commands", "*.md")))
+    if cmd_files:
+        w(f"  {_C_ORANGE}>{_RST} Linking commands ({len(cmd_files)} files)\n")
+        for f in cmd_files:
+            dst = os.path.join(commands_dir, os.path.basename(f))
+            if _safe_link(f, dst, w):
+                installed.append(dst)
+    _clean_dangling_plamen_links(commands_dir, w)
 
     # 4. Rule files (individual — user may have own rules)
     rules_dir = os.path.join(CLAUDE_HOME, "rules")
     os.makedirs(rules_dir, exist_ok=True)
-    rule_files = sorted(glob.glob(os.path.join(PLAMEN_HOME, "rules", "*.md")))
+    rule_files = sorted(glob.glob(os.path.join(PLAMEN_HOME, "rules", "*.md")) +
+                        glob.glob(os.path.join(PLAMEN_HOME, "rules", "*.json")))
     if rule_files:
         w(f"  {_C_ORANGE}>{_RST} Linking rules ({len(rule_files)} files)\n")
         for f in rule_files:
             dst = os.path.join(rules_dir, os.path.basename(f))
             if _safe_link(f, dst, w):
                 installed.append(dst)
+    _clean_dangling_plamen_links(rules_dir, w)
 
     # 5. Prompts directory (Plamen-only — per-language prompt trees)
     prompts_src = os.path.join(PLAMEN_HOME, "prompts")
@@ -1488,6 +1691,22 @@ def _run_symlink_install(w):
         w(f"  {_C_ORANGE}>{_RST} Linking hooks\n")
         if _safe_link(hooks_src, hooks_dst, w):
             installed.append(hooks_dst)
+
+    # 7b. Scripts directory (driver + modules)
+    scripts_src = os.path.join(PLAMEN_HOME, "scripts")
+    scripts_dst = os.path.join(CLAUDE_HOME, "scripts")
+    if os.path.isdir(scripts_src):
+        w(f"  {_C_ORANGE}>{_RST} Linking scripts\n")
+        if _safe_link(scripts_src, scripts_dst, w):
+            installed.append(scripts_dst)
+
+    # 7c. L1 static analysis modules (SCIP reader, SARIF merge)
+    l1_src = os.path.join(PLAMEN_HOME, "plamen_l1")
+    l1_dst = os.path.join(CLAUDE_HOME, "plamen_l1")
+    if os.path.isdir(l1_src):
+        w(f"  {_C_ORANGE}>{_RST} Linking L1 modules\n")
+        if _safe_link(l1_src, l1_dst, w):
+            installed.append(l1_dst)
 
     # 8. Utility files
     for fname in ("plamen", "plamen.py", "plamen.sh", "plamen.bat", "VERSION"):
@@ -1921,7 +2140,7 @@ def _install_codex_adapter(w):
     1. Runs scripts/codex_adapter.py to (re)generate codex/ files
     2. Creates ~/.codex/ if it doesn't exist
     3. Symlinks ~/.codex/plamen/ → PLAMEN_HOME (shared methodology)
-    4. Copies Codex-specific files (AGENTS.md, config.toml, agents/, skills/, hooks.json)
+    4. Copies Codex-specific files (AGENTS.md, config.toml, agents/, skills/, commands/, hooks.json)
     """
     codex_home = os.path.normpath(os.path.expanduser("~/.codex"))
     codex_plamen = os.path.normpath(os.path.join(codex_home, "plamen"))
@@ -1985,6 +2204,17 @@ def _install_codex_adapter(w):
 
     w(f"  {_C_GREEN}✓{_RST} Copied {items_copied} Codex-specific files into {codex_home}\n")
 
+    commands_src = os.path.join(codex_dir, "commands")
+    commands_dst = os.path.join(codex_home, "commands")
+    if os.path.isdir(commands_src):
+        os.makedirs(commands_dst, exist_ok=True)
+        for f in os.listdir(commands_src):
+            src_f = os.path.join(commands_src, f)
+            dst_f = os.path.join(commands_dst, f)
+            if os.path.isfile(src_f):
+                shutil.copy2(src_f, dst_f)
+                items_copied += 1
+
     # NOTE: Codex MCP tool permissions cannot be pre-configured via rules files.
     # Users must select "Always allow" on the first MCP tool prompt per server.
     # Codex's rules/default.rules only supports prefix_rule (shell commands).
@@ -1997,6 +2227,7 @@ def _install_codex_adapter(w):
     w(f"  {_C_GRAY}  Codex config: {os.path.join(codex_home, 'config.toml')}{_RST}\n")
     w(f"  {_C_GRAY}  Agent roles: {os.path.join(codex_home, 'agents', '*.toml')}{_RST}\n")
     w(f"  {_C_GRAY}  Skill: {os.path.join(codex_home, 'skills', 'plamen', 'SKILL.md')}{_RST}\n")
+    w(f"  {_C_GRAY}  Commands: {os.path.join(codex_home, 'commands', 'plamen*.md')}{_RST}\n")
     w(f"\n  {_C_ORANGE}>{_RST} Remember to replace API key placeholders in config.toml\n\n")
     return True
 
@@ -2006,9 +2237,12 @@ def run_setup():
     w = sys.stdout.write
 
     # ── Symlink install (if repo is not directly in ~/.claude) ─
-    if os.path.normpath(PLAMEN_HOME) != os.path.normpath(CLAUDE_HOME):
+    has_claude = bool(shutil.which("claude") or shutil.which("claude.cmd"))
+    if has_claude and os.path.normpath(PLAMEN_HOME) != os.path.normpath(CLAUDE_HOME):
         console.print(Rule(title="Linking into Claude Code", style="color(238)"))
         _run_symlink_install(w)
+    elif not has_claude:
+        w(f"  {_C_GRAY}Claude Code not detected -- skipping ~/.claude/ symlinks{_RST}\n")
 
     # ── Submodules ─────────────────────────────────────────────
     slither_dir = os.path.join(PLAMEN_HOME, "custom-mcp", "slither-mcp")
@@ -2043,49 +2277,58 @@ def run_setup():
     rag_empty = _rag_needs_build()
     rag_count = _probe_rag_db()
 
-    if not missing and rag_count > 0 and not rag_empty:
-        w(f"  {_C_GREEN}Everything is set up ({rag_count:,} RAG entries).{_RST}\n")
-        w(f"  {_C_GRAY}To rebuild RAG: plamen rag{_RST}\n\n")
-        return
-
-    # ── Build checkbox choices with time estimates ───────────
+    # ── Build checkbox choices ──────────────────────────────
     item_choices = []
-    for group, entries in missing.items():
-        names = ", ".join(d for d, _, _, _, _, _, _ in entries)
-        item_choices.append({"name": f"{group:8s} {names}", "value": group})
+
+    if missing:
+        for group, entries in missing.items():
+            names = ", ".join(d for d, _, _, _, _, _, _ in entries)
+            item_choices.append({"name": f"{group:8s} {names}", "value": group})
+    else:
+        for group, recipes in _INSTALL_RECIPES.items():
+            names = ", ".join(d for d, _, _, _, _, _, _ in recipes)
+            item_choices.append({"name": f"{group:8s} {names}  {_C_GREEN}✓{_RST}",
+                                 "value": group, "enabled": False})
 
     if rag_empty:
         item_choices.append({"name": "RAG DB   vulnerability knowledge base",
                              "value": "__rag__"})
-    elif rag_count > 0:
-        item_choices.append({"name": f"RAG DB   rebuild/extend ({rag_count:,} entries currently)",
-                             "value": "__rag__"})
+    else:
+        rag_label = f"RAG DB   rebuild ({rag_count:,} entries)" if rag_count > 0 else "RAG DB   build vulnerability knowledge base"
+        item_choices.append({"name": rag_label, "value": "__rag__"})
 
     all_values = [c["value"] for c in item_choices]
 
     choices = []
-    choices.append({"name": "All      install everything below",
-                    "value": "__all__"})
+    if missing:
+        choices.append({"name": "All      install everything below",
+                        "value": "__all__"})
+    else:
+        choices.append({"name": "All      reinstall everything below",
+                        "value": "__all__"})
     choices.append(Separator())
     choices.extend(item_choices)
     choices.append(Separator())
     choices.append({"name": "Skip     back to menu", "value": "__skip__"})
 
-    # Show time estimates
-    w(f"  {_C_GRAY}Time estimates:{_RST}\n")
-    for group, entries in missing.items():
-        for display, _, _, _, est, _, requires in entries:
-            prereq_note = ""
-            prereq_list = [requires] if isinstance(requires, str) else (requires or [])
-            for pname in prereq_list:
-                if pname:
-                    prereq = _PREREQ_INSTALLERS.get(pname, {})
-                    if not prereq.get("check", lambda: True)():
-                        prereq_note += f" + {prereq.get('label', pname)}"
-            w(f"    {_C_DARK_GRAY}{display}: {est}{prereq_note}{_RST}\n")
-    if rag_empty:
-        w(f"    {_C_DARK_GRAY}RAG DB: ~3-5 min (downloads + indexes){_RST}\n")
-    w(f"\n  {_C_GRAY}Press Enter to begin installation{_RST}\n\n")
+    if missing:
+        w(f"  {_C_GRAY}Time estimates:{_RST}\n")
+        for group, entries in missing.items():
+            for display, _, _, _, est, _, requires in entries:
+                prereq_note = ""
+                prereq_list = [requires] if isinstance(requires, str) else (requires or [])
+                for pname in prereq_list:
+                    if pname:
+                        prereq = _PREREQ_INSTALLERS.get(pname, {})
+                        if not prereq.get("check", lambda: True)():
+                            prereq_note += f" + {prereq.get('label', pname)}"
+                w(f"    {_C_DARK_GRAY}{display}: {est}{prereq_note}{_RST}\n")
+        if rag_empty:
+            w(f"    {_C_DARK_GRAY}RAG DB: ~3-5 min (downloads + indexes){_RST}\n")
+        w(f"\n  {_C_GRAY}Press Enter to begin installation{_RST}\n\n")
+    else:
+        w(f"  {_C_GREEN}All tools installed ({rag_count:,} RAG entries).{_RST}\n")
+        w(f"  {_C_GRAY}Select components to reinstall/rebuild, or Skip to go back.{_RST}\n\n")
     sys.stdout.flush()
 
     selected = inquirer.checkbox(
@@ -2129,7 +2372,8 @@ def run_setup():
         w("\n")
         sys.stdout.flush()
 
-        for display, check_fn, cmds_fn, provides, est, paths, requires in missing[group]:
+        entries = missing.get(group, _INSTALL_RECIPES.get(group, []))
+        for display, check_fn, cmds_fn, provides, est, paths, requires in entries:
             w(f"  {_C_ORANGE}>{_RST} {_C_WHITE}{display}{_RST}"
               f"  {_C_DARK_GRAY}{est}{_RST}\n")
             sys.stdout.flush()
@@ -2198,14 +2442,13 @@ def show_banner():
     else:
         art = _ART_COMPACT
 
-    for row, ci in zip(art, _FIRE if len(art) > 1 else [214]):
-        t = Text(row)
-        t.stylize(f"bold color({ci})")
-        console.print(t)
+    grad = _BANNER_GRAD if len(art) > 1 else [_BANNER_GRAD[-1]]
+    for row, ansi_color in zip(art, grad):
+        w(f"  {_BOLD}{ansi_color}{row}{_RST}\n")
 
     w("\n")
     console.print(Rule(style="color(238)"))
-    w(f"  {_C_GRAY}⬡{_RST} {_BOLD}{_C_WHITE}Web3 Security Auditor{_RST}  {_DIM}v{VERSION}{_RST}\n")
+    w(f"  {_C_GREEN}⬡{_RST} {_BOLD}{_C_WHITE}Security Auditor{_RST}  {_DIM}v{VERSION}{_RST}\n")
     w("\n")
     sys.stdout.flush()
 
@@ -2225,13 +2468,13 @@ def show_hint_panel():
     w(f"  {bx}╭{'─' * W}╮{_RST}\n")
     row([("  you'll need to provide", _C_GRAY)])
     row([])  # blank line
-    row([("  ", None), ("target", _C_ORANGE), ("          ", None),
+    row([("  ", None), ("target", _C_GREEN), ("          ", None),
          ("local project directory", _C_GRAY)])
-    row([("  ", None), ("docs", _C_ORANGE), ("            ", None),
+    row([("  ", None), ("docs", _C_GREEN), ("            ", None),
          ("whitepaper or spec (optional)", _C_GRAY)])
-    row([("  ", None), ("scope", _C_ORANGE), ("           ", None),
+    row([("  ", None), ("scope", _C_GREEN), ("           ", None),
          ("scope.txt or notes (optional)", _C_GRAY)])
-    row([("  ", None), ("ground truth", _C_ORANGE), ("    ", None),
+    row([("  ", None), ("ground truth", _C_GREEN), ("    ", None),
          ("reference report (compare only)", _C_GRAY)])
     w(f"  {bx}╰{'─' * W}╯{_RST}\n")
     w("\n")
@@ -2242,11 +2485,13 @@ def show_hint_panel():
 
 # Dirs skipped at ANY depth (build artifacts, tooling, never contain source)
 _SKIP_ALWAYS = {'node_modules', '.git', 'cache', 'artifacts', '.anchor', '.aptos', '.stellar', '.soroban',
-                'typechain', 'typechain-types', 'coverage', '__pycache__'}
+                'typechain', 'typechain-types', 'coverage', '__pycache__', 'vendor'}
 # Dirs skipped only at project ROOT level (contain deps/tests/scripts, not source)
 _SKIP_ROOT = {'lib', 'target', 'build', 'out', 'test', 'tests', 'mock', 'mocks',
               'script', 'deploy', 'migrations', 'flatten', 'docs', 'doc'}
-_SRC_EXTS = {'.sol', '.rs', '.move'}
+_SC_EXTS = {'.sol', '.rs', '.move'}
+_L1_EXTS = {'.go', '.rs'}
+_SRC_EXTS = _SC_EXTS | _L1_EXTS
 
 
 def _count_source_files(d: str) -> int:
@@ -2282,6 +2527,7 @@ def _detect_project_hint(d: str) -> str:
         "foundry.toml": "Foundry", "hardhat.config.js": "Hardhat",
         "hardhat.config.ts": "Hardhat", "truffle-config.js": "Truffle",
         "Anchor.toml": "Anchor", "Move.toml": "Move", "stellar.toml": "Soroban",
+        "go.mod": "Go", "Cargo.toml": "Rust",
     }
     for fname, label in indicators.items():
         if os.path.exists(os.path.join(d, fname)):
@@ -2294,8 +2540,278 @@ def _detect_project_hint(d: str) -> str:
     return ""
 
 
+# ── Detection Helpers ──────────────────────────────────────
+
+_L1_GO_IMPORTS = [
+    "reth-", "libp2p", "cometbft", "cosmos-sdk", "beacon-chain",
+    "eth/protocols", "fork_choice", "x/staking", "prysm", "lighthouse",
+    "tendermint", "consensus/", "p2p/", "core/vm/",
+]
+_L1_RUST_CRATES = [
+    "reth", "lighthouse", "substrate", "libp2p", "tendermint",
+    "revm", "alloy-consensus", "sc-consensus", "sp-consensus",
+]
+
+
+def _count_loc(target: str, extensions: set, skip_patterns: set = None) -> int:
+    """Count lines of code for given extensions, skipping test files and vendor dirs."""
+    skip = skip_patterns or set()
+    total = 0
+    for root, dirs, files in os.walk(target):
+        rel = os.path.relpath(root, target)
+        if os.path.normpath(root) == os.path.normpath(target):
+            dirs[:] = [x for x in dirs if x not in _SKIP_ALWAYS and x not in _SKIP_ROOT]
+        else:
+            dirs[:] = [x for x in dirs if x not in _SKIP_ALWAYS]
+        for f in files:
+            if os.path.splitext(f)[1] not in extensions:
+                continue
+            low = f.lower()
+            if any(p in low for p in ("_test.", "test_", ".test.", "_mock", "mock_")):
+                continue
+            if any(p in low for p in skip):
+                continue
+            try:
+                fp = os.path.join(root, f)
+                with open(fp, "r", errors="ignore") as fh:
+                    total += sum(1 for _ in fh)
+            except OSError:
+                pass
+    return total
+
+
+def _detect_language(target: str) -> str:
+    """Detect project language: evm, solana, soroban, aptos, sui, go, rust."""
+    sol_count = _count_loc(target, {".sol"})
+    go_count = _count_loc(target, {".go"})
+    rs_count = _count_loc(target, {".rs"})
+    move_count = _count_loc(target, {".move"})
+
+    if sol_count > 0 and sol_count >= max(go_count, rs_count, move_count):
+        return "evm"
+
+    if move_count > 0 and move_count >= max(sol_count, go_count, rs_count):
+        move_toml = os.path.join(target, "Move.toml")
+        if os.path.isfile(move_toml):
+            try:
+                with open(move_toml, "r", errors="ignore") as f:
+                    content = f.read()
+                if "AptosFramework" in content or "aptos" in content.lower():
+                    return "aptos"
+            except OSError:
+                pass
+        return "sui"
+
+    if rs_count > 0 and rs_count >= max(sol_count, go_count, move_count):
+        cargo_toml = os.path.join(target, "Cargo.toml")
+        if os.path.isfile(cargo_toml):
+            try:
+                with open(cargo_toml, "r", errors="ignore") as f:
+                    content = f.read().lower()
+                if "soroban" in content or "stellar" in content:
+                    return "soroban"
+                if "anchor" in content or "solana" in content:
+                    return "solana"
+                if any(c in content for c in _L1_RUST_CRATES):
+                    return "rust"
+            except OSError:
+                pass
+        # Check workspace members for deeper Cargo.toml files
+        for sub in os.listdir(target):
+            sub_cargo = os.path.join(target, sub, "Cargo.toml")
+            if os.path.isfile(sub_cargo):
+                try:
+                    with open(sub_cargo, "r", errors="ignore") as f:
+                        c = f.read().lower()
+                    if "soroban" in c or "stellar" in c:
+                        return "soroban"
+                    if "anchor" in c or "solana" in c:
+                        return "solana"
+                except OSError:
+                    pass
+        return "rust"
+
+    if go_count > 0 and go_count >= max(sol_count, rs_count, move_count):
+        return "go"
+
+    # Fallback: check config files
+    if os.path.isfile(os.path.join(target, "Anchor.toml")):
+        return "solana"
+    if os.path.isfile(os.path.join(target, "foundry.toml")):
+        return "evm"
+    if os.path.isfile(os.path.join(target, "go.mod")):
+        return "go"
+    return "evm"
+
+
+def _detect_pipeline(language: str) -> str:
+    """Map language to pipeline: 'sc' or 'l1'."""
+    if language in ("go", "rust"):
+        return "l1"
+    return "sc"
+
+
+def _detect_l1_tier(loc: int) -> str:
+    if loc < 2000:
+        return "t0"
+    if loc < 30000:
+        return "t1"
+    if loc <= 100000:
+        return "t2"
+    return "t3"
+
+
+_L1_TIER_LABELS = {
+    "t0": ("T0 — Patch", "<=2k LOC diff, PR/commit review"),
+    "t1": ("T1 — Subsystem", "5-30k LOC, one module cluster"),
+    "t2": ("T2 — Whole-client", "30-100k LOC, full codebase"),
+    "t3": ("T3 — Full screen", ">100k LOC, breadth over depth"),
+}
+
+
+_WORKSPACE_CONTAINERS = {
+    'crates', 'packages', 'subcrates', 'libs', 'components',
+    'cmd', 'pkg', 'internal', 'modules',
+}
+
+
+def _scan_modules(target: str, language: str) -> list:
+    """Enumerate project modules with LOC counts. Returns [(name, path, loc)].
+
+    Expands workspace container dirs (crates/, cmd/, pkg/, internal/, etc.)
+    into their children so each subcrate/subpackage appears as a selectable module.
+    """
+    exts = {".go"} if language == "go" else {".rs"}
+    skip = _SKIP_ALWAYS | _SKIP_ROOT
+    modules = []
+    try:
+        entries = sorted(os.listdir(target))
+    except OSError:
+        return []
+    for entry in entries:
+        full = os.path.join(target, entry)
+        if not os.path.isdir(full):
+            continue
+        if entry in skip or entry.startswith("."):
+            continue
+        if entry.lower() in _WORKSPACE_CONTAINERS:
+            try:
+                children = sorted(os.listdir(full))
+            except OSError:
+                children = []
+            for child in children:
+                child_full = os.path.join(full, child)
+                if not os.path.isdir(child_full):
+                    continue
+                if child in _SKIP_ALWAYS or child.startswith("."):
+                    continue
+                loc = _count_loc(child_full, exts)
+                if loc > 0:
+                    modules.append((f"{entry}/{child}", child_full, loc))
+            continue
+        loc = _count_loc(full, exts)
+        if loc > 0:
+            modules.append((entry, full, loc))
+    return modules
+
+
+def _detect_fork(target: str) -> bool:
+    """Check for fork indicators: upstream remote or README mentions."""
+    try:
+        r = subprocess.run(
+            ["git", "remote", "-v"], capture_output=True, text=True,
+            cwd=target, timeout=5)
+        if r.returncode == 0 and "upstream" in r.stdout.lower():
+            return True
+    except Exception:
+        pass
+    for readme in ("README.md", "README", "readme.md"):
+        rp = os.path.join(target, readme)
+        if os.path.isfile(rp):
+            try:
+                with open(rp, "r", errors="ignore") as f:
+                    head = f.read(2000).lower()
+                if "fork" in head and ("upstream" in head or "based on" in head):
+                    return True
+            except OSError:
+                pass
+    return False
+
+
+def _l1_stages(mode, bc, vc, est_findings, src_tok, total_lines,
+               PROMPT_BASE, SKILL_AVG, ARTIFACT_SMALL, ARTIFACT_LARGE, orch_base):
+    """Build L1 pipeline stage list for cost estimation.
+
+    L1 differs from SC: bake phase, no chain analysis, no instantiate,
+    graph sweeps + location recovery (thorough), more verify shards,
+    larger codebases with module-scoped agents.
+    """
+    # L1 breadth agents are module-scoped — each sees a smaller source slice
+    # but L1 codebases are much larger, so cap the per-agent source fraction
+    src_per_agent = min(src_tok, int(src_tok * 0.3))
+
+    # L1 verify shards: 10 high + 6 medium + 4 low (thorough), scaled by findings
+    vc_high = min(10, max(2, int(est_findings * 0.3)))
+    vc_med = min(6, max(2, int(est_findings * 0.25)))
+    vc_low = min(4, max(1, int(est_findings * 0.15)))
+
+    if mode == "light":
+        bc_l = min(3, max(2, bc))
+        vc_l = min(4, max(2, est_findings // 4))
+        return [
+            ("Bake",             1, "sonnet", PROMPT_BASE + int(src_tok * 0.2), 6),
+            ("Recon",            2, "sonnet", PROMPT_BASE + int(src_tok * 0.4) + ARTIFACT_SMALL, 10),
+            ("Breadth",          bc_l, "sonnet", PROMPT_BASE + SKILL_AVG + src_per_agent + ARTIFACT_LARGE, 10),
+            ("Inventory",        1, "sonnet", PROMPT_BASE + ARTIFACT_LARGE * 2, 8),
+            ("Depth (merged)",   3, "sonnet", PROMPT_BASE + SKILL_AVG * 2 + int(src_tok * 0.2) + ARTIFACT_LARGE, 10),
+            ("Verification",     vc_l, "sonnet", PROMPT_BASE + SKILL_AVG + int(src_tok * 0.15) + ARTIFACT_SMALL, 12),
+            ("Report",           1, "sonnet", PROMPT_BASE + ARTIFACT_LARGE * 2, 8),
+            ("Report assembler", 1, "haiku",  PROMPT_BASE + ARTIFACT_LARGE * 2, 6),
+            ("Orchestrator",     1, "sonnet", orch_base, 20),
+        ]
+
+    # Core stages (Thorough appends below)
+    stages = [
+        ("Bake",             1, "sonnet", PROMPT_BASE + int(src_tok * 0.2), 8),
+        ("Recon (opus)",     2, "opus",   PROMPT_BASE + int(src_tok * 0.5) + ARTIFACT_SMALL, 12),
+        ("Recon (sonnet)",   2, "sonnet", PROMPT_BASE + int(src_tok * 0.2) + ARTIFACT_SMALL, 10),
+        ("Breadth",         bc, "sonnet", PROMPT_BASE + SKILL_AVG + src_per_agent + ARTIFACT_LARGE, 12),
+        ("Inventory",        4, "sonnet", PROMPT_BASE + ARTIFACT_LARGE * 2, 8),
+        ("Sem. Invariants",  1, "sonnet", PROMPT_BASE + int(src_tok * 0.3) + ARTIFACT_SMALL, 10),
+        ("Depth (opus)",     3, "opus",   PROMPT_BASE + SKILL_AVG + int(src_tok * 0.2) + ARTIFACT_LARGE, 12),
+        ("Depth (sonnet)",   2, "sonnet", PROMPT_BASE + SKILL_AVG + int(src_tok * 0.2) + ARTIFACT_LARGE, 10),
+        ("RAG + Scoring",    3, "haiku",  PROMPT_BASE + ARTIFACT_LARGE, 6),
+        ("Semantic Dedup",   1, "sonnet", PROMPT_BASE + ARTIFACT_LARGE * 2, 8),
+        ("Verify (high)",    vc_high, "sonnet", PROMPT_BASE + SKILL_AVG + int(src_tok * 0.15) + ARTIFACT_SMALL, 12),
+        ("Verify (medium)",  vc_med, "sonnet", PROMPT_BASE + SKILL_AVG + int(src_tok * 0.15) + ARTIFACT_SMALL, 12),
+        ("Report (sonnet)",  3, "sonnet", PROMPT_BASE + ARTIFACT_LARGE * 2, 8),
+        ("Report (haiku)",   2, "haiku",  PROMPT_BASE + ARTIFACT_LARGE * 2, 6),
+        ("Orchestrator",     1, "opus",   orch_base, 25),
+    ]
+
+    if mode == "thorough":
+        est_high_crit = max(2, int(est_findings * 0.3))
+        est_judge = max(1, est_high_crit // 3)
+        stages += [
+            ("Graph Sweeps",     1, "sonnet", PROMPT_BASE + int(src_tok * 0.3) + ARTIFACT_LARGE, 10),
+            ("Location Recov.",  1, "sonnet", PROMPT_BASE + ARTIFACT_LARGE, 8),
+            ("Attention Repair", 1, "sonnet", PROMPT_BASE + int(src_tok * 0.2) + ARTIFACT_LARGE, 10),
+            ("Verify (low)",     vc_low, "sonnet", PROMPT_BASE + SKILL_AVG + int(src_tok * 0.1) + ARTIFACT_SMALL, 10),
+            ("Skeptic",          est_high_crit, "sonnet",
+             PROMPT_BASE + SKILL_AVG + int(src_tok * 0.15) + ARTIFACT_SMALL, 10),
+            ("Judge",            est_judge, "haiku",
+             PROMPT_BASE + ARTIFACT_SMALL * 2, 4),
+            ("Cross-batch",      1, "sonnet", PROMPT_BASE + ARTIFACT_LARGE, 8),
+            ("Orch. extra",      1, "opus",   orch_base, 15),
+        ]
+
+    return stages
+
+
 def estimate_cost(target: str, mode: str,
-                  scope_file: str = "", scope_notes: str = "") -> dict:
+                  scope_file: str = "", scope_notes: str = "",
+                  pipeline: str = "sc", backend: str = "claude",
+                  subsystem_scope: str = "") -> dict:
     """Estimate audit resource usage by modeling pipeline stages with context accumulation.
 
     Each subagent is a multi-turn conversation where every turn re-sends the full
@@ -2304,6 +2820,8 @@ def estimate_cost(target: str, mode: str,
 
     Respects scope constraints: if scope_file or scope_notes list specific contracts,
     only those files are counted for the estimate.
+    pipeline='l1' uses L1-specific phases, extensions (.go/.rs), and scaling.
+    subsystem_scope: comma-separated module paths for L1 T1 (e.g. 'crates/p2p,crates/rpc').
 
     Returns: lines, files, agents, est_input_mtok, plan_pct (Max x5 / x20)
     """
@@ -2357,6 +2875,16 @@ def estimate_cost(target: str, mode: str,
 
     has_scope = len(scope_names) > 0
 
+    # ── L1 module scoping: restrict walk to subsystem paths ─
+    module_roots = []
+    if subsystem_scope and pipeline == "l1":
+        for mod_path in subsystem_scope.split(","):
+            mod_path = mod_path.strip()
+            if mod_path:
+                full = os.path.join(target, mod_path)
+                if os.path.isdir(full):
+                    module_roots.append(os.path.normpath(full))
+
     # ── Count source files and lines ────────────────────────
     total_files = 0
     total_lines = 0
@@ -2369,31 +2897,47 @@ def estimate_cost(target: str, mode: str,
             "pct_x5": 0, "pct_x20": 0, "pct_pro": 0, "scoped": False,
         }
 
-    target_norm = os.path.normpath(target)
-    for root, dirs, files in os.walk(target):
-        if os.path.normpath(root) == target_norm:
-            dirs[:] = [x for x in dirs if x not in _SKIP_ALWAYS and x not in _SKIP_ROOT]
-        else:
-            dirs[:] = [x for x in dirs if x not in _SKIP_ALWAYS]
-        for fname in files:
-            if os.path.splitext(fname)[1] not in _SRC_EXTS:
-                continue
-
-            # Apply scope filter if we have scope constraints
-            if has_scope:
-                basename = fname.lower()
-                stem = os.path.splitext(basename)[0]
-                if not (basename in scope_names or stem in scope_names):
+    walk_targets = module_roots if module_roots else [target]
+    for walk_root in walk_targets:
+        walk_root_norm = os.path.normpath(walk_root)
+        for root, dirs, files in os.walk(walk_root):
+            if os.path.normpath(root) == walk_root_norm and not module_roots:
+                dirs[:] = [x for x in dirs if x not in _SKIP_ALWAYS and x not in _SKIP_ROOT]
+            else:
+                dirs[:] = [x for x in dirs if x not in _SKIP_ALWAYS]
+            exts = _L1_EXTS if pipeline == "l1" else _SC_EXTS
+            for fname in files:
+                if os.path.splitext(fname)[1] not in exts:
                     continue
 
-            total_files += 1
-            try:
-                with open(os.path.join(root, fname), 'r', errors='ignore') as fh:
-                    total_lines += sum(1 for _ in fh)
-            except Exception:
-                pass
+                # Apply scope filter if we have scope constraints
+                if has_scope:
+                    basename = fname.lower()
+                    stem = os.path.splitext(basename)[0]
+                    if not (basename in scope_names or stem in scope_names):
+                        continue
+
+                total_files += 1
+                try:
+                    with open(os.path.join(root, fname), 'r', errors='ignore') as fh:
+                        total_lines += sum(1 for _ in fh)
+                except Exception:
+                    pass
 
     src_tok = total_lines * 4  # ~4 tokens per line of code
+    effective_lines = total_lines
+    if pipeline == "l1" and total_lines > 30_000:
+        # L1 V2 does not stream the full client into every agent. Recon and
+        # breadth build bounded summaries/shard packets, then later phases
+        # consume those artifacts. Past estimates scaled near-linearly with
+        # total LOC, which made 150k-250k LOC clients look 3x too expensive.
+        # Keep a small logarithmic lift for larger clients, but cap the code
+        # context used by the estimate to match the bounded driver behavior.
+        import math
+        effective_lines = 30_000 + int(
+            min(10_000, math.log2(max(total_lines / 30_000, 1.0)) * 3_000)
+        )
+        src_tok = effective_lines * 4
 
     # ── Agent token model with context accumulation ─────────
     # Each agent turn re-sends full prior context. Total input for N turns:
@@ -2425,9 +2969,12 @@ def estimate_cost(target: str, mode: str,
 
     # ── Pipeline stages ─────────────────────────────────────
     # (name, count, model, base_context, turns)
-    orch_base = PROMPT_BASE + 15_000  # CLAUDE.md + plamen.md loaded
+    orch_base = PROMPT_BASE + 15_000  # CLAUDE.md + methodology prompt loaded
 
-    if mode == "light":
+    if pipeline == "l1":
+        stages = _l1_stages(mode, bc, vc, est_findings, src_tok, total_lines,
+                            PROMPT_BASE, SKILL_AVG, ARTIFACT_SMALL, ARTIFACT_LARGE, orch_base)
+    elif mode == "light":
         # Light mode: all sonnet/haiku, no opus, fewer agents, merged phases
         bc_light = min(3, max(2, bc))  # cap breadth at 3
         est_findings_light = bc_light * 4  # fewer findings from sonnet breadth
@@ -2466,7 +3013,7 @@ def estimate_cost(target: str, mode: str,
             ("Orchestrator",     1, "opus",   orch_base, 25),
         ]
 
-    if mode == "thorough":
+    if pipeline != "l1" and mode == "thorough":
         # Estimate HIGH/CRIT findings for skeptic-judge: ~40% of findings are M+, ~30% are H/C
         est_high_crit = max(2, int(est_findings * 0.3))
         est_judge = max(1, est_high_crit // 3)  # ~1/3 of skeptics disagree
@@ -2492,7 +3039,7 @@ def estimate_cost(target: str, mode: str,
              PROMPT_BASE + SKILL_AVG + int(src_tok * 0.25) + ARTIFACT_SMALL, 10),
             ("Judge",        est_judge, "haiku",
              PROMPT_BASE + ARTIFACT_SMALL * 2, 4),
-            ("Orch. extra",  1, "opus",   orch_base, 15),  # reduced: context compression limits real accumulation
+            ("Orch. extra",  1, "opus",   orch_base, 15),
         ]
 
     # ── Compute totals per model ──────────────────────────────
@@ -2514,8 +3061,15 @@ def estimate_cost(target: str, mode: str,
     output_mtok = total_output / 1_000_000
 
     # ── API cost estimate ────────────────────────────────────
-    # Current pricing (Opus 4.6 $5/$25, Sonnet 4.6 $3/$15, Haiku 4.5 $1/$5)
-    pricing = {"opus": (5.0, 25.0), "sonnet": (3.0, 15.0), "haiku": (1.0, 5.0)}
+    if backend == "codex":
+        # OpenAI API-equivalent pricing as of 2026-05:
+        # GPT-5.5 $5/$30, GPT-5.4 $2.50/$15, GPT-5.4 nano $0.20/$1.25.
+        # The launcher maps Plamen opus/sonnet/haiku tiers to those models by
+        # default; env overrides may change real billing.
+        pricing = {"opus": (5.0, 30.0), "sonnet": (2.5, 15.0), "haiku": (0.20, 1.25)}
+    else:
+        # Claude pricing (Opus 4.6 $5/$25, Sonnet 4.6 $3/$15, Haiku 4.5 $1/$5)
+        pricing = {"opus": (5.0, 25.0), "sonnet": (3.0, 15.0), "haiku": (1.0, 5.0)}
     api_cost = 0.0
     for m in ("opus", "sonnet", "haiku"):
         ip, op = pricing[m]
@@ -2523,41 +3077,77 @@ def estimate_cost(target: str, mode: str,
 
     # ── Weekly plan usage estimate ───────────────────────────
     # Calibrated from empirical data:
-    #   A thorough audit on a ~5000-line project uses ~9% of Max x20 weekly allowance.
+    #   SC: A thorough audit on a ~5000-line project uses ~9% of Max x20.
+    #   L1: Recent whole-client thorough runs usually land around 10-20%
+    #       of Max x20, centered near ~15%, because V2 uses bounded shards
+    #       rather than reading full-client LOC in every phase.
     #   Max x20 weekly allowance: 240-480h Sonnet + 24-40h Opus (resets weekly).
     #   Max x5 has 4x less capacity than x20.
-    ref_tokens_thorough_5k = 0
-    ref_src = 5000 * 4
-    ref_stages = [
-        # Core stages (same model as main stages)
-        (2, ref_src * 0.8 + 8000, 12), (2, ref_src * 0.3 + 8000, 10),    # Recon
-        (4, ref_src * 0.8 + 36000, 12), (1, 48000, 8),                     # Breadth + Inventory
-        (1, ref_src * 0.5 + 13000, 10),                                     # Sem. Invariants
-        (2, ref_src * 0.4 + 36000, 12), (2, ref_src * 0.4 + 36000, 10),   # Depth
-        (3, ref_src * 0.3 + 28000, 8), (1, ref_src * 0.3 + 28000, 8),     # Scanners + VS
-        (3, ref_src * 0.3 + 21000, 8), (3, 28000, 6), (2, 48000, 8),      # Niche(3) + RAG + Chain
-        (5, ref_src * 0.25 + 21000, 14),                                    # Verification
-        (1, 68000, 8), (2, 48000, 8), (2, 68000, 6),                       # Report
-        (1, 23000, 35),                                                      # Orchestrator (capped)
-        # Thorough-only stages (with skip-probability adjustments)
-        (3, ref_src * 0.6 + 28000, 10), (4, ref_src * 0.25 + 13000, 8),   # Re-scan(3) + Per-contract(4)
-        (1, ref_src * 0.4 + 28000, 8), (3, ref_src * 0.2 + 21000, 8),     # Sem. Pass 2 + Depth 2-3(3)
-        (1, ref_src * 0.3 + 13000, 10),                                     # Inv. Fuzz only (Medusa ~50% skip)
-        (1, 28000, 8),                                                       # Design Stress
-        (2, ref_src * 0.2 + 21000, 10),                                     # Extra verify(2)
-        (4, ref_src * 0.25 + 21000, 10), (1, 18000, 4),                    # Skeptic + Judge
-        (1, 23000, 15),                                                      # Orch. extra (capped)
-    ]
+    ref_tokens = 0
+
+    if pipeline == "l1":
+        ref_src = 30_000 * 4
+        ref_pct = 10.5
+        ref_per_agent = min(ref_src, int(ref_src * 0.3))
+        ref_stages = [
+            # L1 Core stages
+            (1, ref_src * 0.2 + 8000, 8),                                       # Bake
+            (2, ref_src * 0.5 + 13000, 12), (2, ref_src * 0.2 + 13000, 10),    # Recon
+            (5, ref_per_agent + 36000, 12),                                      # Breadth
+            (4, 48000, 8),                                                        # Inventory (4 chunks + merge)
+            (1, ref_src * 0.3 + 13000, 10),                                      # Sem. Invariants
+            (3, ref_src * 0.2 + 36000, 12), (2, ref_src * 0.2 + 36000, 10),    # Depth
+            (3, 28000, 6), (1, 48000, 8),                                        # RAG + Dedup
+            (5, ref_src * 0.15 + 21000, 12),                                     # Verify (high)
+            (4, ref_src * 0.15 + 21000, 12),                                     # Verify (med)
+            (3, 48000, 8), (2, 48000, 6),                                        # Report
+            (1, 23000, 25),                                                       # Orchestrator
+            # L1 Thorough-only
+            (1, ref_src * 0.3 + 28000, 10),                                      # Graph Sweeps
+            (1, 28000, 8),                                                        # Location Recovery
+            (1, ref_src * 0.2 + 28000, 10),                                      # Attention Repair
+            (3, ref_src * 0.1 + 21000, 10),                                      # Verify (low)
+            (4, ref_src * 0.15 + 21000, 10), (1, 18000, 4),                     # Skeptic + Judge
+            (1, 28000, 8),                                                        # Cross-batch
+            (1, 23000, 15),                                                       # Orch. extra
+        ]
+    else:
+        ref_src = 5000 * 4
+        ref_pct = 9.0
+        ref_stages = [
+            # SC Core stages
+            (2, ref_src * 0.8 + 8000, 12), (2, ref_src * 0.3 + 8000, 10),    # Recon
+            (4, ref_src * 0.8 + 36000, 12), (1, 48000, 8),                     # Breadth + Inventory
+            (1, ref_src * 0.5 + 13000, 10),                                     # Sem. Invariants
+            (2, ref_src * 0.4 + 36000, 12), (2, ref_src * 0.4 + 36000, 10),   # Depth
+            (3, ref_src * 0.3 + 28000, 8), (1, ref_src * 0.3 + 28000, 8),     # Scanners + VS
+            (3, ref_src * 0.3 + 21000, 8), (3, 28000, 6), (2, 48000, 8),      # Niche(3) + RAG + Chain
+            (5, ref_src * 0.25 + 21000, 14),                                    # Verification
+            (1, 68000, 8), (2, 48000, 8), (2, 68000, 6),                       # Report
+            (1, 23000, 35),                                                      # Orchestrator (capped)
+            # SC Thorough-only stages
+            (3, ref_src * 0.6 + 28000, 10), (4, ref_src * 0.25 + 13000, 8),   # Re-scan + Per-contract
+            (1, ref_src * 0.4 + 28000, 8), (3, ref_src * 0.2 + 21000, 8),     # Sem. Pass 2 + Depth 2-3
+            (1, ref_src * 0.3 + 13000, 10),                                     # Inv. Fuzz
+            (1, 28000, 8),                                                       # Design Stress
+            (2, ref_src * 0.2 + 21000, 10),                                     # Extra verify
+            (4, ref_src * 0.25 + 21000, 10), (1, 18000, 4),                    # Skeptic + Judge
+            (1, 23000, 15),                                                      # Orch. extra
+        ]
+
     for c, b, t in ref_stages:
         ai, _ = agent_tokens(b, t)
-        ref_tokens_thorough_5k += c * ai
+        ref_tokens += c * ai
 
-    pct_x20 = (total_input / ref_tokens_thorough_5k) * 9.0 if ref_tokens_thorough_5k else 0
-    pct_x5 = pct_x20 * 4
-
-    # Pro plan estimate: ~1/8th of Max x5 weekly capacity (sonnet-only, no opus,
-    # significantly lower rate limits). Calibrated conservatively.
-    pct_pro = pct_x5 * 2.5 if mode == "light" else pct_x5 * 5
+    # Plan usage percentages (Claude-specific — not applicable for Codex)
+    if backend == "codex":
+        pct_x20 = 0.0
+        pct_x5 = 0.0
+        pct_pro = 0.0
+    else:
+        pct_x20 = (total_input / ref_tokens) * ref_pct if ref_tokens else 0
+        pct_x5 = pct_x20 * 4
+        pct_pro = pct_x5 * 2.5 if mode == "light" else pct_x5 * 5
 
     return {
         "files": total_files,
@@ -2566,10 +3156,12 @@ def estimate_cost(target: str, mode: str,
         "input_mtok": round(input_mtok, 1),
         "output_mtok": round(output_mtok, 1),
         "api_cost": round(api_cost, 0),
+        "effective_lines": effective_lines,
         "pct_x5": round(pct_x5, 1),
         "pct_x20": round(pct_x20, 1),
         "pct_pro": round(pct_pro, 1),
-        "scoped": has_scope and total_files > 0,
+        "scoped": (has_scope or bool(module_roots)) and total_files > 0,
+        "backend": backend,
     }
 
 
@@ -2597,21 +3189,59 @@ def _cap(s: str, n: int = 44) -> str:
 
 # ── Prompts ──────────────────────────────────────────────────
 
-def select_mode() -> str:
-    return inquirer.select(
-        message="Select audit mode:",
+def select_pipeline() -> str:
+    """Returns 'sc', 'l1', 'compare', or 'setup'."""
+    result = inquirer.select(
+        message="What are you auditing?",
         choices=[
-            {"name": "Light      18-22 agents  | Pro plan  | best under 3k LOC", "value": "light"},
-            {"name": "Core       30-50 agents  | Max plan  | ALL severities",  "value": "core"},
-            {"name": "Thorough   40-100 agents | Max plan  | ALL severities + fuzz", "value": "thorough"},
+            {"name": "Smart Contract         EVM · Solana · Soroban · Aptos · Sui",
+             "value": "sc"},
+            {"name": "L1 / DLT               Go or Rust node client",
+             "value": "l1"},
             Separator(),
-            {"name": "Compare    variable     | DELTA report",               "value": "compare"},
-            {"name": "Setup      install tools + build RAG DB",              "value": "setup"},
+            {"name": "Compare                Diff reports",
+             "value": "compare"},
+            {"name": "Setup                  Install tools + build RAG DB",
+             "value": "setup"},
         ],
-        default="light",
+        default="sc",
         pointer="  >",
         style=_STYLE,
         qmark="⬡",
+        amark="✓",
+    ).execute()
+    return result
+
+
+def select_audit_mode(pipeline: str) -> str:
+    """Returns 'light', 'core', or 'thorough' for the given pipeline."""
+    if pipeline == "sc":
+        choices = [
+            {"name": "Light         18-22 agents  | Pro plan  | best under 3k LOC",
+             "value": "light"},
+            {"name": "Core          30-50 agents  | Max plan  | ALL severities",
+             "value": "core"},
+            {"name": "Thorough      40-100 agents | Max plan  | ALL + fuzz",
+             "value": "thorough"},
+            *_back_separator(),
+        ]
+    else:
+        choices = [
+            {"name": "Light         15-20 agents  | Quick scan",
+             "value": "light"},
+            {"name": "Core          25-40 agents  | Standard L1 depth",
+             "value": "core"},
+            {"name": "Thorough      35-55 agents  | Iterative + re-scan",
+             "value": "thorough"},
+            *_back_separator(),
+        ]
+    return inquirer.select(
+        message="Select audit depth:",
+        choices=choices,
+        default="core",
+        pointer="  >",
+        style=_STYLE,
+        qmark=">",
         amark="✓",
     ).execute()
 
@@ -2846,11 +3476,73 @@ def confirm_launch() -> str:
     ).execute()
 
 
+def select_l1_tier(detected_tier: str, loc: int) -> str:
+    """Select L1 audit tier. Returns 't0'/'t1'/'t2'/'t3' or _BACK."""
+    choices = []
+    for tid, (label, desc) in _L1_TIER_LABELS.items():
+        marker = " ←" if tid == detected_tier else ""
+        choices.append({"name": f"{label:22s} {desc}{marker}", "value": tid})
+    choices.extend(_back_separator())
+    result = inquirer.select(
+        message=f"Select audit tier (detected: {detected_tier.upper()} based on {loc:,} LOC):",
+        choices=choices,
+        default=detected_tier,
+        pointer="  >",
+        style=_STYLE,
+        qmark=">",
+        amark="✓",
+    ).execute()
+    return result
+
+
+def select_l1_modules(modules: list) -> list:
+    """Select modules for T1 subsystem audit. Returns list of (name, path, loc) or [_BACK]."""
+    if not modules:
+        return []
+    choices = [
+        {"name": f"{name:20s} {loc:>7,} LOC   {path}", "value": (name, path, loc)}
+        for name, path, loc in modules
+    ]
+    result = inquirer.checkbox(
+        message="Select modules to audit (space=toggle, enter=confirm, empty=back):",
+        choices=choices,
+        style=_STYLE,
+        qmark=">",
+        amark="✓",
+        pointer="  >",
+    ).execute()
+    if not result:
+        return [_BACK]
+    return result
+
+
+def select_l1_fork() -> str:
+    """Select fork analysis mode. Returns 'diff'/'standalone'/'both' or _BACK."""
+    result = inquirer.select(
+        message="Fork detected. Upstream comparison?",
+        choices=[
+            {"name": "Diff against upstream     focus on fork-specific changes", "value": "diff"},
+            {"name": "Audit as standalone       treat as independent codebase",  "value": "standalone"},
+            {"name": "Both                      upstream diff + standalone",      "value": "both"},
+            *_back_separator(),
+        ],
+        default="standalone",
+        pointer="  >",
+        style=_STYLE,
+        qmark=">",
+        amark="✓",
+    ).execute()
+    return result
+
+
 # ── Summary ──────────────────────────────────────────────────
 
 def show_summary(mode: str, target: str, docs: str,
                  network: str = "", scope_file: str = "", scope_notes: str = "",
-                 cost_estimate: dict = None, strict: bool = False):
+                 cost_estimate: dict = None, strict: bool = False,
+                 pipeline: str = "sc", language: str = "",
+                 tier: str = "", modules: list = None, fork_mode: str = "",
+                 backend: str = "claude"):
     w = sys.stdout.write
     bx = _C_BOX
     W = 52
@@ -2875,8 +3567,26 @@ def show_summary(mode: str, target: str, docs: str,
     # Blank line
     w(f"  {bx}│{_RST}{' ' * W}{bx}│{_RST}\n")
 
-    row("Mode", f"{MODES[mode]['label']}", _C_ORANGE)
+    mode_table = L1_MODES if pipeline == "l1" else MODES
+    mode_label = mode_table.get(mode, {}).get("label", mode)
+    row("Pipeline", "L1 Infrastructure" if pipeline == "l1" else "Smart Contract", _C_ORANGE)
+    row("Mode", mode_label, _C_ORANGE)
+    if backend == "codex":
+        row("Backend", "Codex CLI (OpenAI)", _C_ORANGE)
+    row("AI Model", _wizard_model_summary(backend, mode), _C_ORANGE)
     row("Target", target)
+    if language:
+        row("Language", language.upper())
+    if tier:
+        tl = _L1_TIER_LABELS.get(tier, (tier, ""))[0]
+        row("Tier", tl)
+    if modules:
+        names = ", ".join(m[0] for m in modules[:5])
+        if len(modules) > 5:
+            names += f" +{len(modules) - 5} more"
+        row("Modules", names)
+    if fork_mode and fork_mode != "standalone":
+        row("Fork", fork_mode)
     if network:
         row("Network", NETWORKS.get(network, network))
     row("Docs", docs if docs else "none", _C_WHITE if docs else _C_DARK_GRAY)
@@ -2896,62 +3606,438 @@ def show_summary(mode: str, target: str, docs: str,
         row("Agents", f"~{agents}")
         row("Tokens", f"~{cost_estimate['input_mtok']}M in / ~{cost_estimate['output_mtok']}M out")
         api = cost_estimate.get("api_cost", 0)
-        row("API cost", f"~${api:.0f} USD", _C_WHITE)
-        pct_pro = cost_estimate.get("pct_pro", 0)
-        pct5 = cost_estimate["pct_x5"]
-        pct20 = cost_estimate["pct_x20"]
-        if pct_pro > 0:
-            color_pro = _C_RED if pct_pro > 80 else (_C_ORANGE if pct_pro > 40 else _C_GREEN)
-            row("Pro", f"~{pct_pro:.0f}% of weekly allowance", color_pro)
-        if pct5 > 0:
-            color5 = _C_RED if pct5 > 80 else (_C_ORANGE if pct5 > 40 else _C_GREEN)
-            color20 = _C_RED if pct20 > 80 else (_C_ORANGE if pct20 > 40 else _C_GREEN)
-            row("Max x5", f"~{pct5:.0f}% of weekly allowance", color5)
-            row("Max x20", f"~{pct20:.0f}% of weekly allowance", color20)
+        est_backend = cost_estimate.get("backend", backend)
+        if est_backend == "codex":
+            row("API equiv", f"~${api:.0f} USD (OpenAI)", _C_WHITE)
+            row("Weekly", "N/A - Codex/OpenAI quotas differ", _C_DARK_GRAY)
+        else:
+            row("API cost", f"~${api:.0f} USD", _C_WHITE)
+            pct_pro = cost_estimate.get("pct_pro", 0)
+            pct5 = cost_estimate["pct_x5"]
+            pct20 = cost_estimate["pct_x20"]
+            if pct_pro > 0:
+                color_pro = _C_RED if pct_pro > 80 else (_C_ORANGE if pct_pro > 40 else _C_GREEN)
+                row("Pro", f"~{pct_pro:.0f}% of weekly allowance", color_pro)
+            if pct5 > 0:
+                color5 = _C_RED if pct5 > 80 else (_C_ORANGE if pct5 > 40 else _C_GREEN)
+                color20 = _C_RED if pct20 > 80 else (_C_ORANGE if pct20 > 40 else _C_GREEN)
+                row("Max x5", f"~{pct5:.0f}% of weekly allowance", color5)
+                row("Max x20", f"~{pct20:.0f}% of weekly allowance", color20)
 
     w(f"  {bx}╰{'─' * W}╯{_RST}\n")
 
     if cost_estimate:
         w(f"  {_C_DARK_GRAY}Rough estimates only. Actual usage varies with protocol{_RST}\n")
-        w(f"  {_C_DARK_GRAY}complexity and findings count. Run /cost after for actuals.{_RST}\n")
+        if cost_estimate.get("backend", backend) == "codex":
+            w(f"  {_C_DARK_GRAY}Codex shows API-equivalent spend; weekly plan percent is not{_RST}\n")
+            w(f"  {_C_DARK_GRAY}comparable to Claude Max/Pro. Run /cost after for actuals.{_RST}\n")
+        else:
+            w(f"  {_C_DARK_GRAY}complexity and findings count. Run /cost after for actuals.{_RST}\n")
 
     w("\n")
     sys.stdout.flush()
 
 
+# ── Resume Detection ─────────────────────────────────────────
+
+def _resolve_resume_progress(config: dict, completed: list[str]) -> dict:
+    """Return last completed phase and the next active phase to run."""
+    last_phase = completed[-1] if completed else "(not started)"
+    pipeline = str(config.get("pipeline", "sc")).lower()
+    mode = str(config.get("mode", "core")).lower()
+    next_phase = "(complete)"
+
+    try:
+        scripts_dir = os.path.join(PLAMEN_HOME, "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        from plamen_types import L1_PHASES, SC_PHASES  # type: ignore
+
+        phases = L1_PHASES if pipeline == "l1" else SC_PHASES
+        completed_set = set(completed or [])
+        for phase in phases:
+            if mode not in getattr(phase, "modes", ()):
+                continue
+            if phase.name not in completed_set:
+                next_phase = phase.name
+                break
+    except Exception:
+        fallback = {
+            "sc": [
+                "recon", "instantiate", "breadth", "rescan",
+                "inventory_prepare", "inventory_chunk_a", "inventory_chunk_b",
+                "inventory_chunk_c", "inventory", "invariants", "depth",
+                "attention_repair", "rag_sweep", "sc_semantic_dedup",
+                "chain", "chain_agent2", "sc_verify_queue",
+                "sc_verify_crithigh", "sc_verify_high_b", "sc_verify_high_c",
+                "sc_verify_high_d", "sc_verify_medium_a",
+                "sc_verify_medium_b", "sc_verify_medium_c",
+                "sc_verify_medium_d", "sc_verify_low_a", "sc_verify_low_b",
+                "sc_verify_aggregate", "skeptic", "crossbatch",
+                "report_index", "report_body_writer_critical_high",
+                "report_body_writer_medium", "report_body_writer_low_info",
+                "report_critical_high", "report_critical_high_merge",
+                "report_medium", "report_medium_merge", "report_low_info",
+                "report_low_info_merge", "report_assemble",
+            ],
+            "l1": [
+                "bake", "recon", "breadth", "graph_sweeps",
+                "inventory_prepare", "inventory_chunk_a", "inventory_chunk_b",
+                "inventory_chunk_c", "inventory", "location_recovery",
+                "invariants", "depth", "attention_repair", "rag_sweep",
+                "chain", "chain_agent2", "semantic_dedup", "verify_queue",
+                "verify_aggregate", "crossbatch", "skeptic", "report_index",
+                "report_body_writer_critical_high",
+                "report_body_writer_medium", "report_body_writer_low_info",
+                "report_critical_high", "report_critical_high_merge",
+                "report_medium", "report_medium_merge", "report_low_info",
+                "report_low_info_merge", "report_assemble",
+            ],
+        }.get(pipeline, [])
+        completed_set = set(completed or [])
+        for name in fallback:
+            if name not in completed_set:
+                next_phase = name
+                break
+
+    return {
+        "last_phase": last_phase,
+        "next_phase": next_phase,
+        "phases_done": len(completed or []),
+    }
+
+
+def _find_existing_audit(cwd: str = "") -> "dict | None":
+    """Look for an existing audit scratchpad relative to cwd.
+
+    Primary: .scratchpad/config.json (normal path).
+    Fallback: .scratchpad exists with checkpoint or artifacts but config.json
+    is missing (e.g. crash/interrupt deleted it). Tries to reconstruct config
+    from the checkpoint's embedded copy (v2.6.2+) or from prompt snapshots.
+
+    Returns dict with keys: config_path, scratchpad, mode, pipeline,
+    language, target, last_phase, phases_done.
+    Extra key 'config_missing' = True when config.json was reconstructed
+    or is unrecoverable.
+    Returns None if no existing audit found.
+    """
+    import json as _json
+
+    if not cwd:
+        cwd = os.getcwd()
+
+    scratchpad_dirs = [
+        os.path.join(cwd, ".scratchpad"),
+        os.path.join(cwd, "src", ".scratchpad"),
+        os.path.join(cwd, "contracts", ".scratchpad"),
+    ]
+
+    for scratchpad in scratchpad_dirs:
+        config_path = os.path.join(scratchpad, "config.json")
+        checkpoint_path = os.path.join(scratchpad, "_v2_checkpoint.json")
+
+        # ── Primary: config.json exists ──
+        if os.path.isfile(config_path):
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    config = _json.load(f)
+            except Exception:
+                continue
+
+            completed = []
+            if os.path.isfile(checkpoint_path):
+                try:
+                    with open(checkpoint_path, encoding="utf-8") as f:
+                        cp = _json.load(f)
+                    completed = cp.get("completed", [])
+                except Exception:
+                    pass
+            progress = _resolve_resume_progress(config, completed)
+
+            return {
+                "config_path": config_path,
+                "scratchpad": scratchpad,
+                "mode": config.get("mode", "?"),
+                "pipeline": config.get("pipeline", "?"),
+                "language": config.get("language", "?"),
+                "target": config.get("project_root", "?"),
+                "last_phase": progress["last_phase"],
+                "next_phase": progress["next_phase"],
+                "phases_done": progress["phases_done"],
+            }
+
+        # ── Fallback: scratchpad dir exists but config.json is missing ──
+        if not os.path.isdir(scratchpad):
+            continue
+
+        # Need checkpoint or at least some real artifacts
+        has_checkpoint = os.path.isfile(checkpoint_path)
+        try:
+            artifact_files = [
+                f for f in os.listdir(scratchpad)
+                if not f.startswith("_") and f.endswith(".md")
+                and os.path.isfile(os.path.join(scratchpad, f))
+            ]
+        except Exception:
+            artifact_files = []
+
+        if not has_checkpoint and not artifact_files:
+            continue
+
+        completed = []
+        recovered_config = None
+
+        if has_checkpoint:
+            try:
+                with open(checkpoint_path, encoding="utf-8") as f:
+                    cp = _json.load(f)
+                completed = cp.get("completed", [])
+                recovered_config = cp.get("config")
+                if recovered_config and not isinstance(recovered_config, dict):
+                    recovered_config = None
+            except Exception:
+                pass
+
+        # Try to reconstruct config from checkpoint's embedded copy
+        if recovered_config:
+            try:
+                with open(config_path, "w", encoding="utf-8") as f:
+                    _json.dump(recovered_config, f, indent=2)
+            except Exception:
+                pass
+            progress = _resolve_resume_progress(recovered_config, completed)
+            return {
+                "config_path": config_path,
+                "scratchpad": scratchpad,
+                "mode": recovered_config.get("mode", "?"),
+                "pipeline": recovered_config.get("pipeline", "?"),
+                "language": recovered_config.get("language", "?"),
+                "target": recovered_config.get("project_root", "?"),
+                "last_phase": progress["last_phase"],
+                "next_phase": progress["next_phase"],
+                "phases_done": progress["phases_done"],
+                "recovered": True,
+            }
+
+        # Last resort: scratchpad has artifacts but no recoverable config.
+        # We know an audit happened but can't reconstruct its settings.
+        return {
+            "config_path": None,
+            "scratchpad": scratchpad,
+            "mode": "?",
+            "pipeline": "?",
+            "language": "?",
+            "target": os.path.dirname(scratchpad),
+            "last_phase": completed[-1] if completed else "(unknown)",
+            "next_phase": "(unknown)",
+            "phases_done": len(completed),
+            "config_missing": True,
+        }
+
+    return None
+
+
+def _resume_audit_prompt(info: dict) -> str:
+    """Show existing audit info and ask user what to do.
+
+    Returns: 'resume', 'fresh', or 'new'.
+    """
+    config_missing = info.get("config_missing", False)
+    recovered = info.get("recovered", False)
+
+    w = sys.stdout.write
+    w(f"\n  {_C_ORANGE}⬡ Existing audit detected{_RST}\n\n")
+    w(f"    {_C_GRAY}Target:    {_RST}{info['target']}\n")
+    w(f"    {_C_GRAY}Pipeline:  {_RST}{info['pipeline'].upper()} {info['mode']}\n")
+    w(f"    {_C_GRAY}Language:  {_RST}{info['language']}\n")
+    next_phase = info.get("next_phase", "(unknown)")
+    w(f"    {_C_GRAY}Progress:  {_RST}{info['phases_done']} phases done, last = {info['last_phase']}, next = {next_phase}\n")
+
+    if config_missing:
+        w(f"    {_C_GRAY}Config:    {_RST}{_C_RED}missing (not recoverable){_RST}\n")
+        w(f"\n    {_C_ORANGE}Config was lost and could not be reconstructed from checkpoint.{_RST}\n")
+        w(f"    {_C_ORANGE}Scratchpad artifacts exist at: {info['scratchpad']}{_RST}\n\n")
+    elif recovered:
+        w(f"    {_C_GRAY}Config:    {_RST}{info['config_path']} {_C_GREEN}(recovered from checkpoint){_RST}\n\n")
+    else:
+        w(f"    {_C_GRAY}Config:    {_RST}{info['config_path']}\n\n")
+    sys.stdout.flush()
+
+    if config_missing:
+        choices = [
+            {"name": "Clean up (wipe scratchpad, configure from scratch)",
+             "value": "new"},
+            Separator(),
+            {"name": "Cancel   (leave scratchpad intact, exit)",
+             "value": "cancel"},
+        ]
+        default = "new"
+    else:
+        choices = [
+            {"name": f"Resume  (next: {next_phase})",
+             "value": "resume"},
+            {"name": "Fresh   (wipe scratchpad, restart same config)",
+             "value": "fresh"},
+            Separator(),
+            {"name": "New     (ignore existing, configure from scratch)",
+             "value": "new"},
+        ]
+        default = "resume"
+
+    result = inquirer.select(
+        message="What would you like to do?",
+        choices=choices,
+        default=default,
+        pointer="  >",
+        style=_STYLE,
+        qmark="⬡",
+        amark="✓",
+    ).execute()
+    return result
+
+
+def resume_v2(config_path: str, fresh: bool = False):
+    """Resume (or fresh-restart) an existing audit via the driver."""
+    driver = os.path.join(PLAMEN_HOME, "scripts", "plamen_driver.py")
+    if not os.path.isfile(driver):
+        sys.stdout.write(f"  {_C_RED}✗ Driver not found: {driver}{_RST}\n")
+        sys.exit(1)
+
+    import json as _json
+    with open(config_path, encoding="utf-8") as f:
+        config = _json.load(f)
+    target = config.get("project_root", "")
+    pipeline = config.get("pipeline", "sc").upper()
+    mode = config.get("mode", "core")
+
+    console.print(Rule(style="color(238)"))
+    w = sys.stdout.write
+    action = "Fresh restart" if fresh else "Resuming"
+    w(f"\n  {_BOLD}{_C_WHITE}{action} audit driver ({pipeline} {mode})...{_RST}\n\n")
+    sys.stdout.flush()
+
+    cmd = [sys.executable, driver]
+    if fresh:
+        cmd.append("--fresh")
+    cmd.append(config_path)
+
+    if sys.platform == "win32":
+        os.system("")
+    result = subprocess.run(cmd)
+
+    if result.returncode == 0:
+        report = os.path.join(target, "AUDIT_REPORT.md")
+        w(f"\n  {_C_GREEN}✓ Pipeline completed.{_RST}\n")
+        if os.path.isfile(report):
+            w(f"  {_C_WHITE}Report: {report}{_RST}\n")
+    elif result.returncode == 2:
+        w(f"\n  {_C_ORANGE}⏸ Pipeline paused — rate limit or usage cap reached.{_RST}\n")
+        w(f"  {_C_GRAY}Resume: run plamen again from the same directory.{_RST}\n")
+    else:
+        w(f"\n  {_C_RED}✗ Pipeline stopped with errors.{_RST}\n")
+        w(f"  {_C_GRAY}Resume: run plamen again from the same directory.{_RST}\n")
+
+    sys.exit(result.returncode)
+
+
 # ── Launch ───────────────────────────────────────────────────
+
+def launch_v2(pipeline: str, mode: str, target: str, language: str,
+              docs: str = "", scope_file: str = "", scope_notes: str = "",
+              proven_only: bool = False, tier: str = "",
+              subsystem_scope: str = "", fork_mode: str = "standalone",
+              cli_backend: str = ""):
+    """Write config.json and run plamen_driver.py (deterministic driver)."""
+    import json as _json
+
+    target = os.path.abspath(target)
+    scratchpad = os.path.join(target, ".scratchpad")
+    os.makedirs(scratchpad, exist_ok=True)
+
+    if not cli_backend:
+        detected_backends = _detect_cli_backends()
+        cli_backend = (
+            detected_backends[0]
+            if len(detected_backends) == 1
+            else _ambient_backend(detected_backends)
+        )
+
+    config = {
+        "project_root": target,
+        "scratchpad": scratchpad,
+        "mode": mode,
+        "pipeline": pipeline,
+        "language": language,
+        "cli_backend": cli_backend,
+    }
+
+    if pipeline == "sc":
+        config["docs_path"] = docs
+        config["scope_file"] = scope_file
+        config["scope_notes"] = scope_notes
+        config["proven_only"] = proven_only
+    elif pipeline == "l1":
+        config["tier"] = tier
+        config["subsystem_scope"] = subsystem_scope
+        config["fork_mode"] = fork_mode
+        config["docs_path"] = docs
+
+    config_path = os.path.join(scratchpad, "config.json")
+    with open(config_path, "w", encoding="utf-8") as f:
+        _json.dump(config, f, indent=2)
+
+    driver = os.path.join(PLAMEN_HOME, "scripts", "plamen_driver.py")
+    if not os.path.isfile(driver):
+        sys.stdout.write(f"  {_C_RED}✗ Driver not found: {driver}{_RST}\n")
+        sys.exit(1)
+
+    console.print(Rule(style="color(238)"))
+    w = sys.stdout.write
+    w(f"\n  {_BOLD}{_C_WHITE}Launching audit driver ({pipeline.upper()} mode)...{_RST}\n\n")
+    w(f"  {_C_GRAY}Config: {config_path}{_RST}\n")
+    w(f"  {_C_GRAY}If interrupted, resume with:{_RST}\n")
+    w(f"  {_C_WHITE}  python {driver} \"{config_path}\"{_RST}\n\n")
+    sys.stdout.flush()
+
+    if sys.platform == "win32":
+        os.system("")
+    result = subprocess.run([sys.executable, driver, config_path])
+
+    if result.returncode == 0:
+        report = os.path.join(target, "AUDIT_REPORT.md")
+        w(f"\n  {_C_GREEN}✓ Pipeline completed.{_RST}\n")
+        if os.path.isfile(report):
+            w(f"  {_C_WHITE}Report: {report}{_RST}\n")
+    elif result.returncode == 2:
+        w(f"\n  {_C_ORANGE}⏸ Pipeline paused — rate limit or usage cap reached.{_RST}\n")
+        w(f"  {_C_GRAY}Resume when usage resets:{_RST}\n")
+        w(f"  {_C_WHITE}  python {driver} \"{config_path}\"{_RST}\n")
+    else:
+        violations = os.path.join(scratchpad, "violations.md")
+        w(f"\n  {_C_RED}✗ Pipeline stopped with errors.{_RST}\n")
+        if os.path.isfile(violations):
+            w(f"  {_C_GRAY}Check: {violations}{_RST}\n")
+        w(f"  {_C_GRAY}Resume (re-attempts failed phases):{_RST}\n")
+        w(f"  {_C_WHITE}  python {driver} \"{config_path}\"{_RST}\n")
+
+    sys.exit(result.returncode)
+
 
 def launch_claude(mode: str, target: str, docs: str,
                   network: str = "", scope_file: str = "", scope_notes: str = "",
                   **kwargs):
+    """Launch 'compare' mode — runs /plamen compare in a Claude Code session."""
     claude_bin = shutil.which("claude")
     if not claude_bin:
         sys.stdout.write(f"  {_C_RED}✗ 'claude' not found in PATH{_RST}\n")
         sys.exit(1)
 
-    # Build the prompt string
-    if mode == "compare":
-        parts = ["/plamen compare"]
-        if target:
-            parts.append(f"report: {target}")
-        if docs:
-            parts.append(f"ground_truth: {docs}")
-        prompt = " ".join(parts)
-    else:
-        parts = [f"/plamen {mode} {target} wrapper-launch"]
-        if docs:
-            parts.append(f"docs: {docs}")
-        else:
-            parts.append("nodocs")
-        if network:
-            parts.append(f"network: {network}")
-        if scope_file:
-            parts.append(f"scope: {scope_file}")
-        if scope_notes:
-            parts.append(f"notes: {scope_notes}")
-        if kwargs.get("strict"):
-            parts.append("proven-only: true")
-        prompt = " ".join(parts)
+    parts = ["/plamen compare"]
+    if target:
+        parts.append(f"report: {target}")
+    if docs:
+        parts.append(f"ground_truth: {docs}")
+    prompt = " ".join(parts)
 
     console.print(Rule(style="color(238)"))
     w = sys.stdout.write
@@ -2966,6 +4052,33 @@ def launch_claude(mode: str, target: str, docs: str,
 
 # ── Main: state machine with back support ────────────────────
 
+def _parse_cli_opts() -> dict:
+    """Parse --key VALUE and --flag options from sys.argv into a dict."""
+    opts = {"docs": "", "network": "", "scope_file": "", "scope_notes": "",
+            "proven_only": False, "tier": "", "modules": "",
+            "cli_backend": ""}
+    for i, a in enumerate(sys.argv):
+        if a == "--docs" and i + 1 < len(sys.argv):
+            opts["docs"] = sys.argv[i + 1]
+        if a == "--network" and i + 1 < len(sys.argv):
+            opts["network"] = sys.argv[i + 1]
+        if a == "--scope" and i + 1 < len(sys.argv):
+            opts["scope_file"] = sys.argv[i + 1]
+        if a == "--notes" and i + 1 < len(sys.argv):
+            opts["scope_notes"] = sys.argv[i + 1]
+        if a in ("--proven-only", "--strict"):
+            opts["proven_only"] = True
+        if a == "--tier" and i + 1 < len(sys.argv):
+            opts["tier"] = sys.argv[i + 1].lower()
+        if a == "--modules" and i + 1 < len(sys.argv):
+            opts["modules"] = sys.argv[i + 1]
+        if a == "--codex":
+            opts["cli_backend"] = "codex"
+        if a == "--claude":
+            opts["cli_backend"] = "claude"
+    return opts
+
+
 def main():
     # Fast path: CLI args skip the interactive UI
     if len(sys.argv) > 1:
@@ -2977,23 +4090,32 @@ def main():
             show_banner()
             w(f"  {_C_WHITE}Usage:{_RST}\n")
             w(f"    {_C_ORANGE}plamen{_RST}                              Interactive wizard\n")
-            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}core{_RST} /path/to/project        Audit in Core mode\n")
-            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}thorough{_RST} /path/to/project    Audit in Thorough mode\n")
-            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}light{_RST} /path/to/project       Audit in Light mode\n")
+            w(f"\n  {_C_WHITE}Smart Contract (auto-detect language):{_RST}\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}core{_RST} /path/to/project        SC audit in Core mode\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}thorough{_RST} /path/to/project    SC audit in Thorough mode\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}light{_RST} /path/to/project       SC audit in Light mode\n")
+            w(f"\n  {_C_WHITE}L1 Infrastructure:{_RST}\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}l1 core{_RST} /path/to/project     L1 audit in Core mode\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}l1 thorough{_RST} /path             L1 audit in Thorough mode\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}l1 light{_RST} /path                L1 audit in Light mode\n")
+            w(f"\n  {_C_WHITE}Other:{_RST}\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}resume{_RST}                       Resume interrupted audit\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}resume{_RST} path/config.json      Resume specific config\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}compare{_RST}                      Diff reports\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}setup{_RST}                        Install tools + build RAG\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}rag{_RST}                          Rebuild RAG database only\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}uninstall{_RST}                    Remove from ~/.claude\n")
-            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}install --codex{_RST}             Install Codex adapter to ~/.codex\n")
-            w(f"\n  {_C_WHITE}Options (for audit modes):{_RST}\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}install --codex{_RST}             Install Codex adapter\n")
+            w(f"\n  {_C_WHITE}Options:{_RST}\n")
             w(f"    {_C_GRAY}--docs{_RST} PATH              Whitepaper or spec file\n")
             w(f"    {_C_GRAY}--scope{_RST} PATH             Scope file listing contracts\n")
             w(f"    {_C_GRAY}--notes{_RST} TEXT             Scope notes (free text)\n")
-            w(f"    {_C_GRAY}--network{_RST} NAME           Target network (ethereum, arbitrum, etc.)\n")
-            w(f"    {_C_GRAY}--proven-only{_RST}            Cap unproven findings at Low severity\n")
-            w(f"\n  {_C_WHITE}Inside Claude Code:{_RST}\n")
-            w(f"    {_C_GRAY}/plamen{_RST}                          Interactive wizard\n")
-            w(f"    {_C_GRAY}/plamen core{_RST} docs: file.pdf      With options\n")
+            w(f"    {_C_GRAY}--network{_RST} NAME           Target network (SC only)\n")
+            w(f"    {_C_GRAY}--proven-only{_RST}            Cap unproven findings at Low (SC only)\n")
+            w(f"    {_C_GRAY}--tier{_RST} T0|T1|T2|T3      L1 tier override\n")
+            w(f"    {_C_GRAY}--modules{_RST} a,b,c          L1 T1 module selection\n")
+            w(f"    {_C_GRAY}--codex{_RST}                  Use Codex CLI backend\n")
+            w(f"    {_C_GRAY}--claude{_RST}                 Use Claude Code backend (default)\n")
             w(f"\n")
             return
 
@@ -3002,6 +4124,7 @@ def main():
             import json as _json
             est_target = sys.argv[2] if len(sys.argv) > 2 else "."
             est_mode = sys.argv[3] if len(sys.argv) > 3 else "core"
+            est_pipeline = "sc"
             est_scope = ""
             est_notes = ""
             for i, a in enumerate(sys.argv):
@@ -3009,13 +4132,15 @@ def main():
                     est_scope = sys.argv[i + 1]
                 if a == "--scope-notes" and i + 1 < len(sys.argv):
                     est_notes = sys.argv[i + 1]
-            r = estimate_cost(est_target, est_mode, est_scope, est_notes)
+                if a == "--l1":
+                    est_pipeline = "l1"
+            r = estimate_cost(est_target, est_mode, est_scope, est_notes,
+                              pipeline=est_pipeline)
             print(_json.dumps(r))
             return
 
         # ── Install / uninstall subcommands ───────────────────
         if arg in ("install", "setup"):
-            # Check for --codex flag
             if "--codex" in sys.argv:
                 show_banner()
                 w = sys.stdout.write
@@ -3031,6 +4156,29 @@ def main():
             run_uninstall()
             return
 
+        if arg == "resume":
+            show_banner()
+            # Accept explicit config path or auto-detect
+            config_path = sys.argv[2] if len(sys.argv) > 2 else None
+            if config_path and os.path.isfile(config_path):
+                resume_v2(config_path, fresh=False)
+            else:
+                existing = _find_existing_audit(config_path or "")
+                if existing and existing.get("config_path"):
+                    resume_v2(existing["config_path"], fresh=False)
+                elif existing and existing.get("config_missing"):
+                    sys.stdout.write(
+                        f"  {_C_RED}✗ Audit found but config.json is missing and"
+                        f" could not be recovered.{_RST}\n"
+                        f"  {_C_GRAY}Scratchpad: {existing['scratchpad']}{_RST}\n"
+                        f"  {_C_GRAY}Run interactively to clean up or start fresh.{_RST}\n"
+                    )
+                    sys.exit(1)
+                else:
+                    sys.stdout.write(f"  {_C_RED}✗ No existing audit found to resume.{_RST}\n")
+                    sys.exit(1)
+            return
+
         if arg == "rag":
             show_banner()
             w = sys.stdout.write
@@ -3039,74 +4187,251 @@ def main():
             _build_rag_db(w)
             return
 
-        if arg in ("light", "core", "thorough", "compare"):
+        # ── L1 CLI: plamen l1 <mode> [path] [--opts] ─────────
+        if arg == "l1":
+            _check_claude_md_version()
+            l1_mode = sys.argv[2].lower() if len(sys.argv) > 2 else "core"
+            if l1_mode not in ("light", "core", "thorough"):
+                sys.stdout.write(f"  {_C_RED}Unknown L1 mode: {l1_mode}{_RST}\n")
+                sys.exit(1)
+            target = ""
+            for a in sys.argv[3:]:
+                if not a.startswith("--"):
+                    target = a
+                    break
+            if not target:
+                show_banner()
+                target, _ = select_target()
+            target = os.path.abspath(target)
+            opts = _parse_cli_opts()
+            language = _detect_language(target)
+            if language not in ("go", "rust"):
+                language = "go"  # default for L1
+            exts = {".go"} if language == "go" else {".rs"}
+            loc = _count_loc(target, exts)
+            tier = opts["tier"] or _detect_l1_tier(loc)
+            subsystem_scope = ""
+            if tier == "t1" and opts["modules"]:
+                subsystem_scope = opts["modules"]
+            elif tier == "t1":
+                modules = _scan_modules(target, language)
+                if modules:
+                    selected = select_l1_modules(modules)
+                    subsystem_scope = ",".join(m[1] for m in selected)
+            fork_mode = "standalone"
+            if _detect_fork(target):
+                fork_mode = select_l1_fork()
+            launch_v2("l1", l1_mode, target, language,
+                       docs=opts["docs"], tier=tier,
+                       subsystem_scope=subsystem_scope, fork_mode=fork_mode,
+                       cli_backend=opts["cli_backend"])
+            return
+
+        # ── SC CLI: plamen <mode> [path] [--opts] ─────────────
+        if arg in ("light", "core", "thorough"):
+            _check_claude_md_version()
+            target = ""
+            for a in sys.argv[2:]:
+                if not a.startswith("--"):
+                    target = a
+                    break
+            if not target:
+                show_banner()
+                target, _ = select_target()
+            target = os.path.abspath(target)
+            opts = _parse_cli_opts()
+            language = _detect_language(target)
+            if language in ("go", "rust"):
+                language = "evm"  # SC mode, force SC language
+            launch_v2("sc", arg, target, language,
+                       docs=opts["docs"], scope_file=opts["scope_file"],
+                       scope_notes=opts["scope_notes"],
+                       proven_only=opts["proven_only"],
+                       cli_backend=opts["cli_backend"])
+            return
+
+        # ── Compare ──────────────────────────────────────────
+        if arg == "compare":
             _check_claude_md_version()
             target = sys.argv[2] if len(sys.argv) > 2 else ""
             docs = ""
-            network = ""
-            scope_file = ""
-            scope_notes = ""
-            strict = False
             for i, a in enumerate(sys.argv):
                 if a == "--docs" and i + 1 < len(sys.argv):
                     docs = sys.argv[i + 1]
-                if a == "--network" and i + 1 < len(sys.argv):
-                    network = sys.argv[i + 1]
-                if a == "--scope" and i + 1 < len(sys.argv):
-                    scope_file = sys.argv[i + 1]
-                if a == "--notes" and i + 1 < len(sys.argv):
-                    scope_notes = sys.argv[i + 1]
-                if a in ("--proven-only", "--strict"):
-                    strict = True
-            if not target and arg != "compare":
-                show_banner()
-                target, network = select_target()
-            launch_claude(arg, target, docs, network, scope_file, scope_notes,
-                          strict=strict)
+            launch_claude("compare", target, docs)
             return
 
     # ── Interactive flow (state machine) ─────────────────────
     show_banner()
     _check_claude_md_version()
+
+    # ── Resume detection: check for existing audit before anything else ──
+    existing = _find_existing_audit()
+    if existing:
+        decision = _resume_audit_prompt(existing)
+        if decision == "cancel":
+            sys.stdout.write(f"\n  {_C_GRAY}Exiting. Scratchpad left intact.{_RST}\n")
+            return
+        elif decision == "resume":
+            resume_v2(existing["config_path"], fresh=False)
+            return
+        elif decision == "fresh":
+            resume_v2(existing["config_path"], fresh=True)
+            return
+        else:
+            # "new" → wipe old scratchpad, then fall through to config wizard
+            old_sp = existing["scratchpad"]
+            if os.path.isdir(old_sp):
+                shutil.rmtree(old_sp, ignore_errors=True)
+            sys.stdout.write(
+                f"\n  {_C_GREEN}✓{_RST} Previous audit cleared."
+                f"  {_C_GRAY}Configuring new audit...{_RST}\n\n"
+            )
+            sys.stdout.flush()
+
     show_hint_panel()
 
     if not _quick_check_required():
         check_dependencies()
         sys.stdout.write(f"  {_C_RED}Cannot proceed without required tools.{_RST}\n")
-        sys.stdout.write(f"  {_C_GRAY}Install claude, python, npx/npm, and git, then retry.{_RST}\n")
+        sys.stdout.write(
+            f"  {_C_GRAY}Install Claude Code or Codex CLI, plus python, npm, and git, then retry.{_RST}\n"
+        )
         sys.exit(1)
 
-    mode = target = docs = network = scope_file = scope_notes = ""
+    pipeline = mode = target = docs = network = scope_file = scope_notes = ""
+    language = tier = fork_mode = subsystem_scope = ""
+    cli_backend = ""
+    is_fork = False
+    l1_modules = []
     report = ground_truth = ""
     strict = False
     step = 0
 
-    while True:
-        # ── Step 0: Mode selection ───────────────────────────
-        if step == 0:
-            mode = select_mode()
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            if mode == "setup":
-                run_setup()
-                step = 0
-                continue
-            step = 1
-            continue
+    # Helper: build breadcrumbs from current state for clear+rebanner
+    def _sc_crumbs_to(step_id):
+        """Breadcrumbs for SC flow up to (not including) step_id."""
+        c = [("Pipeline", "Smart Contract"), ("Mode", mode)]
+        if step_id > 1:
+            c.append(("Target", _shorten(target, 40)))
+        if step_id > 2:
+            c.append(("Docs", docs if docs else "none"))
+        if step_id > 3:
+            sc = scope_file or scope_notes or "full project"
+            c.append(("Scope", _shorten(sc, 40) if scope_file else sc))
+        if step_id > 35:
+            c.append(("Proven-only", "yes" if strict else "no"))
+        return c
 
-        # ── Core / Thorough flow ─────────────────────────────
-        if mode in ("light", "core", "thorough"):
+    def _l1_crumbs_to(step_id):
+        """Breadcrumbs for L1 flow up to (not including) step_id."""
+        c = [("Pipeline", "L1 Infrastructure"), ("Mode", mode)]
+        if step_id > 1:
+            c.append(("Target", f"{_shorten(target, 30)} ({language.upper()}, {loc:,} LOC)"))
+        if step_id > 12:
+            tl = _L1_TIER_LABELS.get(tier, (tier, ""))[0]
+            c.append(("Tier", tl))
+        if step_id > 13 and tier == "t1" and l1_modules:
+            names = ", ".join(m[0] for m in l1_modules[:4])
+            c.append(("Modules", names))
+        if step_id > 14:
+            c.append(("Fork", fork_mode))
+        if step_id > 15:
+            c.append(("Docs", docs if docs else "none"))
+        return c
+
+    def _cmp_crumbs_to(step_id):
+        """Breadcrumbs for Compare flow."""
+        c = [("Mode", "Compare")]
+        if step_id > 1:
+            c.append(("Report", _shorten(report, 40)))
+        if step_id > 2:
+            c.append(("Ground truth", _shorten(ground_truth, 40)))
+        return c
+
+    loc = 0  # needed by _l1_crumbs_to before L1 step 1 sets it
+    detected_tier = "t2"
+
+    while True:
+        # ── Step 0: Pipeline selection ────────────────────────
+        if step == 0:
+            pipeline = select_pipeline()
+            sys.stdout.write("\n"); sys.stdout.flush()
+            if pipeline == "setup":
+                run_setup()
+                step = 0; continue
+            if pipeline == "compare":
+                mode = "compare"
+                step = 1; continue
+            step = 5; continue
+
+        # ── Step 0.5: Audit depth selection ──────────────────
+        if step == 5:
+            mode = select_audit_mode(pipeline)
+            if mode == _BACK:
+                _clear_and_rebanner()
+                step = 0; continue
+            sys.stdout.write("\n"); sys.stdout.flush()
+            step = 6; continue
+
+        # ── Step 6: Backend selection (only if multiple runtimes exist) ──
+        if step == 6:
+            detected_backends = _detect_cli_backends()
+            if _skip_backend_prompt() or len(detected_backends) <= 1:
+                cli_backend = (
+                    detected_backends[0]
+                    if len(detected_backends) == 1
+                    else _ambient_backend(detected_backends)
+                )
+                step = 1; continue
+            choices = []
+            if "claude" in detected_backends:
+                choices.append({
+                    "name": "Claude Code    Anthropic Claude",
+                    "value": "claude",
+                })
+            if "codex" in detected_backends:
+                choices.append({
+                    "name": "Codex CLI      OpenAI GPT-5.5 / GPT-5.4-mini",
+                    "value": "codex",
+                })
+            choices.extend(_back_separator())
+            result = inquirer.select(
+                message="AI runtime?",
+                choices=choices,
+                default=_ambient_backend(detected_backends),
+                pointer="  >",
+                style=_STYLE,
+                qmark=">",
+                amark="✓",
+            ).execute()
+            if result == _BACK:
+                _clear_and_rebanner()
+                step = 5; continue
+            cli_backend = result
+            sys.stdout.write("\n"); sys.stdout.flush()
+            step = 1; continue
+
+        # ── SC audit flow ────────────────────────────────────
+        if pipeline == "sc" and mode in ("light", "core", "thorough"):
             if step == 1:
                 result = select_target()
                 if result[0] == _BACK:
-                    step = 0; continue
+                    _clear_and_rebanner()
+                    step = 5; continue
                 target, network = result
+                language = _detect_language(target)
+                if language in ("go", "rust"):
+                    language = "evm"
+                sys.stdout.write(f"  {_C_GRAY}Detected: {language.upper()}{_RST}\n")
                 sys.stdout.write("\n"); sys.stdout.flush()
                 step = 2; continue
 
             if step == 2:
                 result = select_docs()
                 if result == _BACK:
+                    _crumb_set(_sc_crumbs_to(1))
+                    _clear_and_rebanner()
                     step = 1; continue
                 docs = result
                 sys.stdout.write("\n"); sys.stdout.flush()
@@ -3115,8 +4440,11 @@ def main():
             if step == 3:
                 result = select_scope()
                 if result[0] == _BACK:
+                    _crumb_set(_sc_crumbs_to(2))
+                    _clear_and_rebanner()
                     step = 2; continue
                 scope_file, scope_notes = result
+                sys.stdout.write("\n"); sys.stdout.flush()
                 step = 35; continue
 
             if step == 35:
@@ -3134,6 +4462,8 @@ def main():
                     amark="✓",
                 ).execute()
                 if result == _BACK:
+                    _crumb_set(_sc_crumbs_to(3))
+                    _clear_and_rebanner()
                     step = 3; continue
                 strict = result
                 sys.stdout.write("\n"); sys.stdout.flush()
@@ -3142,17 +4472,126 @@ def main():
             if step == 4:
                 cost_est = None
                 if os.path.isdir(target):
-                    cost_est = estimate_cost(target, mode, scope_file, scope_notes)
+                    cost_est = estimate_cost(target, mode, scope_file, scope_notes,
+                                            backend=cli_backend or "claude")
                 show_summary(mode, target, docs, network, scope_file, scope_notes, cost_est,
-                             strict=strict)
+                             strict=strict, pipeline="sc", language=language,
+                             backend=cli_backend or "claude")
                 decision = confirm_launch()
                 if decision == "back":
+                    _crumb_set(_sc_crumbs_to(35))
+                    _clear_and_rebanner()
                     step = 35; continue
                 if decision == "cancel":
                     sys.stdout.write(f"  {_C_DARK_GRAY}Cancelled.{_RST}\n")
                     return
-                launch_claude(mode, target, docs, network, scope_file, scope_notes,
-                              strict=strict)
+                launch_v2("sc", mode, target, language,
+                          docs=docs, scope_file=scope_file,
+                          scope_notes=scope_notes, proven_only=strict,
+                          cli_backend=cli_backend)
+                return
+
+        # ── L1 audit flow ────────────────────────────────────
+        if pipeline == "l1" and mode in ("light", "core", "thorough"):
+            if step == 1:
+                result = select_target()
+                if result[0] == _BACK:
+                    _clear_and_rebanner()
+                    step = 5; continue
+                target, _ = result
+                language = _detect_language(target)
+                if language not in ("go", "rust"):
+                    language = "go"
+                exts = {".go"} if language == "go" else {".rs"}
+                loc = _count_loc(target, exts)
+                detected_tier = _detect_l1_tier(loc)
+                sys.stdout.write(f"  {_C_GRAY}Detected: {language.upper()}, {loc:,} LOC{_RST}\n")
+                sys.stdout.write("\n"); sys.stdout.flush()
+                step = 12; continue
+
+            if step == 12:
+                result = select_l1_tier(detected_tier, loc)
+                if result == _BACK:
+                    _crumb_set(_l1_crumbs_to(1))
+                    _clear_and_rebanner()
+                    step = 1; continue
+                tier = result
+                sys.stdout.write("\n"); sys.stdout.flush()
+                if tier == "t1":
+                    step = 13; continue
+                step = 14; continue
+
+            if step == 13:
+                l1_modules = _scan_modules(target, language)
+                if l1_modules:
+                    selected = select_l1_modules(l1_modules)
+                    if selected == [_BACK]:
+                        _crumb_set(_l1_crumbs_to(12))
+                        _clear_and_rebanner()
+                        step = 12; continue
+                    subsystem_scope = ",".join(m[1] for m in selected)
+                    total_mod_loc = sum(m[2] for m in selected)
+                    if total_mod_loc > 30000:
+                        sys.stdout.write(
+                            f"  {_C_ORANGE}⚠ Selected modules total {total_mod_loc:,} LOC "
+                            f"(T1 target: 5-30k){_RST}\n")
+                    l1_modules = selected
+                sys.stdout.write("\n"); sys.stdout.flush()
+                step = 14; continue
+
+            if step == 14:
+                is_fork = _detect_fork(target)
+                if is_fork:
+                    result = select_l1_fork()
+                    if result == _BACK:
+                        _crumb_set(_l1_crumbs_to(13 if tier == "t1" else 12))
+                        _clear_and_rebanner()
+                        step = 12 if tier != "t1" else 13; continue
+                    fork_mode = result
+                else:
+                    fork_mode = "standalone"
+                sys.stdout.write("\n"); sys.stdout.flush()
+                step = 15; continue
+
+            if step == 15:
+                result = select_docs()
+                if result == _BACK:
+                    # Step 14 (fork) is a no-op when no fork — skip it
+                    if is_fork:
+                        back_step = 14
+                    elif tier == "t1":
+                        back_step = 13
+                    else:
+                        back_step = 12
+                    _crumb_set(_l1_crumbs_to(back_step))
+                    _clear_and_rebanner()
+                    step = back_step; continue
+                docs = result
+                sys.stdout.write("\n"); sys.stdout.flush()
+                step = 16; continue
+
+            if step == 16:
+                cost_est = None
+                if os.path.isdir(target):
+                    cost_est = estimate_cost(target, mode, pipeline="l1",
+                                            backend=cli_backend or "claude",
+                                            subsystem_scope=subsystem_scope)
+                show_summary(mode, target, docs, cost_estimate=cost_est,
+                             pipeline="l1", language=language,
+                             tier=tier, modules=l1_modules, fork_mode=fork_mode,
+                             backend=cli_backend or "claude")
+                decision = confirm_launch()
+                if decision == "back":
+                    _crumb_set(_l1_crumbs_to(15))
+                    _clear_and_rebanner()
+                    step = 15; continue
+                if decision == "cancel":
+                    sys.stdout.write(f"  {_C_DARK_GRAY}Cancelled.{_RST}\n")
+                    return
+                launch_v2("l1", mode, target, language,
+                          docs=docs, tier=tier,
+                          subsystem_scope=subsystem_scope, fork_mode=fork_mode,
+                          cli_backend=cli_backend)
                 return
 
         # ── Compare flow ─────────────────────────────────────
@@ -3160,6 +4599,7 @@ def main():
             if step == 1:
                 result = select_report("Your Plamen audit report (.md):")
                 if result == _BACK:
+                    _clear_and_rebanner()
                     step = 0; continue
                 report = result
                 sys.stdout.write("\n"); sys.stdout.flush()
@@ -3168,14 +4608,19 @@ def main():
             if step == 2:
                 result = select_report("Ground truth report (.md):")
                 if result == _BACK:
+                    _crumb_set(_cmp_crumbs_to(1))
+                    _clear_and_rebanner()
                     step = 1; continue
                 ground_truth = result
+                sys.stdout.write("\n"); sys.stdout.flush()
                 step = 3; continue
 
             if step == 3:
                 show_summary(mode, report, ground_truth)
                 decision = confirm_launch()
                 if decision == "back":
+                    _crumb_set(_cmp_crumbs_to(2))
+                    _clear_and_rebanner()
                     step = 2; continue
                 if decision == "cancel":
                     sys.stdout.write(f"  {_C_DARK_GRAY}Cancelled.{_RST}\n")

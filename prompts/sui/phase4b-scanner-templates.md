@@ -1,4 +1,4 @@
-# Phase 4b: Scanner & Sweep Templates -- Sui Move
+﻿# Phase 4b: Scanner & Sweep Templates -- Sui Move
 
 > **Usage**: Orchestrator reads this file to spawn the 3 Blind Spot Scanners, Validation Sweep Agent, and Design Stress Testing Agent in iteration 1.
 > Replace placeholders `{SCRATCHPAD}`, etc. with actual values.
@@ -29,7 +29,7 @@ Read:
 - {SCRATCHPAD}/findings_inventory.md (what WAS analyzed)
 - {SCRATCHPAD}/constraint_variables.md (admin-settable parameters)
 
-## Processing Protocol (MANDATORY — applies to every CHECK below)
+## Processing Protocol (MANDATORY â€” applies to every CHECK below)
 
 For each CHECK, execute three steps in order:
 1. **ENUMERATE targets**: List every entity the CHECK applies to (objects, coins, parameters, call sites) as a numbered list before analysis begins.
@@ -71,15 +71,15 @@ From constraint_variables.md, for each parameter with a setter function:
 - Does its setter enforce bounds? (min/max checks before writing to object fields)
 - Can the new value be set below accumulated state? (setter regression)
 - Is there a related parameter that must maintain coherence? (constraint coherence)
-- **Silent misconfiguration**: If the setter has NO bounds check, trace downstream math with an accepted-but-extreme value. Does the function abort, or does it silently produce wrong results? A setter that accepts any value AND downstream math silently breaks for part of the accepted range is a finding — even without an attacker.
+- **Silent misconfiguration**: If the setter has NO bounds check, trace downstream math with an accepted-but-extreme value. Does the function abort, or does it silently produce wrong results? A setter that accepts any value AND downstream math silently breaks for part of the accepted range is a finding â€” even without an attacker.
 
 ## CHECK 2e: Approval/Delegate Sequence Conflicts (IF approve/delegate patterns detected in scope)
-Skip this check if no `approve`, `delegate`, `allowance`, or consent patterns are detected in the scoped modules. If `{SCRATCHPAD}/niche_multi_step_safety_findings.md` exists and is non-empty, limit this to listing affected functions in a table [Function | Pattern | Note] — do NOT trace execution, compute impacts, or construct exploitation scenarios. The niche agent handles deep analysis.
-For each multi-step operation (PTB composed calls, batch operations over coins/objects), enumerate all consent/delegate/approve operations. If the same (spender, coin_type) pair is authorized more than once, verify amounts are additive or the second accounts for the first. Sequential overwrites → FINDING.
+Skip this check if no `approve`, `delegate`, `allowance`, or consent patterns are detected in the scoped modules. If `{SCRATCHPAD}/niche_multi_step_safety_findings.md` exists and is non-empty, limit this to listing affected functions in a table [Function | Pattern | Note] â€” do NOT trace execution, compute impacts, or construct exploitation scenarios. The niche agent handles deep analysis.
+For each multi-step operation (PTB composed calls, batch operations over coins/objects), enumerate all consent/delegate/approve operations. If the same (spender, coin_type) pair is authorized more than once, verify amounts are additive or the second accounts for the first. Sequential overwrites â†’ FINDING.
 
 ## CHECK 2f: Infrastructure Address Targeting (IF on-behalf-of patterns detected in scope)
-Skip this check if no `deposit_for`, `stake_for`, `delegate_to`, or similar on-behalf-of function patterns are detected. If `{SCRATCHPAD}/niche_multi_step_safety_findings.md` exists and is non-empty, limit this to listing affected functions in a table [Function | Target Param | Note] — do NOT trace execution or compute impacts.
-For each public entry function that writes state keyed by an address parameter (e.g., `deposit_for(target)`, `stake_for(target)`, `delegate_to(target)`): can any protocol shared object or singleton be used as the target? If yes, what state is imposed on it, and does it break protocol operations? → FINDING.
+Skip this check if no `deposit_for`, `stake_for`, `delegate_to`, or similar on-behalf-of function patterns are detected. If `{SCRATCHPAD}/niche_multi_step_safety_findings.md` exists and is non-empty, limit this to listing affected functions in a table [Function | Target Param | Note] â€” do NOT trace execution or compute impacts.
+For each public entry function that writes state keyed by an address parameter (e.g., `deposit_for(target)`, `stake_for(target)`, `delegate_to(target)`): can any protocol shared object or singleton be used as the target? If yes, what state is imposed on it, and does it break protocol operations? â†’ FINDING.
 
 **Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
@@ -92,7 +92,7 @@ For each public entry function that writes state keyed by an address parameter (
 | Finding ID | Location | Root Cause (1-line) | Verdict | Severity | Precondition Type | Postcondition Type |
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
-Write to {SCRATCHPAD}/blind_spot_A_findings.md
+Write to {SCRATCHPAD}/blind_spot_a_findings.md
 
 Return: 'DONE: {N} blind spots -- Check1: {A} token gaps, Check2: {B} parameter gaps'
 ")
@@ -116,7 +116,7 @@ Read:
 - {SCRATCHPAD}/state_variables.md (all structs and their abilities)
 - {SCRATCHPAD}/modifiers.md (access control / guard map)
 
-## Processing Protocol (MANDATORY — applies to every CHECK below)
+## Processing Protocol (MANDATORY â€” applies to every CHECK below)
 
 For each CHECK, execute three steps in order:
 1. **ENUMERATE targets**: List every entity the CHECK applies to (guards, modifiers, overrides, functions) as a numbered list before analysis begins.
@@ -145,6 +145,7 @@ From function_list.md, for each function:
 
 **Checks**:
 - `public` functions that modify critical state: should they be `public(package)` or `entry` instead? `public` functions cannot be removed in `compatible` package upgrades and can be called by any external package via PTBs.
+- `public` functions that return `&mut`, call `borrow_mut`, or expose dynamic-field mutable access to internal state: should they be `public(package)` or capability-gated? Treat external packages as attackers that can call any `public` helper.
 - `entry` functions that return values consumed by other protocol functions: should they be `public` instead? (`entry` cannot be called by other Move code, only from PTB transaction commands directly)
 - Functions that should clearly be private but are `public(package)` or `public` -> flag
 Also flag: `public` or `entry` functions that emit events but have NO access control AND do NOT modify meaningful state -- these allow anyone to forge events that mislead off-chain indexers and UIs.
@@ -222,7 +223,7 @@ Misclassified ownership is a Sui-specific blind spot that breadth agents typical
 | Finding ID | Location | Root Cause (1-line) | Verdict | Severity | Precondition Type | Postcondition Type |
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
-Write to {SCRATCHPAD}/blind_spot_B_findings.md
+Write to {SCRATCHPAD}/blind_spot_b_findings.md
 
 Return: 'DONE: {N} blind spots -- Check3: {A} capability-gated gaps, Check4: {B} visibility gaps, Check5: {C} dependency gaps, Check5b: {D} upgrade safety gaps, Check5c: {E} ownership model gaps'
 ")
@@ -247,7 +248,7 @@ Read:
 - {SCRATCHPAD}/state_variables.md (all structs and abilities)
 - Source files for all in-scope modules
 
-## Processing Protocol (MANDATORY — applies to every CHECK below)
+## Processing Protocol (MANDATORY â€” applies to every CHECK below)
 
 For each CHECK, execute three steps in order:
 1. **ENUMERATE targets**: List every entity the CHECK applies to (roles, capabilities, functions, call paths) as a numbered list before analysis begins.
@@ -316,7 +317,7 @@ For each public and entry function in all in-scope modules:
 | Finding ID | Location | Root Cause (1-line) | Verdict | Severity | Precondition Type | Postcondition Type |
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
-Write to {SCRATCHPAD}/blind_spot_C_findings.md
+Write to {SCRATCHPAD}/blind_spot_c_findings.md
 
 Return: 'DONE: {N} blind spots -- Check6: {A} capability lifecycle gaps, Check7: {B} capability exposure gaps, Check8: {C} reachability gaps'
 ")
@@ -343,7 +344,7 @@ Read:
 - {SCRATCHPAD}/modifiers.md (access control / guard map)
 - Source files for all in-scope modules
 
-## Processing Protocol (MANDATORY — applies to every CHECK below)
+## Processing Protocol (MANDATORY â€” applies to every CHECK below)
 
 For each CHECK, execute three steps in order:
 1. **ENUMERATE targets**: List every entity the CHECK applies to (validations, operators, guards, functions) as a numbered list before analysis begins.
@@ -450,9 +451,24 @@ For each function accepting a generic type parameter `T` or accepting objects by
 **Methodology**:
 - For each function with generic `T`: does it verify `T` is the expected type? Can a PTB caller pass a different type that satisfies the ability constraints but is not the intended type?
 - Common pattern: `public fun deposit<T>(pool: &mut Pool<T>, coin: Coin<T>)` -- if `Pool<T>` is a shared object, the type `T` is fixed at pool creation. But if the function creates a NEW object parameterized by `T`, the caller controls `T`.
+- If the function accepts both generic `T` and a runtime selector/config/index/object (asset id, pool id, position id, order id), verify `type_name::get<T>()` or `object::id()` is checked against that runtime identity. Generics do not prove the runtime selector matches the type.
+- If a position/receipt/order was created with one pool/config, later operations must validate the supplied pool/config matches the stored source identity before moving value or collateral.
 - For functions that accept `&mut UID` or `ID` parameters: does the function verify the object type via dynamic field keys or type-tagged lookups? Can a caller pass an object ID of a different type that happens to have the right dynamic field?
 - For witness pattern usage: does the function verify one-time-witness (OTW) properties? Can a non-OTW type satisfy the constraints?
 - Flag: functions where type parameter `T` is used for coin operations but the function does not verify `T` matches the protocol's expected coin type stored in configuration
+
+## CHECK 5d: Mutable Reference Assignment Correctness
+
+For every function that destructures from a mutable reference or binds mutable field references:
+
+| Function | Source `&mut` Object | Destructured Ref Fields | Assignment | Dereferenced? | Wrong Field Write? |
+|----------|----------------------|-------------------------|------------|---------------|-------------------|
+
+**Methodology**:
+- Grep for `let Struct {` in functions operating on `&mut` objects, then inspect assignments among destructured names.
+- If a destructured field is a reference, `field = other_field` rebinds the local reference. It does not copy the value. Value-copy intent should look like `*field = *other_field` or an explicit copied local.
+- After any assignment to a reference variable, trace later `*field = ...` writes and confirm they still mutate the intended stored field.
+- Prioritize quota, cooldown, epoch reset, limit reset, accounting, and liquidation state transitions. If wrong-field mutation changes value limits or locks state, escalate.
 
 ## CHECK 6: Helper Function Call-Site Parity
 
@@ -478,7 +494,7 @@ Read `{SCRATCHPAD}/semantic_invariants.md` (pre-computed by Phase 4a.5 agent). F
 | Variable | Flagged Gap | Confirmed? | Finding? |
 |----------|-----------|-----------|----------|
 
-Verify each flagged gap: does the value-changing function actually modify the tracked value without updating the variable? Filter false positives (e.g., view-only reads, functions that indirectly trigger an update). Confirmed gaps → FINDING.
+Verify each flagged gap: does the value-changing function actually modify the tracked value without updating the variable? Filter false positives (e.g., view-only reads, functions that indirectly trigger an update). Confirmed gaps â†’ FINDING.
 
 ## CHECK 8: Conditional Branch State Completeness
 
@@ -490,13 +506,13 @@ For EVERY state-modifying function that contains an if/else or early abort:
 **Methodology**:
 - For each conditional branch in a state-modifying function, enumerate ALL state writes in the TRUE path
 - Enumerate ALL state writes in the FALSE path (including the implicit "nothing happens" path for early aborts)
-- If a state variable is written in one branch but NOT the other, and both branches represent valid execution paths (not error/abort) → flag as potential stale state
+- If a state variable is written in one branch but NOT the other, and both branches represent valid execution paths (not error/abort) â†’ flag as potential stale state
 - Special focus: functions where fee accrual, timestamp updates, or checkpoint writes are inside a conditional block but downstream consumers assume they always executed
 - Special focus: functions where a "pause" or "skip" branch updates timestamps/counters but NOT accumulators, or vice versa
 
 **Concrete test**: If `function_a` writes `last_update = now` inside an `if (amount > 0)` block, what value does `last_update` retain when `amount == 0`? Trace all consumers of `last_update` -- do they produce correct results with the stale value?
 
-Tag: [TRACE:branch=false → stateVar={old_value} → consumer computes {wrong_result}]
+Tag: [TRACE:branch=false â†’ stateVar={old_value} â†’ consumer computes {wrong_result}]
 
 ## CHECK 9: Validation Semantic Adequacy
 
@@ -505,12 +521,12 @@ For EVERY validation that protects against value loss (slippage checks, balance 
 | Validation | What It Measures | What It Should Measure | Match? |
 |-----------|-----------------|----------------------|--------|
 
-**Classification** — for each validation, determine:
+**Classification** â€” for each validation, determine:
 - Does it check ABSOLUTE state (total balance) or RELATIVE change (delta per operation)?
 - Does it check AGGREGATE result (batch total) or PER-ITEM result (individual operation)?
 - Does it check a PROXY metric (correlated value) or the DIRECT metric (actual value at risk)?
 
-If the validation uses absolute/aggregate/proxy AND the protected operation is per-item or requires delta measurement → FINDING: validation measures the wrong granularity. A batch of operations where each individually loses value but the aggregate stays flat (cross-subsidized by profitable operations or prior balance) passes an aggregate check but fails a per-item check.
+If the validation uses absolute/aggregate/proxy AND the protected operation is per-item or requires delta measurement â†’ FINDING: validation measures the wrong granularity. A batch of operations where each individually loses value but the aggregate stays flat (cross-subsidized by profitable operations or prior balance) passes an aggregate check but fails a per-item check.
 
 **Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
@@ -553,7 +569,7 @@ Task(subagent_type="general-purpose", model="sonnet", prompt="
 You are the Sibling Propagation Agent. Read {SCRATCHPAD}/findings_inventory.md. For each Medium+ CONFIRMED/PARTIAL finding:
 1. Extract ROOT CAUSE PATTERN in one sentence
 2. Grep ALL other functions for the SAME pattern
-3. If sibling exhibits SAME bug and no finding covers it → [SP-N]
+3. If sibling exhibits SAME bug and no finding covers it â†’ [SP-N]
 
 Write to {SCRATCHPAD}/sibling_propagation_findings.md (max 8 findings, standard format with Chain Summary).
 Return: 'DONE: {N} patterns, {M} siblings, {K} new findings'
@@ -652,3 +668,4 @@ Write to {SCRATCHPAD}/design_stress_findings.md:
 Return: 'DONE: {N} design stress findings'
 ")
 ```
+

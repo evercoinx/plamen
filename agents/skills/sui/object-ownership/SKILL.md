@@ -62,6 +62,8 @@ For each SHARED object:
 
 **CRITICAL checks**:
 - **Access control on mutation**: Shared objects can be passed as arguments by ANY transaction. If a function takes `&mut SharedObj` without verifying the caller has authority (e.g., checking a capability object), anyone can mutate it. This is the #1 Sui vulnerability pattern.
+- **Public mutable reference getters**: A `public` function that returns `&mut` internal state, calls `borrow_mut`, or exposes dynamic-field mutable access is externally callable by attacker packages. It must be `public(package)` or require a capability unless external mutation is explicitly safe.
+- **Helper visibility**: Internal helpers that mutate state or expose sensitive references should not be `public` only because another module in the same package needs them. Use `public(package)` for same-package helpers.
 - **Consensus ordering**: Transactions touching the same shared object are ordered by Sui's consensus. If the protocol relies on specific transaction ordering (e.g., "admin sets fee before user trades"), front-running is possible because consensus ordering is non-deterministic from the user's perspective.
 - **Race conditions**: Two transactions that both mutate the same shared object field can produce different final states depending on execution order. If the protocol assumes sequential access, this is a bug.
 - **Gas-based DoS**: An attacker can submit many transactions touching a shared object to increase contention and gas costs for legitimate users.

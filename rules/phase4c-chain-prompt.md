@@ -21,6 +21,14 @@ For each file in [depth_*_findings.md, blind_spot_*_findings.md, validation_swee
 
 This produces ~200-400 lines instead of 5000+.
 
+`chain_summaries_compact.md` is orchestrator-owned. Chain agents must read it,
+not generate it. If it is missing, that is a pre-step failure by the
+orchestrator, not a task for Chain Agent 1 or 2.
+
+**Artifact discipline**: `chain_summaries_compact.md`, `enabler_results.md`,
+and `composition_coverage.md` are REQUIRED standalone artifacts. If you
+also include their contents inline elsewhere, still write the dedicated files.
+
 ---
 
 ## Agent 1: Enabler Enumeration + Grouping (security-analyzer)
@@ -38,6 +46,19 @@ Read:
 - {SCRATCHPAD}/depth_*_findings.md (for STEP 0-pre: scan for [CROSS-DOMAIN-DEP] tags)
 
 For specific findings referenced in enabler enumeration, read the relevant source files directly.
+
+## Mandatory First Action
+
+Before semantic grouping, physically create all three handoff files on disk:
+
+- `{SCRATCHPAD}/hypotheses.md`
+- `{SCRATCHPAD}/finding_mapping.md`
+- `{SCRATCHPAD}/enabler_results.md`
+
+If the files already contain a driver-written `MECHANICAL_BASELINE`, you may
+overwrite them as you improve the analysis. Do not merely return a summary
+saying the files were written. Only return `DONE` after all three files exist
+on disk and contain the final content for this phase.
 
 ## PHASE 0: ENABLER ENUMERATION (Rule 12)
 
@@ -81,6 +102,8 @@ Check if reaching state S1 (from Finding A) also reaches state S2 (from Finding 
 
 ## PHASE 1: GROUPING AND DEDUP
 
+### Grouping Steps
+
 1. MERGE depth findings, enabler findings ([EN-N]), and breadth findings
 2. CROSS-CORRELATE findings across agents - deduplicate same root cause
 3. GROUP by root cause into hypotheses
@@ -110,7 +133,13 @@ Write:
 - {SCRATCHPAD}/finding_mapping.md - finding → hypothesis mapping
 - {SCRATCHPAD}/enabler_results.md - enabler enumeration results (dangerous states, 5-actor tables, cross-state interactions)
 
+Do NOT fold `enabler_results.md` into `hypotheses.md` as the only copy. Both
+files must exist separately.
+
 Return: 'DONE: {N} hypotheses, {E} enabler paths enumerated'
+
+Only return `DONE` after `hypotheses.md`, `finding_mapping.md`, and
+`enabler_results.md` exist on disk.
 ")
 ```
 
@@ -130,11 +159,25 @@ Read:
 - {SCRATCHPAD}/finding_mapping.md (finding → hypothesis mapping from Agent 1)
 - {SCRATCHPAD}/enabler_results.md (enabler enumeration + cross-state interactions from Agent 1)
 - {SCRATCHPAD}/variable_finding_map.md (variable→finding cross-reference for variable-level matching - if missing, fall back to grep-based variable name matching in findings_inventory.md)
+- {SCRATCHPAD}/chain_candidate_pairs.md (pre-filtered pairs with shared state/type — if present, evaluate ONLY these pairs)
 - {SCRATCHPAD}/findings_inventory.md (for full finding details when needed)
 
 For specific chain candidates, read the relevant source files directly.
 
 ## PHASE 2: CHAIN ANALYSIS - Match Postconditions to Preconditions
+
+### Step 2.0: Load Pre-Filtered Pairs (if available)
+
+Read {SCRATCHPAD}/chain_candidate_pairs.md. If present:
+- Evaluate ONLY the pairs listed in the STATE Pairs and TYPE Pairs tables
+- For each pair: read both findings' full details, verify the mechanical match is semantically valid
+- Create CHAIN HYPOTHESIS for valid matches
+- Mark each evaluated pair as EXPLORED in composition_coverage.md
+- All pairs NOT in chain_candidate_pairs.md are EXCLUDED (no shared state or type) — mark them as a single summary row "EXCLUDED: {N} pairs with no shared state/type" in composition_coverage.md. Do NOT spend time evaluating them.
+
+If chain_candidate_pairs.md is MISSING, fall back to the original algorithm below.
+
+### Step 2.1: Original Algorithm (fallback if no pre-filter)
 
 For each PARTIAL or REFUTED finding:
 1. Extract its missing precondition and type (STATE/ACCESS/TIMING/EXTERNAL/BALANCE)
@@ -203,6 +246,9 @@ Write:
   3. Findings status update (which findings upgraded)
   4. Verification priority order
 - {SCRATCHPAD}/composition_coverage.md - composition coverage map
+
+Do NOT rely on `chain_hypotheses.md` to implicitly serve as composition
+coverage. `composition_coverage.md` must be written as its own file.
 
 Return: 'DONE: {M} chains identified, {K} severity upgrades, {U} unexplored pairs remaining, verification priority: [list]'
 ")

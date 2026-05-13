@@ -82,6 +82,43 @@ Findings that share the same root cause MUST be consolidated into a single findi
 [How to fix. If the verifier generated a `### Suggested Fix` diff in verify_{id}.md, paste it here verbatim. Otherwise provide a text recommendation.]
 ```
 
+### UNRESOLVED finding format
+
+When the Skeptic-Judge phase returns `UNRESOLVED` for a finding (verifier and skeptic disagree, no clean resolution reached), the finding still goes in the **report body** — NOT Appendix A. Use this format:
+
+```markdown
+### [X-NN] Title [UNRESOLVED — needs human review]
+
+**Severity**: {demoted by 1 tier from original} (was {original}; demoted under skeptic disagreement)
+**Location**: `SourceFile:L123-L145`
+**Confidence**: CONTESTED — verifier and skeptic disagree
+
+**Description**:
+[The bug as the verifier described it.]
+
+**Verifier case**:
+[1-2 paragraphs: what the verifier confirmed, with cited evidence.]
+
+**Skeptic case**:
+[1-2 paragraphs: what the skeptic argued is wrong with the verifier's analysis or what defense was missed.]
+
+**Impact**:
+[Conditional impact under each case.]
+
+**Recommendation**:
+Human reviewer: confirm deployment-context assumption {X} before triage. If verifier is correct, treat as {original_severity}. If skeptic is correct, treat as informational/false-positive.
+```
+
+**Severity demotion rule**:
+- Critical UNRESOLVED → **High** with `[UNRESOLVED]` flag
+- High UNRESOLVED → **Medium**
+- Medium UNRESOLVED → **Low**
+- Low / Informational UNRESOLVED → unchanged (floor)
+
+The Trust Adj. column in `report_index.md` Master Finding Index records `UNRESOLVED(original_sev)`.
+
+**Why body and not Appendix A**: in security audits, the cost of missing a real exploit (false negative) exceeds the cost of an extra body section flagged for human triage (false positive). Burying UNRESOLVED in Appendix A inverts that tradeoff and historically caused real findings to disappear from human attention.
+
 **Rules for descriptions**:
 - Write as if the reader has never seen the audit pipeline. No "as identified by the breadth agent" or "this chain combines H-1 with H-3."
 - For chain findings (multiple bugs combining): describe the full attack sequence from start to finish in the Description. The reader should understand the complete attack path without needing to read other findings.
@@ -96,7 +133,7 @@ Findings that share the same root cause MUST be consolidated into a single findi
 # Security Audit Report - [Project Name]
 
 **Date**: [YYYY-MM-DD]
-**Auditor**: Automated Security Analysis (Claude Opus 4.6)
+**Auditor**: Plamen Automated Security Analysis
 **Scope**: [description]
 **Language/Version**: [language and version]
 **Build Status**: [Compiled successfully / Failed - reason]
@@ -180,6 +217,26 @@ Findings that share the same root cause MUST be consolidated into a single findi
 
 ---
 
+## Quality Observations (optional megasection)
+
+> Low/Informational findings that are **unambiguously cosmetic** (dead code, unused imports, naming inconsistencies, typos, missing docs, gas optimization, code style, redundant checks, variable shadowing, magic numbers) MAY be grouped into a compact megasection table instead of individual finding sections. This reduces report length without losing signal.
+>
+> **Only these classes qualify**: dead_code, unused_import, unused_variable, naming, typo, magic_number, missing_docs, code_style, gas_optimization, redundant_code, shadowing.
+>
+> **Anything with plausible security impact** (missing validation, missing events, access control, centralization risk) MUST keep its full finding section even at Low/Info severity.
+
+```markdown
+## Quality Observations
+
+| ID | Title | Severity | Location | Class | Description |
+|----|-------|----------|----------|-------|-------------|
+| I-03 | Unused import `SafeMath` | Info | src/Vault.sol:L5 | Unused imports | SafeMath imported but never used after Solidity 0.8+ migration |
+| L-04 | Dead code in `_legacy()` | Low | src/Router.sol:L200-L220 | Dead code | Function unreachable after v2 migration, can be safely removed |
+| I-05 | Magic number 86400 | Info | src/Staking.sol:L45 | Magic numbers | Hardcoded seconds-per-day; extract to named constant |
+```
+
+---
+
 ## Priority Remediation Order
 
 [Numbered list from most to least urgent. Use report IDs only.]
@@ -191,22 +248,17 @@ Findings that share the same root cause MUST be consolidated into a single findi
 
 ---
 
-## Appendix A: Internal Audit Traceability (Optional)
+## Appendix A: Excluded Findings (Optional)
 
-> **NOTE**: This appendix is for the audit team's internal reference only. It maps internal pipeline IDs to report IDs. It is NOT required for the client and may be omitted from client-facing deliverables.
+> **CLIENT-FACING ONLY**: Do not include internal pipeline IDs, hypothesis IDs,
+> chain IDs, agent-source IDs, or report-index traceability columns in the
+> delivered report. Internal traceability belongs in `report_index.md` and
+> `report_coverage.md`, not in `AUDIT_REPORT.md`.
 
-| Report ID | Internal Hypothesis | Chain | Verification | Agent Sources |
-|-----------|-------------------|-------|--------------|---------------|
-| C-01 | [internal ref] | [chain ref] | CONFIRMED | [agent list] |
-| H-01 | [internal ref] | - | CONFIRMED | [agent list] |
-| ... | ... | ... | ... | ... |
-
-### Excluded Findings
-
-| Internal ID | Severity | Title | Exclusion Reason |
-|-------------|----------|-------|-----------------|
-| [internal ref] | Medium | [title] | FALSE_POSITIVE - verified not exploitable |
-| [internal ref] | Low | [title] | Duplicate of M-03 |
+| Severity | Title | Exclusion Reason |
+|----------|-------|------------------|
+| Medium | [title] | FALSE_POSITIVE - verified not exploitable |
+| Low | [title] | Duplicate of M-03 |
 ```
 
 ---
@@ -215,8 +267,11 @@ Findings that share the same root cause MUST be consolidated into a single findi
 
 Before the report is considered complete, verify:
 
-1. **Every finding has its own section** - no finding exists only in a table row
-2. **No internal IDs in body** - search the report for patterns like `[CS-`, `[AC-`, `[TF-`, `[BLIND-`, `[EN-`, `[SE-`, `[VS-`, `[DEPTH-`, `[SLITHER-`, `[RS-`, `[PC-`, `[SP-`, `[DST-`, `[DE-`, `[DX-`, `[DS-`, `[DT-`, `CH-`, and hypothesis `H-` followed by a number in brackets. NONE should appear outside Appendix A.
+1. **Every finding has its own section** - no finding exists only in a table row (exception: findings routed to the Quality Observations megasection appear as table rows by design)
+2. **No internal IDs anywhere in AUDIT_REPORT.md** - search the report for patterns like `[CS-`, `[AC-`, `[TF-`, `[BLIND-`, `[EN-`, `[SE-`, `[VS-`, `[DEPTH-`, `[SLITHER-`, `[RS-`, `[PC-`, `[SP-`, `[DST-`, `[DE-`, `[DX-`, `[DS-`, `[DT-`, `CH-`, and hypothesis `H-` followed by a number in brackets. NONE should appear in the delivered report.
 3. **Finding count matches summary** - the number of `###` sections per severity tier equals the count in the summary table
 4. **Cross-references valid** - every `see X-NN` reference points to a finding that exists in the report
 5. **Severity consistency** - if a verifier downgraded/upgraded a finding, the report reflects the FINAL severity, not the original hypothesis severity
+6. **Coverage ledger exists** - `report_coverage.md` must explain how raw recon/depth/scanner candidates were promoted, deduplicated, refuted, or deferred
+7. **No silent drops** - a Medium+ candidate present in raw depth/scanner outputs must not disappear without a duplicate or verifier-refutation reference
+8. **No control characters in final output** - remove form-feed, ANSI escape codes, and other non-printable bytes copied from tool output

@@ -19,16 +19,65 @@ You are the Report Index Agent. You create the master finding index for the audi
 
 ## Your Inputs
 Read:
-- {SCRATCHPAD}/hypotheses.md (all grouped hypotheses with final severities)
-- {SCRATCHPAD}/chain_hypotheses.md (chain hypotheses with severity upgrades)
+- {SCRATCHPAD}/verify_core.md — **OPTIONAL but primary when present**. Both current SC and L1 pipelines normally produce this via the verification aggregate phase. When absent, enumerate `verify_*.md` files directly and derive the per-hypothesis verdicts from them. Do NOT fail the phase on its absence.
+- {SCRATCHPAD}/rag_validation.md (historical support / contradiction)
 - {SCRATCHPAD}/finding_mapping.md (hypothesis → agent finding mapping)
 - {SCRATCHPAD}/contract_inventory.md (component list for report header)
 - {SCRATCHPAD}/findings_inventory.md (complete agent finding inventory)
+- {SCRATCHPAD}/recon_summary.md (audit themes and risk areas)
+- {SCRATCHPAD}/template_recommendations.md (recommended niche/analysis lanes)
+- If `verify_core.md` exists and already provides the needed status, do NOT open
+  `finding_mapping.md`, raw depth findings, or scanner findings up front.
+  Treat those as fallback-only inputs for missing detail, not default reads.
+  If `verify_core.md` is absent, read `verify_*.md` files directly
+  — each contains its own hypothesis ID and verdict header.
+- {SCRATCHPAD}/depth_*_findings.md (raw depth findings and chain summaries)
+- {SCRATCHPAD}/blind_spot_*_findings.md or {SCRATCHPAD}/scanner_*_findings.md (scanner findings)
+- {SCRATCHPAD}/validation_sweep_findings.md or {SCRATCHPAD}/scanner_validation_findings.md (validation findings)
+- {SCRATCHPAD}/dedup_candidate_pairs.md (OPTIONAL — pre-computed same-file finding pairs with high title overlap or shared code identifiers, produced by the depth promotion pipeline. Use these pairs as HINTS for Step 1.5 consolidation — each pair is a candidate for merging, not a mandate.)
+- {SCRATCHPAD}/poc_demotions.md (OPTIONAL — mechanically-computed severity caps for findings where PoC execution disproved the claimed harm. If present, apply caps in STEP 1 rule 7.)
+
+Forbidden inputs:
+- Do NOT read `{SCRATCHPAD}/report_index.md`, `{SCRATCHPAD}/report_coverage.md`,
+  or any `*.attempt*` file when a retry hint is present. Previous report-index
+  outputs are known-bad artifacts, not evidence.
+- Do NOT read `_prompt_*`, `_stdio_*`, `tool_calls.jsonl`, `_retry_quarantine/`,
+  or `_overflow/`.
 
 Verification verdicts from orchestrator:
 {PASTE_VERDICTS}
 
 ## Your Task
+
+### Severity Authority Contract (READ BEFORE TIERING)
+
+Report indexing is a mapping task, not a new severity-assessment phase. Do NOT
+recalibrate severity from your own impact judgment, economic intuition, title
+wording, or evidence tag. The final report tier must be mechanically derived
+from upstream severity plus explicit, auditable adjustment rules.
+
+For every Master Finding Index row:
+
+1. Read the mapped `verify_<ID>.md` file and the matching
+   `verification_queue.md` row.
+2. The row's final `Severity` and Report ID prefix (`C-`, `H-`, `M-`, `L-`,
+   `I-`) MUST match the upstream verifier/queue severity unless one of the
+   canonical adjustments below applies.
+3. `[CODE-TRACE]` does NOT imply Low. When `PROVEN_ONLY: false`, a
+   Medium/High/Critical `[CODE-TRACE]` finding stays at its upstream severity.
+4. If final severity differs from upstream, the `Trust Adj.` column MUST
+   contain one canonical reason with the original severity:
+   - `TRUSTED-ACTOR(original_sev)`
+   - `UNRESOLVED(original_sev)` or `PARTIAL(original_sev)`
+   - `POC-FAIL(original_sev)`
+   - `PROVEN(original_sev)` only when `PROVEN_ONLY: true`
+   - `CHAIN-UPGRADE(original_sev)` / `CHAIN-DOWNGRADE(original_sev)` with the
+     chain ID and enabling relation
+5. A bare `-` / `—` Trust Adj. is valid only when final severity equals
+   upstream severity.
+6. If no canonical adjustment applies, restore the upstream severity and
+   matching report-ID tier. Do not silently move Medium verified findings into
+   Low rows, and do not silently upgrade Informational findings to Low.
 
 ### STEP 1: Determine Final Severities
 
@@ -36,32 +85,77 @@ For each hypothesis, apply this priority order:
 1. If a verifier returned a verdict → use verifier's final severity
 2. If chain analysis upgraded severity → use upgraded severity
 3. Otherwise → use the severity from hypotheses.md
-4. **Apply trust assumption downgrades**: Check {SCRATCHPAD}/findings_inventory.md for `[ASSUMPTION-DEP: TRUSTED-ACTOR]` tags. For tagged findings, apply −1 tier severity downgrade (floor: Informational). Note the original severity and downgrade reason in the Master Finding Index under a "Trust Adj." column. For `[ASSUMPTION-DEP: WITHIN-BOUNDS]` tags: do NOT change severity, but note the flag in the index for tier writers to include as context. **Mechanical enforcement**: The Index Agent MUST NOT override, remove, or selectively skip Inventory Agent tags. If a finding has the `TRUSTED-ACTOR` tag, apply the downgrade. If it does not have the tag, do not downgrade. No exceptions for chain upgrades, verification results, or analytical reasoning - the Inventory Agent is the sole authority on trust tagging.
-5. **Proven-only demotion** (if `PROVEN_ONLY = true`): For each finding whose BEST evidence tag is `[CODE-TRACE]` (no `[POC-PASS]`, `[MEDUSA-PASS]`, `[PROD-ONCHAIN]`, `[PROD-SOURCE]`, or `[PROD-FORK]`), cap severity at Low. Record the original severity in the "Trust Adj." column as `PROVEN(original_sev)`. Count total demotions for the report header note: *"Proven-only mode enabled: {N} findings capped at Low from {severities} due to unproven evidence ([CODE-TRACE] only)."*
+4. **Trust tags**: In `findings_inventory.md`, `[ASSUMPTION-DEP: TRUSTED-ACTOR]` mechanically applies -1 tier downgrade (floor: Informational) and `TRUSTED-ACTOR(original_sev)` in Trust Adj.; `[ASSUMPTION-DEP: WITHIN-BOUNDS]` is index context only. Do not override, remove, or selectively skip Inventory tags.
+5. **Proven-only mode**: Only when `PROVEN_ONLY: true`, cap findings whose best evidence is `[CODE-TRACE]` only at Low and record `PROVEN(original_sev)`. Count demotions for the report header note. When false, `[CODE-TRACE]` does not affect severity.
+6. **UNRESOLVED/PARTIAL**: Treat both tokens from `skeptic_*.md` or `judge_*.md` as unresolved verifier disagreement. Apply -1 tier downgrade (floor: Low), record `UNRESOLVED(original_sev)`, keep the finding in the body, and have the writer tag it `[UNRESOLVED - needs human review]`. Placing it in Excluded Findings is a workflow violation.
+7. **Skeptic-judge DOWNGRADE**: If `skeptic_judge_decisions.md` exists, for each row where Decision is `DOWNGRADE`, cap the finding's severity at the Final Severity column value. Record `SKEPTIC-DOWNGRADE(original_sev)` in Trust Adj. Do NOT apply to rows with Decision KEEP, UNRESOLVED, or PARTIAL (those are handled by rule 6). DOWNGRADE is deliberate severity calibration by the skeptic-judge — it takes priority over matrix defaults but yields to PoC mechanical evidence (rule 8).
+8. **PoC-fail caps**: If `poc_demotions.md` exists, apply each listed cap, record `POC-FAIL(original_sev)`, and keep the finding in the body. The driver computes this file from `[POC-FAIL]` evidence; the Index Agent must not override or skip entries.
+
+### STEP 1.25: Client-Worthiness Triage (CONSERVATIVE)
+
+This is presentation triage, not a new analysis phase. Assign exactly one:
+
+- `REPORTABLE`: client-facing body section.
+- `MERGE_INTO:<report-or-internal-id>`: same root cause/fix, no semantic loss; preserve source ID in Consolidation Map.
+- `APPENDIX_ONLY`: true/plausible observation, but not body material.
+- `DROP_FALSE_POSITIVE`: verifier refuted the claim or harm.
+- `DROP_NON_SECURITY`: no plausible loss, privilege, liveness, accounting, integrity, or observability impact.
+- `DROP_DESIGN_CONFIRMATION`: expected behavior or intentionally safe design property.
+- `DROP_UNACTIONABLE_SPECULATION`: no reachable path, impacted actor, or actionable fix.
+- `UNRESOLVED_EVIDENCE`: contested or insufficient evidence after analysis/verification.
+
+Safety rules:
+
+1. Never silently delete a candidate. Non-`REPORTABLE` candidates MUST appear in
+   `report_coverage.md` and either the Consolidation Map or Excluded Findings.
+2. Medium+ verified candidates default to `REPORTABLE`. They may be moved out
+   of the body only when the verifier/judge evidence explicitly supports
+   `DROP_FALSE_POSITIVE`, `DROP_NON_SECURITY`, `MERGE_INTO`, or
+   `UNRESOLVED_EVIDENCE` with a reason that names the missing reproducible
+   path, trace, proof, support, or sufficient evidence.
+3. Low/Informational candidates may be `APPENDIX_ONLY` when true but minor,
+   repetitive, non-exploitable, or primarily operational/documentation quality.
+4. Design confirmations, positive properties, safe invariants, and
+   "works as intended" rows are not report-body findings. Use
+   `DROP_DESIGN_CONFIRMATION` unless they are needed as context for a real
+   reportable issue.
+5. Do not use triage to hide uncertainty. If a candidate has credible loss or
+   safety impact and is not refuted, keep it `REPORTABLE` or `APPENDIX_ONLY`
+   with a clear reason.
+6. Dozens of weak, repetitive, design-confirmation, or non-security body sections are a quality failure. Prefer a smaller client body plus complete traceability.
+
+Use the existing `Excluded Findings` table for `APPENDIX_ONLY` and `DROP_*`
+statuses. The Exclusion Reason MUST begin with the exact triage status token
+above, followed by a concise evidence-based reason.
 
 ### STEP 1.5: Root-Cause Consolidation (MANDATORY)
 
 Before assigning report IDs, consolidate hypotheses that share the same root cause into single report findings. This prevents inflated finding counts from pipeline fragmentation.
 
+**Pre-computed hints**: Both sources are hints only; final semantic decision uses the test below and neither hint mechanically blocks/removes findings.
+
+1. **`[LIKELY-DUP]` tags in `findings_inventory.md`**: same file and >=80% title overlap. Evaluate first; consolidate only when root cause and fix are the same.
+
+2. **`dedup_candidate_pairs.md`**: same-file pairs with >=50% title overlap or shared code identifiers. Evaluate with the consolidation test.
+
+**When in doubt, do NOT merge.** A duplicate finding in the report is a cosmetic issue. A dropped true positive is a missed vulnerability.
+
+**Semantic retention rule**: Preserve established broken invariant, branch precondition, terminal mechanism, verification disposition, and source IDs from bounded inputs (`verify_core.md`, `verify_*.md`, `finding_mapping.md`, `findings_inventory.md`, dedup hints). Retain, do not rediscover: no fresh analysis or bulk raw-artifact reads; read minimal fallback only for missing detail that prevents semantic loss.
+
 **Consolidation test** - merge two hypotheses into ONE report finding if ALL of these are true:
-1. **Same fix pattern**: Both require the same TYPE of code change (e.g., both need "add zero-value validation to admin setter", both need "emit event on state change")
+1. **Same fix pattern**: Same type of code change.
 2. **Same severity tier**: Both are in the same tier after STEP 1 adjustments
-3. **Same vulnerability class**: Both are instances of the same bug pattern (e.g., "missing event", "missing input validation", "no staleness check")
+3. **Same vulnerability class**: Same bug pattern.
 4. **Describable together**: A reader can understand all affected locations from a single description + location table
+5. **No semantic loss**: The merged finding preserves every distinct invariant, branch, terminal mechanism, disposition, and source ID in title/description, locations, Consolidation Reason, or coverage ledger
 
 **Do NOT merge if**:
-- Findings are in different severity tiers (a Medium and a Low stay separate even if same class)
-- The root causes are genuinely different (e.g., "missing event" vs "wrong event parameters" - different fixes)
+- Findings are in different severity tiers
+- Root causes/fixes differ (for example missing event vs wrong event parameters)
 - Merging would exceed 6 locations per finding (split into 2 findings for readability)
+- Merging would drop, blur, or overwrite a distinct branch precondition or terminal mechanism. Different branches/mechanisms stay separate unless a shared finding can state both clearly.
 
-**Common consolidation patterns**:
-| Pattern | Example Hypotheses | Consolidated Title |
-|---------|-------------------|-------------------|
-| Missing events on state changes | "setX no event" + "setY no event" + "setZ no event" | "Missing event emission on admin state changes" |
-| Admin setters accept zero/invalid | "paramA accepts zero" + "paramB accepts zero" | "Admin setters lack zero-value validation" |
-| Missing staleness checks | "no staleness on X" + "no max staleness on Y" | "Rate provider staleness not validated" |
-| Retroactive parameter changes | "paramA retroactive" + "paramB retroactive" | "Global parameter changes retroactively affect pending state" |
-| Same-role trust findings | "ROLE can do X" + "ROLE can do Y" (same role, same trust level) | "ROLE capabilities exceed stated trust level" |
+**Common consolidation patterns**: missing events, invalid admin setter values, missing staleness checks, retroactive parameter changes, and same-role trust findings when severity/root cause/fix match.
 
 **Output**: For each consolidation, record:
 ```
@@ -71,6 +165,8 @@ CONSOLIDATED: H-{A} + H-{B} [+ H-{C}...] → single finding
   Severity: {shared severity}
   Internal refs: {all absorbed hypothesis IDs}
 ```
+
+In `Consolidation Reason`, include shared root cause/fix plus preserved invariant, branch, terminal mechanism, disposition, and source IDs. Do not add Master Finding Index columns.
 
 Hypotheses NOT consolidated remain as standalone findings.
 
@@ -104,12 +200,57 @@ Cross-check: For EVERY hypothesis in hypotheses.md AND every standalone finding
 - Is it assigned a report ID in the Master Finding Index above?
 - If NO and NOT marked FALSE_POSITIVE by a verifier → ASSIGN a report ID and tier
 
-**HARD RULE**: The ONLY valid exclusion reason is an explicit FALSE_POSITIVE verdict
-from a Phase 5 verifier OR an explicit duplicate already listed (cite the absorbing
-report ID). "Not grouped into a hypothesis" is NOT a valid exclusion reason.
+**HARD RULE**: The ONLY valid exclusion reasons are the conservative triage
+statuses from Step 1.25, an explicit false-positive/refuted verifier verdict,
+or an explicit duplicate/merge already listed with the absorbing report ID.
+"Not grouped into a hypothesis" is NOT a valid exclusion reason.
+
+### STEP 5.5: Promotion Coverage Audit (MANDATORY)
+
+Before finalizing the index, produce an accounting receipt in `report_coverage.md`.
+Keep this bounded: use `verification_queue.md`, `verify_core.md`,
+`finding_mapping.md`, and the final Master Finding Index as the coverage
+sources. Do NOT bulk-read raw breadth/depth/scanner artifacts in this phase.
+Raw promotion checks are enforced mechanically by the Python gate; the indexer
+owns the reportable verification-to-report mapping.
+
+Coverage reasoning preserves upstream semantics. Keep invariant, branch, terminal mechanism, disposition, and source IDs visible in `Report ID / Refutation / Reason` when they affect promotion, duplicate, false-positive, or deferred status. `DUPLICATE` reasons must show no distinct branch/mechanism was dropped; otherwise assign a report ID or use the correct non-duplicate status.
+
+For each verification/finding-mapping candidate, assign one of:
+- `PROMOTED`: mapped to a report ID
+- `MERGED`: absorbed into an existing report ID with no semantic loss
+- `APPENDIX_ONLY`: accounted in Excluded Findings but intentionally outside the body
+- `DROP_FALSE_POSITIVE`: explicitly refuted by verifier/judge evidence
+- `DROP_NON_SECURITY`: no security-relevant impact after verification
+- `DROP_DESIGN_CONFIRMATION`: positive/safe/design-confirmation row, not a finding
+- `DROP_UNACTIONABLE_SPECULATION`: no reachable path, impacted actor, or actionable fix
+- `DUPLICATE`: absorbed into an existing report ID; use only when equivalent to `MERGED`
+- `FALSE_POSITIVE`: legacy alias for `DROP_FALSE_POSITIVE`
+- `DEFERRED`: hypothesis remains unproven, but must still appear in the ledger
+
+**HARD RULES**:
+1. A Medium+ candidate from verification_queue/finding_mapping MUST NOT disappear silently.
+2. If a Medium+ candidate is not promoted, the ledger must name the absorbing
+   report ID or the exact verifier/judge evidence supporting the non-body
+   triage status.
+3. If recon recommends a niche lane (for example `EVENT_COMPLETENESS`) and that
+   lane did not run in the current mode, record the uncovered recommendation in
+   the ledger as `DEFERRED: mode-limited`.
+4. If a candidate appears in verification_queue/verify_core but not in
+   `finding_mapping.md`, treat that as a promotion failure and either assign it
+   a report ID or explicitly mark it duplicate / false positive / deferred with
+   reasoning.
+5. Do not use `DUPLICATE`, `MERGED`, `APPENDIX_ONLY`, or any `DROP_*` status as
+   convenience when a distinct invariant, branch, terminal mechanism,
+   disposition, or source ID is not retained by the absorbing report ID and
+   ledger reason.
+
+This step exists to catch the exact pipeline failure mode where a verified
+candidate is dropped before the final report without making report_index an
+unbounded raw-artifact scanner.
 
 ### Excluded Findings (for Appendix A)
-| Internal ID | Severity | Title | Exclusion Reason (FALSE_POSITIVE or DUPLICATE OF X-NN only) |
+| Internal ID | Severity | Title | Exclusion Reason (APPENDIX_ONLY / DROP_* / FALSE_POSITIVE / DUPLICATE OF X-NN / MERGE_INTO X-NN only) |
 
 ## Output
 
@@ -135,12 +276,20 @@ Write to {SCRATCHPAD}/report_index.md:
 
 ## Master Finding Index
 
-| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis | Agent Sources |
-|-----------|-------|----------|----------|--------------|-----------|--------------------|--------------|
-| C-01 | [title] | Critical | [location] | VERIFIED | - | [internal ref] | [agents] |
-| H-01 | [title] | High | [location] | VERIFIED | - | [internal ref] | [agents] |
-| M-01 | [title] | Medium↓H | [location] | UNVERIFIED | TRUSTED-ACTOR | [internal ref] | [agents] |
-| ... | ... | ... | ... | ... | ... | ... | ... |
+| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |
+|-----------|-------|----------|----------|--------------|-----------|--------------------|
+| C-01 | [critical upstream title] | Critical | [location] | VERIFIED | - | <critical-internal-id> |
+| H-01 | [high upstream title] | High | [location] | VERIFIED | - | <high-internal-id> |
+| M-01 | [trusted-actor-demoted high title] | Medium | [location] | UNVERIFIED | TRUSTED-ACTOR(High) | <trusted-actor-internal-id> |
+| ... | ... | ... | ... | ... | ... | ... |
+
+**CRITICAL FORMAT RULES for Master Finding Index:**
+0. **Example rows use placeholders only.** Do not copy their report tier, report ID, or internal ID shape for real findings.
+1. **Internal Hypothesis column MUST be LAST** — downstream validation extracts the last matching ID per row.
+2. **Do NOT include an Agent Sources column.** Agent source traceability belongs in `report_coverage.md`, not in the client-facing report.
+3. **No parenthetical constituent IDs** — write `CH-3` or `H-2+H-13`, NOT `CH-3 (H-2, H-13)`. Parenthetical constituent IDs in the same cell cause duplicate binding failures.
+4. **Consolidated rows may use `+`-joined IDs** — write `H-2+H-13` in Internal Hypothesis and list the same IDs in the Consolidation Map. Use `CH-3` only when a chain has its own verifier file; otherwise use joined constituents so writers can read every evidence file.
+5. **Section headings must be EXACT** — use `## Master Finding Index` and `## Excluded Findings`; suffixes create duplicate parsing.
 
 ## Tier Assignments
 
@@ -168,6 +317,40 @@ Write to {SCRATCHPAD}/report_index.md:
 | Internal ID | Severity | Title | Exclusion Reason (FALSE_POSITIVE or DUPLICATE OF X-NN only) |
 ```
 
+Also write to `{SCRATCHPAD}/report_coverage.md`:
+
+```markdown
+# Report Coverage Audit
+
+## Raw Candidate Ledger
+| Source File | Candidate ID / Label | Severity Signal | Status | Report ID / Refutation / Reason |
+|-------------|----------------------|-----------------|--------|---------------------------------|
+
+## Uncovered Mode-Limited Recommendations
+| Source | Recommended Lane | Why Not Run | Risk of Miss |
+|--------|------------------|-------------|--------------|
+
+## Promotion Failures Repaired
+| Raw Source | Candidate | Action Taken |
+|------------|----------|--------------|
+```
+
+### Terminal Stop Rule
+
+After writing both `report_index.md` and `report_coverage.md`, stop immediately.
+Do not reopen either output to polish it. Do not run another self-audit loop.
+The Python driver owns post-write validation and will retry with a precise hint
+if anything is still wrong.
+
+Forbidden outputs in this phase:
+- Do NOT write `report_critical_high.md` or `report_critical_high_*.md`.
+- Do NOT write `report_medium.md` or `report_medium_*.md`.
+- Do NOT write `report_low_info.md` or `report_low_info_*.md`.
+- Do NOT write `AUDIT_REPORT.md`.
+
+If you notice any of those files already exist, ignore them. They belong to
+later subprocesses and are not part of your task.
+
 Return: 'DONE: {N_total} findings indexed ({N_consolidated} consolidated from {N_original} hypotheses) - {C} Critical, {H} High, {M} Medium, {L} Low, {I} Info'
 ")
 ```
@@ -190,6 +373,9 @@ After Index Agent returns, orchestrator performs:
 
 > **This is a mechanical check - the orchestrator does it inline, no new agent needed.**
 
+Then verify `{SCRATCHPAD}/report_coverage.md` exists and has at least one ledger row
+for every depth/scanner artifact present in the scratchpad.
+
 ---
 
 ## Step 6b: Tier Writers (3 Parallel Agents)
@@ -204,7 +390,12 @@ All tier writers MUST follow these rules:
 2. **Every finding gets its own ### section** - no tables, no groups, no summaries, no catch-all dumps
 3. **Write as if the reader has never seen the audit pipeline** - no references to breadth agents, chain analysis, etc.
 4. **Cross-references use report IDs only** - include finding title in parentheses for context: `see H-03 (example title)`
-5. **Trust assumption context**: If report_index.md marks a finding with `TRUSTED-ACTOR` in the Trust Adj. column, include after Severity: *"Severity adjusted from {original} - attack requires {actor} to violate stated trust assumption: {assumption}."* For `WITHIN-BOUNDS` flags: include a note in Description that the impact falls within the protocol's stated operational bounds for the semi-trusted actor. Do NOT change the severity for WITHIN-BOUNDS - flag only.
+5. **Trust context**: For `TRUSTED-ACTOR`, include after Severity: "Severity adjusted from {original} - attack requires {actor} to violate stated trust assumption: {assumption}." For `WITHIN-BOUNDS`, note bounds context in Description without changing severity.
+6. **Missing verify_*.md**: Never stub. Write the full body from hypothesis/inventory data, mark header `[VERIFICATION NOT EXECUTED]`, include the Phase 5 no-PoC sentence, and populate Severity, Location, Description, Impact, Recommendation.
+7. **Minimum length**: Every `### [X-NN]` body must be at least 400 characters or the quality gate retries the writer.
+8. **Chunk scoping**: If the driver prefix lists "Findings assigned to THIS chunk", write only those IDs in order.
+9. **Minimal-input override**: If the driver prefix supplies a minimal read set, obey it; avoid broad `hypotheses.md`, `chain_hypotheses.md`, `synthesis_full.md`, or unrelated `verify_*.md` reads unless assigned detail is missing.
+10. **Constituent root-cause preservation**: For each finding, check `finding_mapping.md` to identify all source findings grouped into that hypothesis. For each source finding, read its Root Cause line in `findings_inventory.md`. If any source finding describes a distinct root cause angle not already in your Description — a different function, a different missing write, a different mechanism — add it to the Description (e.g., "Additionally, `distributeTitanXForBurning()` does not update `totalTitanXDistributed` on deposit, meaning…"). A report finding that only describes the hypothesis's dominant framing while dropping an absorbed constituent's distinct root cause is a recall gap in the delivered report.
 
 ### Critical+High Tier Writer
 
@@ -214,13 +405,15 @@ All tier writers MUST follow these rules:
 Task(subagent_type="general-purpose", model="opus", prompt="
 You are the Critical+High Findings Writer. You write the Critical and High severity sections of the audit report.
 
+**FIRST ACTION**: Use the Write tool to create `{SCRATCHPAD}/report_critical_high.md` with a one-line header `# Critical and High Findings`. This reserves your write budget so the file exists on disk even if your composition is interrupted. You will overwrite it with the full tier content at the end.
+
 ## Your Inputs
 Read:
 - {SCRATCHPAD}/report_index.md (your tier assignments under 'Critical+High Tier')
-- {SCRATCHPAD}/hypotheses.md (detailed hypothesis descriptions)
-- {SCRATCHPAD}/chain_hypotheses.md (chain attack sequences)
-- {SCRATCHPAD}/verify_*.md (verification results with PoC details)
-- {SCRATCHPAD}/synthesis_full.md (full analysis context)
+- assigned `verify_*.md` files only (verification results with PoC details)
+- {SCRATCHPAD}/findings_inventory.md (fallback detail and source citations)
+- {SCRATCHPAD}/finding_mapping.md (hypothesis → source finding mapping — for rule 10 constituent angle check)
+- Optional fallback only if an assigned verify file is missing: {SCRATCHPAD}/hypotheses.md, {SCRATCHPAD}/chain_hypotheses.md
 - ~/.claude/rules/report-template.md (finding format and rules)
 
 ## Your Task
@@ -269,16 +462,18 @@ Return: 'DONE: {C} Critical + {H} High findings written'
 Task(subagent_type="general-purpose", model="sonnet", prompt="
 You are the Medium Findings Writer. You write the Medium severity section of the audit report.
 
+**FIRST ACTION**: Use the Write tool to create `{SCRATCHPAD}/report_medium.md` with a one-line header `# Medium Findings`. This reserves your write budget so the file exists on disk even if your composition is interrupted. You will overwrite it with the full tier content at the end.
+
 ## Your Inputs
 Read:
 - {SCRATCHPAD}/report_index.md (your tier assignments under 'Medium Tier')
-- {SCRATCHPAD}/hypotheses.md (detailed hypothesis descriptions)
-- {SCRATCHPAD}/chain_hypotheses.md (if any medium chains)
-- {SCRATCHPAD}/synthesis_full.md (full analysis context)
+- assigned `verify_*.md` files only when present
 - {SCRATCHPAD}/findings_inventory.md (agent finding details)
+- {SCRATCHPAD}/finding_mapping.md (hypothesis → source finding mapping — for rule 10 constituent angle check)
+- Optional fallback only if an assigned verify file is missing: {SCRATCHPAD}/hypotheses.md, {SCRATCHPAD}/chain_hypotheses.md
 - ~/.claude/rules/report-template.md (finding format and rules)
 
-For each finding, also read the relevant analysis_*.md file(s) listed in the agent sources.
+For each finding, read cited source files directly when you need a code snippet.
 
 ## Your Task
 
@@ -320,28 +515,44 @@ Return: 'DONE: {M} Medium findings written'
 Task(subagent_type="general-purpose", model="sonnet", prompt="
 You are the Low+Informational Findings Writer. You write the Low and Informational severity sections of the audit report.
 
+**FIRST ACTION**: Use the Write tool to create `{SCRATCHPAD}/report_low_info.md` with a one-line header `# Low and Informational Findings`. This reserves your write budget so the file exists on disk even if your composition is interrupted. You will overwrite it with the full tier content at the end.
+
 ## Your Inputs
 Read:
 - {SCRATCHPAD}/report_index.md (your tier assignments under 'Low+Info Tier')
-- {SCRATCHPAD}/hypotheses.md (detailed hypothesis descriptions)
-- {SCRATCHPAD}/synthesis_full.md (full analysis context)
 - {SCRATCHPAD}/findings_inventory.md (agent finding details)
+- {SCRATCHPAD}/finding_mapping.md (hypothesis → source finding mapping — for rule 10 constituent angle check)
+- assigned `verify_*.md` files only when an assigned finding explicitly references one
+- Optional fallback only if required detail is missing: {SCRATCHPAD}/hypotheses.md
 - ~/.claude/rules/report-template.md (finding format and rules)
 
-For each finding, also read the relevant analysis_*.md file(s) listed in the agent sources.
+For each finding, read cited source files directly when you need a code snippet.
 
 ## Your Task
 
 For EACH finding assigned to your tier in report_index.md:
 
-1. Write a full finding section using the EXACT format from report-template.md
-2. Use the report ID from report_index.md (L-01, I-01, etc.) - NEVER use internal pipeline IDs
-3. Include code snippets where relevant
-4. For Low findings: Recommendation field is optional but preferred
-5. For Informational: PoC Result field is optional
+1. **Classify**: Does this finding belong in the Quality Observations megasection?
+   A finding qualifies ONLY if ALL of these are true:
+   - Severity is Low or Informational
+   - The title/description matches one of these cosmetic classes: dead code,
+     unused imports, unused variables, naming inconsistencies, typos, magic
+     numbers, missing documentation, code style, gas optimization, redundant
+     code/checks, variable shadowing
+   - The finding has NO plausible security impact (missing validation, missing
+     events, access control, centralization risk are NOT cosmetic even at Low)
+
+2. **Full-section findings**: Write using the EXACT format from report-template.md.
+   Use report IDs (L-01, I-01, etc.). Include code snippets where relevant.
+   Low: Recommendation field optional. Informational: PoC Result optional.
+
+3. **Quality Observation findings**: Write as a single row in the megasection table.
+   Include: ID, Title, Severity, Location, Class (from list above), 1-sentence Description.
+
+**When in doubt, use full-section format.** The megasection is for unambiguous cosmetic observations only. A finding that could have security implications always gets a full section.
 
 ## HARD RULES
-Follow ALL Tier Writer Common Rules above. Additionally: even simple Low/Info findings deserve 3-5 sentences of Description and a clear Location.
+Follow ALL Tier Writer Common Rules above. Additionally: even simple Low/Info findings that get full sections deserve 3-5 sentences of Description and a clear Location.
 
 ## Output
 
@@ -353,9 +564,6 @@ Write to {SCRATCHPAD}/report_low_info.md:
 ### [L-01] Title
 [full section]
 
-### [L-02] Title
-[full section]
-
 ...
 
 ## Informational Findings
@@ -364,9 +572,18 @@ Write to {SCRATCHPAD}/report_low_info.md:
 [full section]
 
 ...
+
+## Quality Observations
+
+| ID | Title | Severity | Location | Class | Description |
+|----|-------|----------|----------|-------|-------------|
+| I-03 | Unused import SafeMath | Info | src/Vault.sol:L5 | Unused imports | SafeMath imported but never used post-0.8 |
+| L-04 | Dead code in _legacy() | Low | src/Router.sol:L200 | Dead code | Unreachable after v2 migration |
 ```
 
-Return: 'DONE: {L} Low + {I} Informational findings written'
+If no findings qualify for Quality Observations, omit the section entirely.
+
+Return: 'DONE: {L} Low + {I} Informational findings written ({Q} as quality observations)'
 ")
 ```
 
@@ -404,13 +621,21 @@ Combine sections in this order:
 8. **Low Findings** - paste from report_low_info.md (Low section)
 9. **Informational Findings** - paste from report_low_info.md (Informational section)
 10. **Priority Remediation Order** - generate from report_index.md, ordered: Critical → High → Medium
-11. **Appendix A: Internal Audit Traceability** - from report_index.md (Master Finding Index + Excluded Findings)
+11. **Appendix A: Excluded Findings** - client-facing exclusion summary only; internal traceability remains in report_index.md/report_coverage.md
+
+### STEP 1.5: Output Sanitization
+
+- Sanitize copied tool output before writing the report: strip control
+  characters, ANSI escape sequences, form-feed, and other non-printable bytes
+  from headers, prose, and code fences unless they are required source code.
 
 ### STEP 2: Quality Checks
 
 Before writing, verify:
 1. **Finding count matches summary** - count ### sections per severity tier, must equal summary table
-2. **No internal IDs in body** - scan for [CS-, [AC-, [TF-, [BLIND-, [EN-, [SE-, [VS-, [DEPTH-, [SLITHER-, [RS-, [PC-, [SP-, [DST-, [DE-, [DX-, [DS-, [DT-, CH-, and bracketed H- followed by numbers. NONE should appear outside Appendix A.
+2. **No internal IDs anywhere in AUDIT_REPORT.md** - scan for [CS-, [AC-, [TF-, [BLIND-, [EN-, [SE-, [VS-, [DEPTH-, [SLITHER-, [RS-, [PC-, [SP-, [DST-, [DE-, [DX-, [DS-, [DT-, CH-, and bracketed H- followed by numbers. NONE should appear in the delivered report.
+2b. **No control-character leakage** - remove form-feed, ANSI escapes, null
+bytes, or other non-printable characters copied from shell/tool output.
 3. **Cross-references valid** - check the cross-reference map from report_index.md, ensure referenced IDs exist
 4. **No duplicate findings** - no two sections describe the same bug
 5. **All tier files present** - if any tier file is missing or empty, note it as 'Section pending'
@@ -425,16 +650,9 @@ Write the assembled report to: {PROJECT_ROOT}/AUDIT_REPORT.md
 
 Write to {PROJECT_ROOT}/AUDIT_REPORT.md
 
-Also write quality check results to {SCRATCHPAD}/report_quality.md:
-```markdown
-# Report Quality Check
-- Finding count: {matches/mismatch} - Summary says X, sections have Y
-- Internal ID leak: {CLEAN/FOUND} - [list any found]
-- Cross-references: {VALID/BROKEN} - [list any broken]
-- Duplicates: {NONE/FOUND} - [list any found]
-- Missing tiers: {NONE/list}
-- Fixes applied: [list any automatic fixes]
-```
+Do NOT write `{SCRATCHPAD}/report_quality.md`. In V2, report quality is a
+mechanical Python gate owned by the driver after assembly. The assembler owns
+only `{PROJECT_ROOT}/AUDIT_REPORT.md`.
 
 Return: 'DONE: Report assembled - {N} Critical, {N} High, {N} Medium, {N} Low, {N} Info - Quality: {PASS/ISSUES}'
 ")

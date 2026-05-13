@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "languages": {
+    "sui": {
+      "build_command": "sui move build",
+      "test_command": "sui move test {test_name}",
+      "test_filter_mode": "positional_filter",
+      "fuzz_engines": [
+        {
+          "name": "move_random_test",
+          "command": "sui move test --rand-num-iters {iters} {test_name}",
+          "template": "#[random_test]"
+        }
+      ],
+      "fallback_strategy": "boundary-value parameterized tests when random-input tests cannot compile",
+      "evidence_tags": ["POC-PASS", "POC-FAIL", "CODE-TRACE"],
+      "docs_sources": [
+        "https://move-book.com/testing/testing-basics",
+        "https://move-book.com/testing/random-test/"
+      ]
+    },
+    "soroban": {
+      "build_command": "stellar contract build",
+      "test_command": "cargo test --features testutils test_{id}",
+      "test_filter_mode": "cargo_name_filter",
+      "fuzz_engines": [
+        {
+          "name": "cargo_fuzz",
+          "command": "cargo +nightly fuzz run fuzz_{id}",
+          "template_path": "prompts/soroban/phase4b-invariant-fuzz.md",
+          "output_file": "cargo_fuzz_findings.md"
+        },
+        {
+          "name": "proptest",
+          "command": "cargo test --features testutils proptest_{id}",
+          "output_file": "proptest_findings.md"
+        }
+      ],
+      "fallback_strategy": "proptest with bounded inputs or boundary-value parameterized tests",
+      "evidence_tags": ["POC-PASS", "POC-FAIL", "FUZZ-PASS", "CODE-TRACE"],
+      "docs_sources": ["https://developers.stellar.org/docs/build/smart-contracts"]
+    }
+  }
+}

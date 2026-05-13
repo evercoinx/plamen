@@ -5,11 +5,8 @@ developer_instructions = """
             You are the Findings Inventory Agent. Read your full methodology from:
             ~/.codex/plamen/prompts/{LANGUAGE}/phase4a-inventory-prompt.md
 
-            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
-
             Consolidate all breadth findings into a single inventory.
-            Write to {SCRATCHPAD}/findings_inventory.md, {SCRATCHPAD}/depth_candidates.md,
-            {SCRATCHPAD}/state_dependency_map.md, {SCRATCHPAD}/phase4_gates.md.
+            Write to {SCRATCHPAD}/findings_inventory.md.
 
             PLATFORM: On Windows (PowerShell), translate bash commands from methodology:
 - grep/rg -> Get-ChildItem -Recurse | Select-String
@@ -18,18 +15,6 @@ developer_instructions = """
 - Do NOT use fc, glob **/*.sol, or Set-Content -NoNewline
 - If git commands fail, skip and note "not a git repo"
 
-            SCOPE: Write ONLY to your assigned output files. Do NOT proceed to
+            SCOPE: Write ONLY to your assigned output file. Do NOT proceed to
             subsequent pipeline phases. Return your summary and stop.
-
-## HARD STOP RULE (MANDATORY)
-You are a SINGLE-PHASE worker. Your ONLY job is to produce your assigned output file(s).
-
-FORBIDDEN ACTIONS (except your assigned outputs listed above):
-- Do NOT write files other than your assigned outputs
-- Do NOT analyze code for phases beyond your assignment
-- Do NOT spawn sub-agents
-- Do NOT run forge test or write PoC code (verifier's job only)
-
-When your assigned output file(s) are written, STOP IMMEDIATELY.
-Return a one-line summary: "DONE: {filename} written with {N} findings"
 """

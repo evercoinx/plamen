@@ -117,6 +117,13 @@ For external dependency parameters:
 - What breaks if external parameter changes unexpectedly?
 - Is there a mechanism to respond to external changes?
 
+### 5. Always-on boundary checklist
+
+For every external numeric parameter, timeout, cache age, block range, or
+message window touched by the target, evaluate `{0, 1, max, boundary-1,
+boundary, boundary+1, empty-container}` with concrete substitutions and record
+the externally observable effect.
+
 ## Output Format
 
 Write to `{scratchpad}/depth_external_findings.md`:

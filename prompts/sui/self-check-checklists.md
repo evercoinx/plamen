@@ -1,4 +1,4 @@
-# Self-Check Checklists - Sui/Move
+﻿# Self-Check Checklists - Sui/Move
 
 > **Usage**: Orchestrator reviews these checklists at the end of each phase to ensure nothing was missed.
 
@@ -57,13 +57,13 @@
 ### Iteration 1 (full coverage)
 - [ ] All 4 depth agents spawned?
 - [ ] Blind Spot Scanner A spawned IN PARALLEL? (Tokens, Coins & Parameters)
-- [ ] blind_spot_A_findings.md exists in scratchpad?
+- [ ] blind_spot_a_findings.md exists in scratchpad?
 - [ ] Scanner A checked: external token/coin coverage (R11), governance-changeable parameter coverage (R13)?
 - [ ] Blind Spot Scanner B spawned IN PARALLEL? (Guards, Visibility & Abilities)
-- [ ] blind_spot_B_findings.md exists in scratchpad?
+- [ ] blind_spot_b_findings.md exists in scratchpad?
 - [ ] Scanner B checked: admin griefability (R2), function visibility (MR5: public vs public(package) vs entry vs private), ability constraint completeness (MR1), type parameter safety (MR3)?
 - [ ] Blind Spot Scanner C spawned IN PARALLEL? (Role Lifecycle, Capability Exposure & Reachability)
-- [ ] blind_spot_C_findings.md exists in scratchpad?
+- [ ] blind_spot_c_findings.md exists in scratchpad?
 - [ ] Scanner C checked: capability lifecycle completeness (AdminCap create/destroy pairs), capability exposure gaps, function reachability audit?
 - [ ] Validation Sweep Agent spawned IN PARALLEL with depth agents?
 - [ ] validation_sweep_findings.md exists in scratchpad?
@@ -213,3 +213,4 @@
 - [ ] Quality: Finding counts match summary table?
 - [ ] Quality: Cross-references use report IDs only and all resolve?
 - [ ] Quality: Severity reflects FINAL verdict (post-verification), not original hypothesis?
+

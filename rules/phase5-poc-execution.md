@@ -1,4 +1,4 @@
-# Phase 5: Mandatory PoC Execution (v9.9.5)
+# Phase 5: Mandatory PoC Execution
 
 > **Core principle**: A PoC that is written but never executed provides ZERO mechanical evidence. Only executed tests produce ground truth.
 
@@ -32,6 +32,36 @@ Before writing the PoC, identify the finding's claimed HARM in one sentence — 
 - "attacker extracts 1.5x their fair share via reentrancy before guard triggers"
 
 If you cannot construct a harm assertion, the finding is `[CODE-TRACE]` at best. If the harm assertion fails (user receives correct amounts, withdrawal succeeds, no excess extracted), the finding is `[POC-FAIL]`.
+
+## PoC Testability Ledger (MANDATORY)
+
+Every verifier output MUST include a structured PoC ledger before the evidence
+tag is finalized:
+
+```markdown
+### PoC Attempt
+- PoC Required: YES/NO
+- PoC Class: <unit|property|integration|structural>
+- Attempted: YES/NO
+- PoC Not Attempted Because: <NO_BUILD_ENVIRONMENT|EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS|DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL|PURE_SPEC_OR_DOCS_ONLY|STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION|N/A>
+- Test File: <path or N/A>
+- Command: <command or N/A>
+```
+
+For `unit` and `property` findings, a local executable attempt is mandatory
+when a project build/test harness exists. `Compiled: N/A`, `Result: N/A`, "no
+test written", and direct `[CODE-TRACE]` fallback are invalid unless the ledger
+names a real environmental blocker. `STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION`
+is not an allowed skip reason for `unit` or `property` rows; reclassify the row
+or attempt the test.
+
+Allowed no-execution reasons:
+
+- `NO_BUILD_ENVIRONMENT`
+- `EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS`
+- `DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL`
+- `PURE_SPEC_OR_DOCS_ONLY`
+- `STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION` (structural/integration only)
 
 ## Execution Protocol
 
@@ -89,7 +119,7 @@ If execution was not attempted, explain why (no build environment, no test frame
 | **Solana (Anchor)** | `cargo build-sbf` or `anchor build` | `cargo test test_{id} -- --nocapture` | Trident (preferred): `cd trident-tests && trident fuzz run fuzz_0`; fallback: proptest with bounded inputs |
 | **Solana (native)** | `cargo build-sbf` | `cargo test test_{id} -- --nocapture` | proptest with bounded inputs, or boundary-value parameterized tests |
 | **Aptos** | `aptos move compile` | `aptos move test --filter test_{id}` | No built-in fuzzer - write boundary-value parameterized tests (`#[test]` with multiple concrete value sets covering min/mid/max) |
-| **Sui** | `sui move build` | `sui move test --filter test_{id}` | No built-in fuzzer - write boundary-value parameterized tests (`#[test]` with multiple concrete value sets covering min/mid/max) |
+| **Sui** | `sui move build` | `sui move test test_{id}` (positional filter; module/function path accepted) | `#[random_test]` with `sui move test --rand-num-iters {N} test_{id}`; fallback to boundary-value parameterized tests |
 
 **Fork testing** (EVM only): `forge test --match-test test_{ID} --fork-url {RPC_URL} -vvv`
 
@@ -112,6 +142,36 @@ For mode=Core:
   required_ids = set(h.id for h in hypotheses if h.severity >= MEDIUM) + chain_hypothesis_ids
   // Same assertion logic - Core now verifies ALL Medium+, skips fuzz variants only
 ```
+
+---
+
+## Assertion Retry Protocol (MANDATORY on assertion failure)
+
+> **Purpose**: Distinguish "test setup was wrong" from "bug doesn't exist" with ONE retry.
+
+When your test's assertion FAILS (the system behaves correctly, contradicting the finding):
+
+**Step 1: Self-diagnosis (no code yet)**
+
+Ask yourself:
+- Did I test the EXACT function at the EXACT location from the finding?
+- Did my setup create the EXACT preconditions described in the finding?
+- Is my assertion testing the CLAIMED HARM, not just a mechanism step?
+- Did I use realistic values from the codebase (not made-up constants)?
+
+If ANY answer is "no" → Step 2A (fix setup). If ALL answers are "yes" → Step 2B (accept failure).
+
+**Step 2A: Fix Setup (one retry)**
+
+Rewrite ONLY the test setup/inputs. You MUST keep the SAME target function call, the SAME harm assertion, and the SAME finding location. Compile and run. If PASS → `[POC-PASS]`. If FAIL again → Step 2B.
+
+**Step 2B: Accept failure**
+
+Conclude `[POC-FAIL]`. Do NOT weaken the assertion to force a pass or change what harm you're testing.
+
+**Anti-gaming rules:**
+- Attempt 2 tests a DIFFERENT function than the Location field → `[CODE-TRACE]`, not `[POC-PASS]`
+- Attempt 2 assertion checks different harm than Attempt 1 → `[CODE-TRACE]`
 
 ---
 
@@ -189,11 +249,26 @@ proptest! {
 ```
 If proptest is also not available, fall back to boundary-value parameterized tests (3-5 concrete values covering 0, 1, typical, i128::MAX).
 
-### Aptos / Sui - parameterized boundary tests
-Move lacks a fuzzer. Write multiple `#[test]` functions with concrete boundary values:
+### Aptos - parameterized boundary tests
+Aptos Move lacks a built-in random-input fuzzer. Write multiple `#[test]`
+functions with concrete boundary values:
 ```move
 #[test] fun test_hypothesis_min() { run_test(0, 1); }
 #[test] fun test_hypothesis_mid() { run_test(500_000, 86400); }
 #[test] fun test_hypothesis_max() { run_test(MAX_U64, MAX_U64); }
 ```
 This provides 3+ data points instead of 1, catching boundary-dependent bugs without a full fuzzer.
+
+### Sui - random-input tests with boundary fallback
+Prefer Sui Move random-input tests for fuzz variants:
+
+```move
+#[random_test]
+fun test_hypothesis_random(input: u64) {
+    run_test(input);
+}
+```
+
+Run with `sui move test --rand-num-iters 100 test_hypothesis_random`. If the
+random-input test cannot compile for the target harness, fall back to the
+boundary-value parameterized test pattern above and document the limitation.

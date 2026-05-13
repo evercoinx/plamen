@@ -13,7 +13,7 @@
 > | **3: Patterns + Surface + Templates** | TASK 4, 5, 6, 7, 10 | opus | Attack surface + template selection requires reasoning |
 >
 >
-> **CRITICAL - RAG TIMEOUT POLICY (v9.9.6)**:
+> **CRITICAL - RAG TIMEOUT POLICY**:
 > Agent 1A is **FIRE-AND-FORGET**. The orchestrator MUST NOT block on Agent 1A completion.
 > - Spawn Agent 1A with `run_in_background: true`
 > - **DO NOT await Agent 1A** before proceeding to Phase 2. Wait ONLY for Agents 1B, 2, and 3.
@@ -24,7 +24,7 @@
 >
 > Agent 1A writes: `meta_buffer.md`
 > Agent 1B writes: `design_context.md`, `external_production_behavior.md`, fork section of `meta_buffer.md`
-> Agent 2 writes: `build_status.md`, `function_list.md`, `call_graph.md`, `state_variables.md`, `modifiers.md`, `event_definitions.md`, `external_interfaces.md`, `static_analysis.md`, `test_results.md`
+> Agent 2 writes: `build_status.md`, `function_list.md`, `call_graph.md`, `state_variables.md`, `modifiers.md`, `event_definitions.md`, `external_interfaces.md`, `static_analysis.md`, `test_results.md`, `caller_map.md`, `callee_map.md`, `state_write_map.md`, `function_summary.md`
 > Agent 3 writes: `contract_inventory.md`, `attack_surface.md`, `detected_patterns.md`, `setter_list.md`, `emit_list.md`, `constraint_variables.md`, `template_recommendations.md`
 > Orchestrator writes: `recon_summary.md` (after Agents 1B, 2, 3 complete - NOT waiting for 1A)
 
@@ -404,6 +404,83 @@ Grep for external package usage:
 
 Write to {SCRATCHPAD}/external_interfaces.md
 
+### TASK 2.1: Derived Graph Artifacts (depth-agent inputs, uniform schema across all 5 languages)
+
+Produce four derived artifacts that downstream phases consume via Read (V2
+driver disables MCP except in rag_sweep). Sui Move has no Slither
+equivalent, so grep-based derivation is primary. The schema is IDENTICAL
+to EVM/Solana/Aptos/Soroban so depth agents reuse the same read patterns.
+
+**Schema contract.** Every file opens with:
+```
+> **Status**: POPULATED | UNAVAILABLE: {reason}
+> **Source**: grep-based derivation (Sui Move has no AST-level static analyzer)
+> **Generated**: {timestamp UTC}
+```
+
+#### Artifact 1: `caller_map.md`
+
+| Callee | Caller | Call Site |
+|--------|--------|-----------|
+| `module::function` | `module::function` | `file.move:L123` |
+
+Generation: For each public/entry/package-visible function in
+`function_list.md`, grep `\b(module::)?fn_name\s*[<(]` across .move
+files in `sources/` (exclude tests/, build/). Identify containing
+function from the nearest preceding `fun `/`public fun `/`entry fun `.
+
+Write to `{SCRATCHPAD}/caller_map.md`.
+
+#### Artifact 2: `callee_map.md`
+
+| Caller | Callee | Call Site |
+|--------|--------|-----------|
+| `module::function` | `module::function` | `file.move:L45` |
+
+Generation: For each function body, grep:
+- Intra-module: `\b\w+\s*\(`
+- Cross-module: `\b\w+::\w+\s*\(`
+- Framework: `coin::`, `balance::`, `transfer::`, `object::`, `table::`, `dynamic_field::`, `dynamic_object_field::`, `event::`
+
+Callees in Sui framework use fully-qualified form.
+
+Write to `{SCRATCHPAD}/callee_map.md`.
+
+#### Artifact 3: `state_write_map.md`
+
+Sui state is object-scoped. "State variable" here means a struct field
+owned by a Sui object.
+
+| State Variable | Writer Function | Write Site | Access |
+|----------------|-----------------|------------|--------|
+| `Pool.total_borrows` | `pool::borrow` | `pool.move:L89` | inc |
+
+Generation: For each field in `state_variables.md`, grep write patterns:
+- Field assignment: `\.\w+\s*=`
+- Object transfer: `transfer::transfer`, `transfer::public_transfer`, `transfer::share_object`, `transfer::freeze_object`
+- Vector: `vector::push_back`, `vector::pop_back`, `vector::swap_remove`, `vector::remove`
+- Table: `table::add`, `table::remove`, `table::borrow_mut`
+- Dynamic fields: `dynamic_field::add`, `dynamic_field::remove`, `dynamic_object_field::add`
+
+Access column: `set` / `inc` / `dec` / `push` / `pop` / `add` / `remove` /
+`transfer` / `share` / `freeze`.
+
+Write to `{SCRATCHPAD}/state_write_map.md`.
+
+#### Artifact 4: `function_summary.md`
+
+| Function | Visibility | Modifiers | #Callers | #Callees | State Reads | State Writes |
+|----------|-----------|-----------|----------|----------|-------------|--------------|
+| `pool::deposit` | public entry | - | 3 | 5 | Pool.balance | Pool.balance,Pool.shares |
+
+Generation: Aggregate from `function_list.md` + `modifiers.md` (which
+includes ability annotations like `has key`, `has store`) + the
+caller/callee/state-write maps above. `Visibility` =
+`public` / `public(friend)` / `public(package)` / `entry` / `friend` /
+`private`.
+
+Write to `{SCRATCHPAD}/function_summary.md`.
+
 ## TASK 8: Run Static Detectors
 
 Run targeted grep checks for Sui Move-specific vulnerability patterns:
@@ -470,11 +547,17 @@ Run targeted grep checks for Sui Move-specific vulnerability patterns:
 
 Write to {SCRATCHPAD}/static_analysis.md
 
+**OpenGrep PRE-CHECK (v2.5.0)**: The Python recon prepass may have run OpenGrep.
+Check if `{SCRATCHPAD}/opengrep_findings.md` exists. If it does, read it and
+APPEND its findings to `static_analysis.md` under `## OpenGrep Findings`.
+Note: Sui Move rules are not yet available in public rule repos — OpenGrep may
+have produced 0 findings or skipped. This is expected.
+
 ## TASK 9: Run Test Suite
 
 - Run `sui move test` in the package directory
 - If multiple packages, test each separately
-- If specific test filter needed: `sui move test --filter {name}`
+- If specific test filter needed: `sui move test {name}` (positional filter)
 - Note test count, pass/fail, and any test warnings
 - If tests fail, note as TEST HEALTH WARNING
 - Check for test coverage gaps: modules with 0 tests
@@ -601,7 +684,7 @@ Grep in .move source files (exclude build/, tests/ directories):
 | `transfer::share_object\|transfer::public_share_object` | SHARED_OBJECT |
 | `transfer::freeze_object\|transfer::public_freeze_object` | FROZEN_OBJECT |
 | `dynamic_field::\|dynamic_object_field::` | DYNAMIC_FIELDS |
-| `oracle\|price_feed\|pyth\|switchboard\|supra\|PriceInfoObject` | ORACLE |
+| `oracle\|price_feed\|pyth\|switchboard\|supra\|PriceInfoObject\|sqrt_price\|current_sqrt_price\|tick_current_index` | ORACLE |
 | `clock::timestamp_ms\|Clock` | TEMPORAL |
 | `flash_loan\|borrow.*repay\|Receipt` (structs without drop/store/copy/key) | FLASH_LOAN |
 | `balance::value\|coin::value\|balance::join\|balance::split` | BALANCE_DEPENDENT |

@@ -13,7 +13,7 @@
 > | **3: Patterns + Surface + Templates** | opus | TASK 4, 5, 6, 7, 10 | Pure codebase analysis, fast; pattern detection needs reasoning |
 >
 >
-> **CRITICAL - RAG TIMEOUT POLICY (v9.9.6)**:
+> **CRITICAL - RAG TIMEOUT POLICY**:
 > Agent 1A is **FIRE-AND-FORGET**. The orchestrator MUST NOT block on Agent 1A completion.
 > - Spawn Agent 1A with `run_in_background: true`
 > - **DO NOT await Agent 1A** before proceeding to Phase 2. Wait ONLY for Agents 1B, 2, and 3.
@@ -24,7 +24,7 @@
 >
 > Agent 1A writes: `meta_buffer.md`
 > Agent 1B writes: `design_context.md`, `external_production_behavior.md`, fork section of `meta_buffer.md`
-> Agent 2 writes: `build_status.md`, `function_list.md`, `call_graph.md`, `state_variables.md`, `modifiers.md`, `event_definitions.md`, `external_interfaces.md`, `static_analysis.md`, `test_results.md`
+> Agent 2 writes: `build_status.md`, `function_list.md`, `call_graph.md`, `state_variables.md`, `modifiers.md`, `event_definitions.md`, `external_interfaces.md`, `static_analysis.md`, `test_results.md`, `caller_map.md`, `callee_map.md`, `state_write_map.md`, `function_summary.md`
 > Agent 3 writes: `contract_inventory.md`, `attack_surface.md`, `detected_patterns.md`, `setter_list.md`, `emit_list.md`, `constraint_variables.md`, `template_recommendations.md`
 > Orchestrator writes: `recon_summary.md` (after Agents 1B, 2, 3 complete - NOT waiting for 1A)
 
@@ -346,6 +346,87 @@ Write to {SCRATCHPAD}/modifiers.md
 
 **External interfaces**: Grep `contractimport!\|soroban_sdk::xdr\|Address::from_string\|Address::new` -> {SCRATCHPAD}/external_interfaces.md
 
+### TASK 2.1: Derived Graph Artifacts (depth-agent inputs, uniform schema across all 5 languages)
+
+**SCIP PRE-CHECK (v2.5.0)**: Before grep-based derivation, check if each
+artifact already exists with `> **Status**: POPULATED` on line 1. The Python
+recon prepass runs `rust-analyzer scip` and may have already produced
+SCIP-sourced graph artifacts. If an artifact is POPULATED, **skip** the
+grep-based derivation for that file — SCIP data is strictly more accurate.
+If POPULATED but sparse (< 5 rows), append grep-derived rows below a
+`## Grep Supplement` heading.
+
+Produce four derived artifacts that downstream phases consume via Read (V2
+driver disables MCP except in rag_sweep). Soroban is Rust/WASM with no
+Slither equivalent; cargo-scout provides some AST-level data but the
+schema below is grep-based to stay uniform with the other four languages
+(SCIP bake provides an AST-level alternative when rust-analyzer is available).
+
+**Schema contract.** Every file opens with:
+```
+> **Status**: POPULATED | UNAVAILABLE: {reason}
+> **Source**: grep-based derivation (+ cargo-scout augmentation if SCOUT_AVAILABLE=true)
+> **Generated**: {timestamp UTC}
+```
+
+#### Artifact 1: `caller_map.md`
+
+| Callee | Caller | Call Site |
+|--------|--------|-----------|
+| `contract::function` | `contract::function` | `file.rs:L123` |
+
+Generation: For each `pub fn` in `function_list.md` (especially
+`#[contractimpl]` methods), grep `\bfn_name\s*\(` across contract
+sources (exclude target/, tests/). Identify containing function from
+the nearest preceding `pub fn`/`fn` declaration.
+
+Write to `{SCRATCHPAD}/caller_map.md`.
+
+#### Artifact 2: `callee_map.md`
+
+| Caller | Callee | Call Site |
+|--------|--------|-----------|
+| `contract::function` | `contract::function` or `<env>::crypto/storage/events` | `file.rs:L45` |
+
+Generation: For each function body, grep:
+- Intra-contract: `\bself\.\w+\s*\(`, `Self::\w+\s*\(`
+- Env calls: `env\.storage\(\)`, `env\.events\(\)`, `env\.crypto\(\)`, `env\.current_contract_address`, `env\.invoke_contract`
+- Cross-contract: `\bclient\.\w+\s*\(` (from `contractimport!`)
+- Token: `env\.token\(\)`, SEP-41 `TokenClient::transfer`, etc.
+
+Write to `{SCRATCHPAD}/callee_map.md`.
+
+#### Artifact 3: `state_write_map.md`
+
+Soroban state lives in persistent/instance/temporary storage keyed by
+`DataKey` enum variants. "State variable" here means a storage key.
+
+| State Variable | Writer Function | Write Site | Access |
+|----------------|-----------------|------------|--------|
+| `DataKey::Balance(Address)` | `token::transfer` | `token.rs:L89` | set |
+
+Generation: For each `DataKey` variant in `state_variables.md`, grep:
+- `env.storage().persistent().set`, `.temporary().set`, `.instance().set`
+- `.update(&key, |v| ...)` closures
+- `.remove(&key)`
+- `.extend_ttl(&key, ...)` — lifecycle write, access=`ttl`
+
+Access column: `set` / `update` / `remove` / `ttl`.
+
+Write to `{SCRATCHPAD}/state_write_map.md`.
+
+#### Artifact 4: `function_summary.md`
+
+| Function | Visibility | Modifiers | #Callers | #Callees | State Reads | State Writes |
+|----------|-----------|-----------|----------|----------|-------------|--------------|
+| `Token::transfer` | pub (contractimpl) | require_auth | 3 | 5 | DataKey::Balance | DataKey::Balance |
+
+Generation: Aggregate from `function_list.md` + `modifiers.md` +
+caller/callee/state-write maps. `Modifiers` = `require_auth()`,
+`require_admin()`, `extend_ttl`, any Soroban auth pattern.
+
+Write to `{SCRATCHPAD}/function_summary.md`.
+
 ## TASK 8: Run Static Detectors
 
 **If SCOUT_AVAILABLE = true**: Results already captured in static_analysis.md. Supplement with grep checks below.
@@ -387,6 +468,12 @@ Run targeted grep checks for Soroban-specific vulnerability patterns:
 - `unwrap()` on user-controlled values → UNWRAP_PANIC
 
 Write to {SCRATCHPAD}/static_analysis.md
+
+**OpenGrep PRE-CHECK (v2.5.0)**: The Python recon prepass may have run OpenGrep
+(cross-ecosystem SARIF scanner). Check if `{SCRATCHPAD}/opengrep_findings.md`
+exists. If it does, read it and APPEND its findings to `static_analysis.md`
+under `## OpenGrep Findings`. This is complementary to grep-based analysis —
+do not skip grep-based derivation even if OpenGrep produced results.
 
 ## TASK 9: Run Test Suite
 
@@ -471,7 +558,7 @@ Grep in contract .rs files (exclude target/, tests/, node_modules/, .stellar/):
 | `token_client\|token\.balance\|token\.transfer\|token\.mint\|token\.burn` | BALANCE_DEPENDENT |
 | `env\.ledger()\.timestamp\|env\.ledger()\.sequence\|expiration_ledger\|ledger_key_contract_instance` | TEMPORAL |
 | `admin\|owner\|require_auth\|has_role\|is_authorized` | SEMI_TRUSTED_ROLE |
-| `oracle\|price_feed\|get_price\|fetch_price\|PriceData` | ORACLE |
+| `oracle\|price_feed\|get_price\|fetch_price\|PriceData\|sqrt_price\|get_pool_state\|reserve_a\|reserve_b` | ORACLE |
 | `flash\|borrow.*repay\|loan\|flash_loan` | FLASH_LOAN |
 | `fee_rate\|reward_rate\|interest\|emission\|mint_rate\|multiplier` | MONETARY_PARAMETER |
 | `bridge\|stellar_anchor\|sep.*24\|sep.*31\|cross.*chain\|relay` | CROSS_CHAIN |
@@ -510,13 +597,13 @@ Write to {SCRATCHPAD}/constraint_variables.md
 
 ### Soroban-Specific Skills (in ~/.claude/agents/skills/soroban/ — create as needed)
 - AUTH_ANALYSIS -- **ALWAYS required** (require_auth coverage, auth tree propagation across invoke_contract, admin checks)
-- STORAGE_TTL_SAFETY -- TEMPORAL or PERSISTENT_STORAGE flag (TTL extension completeness, expiry handling, Instance storage size bounds)
+- STORAGE_LIFECYCLE -- TEMPORAL or PERSISTENT_STORAGE flag (TTL extension completeness, expiry handling, Instance storage size bounds; alias: STORAGE_TTL_SAFETY)
 - UPGRADE_SAFETY -- SOROBAN_UNPROTECTED_UPGRADE flag (update_current_contract_wasm guard, post-upgrade state validity)
 
 ### Shared Templates (in ~/.claude/agents/skills/ — use soroban-adapted versions)
 - SEMI_TRUSTED_ROLES, TOKEN_FLOW_TRACING, SHARE_ALLOCATION_FAIRNESS, TEMPORAL_PARAMETER_STALENESS
 - ECONOMIC_DESIGN_AUDIT, EXTERNAL_PRECONDITION_AUDIT (adapted for cross-contract calls)
-- ORACLE_ANALYSIS (adapted for Soroban oracle integrations), FLASH_LOAN_INTERACTION
+- EXTERNAL_PRECONDITION_AUDIT (covers Soroban oracle integrations via ORACLE flag), FLASH_LOAN_INTERACTION
 - ZERO_STATE_RETURN, CROSS_CHAIN_TIMING, MIGRATION_ANALYSIS, FORK_ANCESTRY, VERIFICATION_PROTOCOL
 
 For EACH recommended template provide: Trigger, Relevance, Instantiation Parameters, Key Questions.
@@ -533,7 +620,7 @@ For EACH recommended template provide: Trigger, Relevance, Instantiation Paramet
 | Template | Pattern Trigger | Required? | Reason |
 |----------|-----------------|-----------|--------|
 | AUTH_ANALYSIS | Always (Soroban) | YES | Foundational Soroban security — require_auth coverage |
-| STORAGE_TTL_SAFETY | TEMPORAL or PERSISTENT_STORAGE or TEMPORARY_STORAGE flag | {YES/NO} | {storage pattern details} |
+| STORAGE_LIFECYCLE | TEMPORAL or PERSISTENT_STORAGE or TEMPORARY_STORAGE flag | {YES/NO} | {storage pattern details} |
 | UPGRADE_SAFETY | SOROBAN_UNPROTECTED_UPGRADE flag | {YES/NO} | {update_current_contract_wasm found} |
 | SEMI_TRUSTED_ROLES | SEMI_TRUSTED_ROLE flag | {YES/NO} | {admin/owner/role patterns} |
 | TOKEN_FLOW_TRACING | BALANCE_DEPENDENT flag | {YES/NO} | {direct balance usage without internal tracking} |
@@ -542,7 +629,7 @@ For EACH recommended template provide: Trigger, Relevance, Instantiation Paramet
 | ECONOMIC_DESIGN_AUDIT | MONETARY_PARAMETER flag | {YES/NO} | {fee/rate/reward parameter setters found} |
 | EXTERNAL_PRECONDITION_AUDIT | CROSS_CONTRACT flag | {YES/NO} | {N cross-contract call targets} |
 | INTEGRATION_HAZARD_RESEARCH | NAMED_EXTERNAL_PROTOCOL flag | {YES/NO} | {if YES: list detected protocols — e.g., "Soroswap, Phoenix"} |
-| ORACLE_ANALYSIS | ORACLE flag | {YES/NO} | {oracle integration patterns found} |
+| EXTERNAL_PRECONDITION_AUDIT | ORACLE flag | {YES/NO} | {oracle integration patterns found} |
 | FLASH_LOAN_INTERACTION | FLASH_LOAN flag | {YES/NO} | {flash loan patterns found} |
 | ZERO_STATE_RETURN | Vault/first-depositor | {YES/NO} | {vault/share pattern found} |
 | CROSS_CHAIN_TIMING | CROSS_CHAIN flag | {YES/NO} | {bridge/anchor patterns} |
@@ -552,7 +639,7 @@ For EACH recommended template provide: Trigger, Relevance, Instantiation Paramet
 ### Binding Rules
 - AUTH_ANALYSIS **ALWAYS REQUIRED** for Soroban contracts
 - FORK_ANCESTRY **ALWAYS REQUIRED**
-- TEMPORAL or PERSISTENT_STORAGE or TEMPORARY_STORAGE flag → STORAGE_TTL_SAFETY **REQUIRED**
+- TEMPORAL or PERSISTENT_STORAGE or TEMPORARY_STORAGE flag → STORAGE_LIFECYCLE **REQUIRED**
 - SOROBAN_UNPROTECTED_UPGRADE flag → UPGRADE_SAFETY **REQUIRED**
 - SEMI_TRUSTED_ROLE flag → SEMI_TRUSTED_ROLES **REQUIRED**
 - BALANCE_DEPENDENT flag → TOKEN_FLOW_TRACING **REQUIRED**
@@ -561,7 +648,7 @@ For EACH recommended template provide: Trigger, Relevance, Instantiation Paramet
 - MONETARY_PARAMETER flag → ECONOMIC_DESIGN_AUDIT **REQUIRED**
 - CROSS_CONTRACT flag → EXTERNAL_PRECONDITION_AUDIT **REQUIRED**
 - NAMED_EXTERNAL_PROTOCOL flag → INTEGRATION_HAZARD_RESEARCH **REQUIRED** (injectable into depth-external)
-- ORACLE flag → ORACLE_ANALYSIS **REQUIRED**
+- ORACLE flag → EXTERNAL_PRECONDITION_AUDIT **REQUIRED**
 - FLASH_LOAN flag → FLASH_LOAN_INTERACTION **REQUIRED**
 - CROSS_CHAIN flag → CROSS_CHAIN_TIMING **REQUIRED**
 - MIGRATION flag → MIGRATION_ANALYSIS **REQUIRED**

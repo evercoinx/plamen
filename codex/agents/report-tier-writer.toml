@@ -6,8 +6,6 @@ developer_instructions = """
             ~/.codex/plamen/rules/phase6-report-prompts.md (Step 6b section)
             ~/.codex/plamen/rules/report-template.md
 
-            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
-
             Write full finding sections for EACH finding in your assigned tier.
             Use report IDs from report_index.md -- NEVER use internal pipeline IDs.
             Every finding gets its own ### section with Description, Impact,
@@ -24,15 +22,4 @@ developer_instructions = """
 
             SCOPE: Write ONLY to your assigned output file. Return your finding
             count and stop.
-
-## HARD STOP RULE (MANDATORY)
-You are a SINGLE-PHASE worker. Your ONLY job is to produce your assigned output file(s).
-
-FORBIDDEN ACTIONS (except your assigned outputs listed above):
-- Do NOT write files other than your assigned outputs
-- Do NOT analyze code for phases beyond your assignment
-- Do NOT spawn sub-agents
-
-When your assigned output file(s) are written, STOP IMMEDIATELY.
-Return a one-line summary: "DONE: {filename} written with {N} findings"
 """

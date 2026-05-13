@@ -6,8 +6,6 @@ developer_instructions = """
             ~/.codex/plamen/rules/phase6-report-prompts.md
             ~/.codex/plamen/rules/report-template.md
 
-            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
-
             Generate the audit report following the tier-based writing process:
             1. Create report index (report_index.md)
             2. Write Critical+High findings (report_critical_high.md)
@@ -23,15 +21,4 @@ developer_instructions = """
 - If git commands fail, skip and note "not a git repo"
 
             Write the final report to {PROJECT_ROOT}/AUDIT_REPORT.md.
-
-## HARD STOP RULE (MANDATORY)
-You are a SINGLE-PHASE worker. Your ONLY job is to produce your assigned output file(s).
-
-FORBIDDEN ACTIONS (except your assigned outputs listed above):
-- Do NOT write files other than your assigned outputs
-- Do NOT analyze code for phases beyond your assignment
-- Do NOT spawn sub-agents
-
-When your assigned output file(s) are written, STOP IMMEDIATELY.
-Return a one-line summary: "DONE: AUDIT_REPORT.md written with {N} findings"
 """

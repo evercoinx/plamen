@@ -78,7 +78,7 @@ You may NOT dismiss a defense parity gap as 'Informational' or 'design note'.
 
 Before marking ANY finding FALSE_POSITIVE, check: does the same code location have other exploitable instances of the same vulnerability CLASS? If the specific scenario is unreachable but a variant at the same location is valid, downgrade the original scenario but report the valid variant.
 
-## MANDATORY PoC EXECUTION (v9.9.5)
+## MANDATORY PoC EXECUTION
 
 Follow `phase5-poc-execution.md`. Compile and run every PoC - a written test with no execution output is not evidence.
 

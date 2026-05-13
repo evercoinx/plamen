@@ -33,6 +33,26 @@ Every finding MUST use this format:
 
 ---
 
+## Semantic Preservation Fields (OPTIONAL)
+
+Agents MAY add these fields when applicable to preserve analysis context. These
+fields are optional notes only; they are not hard-required schema fields or phase
+gate requirements unless validators are updated later.
+
+```markdown
+**Semantic Invariant** (OPTIONAL): The protocol property, relationship, or safety condition considered by this finding.
+**Branch Preconditions** (OPTIONAL): The generic conditions required for the relevant execution branch to be reachable.
+**Terminal Mechanism** (OPTIONAL): The final mechanism that creates, blocks, or resolves the candidate issue.
+**Refutation Basis** (OPTIONAL): The concrete reason a candidate is REFUTED or downgraded, when that reasoning should be preserved.
+**Composition Candidates** (OPTIONAL): Related conditions, findings, or mechanisms that may compose with this issue in later analysis.
+```
+
+Use these fields sparingly for semantic invariant, branch feasibility,
+refutation, and composition context that would otherwise be lost between
+breadth, depth, scanner, chain, and report phases.
+
+---
+
 ## Step Execution Interpretation
 
 - `✓` = completed

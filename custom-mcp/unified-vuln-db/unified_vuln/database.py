@@ -8,6 +8,9 @@ Unified Vulnerability Database v2.0 - Graph-Enhanced Engine
 
 import os
 import json
+import io
+import sys
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Union, Callable
 try:
@@ -20,7 +23,30 @@ from rich.console import Console
 
 from .schema import Vulnerability, Source
 
-console = Console()
+console = Console(file=sys.stderr)
+
+
+@contextmanager
+def _suppress_native_output():
+    """Temporarily redirect process stdout/stderr to os.devnull.
+
+    Some model-loading dependencies bypass Python's stdio wrappers and write
+    directly to file descriptors. In an MCP stdio server, that corrupts the
+    protocol stream and manifests as hanging tool calls.
+    """
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    stdout_fd = os.dup(1)
+    stderr_fd = os.dup(2)
+    try:
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        yield
+    finally:
+        os.dup2(stdout_fd, 1)
+        os.dup2(stderr_fd, 2)
+        os.close(devnull_fd)
+        os.close(stdout_fd)
+        os.close(stderr_fd)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PATHS - Resolved relative to the Plamen repo root
@@ -53,7 +79,6 @@ class CodeAwareEmbeddingFunction:
         self.model_type = None
         self._model_name_str = "all-MiniLM-L6-v2"
         self.dimensions = 384
-        self._initialize()
 
     def name(self) -> str:
         """Return embedding function name (required by ChromaDB)."""
@@ -63,7 +88,10 @@ class CodeAwareEmbeddingFunction:
         """Load all-MiniLM-L6-v2. Raises ImportError if sentence-transformers is missing."""
         try:
             from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer("all-MiniLM-L6-v2")
+            # Keep MCP stdout clean. Several downstream libraries emit progress
+            # and load reports on stdout during model initialization.
+            with _suppress_native_output(), redirect_stdout(io.StringIO()):
+                self.model = SentenceTransformer("all-MiniLM-L6-v2")
             self.model_type = "minilm"
         except ImportError:
             console.print(
@@ -87,6 +115,8 @@ class CodeAwareEmbeddingFunction:
 
     def _embed(self, input: List[str]) -> List[List[float]]:
         """Embed with MiniLM. Shows progress bar for batches >= 50 (indexing)."""
+        if self.model is None and self.model_type is None:
+            self._initialize()
         if self.model is None:
             return [[0.0] * self.dimensions for _ in input]
         # Show progress for large batches; stay silent at query time.

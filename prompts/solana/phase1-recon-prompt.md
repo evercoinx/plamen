@@ -13,7 +13,7 @@
 > | **3: Patterns + Surface + Templates** | opus | TASK 4, 5, 6, 7, 10 | Pure codebase analysis, fast; pattern detection needs reasoning |
 >
 >
-> **CRITICAL - RAG TIMEOUT POLICY (v9.9.6)**:
+> **CRITICAL - RAG TIMEOUT POLICY**:
 > Agent 1A is **FIRE-AND-FORGET**. The orchestrator MUST NOT block on Agent 1A completion.
 > - Spawn Agent 1A with `run_in_background: true`
 > - **DO NOT await Agent 1A** before proceeding to Phase 2. Wait ONLY for Agents 1B, 2, and 3.
@@ -24,7 +24,7 @@
 >
 > Agent 1A writes: `meta_buffer.md`
 > Agent 1B writes: `design_context.md`, `external_production_behavior.md`, fork section of `meta_buffer.md`
-> Agent 2 writes: `build_status.md`, `function_list.md`, `call_graph.md`, `state_variables.md`, `modifiers.md`, `event_definitions.md`, `external_interfaces.md`, `static_analysis.md`, `test_results.md`
+> Agent 2 writes: `build_status.md`, `function_list.md`, `call_graph.md`, `state_variables.md`, `modifiers.md`, `event_definitions.md`, `external_interfaces.md`, `static_analysis.md`, `test_results.md`, `caller_map.md`, `callee_map.md`, `state_write_map.md`, `function_summary.md`
 > Agent 3 writes: `contract_inventory.md`, `attack_surface.md`, `detected_patterns.md`, `setter_list.md`, `emit_list.md`, `constraint_variables.md`, `template_recommendations.md`
 > Orchestrator writes: `recon_summary.md` (after Agents 1B, 2, 3 complete - NOT waiting for 1A)
 
@@ -333,6 +333,91 @@ Write to {SCRATCHPAD}/modifiers.md
 
 **External interfaces**: Grep `use.*::{`, `declare_id!`, `Pubkey::new_from_array`, `#\[program\]` -> {SCRATCHPAD}/external_interfaces.md
 
+### TASK 2.1: Derived Graph Artifacts (depth-agent inputs, uniform schema across all 5 languages)
+
+**SCIP PRE-CHECK (v2.5.0)**: Before grep-based derivation, check if each
+artifact already exists with `> **Status**: POPULATED` on line 1. The Python
+recon prepass runs `rust-analyzer scip` and may have already produced
+SCIP-sourced graph artifacts. If an artifact is POPULATED, **skip** the
+grep-based derivation for that file — SCIP data is strictly more accurate.
+If POPULATED but sparse (< 5 rows), append grep-derived rows below a
+`## Grep Supplement` heading.
+
+Produce four derived artifacts that downstream phases consume via Read (V2
+driver disables MCP except in rag_sweep, so freezing these at recon time
+gives later phases deterministic caller/callee/state context). Solana has
+no AST-level Slither equivalent, so grep-based derivation is primary
+(SCIP bake provides an AST-level alternative when rust-analyzer is available).
+
+**Schema contract (IDENTICAL across EVM/Solana/Aptos/Sui/Soroban).** Every
+file opens with:
+```
+> **Status**: POPULATED | UNAVAILABLE: {reason}
+> **Source**: grep-based derivation (Solana has no AST-level static analyzer for full call graph)
+> **Generated**: {timestamp UTC}
+```
+
+#### Artifact 1: `caller_map.md`
+
+| Callee | Caller | Call Site |
+|--------|--------|-----------|
+| `module::function` | `module::function` | `file.rs:L123` |
+
+Generation: For each `pub fn` name in `function_list.md`, grep
+`\bfn_name\s*\(` across program sources (exclude target/, tests/). Record
+the containing function (identified by the nearest preceding `pub fn`
+declaration) and line number. Grep-based — approximate; mark approximation
+in the status header.
+
+Write to `{SCRATCHPAD}/caller_map.md`.
+
+#### Artifact 2: `callee_map.md`
+
+| Caller | Callee | Call Site |
+|--------|--------|-----------|
+| `module::function` | `module::function` or `<CPI>::program_id` | `file.rs:L45` |
+
+Generation: For each function body, grep:
+- Intra-program calls: `\b\w+\s*\(` patterns
+- CPI calls: `invoke\s*\(`, `invoke_signed\s*\(`, `CpiContext::new\b`
+- System program calls: `system_program::`, `token::transfer`, `token::mint_to`, etc.
+
+For CPI call sites, the `Callee` column uses `<CPI>::{target_program_name_or_id}`.
+
+Write to `{SCRATCHPAD}/callee_map.md`.
+
+#### Artifact 3: `state_write_map.md`
+
+Solana state is account-struct-scoped. "State variable" here means an account
+struct field, not a contract storage slot.
+
+| State Variable | Writer Function | Write Site | Access |
+|----------------|-----------------|------------|--------|
+| `PoolAccount.total_borrows` | `program::borrow` | `pool.rs:L89` | inc |
+
+Generation: For each field in `state_variables.md`, grep write patterns:
+- Assignment: `\bAccountStruct\.\w+\s*=`
+- Method-based: `\.increment\(`, `\.decrement\(`, `.checked_add`, `.checked_sub`, `.checked_mul`, `.checked_div`
+- Bulk: `*account = ...`, `ctx.accounts.x = ...`
+
+Access column: `set` / `inc` / `dec` / `bulk` / `delete` (for `close =` closes).
+
+Write to `{SCRATCHPAD}/state_write_map.md`.
+
+#### Artifact 4: `function_summary.md`
+
+| Function | Visibility | Modifiers | #Callers | #Callees | State Reads | State Writes |
+|----------|-----------|-----------|----------|----------|-------------|--------------|
+| `program::deposit` | pub | access_control,has_one=authority | 3 | 5 | pool.balance | pool.balance,pool.shares |
+
+Generation: Aggregate per function from `function_list.md` +
+`modifiers.md` (Anchor account constraints) + the caller/callee/state
+write maps produced above. `Visibility` = `pub` / `pub(crate)` / `fn`.
+`Modifiers` = Anchor `#[access_control(...)]` + account constraint
+annotations. `#Callers`/`#Callees` = row counts in the corresponding maps.
+
+Write to `{SCRATCHPAD}/function_summary.md`.
+
 ## TASK 8: Run Static Detectors
 
 **If FENDER_AVAILABLE = true**: Results already captured. Supplement with grep checks below.
@@ -354,6 +439,14 @@ Run targeted grep checks for Solana-specific vulnerability patterns:
 **Misc**: `msg!.*secret\|msg!.*key` -> SENSITIVE_LOG; `Clock::get` -> timestamp deps; loops over `remaining_accounts` or unbounded vectors -> UNBOUNDED_LOOP
 
 Write to {SCRATCHPAD}/static_analysis.md
+
+**Sec3 X-Ray PRE-CHECK (v2.5.0)**: The Python recon prepass may have run Sec3
+X-Ray (Docker-based Solana scanner). Check if `{SCRATCHPAD}/sec3_findings.md`
+exists. If it does, read it and APPEND its findings to `static_analysis.md`
+under `## Sec3 X-Ray Findings`. Similarly check `{SCRATCHPAD}/opengrep_findings.md`
+for OpenGrep scanner results and append under `## OpenGrep Findings` if present.
+These are complementary to Fender — do not skip grep-based analysis even if they
+produced results.
 
 ## TASK 9: Run Test Suite
 
@@ -438,7 +531,7 @@ Grep in program .rs files (exclude target/, tests/, node_modules/, .anchor/):
 | `remaining_accounts` | REMAINING_ACCOUNTS |
 | `invoke\|invoke_signed\|CpiContext` | CPI |
 | `token::mint\|token::authority\|TokenAccount\|spl_token` | TOKEN_FLOW |
-| `Pyth\|switchboard\|chainlink\|oracle\|price_feed\|PriceFeed` | ORACLE |
+| `Pyth\|switchboard\|chainlink\|oracle\|price_feed\|PriceFeed\|sqrt_price\|current_tick\|pool_state` | ORACLE |
 | `close\|CloseAccount\|close =` | ACCOUNT_CLOSING |
 | `seeds\|bump\|find_program_address\|create_program_address` | PDA |
 | `transfer_checked\|TransferChecked\|spl_token_2022\|Token2022` | TOKEN_2022 |

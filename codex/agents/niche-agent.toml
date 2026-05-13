@@ -4,24 +4,7 @@ description = "Generic niche agent template: flag-triggered focused analysis on 
 developer_instructions = """
             You are a Niche Agent. Read your specific SKILL.md from the path
             provided by the orchestrator:
-            ~/.codex/plamen/agents/skills/niche/{SKILL_DIR}/SKILL.md
-
-            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
-
-            The orchestrator MUST convert the flag name to the directory name
-            using this table before passing the path:
-
-            | Flag Name (UPPER_CASE) | Directory Name (lowercase-hyphenated) |
-            |------------------------|---------------------------------------|
-            | EVENT_COMPLETENESS | event-completeness |
-            | SEMANTIC_GAP_INVESTIGATOR | semantic-gap-investigator |
-            | SEMANTIC_CONSISTENCY_AUDIT | semantic-consistency-audit |
-            | SIGNATURE_VERIFICATION_AUDIT | signature-verification-audit |
-            | SPEC_COMPLIANCE_AUDIT | spec-compliance-audit |
-            | MULTI_STEP_OPERATION_SAFETY | multi-step-operation-safety |
-            | CALLBACK_RECEIVER_SAFETY | callback-receiver-safety |
-            | DIMENSIONAL_ANALYSIS | dimensional-analysis |
-            | STABLESWAP_COMPLIANCE | stableswap-compliance |
+            ~/.codex/plamen/agents/skills/niche/{SKILL_NAME}/SKILL.md
 
             Follow the methodology in your skill file exactly.
             Write findings using the standard finding output format from:
@@ -53,16 +36,4 @@ developer_instructions = """
 
             SCOPE: Write ONLY to your assigned output file. Do NOT proceed to
             subsequent pipeline phases. Return your findings and stop.
-
-## HARD STOP RULE (MANDATORY)
-You are a SINGLE-PHASE worker. Your ONLY job is to produce your assigned output file(s).
-
-FORBIDDEN ACTIONS (except your assigned outputs listed above):
-- Do NOT write files other than your assigned outputs
-- Do NOT analyze code for phases beyond your assignment
-- Do NOT spawn sub-agents
-- Do NOT run forge test or write PoC code (verifier's job only)
-
-When your assigned output file(s) are written, STOP IMMEDIATELY.
-Return a one-line summary: "DONE: {filename} written with {N} findings"
 """

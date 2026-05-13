@@ -29,6 +29,11 @@ You receive SPECIFIC TARGETS from the breadth pass - state variables or constrai
 
 For EACH target in your assignment:
 
+Before detailed tracing, if the target includes transaction identity, replay
+protection, sequencing, or cross-layer message persistence, read
+`~/.claude/agents/skills/injectable/l1/consensus-tx-identity-invariants/SKILL.md`
+and apply its identity/binding checklist.
+
 ### 1. Complete State Graph
 For the target state variable:
 - List EVERY function that READS this variable
@@ -73,6 +78,51 @@ For each key state variable:
 - Does the write logic satisfy what readers assume?
 - Should this variable be constant within a time window (epoch, cycle,
   day) but gets modified mid-window?
+
+### 7. Always-on boundary checklist
+
+For every numeric counter, balance-like field, index, or length in scope,
+evaluate `{0, 1, max, boundary-1, boundary, boundary+1, empty-container}` and
+state whether downstream readers still behave correctly.
+
+### 8. Cache Lifecycle Set-Cover (node-client / bounded-cache paths)
+
+**Trigger**: Target names a cache, pool, index, set, map, or pending/seen
+structure (e.g., `txCache`, `seen_blocks`, `peerPool`, `pendingBlobs`,
+`headerCache`, `msgIDSeen`, `ancestorCache`). Skip if no bounded
+memory-backed structure is in the target set.
+
+**Background — why set-cover, not spot-check**:
+In node-client code, a bounded cache needs a **complete set** of lifecycle
+operations, not just presence of SOME eviction. Missing any one leg creates
+an unbounded-growth DoS (CVE-2023-40591 geth unbounded p2p cache, reth issue
+#20110 post-bad-block OOM) OR a stale-serve bug (geth issue #22529 / #23195
+ancestor cache skew, Erigon #5294 / #8193 tx pool retention, Nethermind
+#3393 receipts cache staleness). Single-leg presence is NOT safety.
+
+For each cache-like target, enumerate and mark PRESENT / MISSING / WRONG_PATH
+for EACH of the following legs:
+
+| Leg | What to look for | Missing-leg consequence |
+|-----|------------------|------------------------|
+| INSERT bounded by size cap | `if len(cache) >= maxSize { evict }` BEFORE the insert | unbounded growth → OOM |
+| INSERT bounded by time TTL | `entry.addedAt = now()` with TTL sweep goroutine OR lazy expiry | long-lived stale entries |
+| EVICT on natural lifecycle | `delete(cache, k)` in the handler that retires the underlying object (block finalized, tx included, peer disconnected) | stale serve after lifecycle end |
+| EVICT on error / bad-block | `delete(cache, k)` in the error path too — not just happy path | reth #20110 class (bad-block handler forgets to drop pending state) |
+| EVICT on reorg / rollback | reorg handler walks the cache and drops entries keyed on orphaned blocks | stale references to dropped chain |
+| READ refreshes last-access (if LRU) OR does NOT (if FIFO) — consistent with declared policy | check the promote/touch call | unbounded growth under read-heavy workload when LRU was intended but FIFO was wired |
+| KEY uniqueness under adversary control | adversary cannot craft N distinct keys that all map to the same underlying object (grinding attack) | cache amplification DoS |
+| SIZE accounting matches reality | size counter incremented on insert, decremented on EVERY evict leg, audited periodically | size drift → cap never reached → unbounded growth |
+
+For each leg marked MISSING, state the exact handler that should have the
+deletion/bound but does not. For each leg marked WRONG_PATH, state the
+function where the code currently lives and why that path is not always
+taken (e.g., "eviction only runs on block finalization, but entries are
+inserted on block proposal — unfinalized forks retain entries forever").
+
+**Verdict gate**: A cache target is CONFIRMED vulnerable if ≥1 leg is
+MISSING on a path the adversary can drive. Two+ MISSING legs upgrades to
+HIGH by default on consensus-reachable paths.
 
 ## Output Format
 

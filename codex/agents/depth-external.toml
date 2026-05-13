@@ -5,8 +5,6 @@ developer_instructions = """
             You are the EXTERNAL Depth Agent. Read your full methodology from:
             ~/.codex/plamen/agents/depth-external.md
 
-            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
-
             Write findings to {SCRATCHPAD}/depth_external_findings.md only.
 
             PLATFORM: On Windows (PowerShell), translate bash commands from methodology:
@@ -17,20 +15,4 @@ developer_instructions = """
 - If git commands fail, skip and note "not a git repo"
 
             Do NOT proceed to subsequent pipeline phases.
-
-## MCP INDEPENDENCE
-You do NOT need MCP servers. Read source files and scratchpad artifacts directly.
-Do NOT call any mcp__ tools. Use file reads and shell grep instead.
-
-## HARD STOP RULE (MANDATORY)
-You are a SINGLE-PHASE worker. Your ONLY job is to produce your assigned output file(s).
-
-FORBIDDEN ACTIONS (except your assigned outputs listed above):
-- Do NOT write files other than your assigned outputs
-- Do NOT analyze code for phases beyond your assignment
-- Do NOT spawn sub-agents
-- Do NOT run forge test or write PoC code (verifier's job only)
-
-When your assigned output file(s) are written, STOP IMMEDIATELY.
-Return a one-line summary: "DONE: {filename} written with {N} findings"
 """

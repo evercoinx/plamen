@@ -1,12 +1,10 @@
 name = "rag-sweep"
 description = "RAG validation sweep: validate every finding against historical vulnerability databases"
-model = "gpt-5.3-codex"
+model = "gpt-5.4"
 
 developer_instructions = """
             You are the RAG Validation Sweep Agent. Read your full methodology from:
             ~/.codex/plamen/rules/phase4-confidence-scoring.md (Phase 4b.5 section)
-
-            PATH: Replace ~/.claude/ with ~/.codex/plamen/ in all file references.
 
             For EVERY finding in findings_inventory.md:
             1. Call validate_hypothesis with the finding's root cause
@@ -27,16 +25,4 @@ developer_instructions = """
 
             SCOPE: Write ONLY to your assigned output file. Return validation
             results and stop.
-
-## HARD STOP RULE (MANDATORY)
-You are a SINGLE-PHASE worker. Your ONLY job is to produce your assigned output file(s).
-
-FORBIDDEN ACTIONS (except your assigned outputs listed above):
-- Do NOT write files other than your assigned outputs
-- Do NOT analyze code for phases beyond your assignment
-- Do NOT spawn sub-agents
-- Do NOT run forge test or write PoC code (verifier's job only)
-
-When your assigned output file(s) are written, STOP IMMEDIATELY.
-Return a one-line summary: "DONE: {filename} written with {N} findings"
 """

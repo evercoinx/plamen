@@ -10,6 +10,8 @@ Subcommands:
   --stop          Stop hook: detect phase, check artifacts, block if skipping
   --track-write   PostToolUse hook: track scratchpad writes, reset stall counter
   --init          Initialize watchdog state for a new audit run
+  --finalize      Mark a completed audit as finished and clear stale stall state
+  --validate      Run end-of-audit validation and write audit_validation.md
 
 Dormancy: If no watchdog_state.json exists, all subcommands exit 0 immediately.
 This means non-audit Claude Code sessions have near-zero overhead.
@@ -20,6 +22,7 @@ import os
 import sys
 import glob
 import time
+import uuid
 
 
 # ---------------------------------------------------------------------------
@@ -112,13 +115,70 @@ def find_scratchpad_from_path(file_path):
     return None
 
 
+V2_MARKER_FILENAME = "_v2_checkpoint.json"
+
+
+def _is_v2_scratchpad(scratchpad_path):
+    """True if `scratchpad_path` contains the V2 driver's checkpoint file.
+
+    V2 manages phase gates externally via `plamen_driver.py`. When V2 is
+    active, this watchdog MUST stay dormant — its BLOCK semantics fight
+    the driver's phase-scoped subprocess model (see Irys L1 postmortem
+    anomalies A1/A7/A8).
+    """
+    if not scratchpad_path:
+        return False
+    try:
+        marker = os.path.join(scratchpad_path, V2_MARKER_FILENAME)
+        return os.path.isfile(marker)
+    except (IOError, OSError, TypeError):
+        return False
+
+
+def _v2_active_anywhere_nearby():
+    """Detect V2 via any of the scratchpad discovery routes used by find_state_file.
+
+    Returns True if ANY candidate scratchpad has a `_v2_checkpoint.json`.
+    Used as an early-exit for every hook command so V1 and V2 coexist.
+    """
+    env_sp = os.environ.get("PLAMEN_SCRATCHPAD")
+    if env_sp and _is_v2_scratchpad(env_sp):
+        return True
+
+    cwd = os.getcwd().replace("\\", "/")
+    for sp in (os.path.join(cwd, ".scratchpad"), cwd):
+        if _is_v2_scratchpad(sp):
+            return True
+
+    if os.path.isfile(ACTIVE_AUDIT_PATH):
+        try:
+            with open(ACTIVE_AUDIT_PATH, "r") as f:
+                breadcrumb_sp = f.read().strip()
+            if breadcrumb_sp and _is_v2_scratchpad(breadcrumb_sp):
+                return True
+        except (IOError, OSError):
+            pass
+
+    return False
+
+
 def find_state_file(explicit_scratchpad=None):
     """
     Find watchdog_state.json. Search order:
     1. Explicit scratchpad path
     2. PLAMEN_SCRATCHPAD env var
-    3. Scan common locations
+    3. Current working directory / .scratchpad
+    4. Scan common locations
+
+    Returns None if a V2 `_v2_checkpoint.json` is discovered in any of
+    the same locations — V2 manages gates externally and this watchdog
+    must be dormant for the run.
     """
+    # V2 bypass: if the driver is active, the watchdog is redundant and
+    # will fight the phase-scoped subprocess model. Exit as dormant.
+    if _v2_active_anywhere_nearby():
+        return None
+
     candidates = []
 
     if explicit_scratchpad:
@@ -128,7 +188,11 @@ def find_state_file(explicit_scratchpad=None):
     if env_sp:
         candidates.append(os.path.join(env_sp, STATE_FILENAME))
 
-    # 3. Breadcrumb file written by --init
+    cwd = os.getcwd().replace("\\", "/")
+    candidates.append(os.path.join(cwd, ".scratchpad", STATE_FILENAME))
+    candidates.append(os.path.join(cwd, STATE_FILENAME))
+
+    # 4. Breadcrumb file written by --init
     if os.path.isfile(ACTIVE_AUDIT_PATH):
         try:
             with open(ACTIVE_AUDIT_PATH, "r") as f:
@@ -173,6 +237,27 @@ def get_file_size(path):
         return 0
 
 
+def get_latest_artifact_mtime(scratchpad):
+    """
+    Return the latest mtime among markdown artifacts in the scratchpad, or 0.
+    This is used as a fallback progress detector when the PostToolUse write hook
+    misses sub-agent writes.
+    """
+    latest = 0
+    try:
+        for name in os.listdir(scratchpad):
+            if not name.endswith(".md"):
+                continue
+            full = os.path.join(scratchpad, name)
+            try:
+                latest = max(latest, os.path.getmtime(full))
+            except (IOError, OSError):
+                continue
+    except (IOError, OSError):
+        return 0
+    return latest
+
+
 def glob_match(scratchpad, pattern):
     """
     Glob match files in scratchpad. Returns list of matching paths.
@@ -182,10 +267,48 @@ def glob_match(scratchpad, pattern):
     return glob.glob(full_pattern)
 
 
+def is_reserved_first_pass_analysis(path):
+    """Return True for analysis files owned by later discovery subphases."""
+    name = os.path.basename(path)
+    return (
+        name.startswith("analysis_rescan_")
+        or name.startswith("analysis_percontract_")
+        or name.startswith("analysis_merged_into_")
+        or name.startswith("analysis_report_")
+    )
+
+
+def artifact_matches(scratchpad, pattern):
+    """Return artifact matches with phase-family guards applied."""
+    if "*" in pattern:
+        matches = glob_match(scratchpad, pattern)
+    else:
+        matches = [os.path.join(scratchpad, pattern).replace("\\", "/")]
+    if pattern == "analysis_*.md":
+        matches = [m for m in matches if not is_reserved_first_pass_analysis(m)]
+    return matches
+
+
+def _normalize_mode(mode):
+    """
+    Map L1-specific mode names to their base smart-contract equivalents for
+    condition evaluation. `l1-thorough` is treated as `thorough`, `l1-core` as
+    `core`, etc. This lets phase_manifest.json use `MODE == thorough` once and
+    have it cover both smart-contract and L1 Thorough runs.
+    """
+    if isinstance(mode, str) and mode.startswith("l1-"):
+        return mode[3:]  # strip "l1-" prefix → "thorough" / "core" / etc.
+    if mode == "l1":
+        return "core"  # bare "l1" defaults to Core depth per plamen-l1.md Step 0
+    return mode
+
+
 def evaluate_condition(condition, mode):
     """
     Evaluate a simple condition string like 'MODE == thorough' or 'MODE != light'.
+    L1 modes are normalized to their smart-contract equivalents before comparison.
     """
+    normalized = _normalize_mode(mode)
     condition = condition.strip()
     if "!=" in condition:
         parts = condition.split("!=")
@@ -193,15 +316,40 @@ def evaluate_condition(condition, mode):
             lhs = parts[0].strip()
             rhs = parts[1].strip()
             if lhs == "MODE":
-                return mode != rhs
+                return normalized != rhs
     elif "==" in condition:
         parts = condition.split("==")
         if len(parts) == 2:
             lhs = parts[0].strip()
             rhs = parts[1].strip()
             if lhs == "MODE":
-                return mode == rhs
+                return normalized == rhs
     return False
+
+
+# ---------------------------------------------------------------------------
+# Parallel phase groups
+# ---------------------------------------------------------------------------
+# Phases that legitimately run concurrently. When the watchdog detects a "leak"
+# (artifacts for a later phase appearing while the current phase is incomplete),
+# it suppresses the alarm if BOTH the current phase AND the leaked phase belong
+# to the same group here.
+#
+# RULES for adding a phase to a group:
+#   1. Neither phase reads the other's required artifacts
+#   2. Both phases share the same prerequisite (e.g., all consume inventory)
+#   3. Neither phase is a downstream prerequisite for the other
+#
+# Adding a phase that violates these rules can SUPPRESS REAL phase-skip bugs.
+# Be conservative — only add phases with proven independent inputs.
+
+PARALLEL_GROUPS = [
+    # Phases 4-6 (rescan + per_contract + semantic_invariants) all consume the
+    # findings_inventory (rescan, per_contract) or state_variables.md
+    # (semantic_invariants), produce independent outputs, and all feed into
+    # depth (phase 7). They are safe to run concurrently.
+    {"rescan", "per_contract", "semantic_invariants"},
+]
 
 
 def extract_niche_agents(scratchpad):
@@ -226,11 +374,13 @@ def extract_niche_agents(scratchpad):
             if "## Niche Agents" in line or "## Niche agents" in line:
                 in_niche_section = True
                 continue
-            if in_niche_section and line.startswith("## "):
+            if in_niche_section and line.lstrip().startswith("#"):
                 break
             if in_niche_section and line.strip().startswith("-"):
                 # Extract niche agent name from lines like "- EVENT_COMPLETENESS"
-                name = line.strip().lstrip("-").strip().split()[0] if line.strip().lstrip("-").strip() else ""
+                raw = line.strip().lstrip("-").strip()
+                name = raw.split()[0] if raw else ""
+                name = name.strip("`*_()[]{}:,.")
                 if name:
                     # Use the mapping if available, fall back to generated name
                     filename = NICHE_NAME_MAP.get(name, "niche_{}_findings.md".format(name.lower()))
@@ -245,7 +395,7 @@ def extract_niche_agents(scratchpad):
                     continue
                 cells = [c.strip() for c in stripped.split("|") if c.strip()]
                 if len(cells) >= 4:
-                    name = cells[0].strip()
+                    name = cells[0].strip().strip("`*_()[]{}:,.")
                     # Skip table header rows (contain "Niche Agent", "Trigger", etc.)
                     if name.lower() in ("niche agent", "niche agents", "name", "agent", "skill"):
                         continue
@@ -261,6 +411,212 @@ def extract_niche_agents(scratchpad):
     return niche_files
 
 
+def should_enforce_niche_artifacts(mode):
+    """
+    Light mode skips niche agents entirely, so their outputs should not be part
+    of depth-phase gate enforcement.
+    """
+    return mode in ("core", "thorough")
+
+
+def phase_field(phase, field_name, mode, default=None):
+    """
+    Mode-aware field lookup for a phase dict.
+
+    When mode starts with 'l1' and the phase has 'l1_{field_name}', use that
+    override. This lets phase_manifest.json declare L1-specific artifact lists
+    (l1_required_artifacts, l1_min_required_glob_matches, l1_scanner_artifacts,
+    l1_conditional_artifacts, l1_niche_artifacts_source, l1_optional_artifacts,
+    l1_gate_message) alongside the smart-contract-mode defaults, without
+    forcing a parallel phase set or post-hoc stub-file workarounds.
+
+    Example: phase['required_artifacts'] = ['design_context.md', ...]
+             phase['l1_required_artifacts'] = ['threat_model.md', ...]
+             phase_field(phase, 'required_artifacts', 'l1-core') -> ['threat_model.md', ...]
+             phase_field(phase, 'required_artifacts', 'core')    -> ['design_context.md', ...]
+    """
+    if isinstance(mode, str) and mode.startswith("l1"):
+        l1_key = "l1_" + field_name
+        if l1_key in phase:
+            return phase[l1_key]  # may be None to explicitly suppress for L1
+    return phase.get(field_name, default)
+
+
+def get_required_phases(manifest, mode):
+    """Return phase tuples required for the given mode, in order."""
+    phases_sorted = sorted(
+        manifest["phases"].items(),
+        key=lambda x: x[1]["order"]
+    )
+    required = []
+    for phase_name, phase in phases_sorted:
+        if "mode_required" in phase and mode not in phase["mode_required"]:
+            continue
+        if "mode_excluded" in phase and mode in phase["mode_excluded"]:
+            continue
+        required.append((phase_name, phase))
+    return required
+
+
+def get_mode_forbidden_patterns(mode):
+    """
+    Return artifact patterns that should not appear for this mode.
+    These are mode-discipline checks for end-of-run validation.
+    """
+    if mode == "light":
+        return [
+            "semantic_invariants.md",
+            "confidence_scores.md",
+            "rag_validation.md",
+            "niche_*_findings.md",
+            "analysis_rescan_*.md",
+            "analysis_percontract_*.md",
+            "design_stress_findings.md",
+            "perturbation_findings.md",
+            "skill_execution_gaps.md",
+        ]
+    if mode == "core":
+        return [
+            "analysis_rescan_*.md",
+            "analysis_percontract_*.md",
+            "design_stress_findings.md",
+            "perturbation_findings.md",
+            "skill_execution_gaps.md",
+        ]
+    return []
+
+
+def find_present_artifacts(scratchpad, pattern, min_bytes=1):
+    """Return matching artifact paths for a pattern."""
+    if "*" in pattern:
+        return [m for m in artifact_matches(scratchpad, pattern) if get_file_size(m) >= min_bytes]
+    path = os.path.join(scratchpad, pattern).replace("\\", "/")
+    if os.path.isfile(path) and get_file_size(path) >= min_bytes:
+        return [path]
+    return []
+
+
+def collect_validation_issues(state, manifest):
+    """
+    Collect end-of-audit validation errors and warnings.
+    Returns (errors, warnings).
+    """
+    errors = []
+    warnings = []
+    scratchpad = state.get("scratchpad", "").replace("\\", "/")
+    project_root = state.get("project_root", "").replace("\\", "/")
+    mode = state.get("mode", "core")
+
+    required_phases = get_required_phases(manifest, mode)
+    for phase_name, phase in required_phases:
+        missing = get_missing_artifacts(scratchpad, phase, mode)
+        if missing:
+            missing_names = ", ".join(name for name, _ in missing)
+            errors.append(
+                "Missing required {} artifacts: {}".format(
+                    phase.get("display_name", phase_name), missing_names
+                )
+            )
+
+    current_phase_name, _ = detect_current_phase(scratchpad, manifest, mode)
+    if current_phase_name != "complete":
+        errors.append("Run is not complete according to phase manifest; current phase is '{}'.".format(current_phase_name))
+
+    final_report = os.path.join(project_root, "AUDIT_REPORT.md").replace("\\", "/")
+    if not os.path.isfile(final_report) or get_file_size(final_report) < 200:
+        errors.append("Missing or undersized final report: AUDIT_REPORT.md")
+
+    quality_report = os.path.join(scratchpad, "report_quality.md").replace("\\", "/")
+    if not os.path.isfile(quality_report) or get_file_size(quality_report) < 50:
+        errors.append("Missing or undersized report_quality.md")
+
+    coverage_report = os.path.join(scratchpad, "report_coverage.md").replace("\\", "/")
+    if mode in ("core", "thorough") and (not os.path.isfile(coverage_report) or get_file_size(coverage_report) < 50):
+        errors.append("Missing or undersized report_coverage.md")
+
+    recon_summary = os.path.join(scratchpad, "recon_summary.md").replace("\\", "/")
+    if os.path.isfile(recon_summary):
+        try:
+            with open(recon_summary, "r", encoding="utf-8") as f:
+                recon_text = f.read().lower()
+            rescue_markers = (
+                "orchestrator materialized the missing recon artifacts directly",
+                "recon agent 3 workers both stalled",
+                "recon rescue",
+            )
+            if any(marker in recon_text for marker in rescue_markers):
+                errors.append("Recon phase required orchestrator rescue/materialization; parity run is not clean.")
+        except (IOError, OSError):
+            warnings.append("Could not inspect recon_summary.md for rescue markers.")
+
+    if state.get("stall_phase") or state.get("stall_missing"):
+        warnings.append(
+            "Watchdog still records stale stall state: phase={}, missing={}".format(
+                state.get("stall_phase"), state.get("stall_missing", [])
+            )
+        )
+
+    for pattern in get_mode_forbidden_patterns(mode):
+        present = find_present_artifacts(scratchpad, pattern)
+        if present:
+            warnings.append("Forbidden-by-mode artifacts present for {}: {}".format(mode, pattern))
+
+    return errors, warnings
+
+
+def write_validation_report(scratchpad, mode, errors, warnings):
+    """Write audit_validation.md in the scratchpad."""
+    lines = [
+        "# Audit Validation",
+        "",
+        "- Mode: `{}`".format(mode),
+        "- Status: `{}`".format("PASS" if not errors else "FAIL"),
+        "- Errors: {}".format(len(errors)),
+        "- Warnings: {}".format(len(warnings)),
+        "",
+    ]
+    if errors:
+        lines.append("## Errors")
+        for item in errors:
+            lines.append("- {}".format(item))
+        lines.append("")
+    if warnings:
+        lines.append("## Warnings")
+        for item in warnings:
+            lines.append("- {}".format(item))
+        lines.append("")
+    if not errors and not warnings:
+        lines.append("No validation issues detected.")
+        lines.append("")
+
+    report_path = os.path.join(scratchpad, "audit_validation.md").replace("\\", "/")
+    try:
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except (IOError, OSError):
+        return None
+    return report_path
+
+
+def mark_state_complete(state_path, state, latest_artifact_mtime=0, validation_status=None):
+    """Clear stale state and mark the run complete."""
+    state["stop_hook_active"] = False
+    state["stall_counter"] = 0
+    state["stall_phase"] = None
+    state["stall_missing"] = []
+    if latest_artifact_mtime:
+        state["last_write_time"] = latest_artifact_mtime
+    state["status"] = "complete"
+    state["completed_at"] = time.time()
+    if validation_status:
+        state["validation_status"] = validation_status
+    save_json_file(state_path, state)
+    try:
+        os.remove(ACTIVE_AUDIT_PATH)
+    except (IOError, OSError):
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Phase Detection
 # ---------------------------------------------------------------------------
@@ -272,7 +628,7 @@ def check_artifact_present(scratchpad, artifact_name, min_bytes):
     Returns (present: bool, details: str).
     """
     if "*" in artifact_name:
-        matches = glob_match(scratchpad, artifact_name)
+        matches = artifact_matches(scratchpad, artifact_name)
         valid_matches = [m for m in matches if get_file_size(m) >= min_bytes]
         if valid_matches:
             return True, "{} matches".format(len(valid_matches))
@@ -291,7 +647,7 @@ def check_glob_min_matches(scratchpad, artifact_name, min_matches, min_bytes):
     Check that a glob pattern has at least min_matches valid files.
     Returns (satisfied: bool, actual_count: int).
     """
-    matches = glob_match(scratchpad, artifact_name)
+    matches = artifact_matches(scratchpad, artifact_name)
     valid = [m for m in matches if get_file_size(m) >= min_bytes]
     return len(valid) >= min_matches, len(valid)
 
@@ -312,21 +668,26 @@ def detect_current_phase(scratchpad, manifest, mode):
         # Skip phases not required for this mode
         if "mode_required" in phase and mode not in phase["mode_required"]:
             continue
+        # Skip phases explicitly excluded for this mode (e.g. Phase 4c chain analysis for L1)
+        if "mode_excluded" in phase and mode in phase["mode_excluded"]:
+            continue
 
         min_bytes = phase.get("min_file_bytes", 50)
 
-        # Check required artifacts
+        # Check required artifacts (L1-aware via phase_field)
         all_present = True
 
-        for artifact in phase.get("required_artifacts", []):
+        for artifact in (phase_field(phase, "required_artifacts", mode, default=[]) or []):
             if "*" in artifact:
                 # For glob patterns, check min_required_glob_matches or default to 1
                 min_matches = 1
-                glob_map = phase.get("min_required_glob_matches_map", {})
+                glob_map = phase_field(phase, "min_required_glob_matches_map", mode, default={}) or {}
                 if artifact in glob_map:
                     min_matches = glob_map[artifact]
-                elif "min_required_glob_matches" in phase:
-                    min_matches = phase["min_required_glob_matches"]
+                else:
+                    override_min = phase_field(phase, "min_required_glob_matches", mode)
+                    if override_min is not None:
+                        min_matches = override_min
 
                 satisfied, _ = check_glob_min_matches(scratchpad, artifact, min_matches, min_bytes)
                 if not satisfied:
@@ -342,7 +703,8 @@ def detect_current_phase(scratchpad, manifest, mode):
             return phase_name, phase
 
         # Check scanner_artifacts (flexible multi-pattern with min_matches)
-        scanner_cfg = phase.get("scanner_artifacts")
+        # L1 mode sets l1_scanner_artifacts: null to explicitly suppress this check
+        scanner_cfg = phase_field(phase, "scanner_artifacts", mode)
         if scanner_cfg:
             scanner_min = scanner_cfg.get("min_matches", 1)
             scanner_total = 0
@@ -352,15 +714,17 @@ def detect_current_phase(scratchpad, manifest, mode):
             if scanner_total < scanner_min:
                 return phase_name, phase
 
-        # Check conditional artifacts
-        for artifact, condition in phase.get("conditional_artifacts", {}).items():
+        # Check conditional artifacts (L1-aware)
+        conditional = phase_field(phase, "conditional_artifacts", mode, default={}) or {}
+        for artifact, condition in conditional.items():
             if evaluate_condition(condition, mode):
                 present, _ = check_artifact_present(scratchpad, artifact, min_bytes)
                 if not present:
                     return phase_name, phase
 
         # Check niche artifacts if this phase defines them
-        if phase.get("niche_artifacts_source"):
+        # L1 mode sets l1_niche_artifacts_source: null to explicitly suppress
+        if phase_field(phase, "niche_artifacts_source", mode) and should_enforce_niche_artifacts(mode):
             niche_files = extract_niche_agents(scratchpad)
             for nf in niche_files:
                 present, _ = check_artifact_present(scratchpad, nf, min_bytes)
@@ -375,18 +739,26 @@ def get_missing_artifacts(scratchpad, phase, mode):
     """
     Get a detailed list of missing artifacts for a phase.
     Returns list of (artifact_name, reason) tuples.
+
+    L1 mode-aware: uses phase_field() to resolve l1_* overrides when mode
+    starts with 'l1'. This is how we let phase_manifest.json declare
+    l1_required_artifacts / l1_scanner_artifacts / l1_conditional_artifacts
+    alongside the smart-contract defaults without forcing stub redirector
+    files in L1 runs.
     """
     missing = []
     min_bytes = phase.get("min_file_bytes", 50)
 
-    for artifact in phase.get("required_artifacts", []):
+    for artifact in (phase_field(phase, "required_artifacts", mode, default=[]) or []):
         if "*" in artifact:
             min_matches = 1
-            glob_map = phase.get("min_required_glob_matches_map", {})
+            glob_map = phase_field(phase, "min_required_glob_matches_map", mode, default={}) or {}
             if artifact in glob_map:
                 min_matches = glob_map[artifact]
-            elif "min_required_glob_matches" in phase:
-                min_matches = phase["min_required_glob_matches"]
+            else:
+                override_min = phase_field(phase, "min_required_glob_matches", mode)
+                if override_min is not None:
+                    min_matches = override_min
 
             satisfied, actual = check_glob_min_matches(scratchpad, artifact, min_matches, min_bytes)
             if not satisfied:
@@ -396,8 +768,8 @@ def get_missing_artifacts(scratchpad, phase, mode):
             if not present:
                 missing.append((artifact, reason))
 
-    # Check scanner_artifacts (flexible multi-pattern with min_matches)
-    scanner_cfg = phase.get("scanner_artifacts")
+    # Check scanner_artifacts (L1 mode sets l1_scanner_artifacts: null to suppress)
+    scanner_cfg = phase_field(phase, "scanner_artifacts", mode)
     if scanner_cfg:
         scanner_min = scanner_cfg.get("min_matches", 1)
         scanner_total = 0
@@ -411,13 +783,14 @@ def get_missing_artifacts(scratchpad, phase, mode):
                  "need {} matches across [{}], found {}".format(scanner_min, patterns_str, scanner_total))
             )
 
-    for artifact, condition in phase.get("conditional_artifacts", {}).items():
+    conditional = phase_field(phase, "conditional_artifacts", mode, default={}) or {}
+    for artifact, condition in conditional.items():
         if evaluate_condition(condition, mode):
             present, reason = check_artifact_present(scratchpad, artifact, min_bytes)
             if not present:
                 missing.append((artifact, reason + " (conditional: {})".format(condition)))
 
-    if phase.get("niche_artifacts_source"):
+    if phase_field(phase, "niche_artifacts_source", mode) and should_enforce_niche_artifacts(mode):
         niche_files = extract_niche_agents(scratchpad)
         for nf in niche_files:
             present, reason = check_artifact_present(scratchpad, nf, min_bytes)
@@ -427,10 +800,29 @@ def get_missing_artifacts(scratchpad, phase, mode):
     return missing
 
 
-def detect_forward_leak(scratchpad, manifest, mode, current_phase_order):
+def _phases_in_same_parallel_group(phase_a, phase_b):
+    """
+    Return True if phase_a and phase_b belong to the same PARALLEL_GROUPS entry,
+    meaning a "forward leak" between them is a false alarm (legitimate parallel
+    execution, not a phase skip).
+    """
+    if not phase_a or not phase_b or phase_a == phase_b:
+        return False
+    for group in PARALLEL_GROUPS:
+        if phase_a in group and phase_b in group:
+            return True
+    return False
+
+
+def detect_forward_leak(scratchpad, manifest, mode, current_phase_order, current_phase_name=None):
     """
     Check if the orchestrator has started writing artifacts for a LATER phase
     while the current phase is still incomplete. This indicates step skipping.
+
+    Phases listed in the same PARALLEL_GROUPS entry as current_phase_name are
+    exempt from leak detection (they legitimately run concurrently). When
+    current_phase_name is None, behavior is identical to the legacy version
+    (no parallel-group suppression).
 
     Returns (leaked_phase_name, leaked_artifact) or (None, None).
     """
@@ -445,12 +837,19 @@ def detect_forward_leak(scratchpad, manifest, mode, current_phase_order):
 
         if "mode_required" in phase and mode not in phase["mode_required"]:
             continue
+        if "mode_excluded" in phase and mode in phase["mode_excluded"]:
+            continue
+
+        # Suppress alarms for phases that legitimately run in parallel with
+        # the current phase (see PARALLEL_GROUPS at top of file).
+        if _phases_in_same_parallel_group(current_phase_name, phase_name):
+            continue
 
         min_bytes = phase.get("min_file_bytes", 50)
 
-        for artifact in phase.get("required_artifacts", []):
+        for artifact in (phase_field(phase, "required_artifacts", mode, default=[]) or []):
             if "*" in artifact:
-                matches = glob_match(scratchpad, artifact)
+                matches = artifact_matches(scratchpad, artifact)
                 valid = [m for m in matches if get_file_size(m) >= min_bytes]
                 if valid:
                     return phase_name, artifact
@@ -479,12 +878,21 @@ def cmd_init(args):
     mode = args[1].lower()
     project_root = args[2].replace("\\", "/") if len(args) > 2 else os.getcwd().replace("\\", "/")
 
-    if mode not in ("light", "core", "thorough"):
-        print("Invalid mode '{}'. Must be light, core, or thorough.".format(mode), file=sys.stderr)
+    # V2 bypass: if the V2 driver owns this scratchpad, do NOT initialize the
+    # V1 watchdog — the driver's Python gate replaces it. An --init call here
+    # is almost always a V1 prompt's Step 1.5 running under V2, which would
+    # install a breadcrumb that blocks subsequent phases.
+    if _is_v2_scratchpad(scratchpad):
+        print("[phase_gate] V2 checkpoint detected at {} -- watchdog init skipped".format(scratchpad), file=sys.stderr)
+        sys.exit(0)
+
+    if mode not in ("light", "core", "thorough", "l1", "l1-core", "l1-thorough"):
+        print("Invalid mode '{}'. Must be light, core, thorough, l1, l1-core, or l1-thorough.".format(mode), file=sys.stderr)
         sys.exit(1)
 
     state = {
         "version": "1.0.0",
+        "run_id": str(uuid.uuid4()),
         "mode": mode,
         "scratchpad": scratchpad,
         "project_root": project_root,
@@ -500,6 +908,13 @@ def cmd_init(args):
     }
 
     state_path = os.path.join(scratchpad, STATE_FILENAME).replace("\\", "/")
+    for generated_name in ("tool_calls.jsonl", "audit_validation.md"):
+        generated_path = os.path.join(scratchpad, generated_name).replace("\\", "/")
+        try:
+            if os.path.isfile(generated_path):
+                os.remove(generated_path)
+        except (IOError, OSError):
+            pass
     if save_json_file(state_path, state):
         # Write breadcrumb so Stop hook can find the state without env vars
         try:
@@ -610,6 +1025,258 @@ def cmd_track_write():
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: --pretool-check
+# ---------------------------------------------------------------------------
+#
+# PreToolUse hook for the Task tool. Blocks Phase 6 (Report) agent spawns
+# when Phase 5 verification artifacts are missing. Read-only on state file.
+# Honors dormancy, grace period, anti-loop free pass, and Light mode.
+# Fails open on any error to never break the pipeline.
+
+# Phase 6 detection markers — output filenames that only Phase 6 agents write.
+# Stable across orchestrator versions because they are load-bearing for
+# downstream report assembly.
+PHASE_6_OUTPUT_MARKERS = (
+    "report_index.md",
+    "report_critical_high.md",
+    "report_medium.md",
+    "report_low_info.md",
+    "report_quality.md",
+    "report_coverage.md",
+    "AUDIT_REPORT.md",
+)
+
+
+def cmd_pretool_check():
+    """
+    PreToolUse hook for the Task tool. Block Phase 6 (Report) agent spawns
+    when required Phase 5 verification artifacts are missing.
+
+    Read-only on watchdog_state.json. Never writes state — avoids race
+    conditions with the Stop hook (--stop) and PostToolUse hook
+    (--track-write).
+
+    Fail-open: any error path exits 0 (allow) to ensure the hook never
+    breaks the pipeline by mistake.
+
+    Exit codes:
+        0 + no output     → allow Task call
+        0 + JSON decision → block Task call with reason
+    """
+    # 1. Read stdin payload from Claude Code harness.
+    stdin_data = read_stdin_json()
+    if not stdin_data:
+        sys.exit(0)  # Fail-open: no input → allow
+
+    # 2. Defensive tool name check (matcher in settings.json should already
+    #    filter to "Task", but double-check in case the matcher changes).
+    if stdin_data.get("tool_name") != "Task":
+        sys.exit(0)
+
+    # 3. Extract the spawn prompt. Different orchestrator versions store it
+    #    under different keys; check all the common ones.
+    tool_input = stdin_data.get("tool_input", {}) or {}
+    prompt_text = (
+        tool_input.get("prompt", "")
+        or tool_input.get("description", "")
+        or tool_input.get("subject", "")
+    )
+    if not isinstance(prompt_text, str) or not prompt_text:
+        sys.exit(0)  # Fail-open: no prompt → allow
+
+    # 4. Detect Phase 6 spawn by output filename match. This is the most
+    #    stable detector because output filenames are load-bearing.
+    is_phase_6 = any(marker in prompt_text for marker in PHASE_6_OUTPUT_MARKERS)
+    if not is_phase_6:
+        sys.exit(0)  # Not Phase 6 → allow
+
+    # 5. Find the watchdog state file. If none, the audit is dormant or
+    #    this is a non-audit session — allow the call.
+    state_path = find_state_file()
+    if not state_path:
+        sys.exit(0)
+
+    state = load_json_file(state_path)
+    if not state:
+        sys.exit(0)  # Fail-open: corrupt state → allow
+
+    # 6. Anti-loop free pass: if the Stop hook just blocked, the next
+    #    cycle gets a free pass. Honor that here too — do not double-block.
+    if state.get("stop_hook_active"):
+        sys.exit(0)
+
+    scratchpad = state.get("scratchpad", "").replace("\\", "/")
+    if not scratchpad or not os.path.isdir(scratchpad):
+        sys.exit(0)  # Fail-open: no scratchpad → allow
+
+    mode = state.get("mode", "core")
+
+    # 7. Grace period: if the scratchpad has no .md artifacts yet, the
+    #    audit is in early bootstrap (recon planning). Phase 6 keywords
+    #    might appear coincidentally; do not block in grace period.
+    try:
+        md_count = sum(
+            1 for entry in os.listdir(scratchpad)
+            if entry.endswith(".md") and entry != STATE_FILENAME
+        )
+    except (IOError, OSError):
+        md_count = 0
+    if md_count == 0:
+        sys.exit(0)
+
+    # 8. Check Phase 5 artifacts.
+    missing = []
+
+    # 8a. Standard verification artifacts (verify_*.md). Required in all modes.
+    if not find_present_artifacts(scratchpad, "verify_*.md", min_bytes=100):
+        missing.append("verify_*.md (Phase 5: Verification — at least one required)")
+
+    # 8b. Cross-batch consistency. Required in Core/Thorough only.
+    if mode != "light":
+        if not find_present_artifacts(scratchpad, "cross_batch_consistency.md", min_bytes=100):
+            missing.append("cross_batch_consistency.md (Phase 5.2: Cross-Batch Consistency)")
+
+    # 8c. Per-finding Skeptic-Judge (Thorough only). If hypotheses.md contains
+    # any HIGH or CRITICAL findings, at least one skeptic_*.md must exist.
+    # We use the existence-of-any check (not strict count) for robustness:
+    # the failure mode we're catching is "zero skeptics ran at all", and
+    # strict per-finding matching is fragile to format variations.
+    if mode == "thorough":
+        hypotheses_path = os.path.join(scratchpad, "hypotheses.md").replace("\\", "/")
+        try:
+            with open(hypotheses_path, "r", encoding="utf-8", errors="ignore") as f:
+                hypotheses_text = f.read()
+        except (IOError, OSError):
+            hypotheses_text = ""
+
+        # Look for HIGH/CRITICAL severity markers. Use both heading-style
+        # and severity-line markers for robustness against format drift.
+        # `### H-\d` matches "### H-01:", does NOT match "### CH-1:" because
+        # the C is followed by H, not by digits.
+        import re
+        has_high_or_crit = bool(
+            re.search(r"^###\s+[HC]-\d+:", hypotheses_text, re.MULTILINE)
+            or re.search(r"\*\*Severity\*\*:\s*(High|Critical)", hypotheses_text)
+        )
+
+        if has_high_or_crit:
+            skeptic_files = find_present_artifacts(scratchpad, "skeptic_*.md", min_bytes=50)
+            if not skeptic_files:
+                missing.append(
+                    "skeptic_*.md (Phase 5.1: Skeptic-Judge — Thorough mode requires "
+                    "adversarial re-verification for every HIGH/CRIT finding)"
+                )
+
+    # 9. If anything is missing, block.
+    if missing:
+        block_reason = (
+            "[Watchdog PreToolUse BLOCK] Phase 6 (Report) agent spawn detected "
+            "before Phase 5 verification is complete.\n\n"
+            "Missing Phase 5 artifacts:\n"
+            + "\n".join("  - " + m for m in missing)
+            + "\n\n"
+            "ACTION REQUIRED: Spawn the missing verification agents BEFORE "
+            "spawning report agents:\n"
+            "  - Phase 5 verification: read prompts/{LANGUAGE}/phase5-verification-prompt.md\n"
+            "  - Phase 5.2 Cross-Batch: see CLAUDE.md Phase 5.2 section\n\n"
+            "Blocked spawn (truncated): " + prompt_text[:200].replace("\n", " ")
+        )
+        output_json({"decision": "block", "reason": block_reason})
+        sys.exit(0)
+
+    # 10. All checks passed — allow the Task spawn.
+    sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: --finalize
+# ---------------------------------------------------------------------------
+
+def cmd_finalize():
+    """
+    Explicitly finalize a completed audit run.
+    This is used at the end of the pipeline so stale stall metadata does not
+    survive simply because no later --stop hook fired after report assembly.
+    """
+    state_path = find_state_file()
+    if not state_path:
+        sys.exit(0)
+
+    state = load_json_file(state_path)
+    if not state:
+        sys.exit(0)
+
+    scratchpad = state.get("scratchpad", os.path.dirname(state_path)).replace("\\", "/")
+    manifest = load_json_file(MANIFEST_PATH)
+    if not manifest:
+        output_json({"decision": "error", "reason": "Manifest unavailable; cannot finalize audit state."})
+        sys.exit(0)
+
+    mode = state.get("mode", "core")
+    current_phase_name, _ = detect_current_phase(scratchpad, manifest, mode)
+    if current_phase_name != "complete":
+        output_json({
+            "decision": "error",
+            "reason": "Cannot finalize: run is incomplete and currently blocked on phase '{}'.".format(current_phase_name)
+        })
+        sys.exit(0)
+
+    latest_artifact_mtime = get_latest_artifact_mtime(scratchpad)
+    mark_state_complete(state_path, state, latest_artifact_mtime)
+    output_json({
+        "systemMessage": "[Watchdog] Audit finalized. Stale stall state cleared."
+    })
+    sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: --validate
+# ---------------------------------------------------------------------------
+
+def cmd_validate():
+    """
+    Run an explicit end-of-audit validation pass and write audit_validation.md.
+    Does not block; it reports pass/fail for the completed run.
+    """
+    state_path = find_state_file()
+    if not state_path:
+        sys.exit(0)
+
+    state = load_json_file(state_path)
+    if not state:
+        sys.exit(0)
+
+    manifest = load_json_file(MANIFEST_PATH)
+    if not manifest:
+        output_json({"decision": "error", "reason": "Manifest unavailable; cannot validate audit run."})
+        sys.exit(0)
+
+    scratchpad = state.get("scratchpad", os.path.dirname(state_path)).replace("\\", "/")
+    mode = state.get("mode", "core")
+    errors, warnings = collect_validation_issues(state, manifest)
+    report_path = write_validation_report(scratchpad, mode, errors, warnings)
+    validation_status = "pass" if not errors else "fail"
+
+    if not errors:
+        latest_artifact_mtime = max(get_latest_artifact_mtime(scratchpad), time.time())
+        mark_state_complete(state_path, state, latest_artifact_mtime, validation_status=validation_status)
+    else:
+        state["validation_status"] = validation_status
+        save_json_file(state_path, state)
+
+    message = "[Watchdog] Validation {}. {} errors, {} warnings.".format(
+        validation_status.upper(), len(errors), len(warnings)
+    )
+    if report_path:
+        message += " Report: {}".format(report_path)
+
+    output_json({
+        "systemMessage": message
+    })
+    sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: --stop
 # ---------------------------------------------------------------------------
 
@@ -681,25 +1348,40 @@ def cmd_stop():
     # Detect current phase
     current_phase_name, current_phase = detect_current_phase(scratchpad, manifest, mode)
 
+    # Fallback progress inference: some Codex sub-agent writes do not reliably
+    # trigger the write hook, so infer progress from actual artifact mtimes.
+    latest_artifact_mtime = get_latest_artifact_mtime(scratchpad)
+    if latest_artifact_mtime > state.get("last_write_time", 0):
+        state["stall_counter"] = 0
+        state["stall_phase"] = None
+        state["stall_missing"] = []
+        state["last_write_time"] = latest_artifact_mtime
+        save_json_file(state_path, state)
+
     if current_phase_name == "complete":
         # All phases have their artifacts — audit is done.
         # Clean up breadcrumb so the watchdog doesn't interfere with
         # non-audit work in the same project directory.
-        try:
-            os.remove(ACTIVE_AUDIT_PATH)
-        except (IOError, OSError):
-            pass
+        mark_state_complete(state_path, state, latest_artifact_mtime)
         sys.exit(0)
 
     # Get missing artifacts for current phase
     missing = get_missing_artifacts(scratchpad, current_phase, mode)
     if not missing:
         # Current phase is actually complete (edge case from conditional checks)
+        state["stall_counter"] = 0
+        state["stall_phase"] = None
+        state["stall_missing"] = []
+        state["last_write_time"] = latest_artifact_mtime
+        save_json_file(state_path, state)
         sys.exit(0)
 
-    # Check for forward leak - orchestrator started a later phase
+    # Check for forward leak - orchestrator started a later phase.
+    # Pass current_phase_name to enable PARALLEL_GROUPS suppression for phases
+    # that legitimately run concurrently (e.g., rescan + per_contract +
+    # semantic_invariants all run in parallel after inventory).
     leaked_phase, leaked_artifact = detect_forward_leak(
-        scratchpad, manifest, mode, current_phase["order"]
+        scratchpad, manifest, mode, current_phase["order"], current_phase_name
     )
 
     if leaked_phase:
@@ -815,7 +1497,7 @@ def cmd_stop():
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: phase_gate.py [--stop|--track-write|--init ...]", file=sys.stderr)
+        print("Usage: phase_gate.py [--stop|--track-write|--init ...|--finalize|--validate|--pretool-check]", file=sys.stderr)
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -826,6 +1508,12 @@ def main():
         cmd_track_write()
     elif cmd == "--init":
         cmd_init(sys.argv[2:])
+    elif cmd == "--finalize":
+        cmd_finalize()
+    elif cmd == "--validate":
+        cmd_validate()
+    elif cmd == "--pretool-check":
+        cmd_pretool_check()
     else:
         print("Unknown command: {}".format(cmd), file=sys.stderr)
         sys.exit(1)

@@ -13,6 +13,7 @@
 | Mismatch Type | Example | Impact |
 |---------------|---------|--------|
 | Generic type confusion | `Coin<FakeToken>` passed where `Coin<USDC>` expected | Wrong token processed, vault drain |
+| Generic/runtime config mismatch | `Pool<BTC>` plus `asset=USDC` or wrong pool ID for a position | Wrong asset accounting, free collateral, pool drain |
 | Object type parameter mismatch | `Pool<A, B>` vs `Pool<B, A>` | Swapped token pair, incorrect pricing |
 | Balance unwrap mismatch | `Balance<T>` unwrapped to wrong `Coin<T>` | Accounting corruption |
 | Dynamic field type confusion | Dynamic field read with wrong type parameter | Deserialized data misinterpretation, abort |
@@ -20,7 +21,7 @@
 
 **Sui key difference**: Sui Move has NO reentrancy. There are no callbacks, no hooks, no closures executing during external calls. External module calls are synchronous and complete before control returns. Focus analysis on: return type validation, object type parameter validation (`Coin<FakeToken>` vs `Coin<USDC>`), and dynamic field type confusion.
 
-**Action**: For every external module call returning objects or values: (1) trace the generic type parameters through all instantiation paths, (2) verify `Coin<T>` type constraints are enforced at the entry function level not just internally, (3) for dynamic field access, verify the key-value type pair matches what was stored.
+**Action**: For every external module call returning objects or values: (1) trace the generic type parameters through all instantiation paths, (2) verify `Coin<T>` type constraints are enforced at the entry function level not just internally, (3) for any generic `T` paired with an asset index/config row/object ID, verify `type_name::get<T>()` or `object::id()` binds the runtime selector to the generic type, (4) for dynamic field access, verify the key-value type pair matches what was stored.
 
 ---
 
@@ -516,13 +517,14 @@ Verify hot potato correctness:
 |---------|---------|--------|
 | `public` on state-changing function intended as `entry` | Function composable in PTB via other modules -> PTB manipulation attacks | Attacker chains manipulate->exploit->restore in one PTB |
 | `public` on internal helper | Helper exposed to external packages | Unintended state mutations by external callers |
+| `public` mutable reference getter | External package can obtain `&mut` internal account/balance/config/dynamic-field state | Direct state corruption or collateral drain |
 | `entry` on function meant for composability | Cannot be called by other modules or within PTB chains | Integration failure, protocol unusable by aggregators |
 | `public(package)` on function needing external access | External packages cannot integrate | Protocol isolation |
 | Missing access control on `public` function mutating shared object | Anyone can call with `&mut SharedObject` | Unauthorized state changes |
 | `public` function lock-in | `public` functions CANNOT be removed or have signatures changed in upgrades | Functions that may need modification should use `public(package)` or `entry` |
 | `friend` deprecation | Legacy code using `friend` declarations | Sui Move deprecated `friend` in favor of `public(package)` |
 
-**Action**: For every function, verify visibility matches intent. For every `public` function that modifies shared object state, verify access control (capability check, or explicit design for permissionless access). For every state-modifying function, verify visibility is minimized.
+**Action**: For every function, verify visibility matches intent. For every `public` function that modifies shared object state, returns `&mut`, or exposes `borrow_mut`/dynamic-field mutable access, verify access control (capability check, or explicit design for permissionless access). For every state-modifying function, verify visibility is minimized.
 
 ---
 
@@ -628,11 +630,12 @@ struct FlashLoanReceipt { amount: u64, fee: u64 }
 | # | Check | What to Verify | Impact if Wrong |
 |---|-------|---------------|----------------|
 | 1 | Zero abilities | Hot potato struct has NO abilities (especially no `drop`) | `drop` -> receipt discarded -> loan not repaid |
-| 2 | Consumption validates | `repay()` function checks: correct amount + fee, correct pool, not double-consumed | Under-repayment, wrong pool, replay |
+| 2 | Consumption validates | `repay()` function checks: correct amount + fee, correct pool/source object ID, not double-consumed | Under-repayment, wrong pool/order/position, replay |
 | 3 | No wrapping bypass | Can the receipt be placed inside an object with `store`? | If possible -> store receipt -> take loan without repaying in same tx |
 | 4 | Abort safety | If consuming function aborts, transaction rolls back -- ALL state including the loan is reversed | This is SAFE in Move -- abort = full rollback. No risk of loan-taken-but-not-repaid via abort. |
 | 5 | Multiple receipts | Can multiple receipts be obtained and only some repaid? | Track receipt count or use unique IDs |
 | 6 | Nested hot potatoes | If a hot potato contains or references another hot potato | Verify nesting does not create deadlock or bypass |
+| 7 | Source-object binding | Receipt stores source order/pool/position/loan ID and consume path asserts it equals `object::id(source_obj)` | Repay/settle against attacker object while victim source loses value |
 
 ### Capability Objects
 
@@ -650,7 +653,7 @@ struct FlashLoanReceipt { amount: u64, fee: u64 }
 - Permission tokens: `ActionPermission { action_type: u8 }` -- consumed by the permitted action function
 - Sequencing tokens: `StepOneComplete { data: ... }` -- consumed by step two function
 
-**Action**: For every hot potato struct, verify all 6 checks. If any consumption path allows value extraction without meeting obligations -> FINDING (typically HIGH or CRITICAL). For every capability object, audit abilities, uniqueness, ownership, revocation, and creation paths.
+**Action**: For every hot potato struct, verify all 7 checks. If any consumption path allows value extraction without meeting obligations, or consumes a receipt against a different source object than the one that created it, -> FINDING (typically HIGH or CRITICAL). For every capability object, audit abilities, uniqueness, ownership, revocation, and creation paths.
 
 ---
 

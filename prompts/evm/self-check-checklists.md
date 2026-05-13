@@ -1,4 +1,4 @@
-# Self-Check Checklists
+﻿# Self-Check Checklists
 
 > **Usage**: Orchestrator reviews these checklists at the end of each phase to ensure nothing was missed.
 
@@ -25,7 +25,7 @@
 - [ ] All findings have Rules Applied field [R4, R5, R6, R8, R9, R10, R11, R12, R13, R14, R15, R16]?
 - [ ] FLASH_LOAN_INTERACTION skill instantiated if FLASH_LOAN flag detected? (R15)
 - [ ] ORACLE_ANALYSIS skill instantiated if ORACLE flag detected? (R16)
-- [ ] Breadth agent count ≤ target from merge hierarchy? If exceeded, skills merged per M1-M5 priority? (FLASH_LOAN and ORACLE_ANALYSIS never merged)
+- [ ] Breadth agent count â‰¤ target from merge hierarchy? If exceeded, skills merged per M1-M5 priority? (FLASH_LOAN and ORACLE_ANALYSIS never merged)
 - [ ] ORACLE_ANALYSIS skill NOT merged with any other agent?
 - [ ] ECONOMIC_DESIGN_AUDIT skill instantiated if MONETARY_PARAMETER flag detected?
 - [ ] EXTERNAL_PRECONDITION_AUDIT skill instantiated if external interactions detected?
@@ -45,27 +45,27 @@
 ### Iteration 1 (full coverage)
 - [ ] All 4 depth agents spawned?
 - [ ] Blind Spot Scanner A spawned IN PARALLEL? (Tokens & Parameters)
-- [ ] blind_spot_A_findings.md exists in scratchpad?
+- [ ] blind_spot_a_findings.md exists in scratchpad?
 - [ ] Scanner A checked: external token coverage (R11), governance-changeable parameter coverage (R13)?
 - [ ] Blind Spot Scanner B spawned IN PARALLEL? (Guards, Visibility & Inheritance)
-- [ ] blind_spot_B_findings.md exists in scratchpad?
+- [ ] blind_spot_b_findings.md exists in scratchpad?
 - [ ] Scanner B checked: admin griefability (R2), function visibility, inherited capability completeness, override safety?
 - [ ] Blind Spot Scanner C spawned IN PARALLEL? (Role Lifecycle, Capability Exposure & Reachability)
-- [ ] blind_spot_C_findings.md exists in scratchpad?
+- [ ] blind_spot_c_findings.md exists in scratchpad?
 - [ ] Scanner C checked: role lifecycle completeness (grant/revoke pairs), inherited capability exposure gaps, function reachability audit?
 - [ ] Validation Sweep Agent spawned IN PARALLEL with depth agents?
 - [ ] validation_sweep_findings.md exists in scratchpad?
 - [ ] Depth agents answered "What would make this exploitable?"
 - [ ] Depth agents searched for enablers before REFUTED?
 - [ ] No REFUTED based on mock behavior?
-- [ ] Uncertain verdicts → CONTESTED (not REFUTED)?
+- [ ] Uncertain verdicts â†’ CONTESTED (not REFUTED)?
 - [ ] REFUTED upgraded to PARTIAL/CONTESTED where needed?
 - [ ] Timeout split-and-retry applied for timed-out agents? (2 lite agents = 1 budget unit)
 - [ ] Depth agent findings contain Depth Evidence tags ([BOUNDARY:*], [VARIATION:*], [TRACE:*])?
 
 ### Confidence Scoring (after iteration 1)
 - [ ] Consensus pre-computation completed (consensus_map.md)? (orchestrator inline)
-- [ ] Scoring agents spawned in domain batches (≤15 per batch)? (batched scoring)
+- [ ] Scoring agents spawned in domain batches (â‰¤15 per batch)? (batched scoring)
 - [ ] confidence_scores.md written to scratchpad?
 - [ ] confidence_distribution.md written to scratchpad?
 - [ ] All findings have composite confidence scores?
@@ -86,7 +86,7 @@
 - [ ] Severity-weighted spawn selection used for iterations 2-3? (Critical first)
 - [ ] Loop dynamics classified after iteration 2? (CONTRACTIVE/OSCILLATORY/EXPLORATORY)
 - [ ] If OSCILLATORY: all uncertain forced to CONTESTED and loop exited?
-- [ ] Total depth agent spawns ≤ dynamic budget cap?
+- [ ] Total depth agent spawns â‰¤ dynamic budget cap?
 - [ ] adaptive_loop_log.md written (iteration count, exit condition, spawns used, loop dynamics)?
 - [ ] Budget redirect triggered if remaining_budget >= 3? (Design Stress Testing Agent)
 
@@ -113,7 +113,7 @@
 - [ ] Cross-variable invariants checked? (Rule 14: aggregates, constraint coherence, setter regression)
 - [ ] Shared utility findings list ALL consumers in Impact section?
 - [ ] All privileged functions enumerated exhaustively via Slither? (Step 6b)
-- [ ] Rule 2 bidirectional: admin→user griefing checked? (admin parameter changes breaking user functions)
+- [ ] Rule 2 bidirectional: adminâ†’user griefing checked? (admin parameter changes breaking user functions)
 - [ ] Rule 16 oracle config bounds: oracle parameter setters have meaningful min/max?
 - [ ] Struct parameters to external calls validated? (Validation Sweep CHECK 5)
 - [ ] Initialization ordering checked for multi-contract systems? (depth-edge-case)
@@ -130,7 +130,7 @@
 - [ ] Passive attack modeling done for rate/timing findings (Rule 13)?
 - [ ] Chain analyzer read depth findings + blind_spot_A/B/C_findings.md + validation_sweep_findings.md?
 - [ ] Chain analyzer read confidence_scores.md for prioritization?
-- [ ] Chain analyzer found postcondition→precondition matches?
+- [ ] Chain analyzer found postconditionâ†’precondition matches?
 - [ ] Severity reassessed with chain context?
 - [ ] Chain severity matrix applied correctly?
 - [ ] Anti-absorption rule applied? (same fix required, no severity obscuring, both paths readable)
@@ -151,7 +151,7 @@
 - [ ] All chain hypotheses verified with PoC?
 - [ ] All Medium+ verified with PoC? (both Core and Thorough)
 - [ ] No [MOCK]/[EXT-UNV] evidence supports REFUTED?
-- [ ] RAG ≥ 6/8 findings not marked FALSE_POSITIVE?
+- [ ] RAG â‰¥ 6/8 findings not marked FALSE_POSITIVE?
 - [ ] Verifiers used real contract constants?
 - [ ] Fork testing MANDATORY for CONTESTED findings? (not just preferred)
 - [ ] Fork testing used for external dep hypotheses?
@@ -176,3 +176,4 @@
 - [ ] Quality: Finding counts match summary table?
 - [ ] Quality: Cross-references use report IDs only and all resolve?
 - [ ] Quality: Severity reflects FINAL verdict (post-verification), not original hypothesis?
+

@@ -1,0 +1,100 @@
+{
+  "target": "go-ethereum",
+  "language": "go",
+  "description": "Subsystem scope manifest for go-ethereum. Maps each L1 attack-surface layer to a scip-go package pattern set. Used by the T2 multi-scoped-run harness to produce one SCIP index per subsystem.",
+  "scip_indexer": "scip-go",
+  "usage": {
+    "single_subsystem": "scip-go ./eth/protocols/eth/...",
+    "note": "scip-go supports native scoped indexing via positional PackagePatterns (see Round 5 research). Multiple patterns can be passed in one invocation."
+  },
+  "scopes": {
+    "p2p": {
+      "patterns": [
+        "./p2p/...",
+        "./eth/protocols/eth/...",
+        "./eth/protocols/snap/..."
+      ],
+      "layers": ["network"],
+      "skills": [
+        "p2p-dos-and-eclipse",
+        "go-concurrency-safety"
+      ]
+    },
+    "mempool": {
+      "patterns": [
+        "./core/txpool/...",
+        "./eth/txpool/..."
+      ],
+      "layers": ["mempool"],
+      "skills": [
+        "mempool-asymmetric-dos",
+        "go-concurrency-safety"
+      ]
+    },
+    "consensus": {
+      "patterns": [
+        "./consensus/...",
+        "./core/forkchoice/...",
+        "./core/state_processor.go"
+      ],
+      "layers": ["consensus"],
+      "skills": [
+        "consensus-safety-invariants",
+        "fork-choice-audit",
+        "validator-lifecycle-and-slashing",
+        "hardfork-activation-and-protocol-upgrade"
+      ]
+    },
+    "execution": {
+      "patterns": [
+        "./core/vm/...",
+        "./core/state/..."
+      ],
+      "layers": ["execution"],
+      "skills": [
+        "execution-client-hardening",
+        "cross-environment-semantic-drift"
+      ]
+    },
+    "state-sync": {
+      "patterns": [
+        "./eth/downloader/...",
+        "./eth/protocols/snap/...",
+        "./trie/...",
+        "./core/rawdb/..."
+      ],
+      "layers": ["storage"],
+      "skills": [
+        "state-sync-pruning"
+      ]
+    },
+    "rpc": {
+      "patterns": [
+        "./rpc/...",
+        "./internal/ethapi/...",
+        "./eth/tracers/...",
+        "./graphql/..."
+      ],
+      "layers": ["rpc"],
+      "skills": [
+        "rpc-surface-audit"
+      ]
+    },
+    "crypto": {
+      "patterns": [
+        "./crypto/...",
+        "./p2p/rlpx/..."
+      ],
+      "layers": ["crypto"],
+      "skills": [
+        "bls-aggregation-audit",
+        "dependency-audit-nodeclient"
+      ]
+    }
+  },
+  "notes": {
+    "t2_composition": "For a T2 whole-client audit, iterate over scopes and spawn one /plamen l1 run per scope with SUBSYSTEM_SCOPE set. Merge the N resulting SARIF reports with plamen_l1.sarif_merge.",
+    "overlap": "Note that eth/protocols/snap appears in both 'p2p' and 'state-sync' scopes. The SARIF merge harness deduplicates findings by (rule_id, uri, start_line, end_line) so this overlap does not produce double-reporting.",
+    "coverage_check": "Before running T2, verify the patterns cover all security-critical packages. Use 'scip-go --help' to see pattern syntax. Packages not in any scope will be missed by the T2 run — keep this manifest current with go-ethereum's upstream directory layout."
+  }
+}

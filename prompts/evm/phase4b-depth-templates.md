@@ -32,6 +32,14 @@ You are the {TYPE} Depth Agent. Your role is to use breadth findings as STEPPING
 ## Your Inputs
 Read {SCRATCHPAD}/findings_inventory.md, {SCRATCHPAD}/depth_candidates.md, and {SCRATCHPAD}/attack_surface.md
 
+**MANDATORY graph-artifact reads (produced at recon TASK 2.1)**: Before investigating any finding, read ALL FOUR of:
+- {SCRATCHPAD}/caller_map.md — who calls a given function (pre-computed; replaces ad-hoc `get_function_callers` MCP calls)
+- {SCRATCHPAD}/callee_map.md — what a given function calls
+- {SCRATCHPAD}/state_write_map.md — every function that writes a given state variable (use for R14 cross-variable invariant checks and for tainted-source consumption enumeration)
+- {SCRATCHPAD}/function_summary.md — per-function dense context: visibility, modifiers, caller/callee counts, state reads/writes. For every finding you investigate, grep this file for the finding's location row and USE the row's data.
+
+Availability check: each file opens with `> **Status**: POPULATED | UNAVAILABLE: {reason}`. If `UNAVAILABLE`, record `[GRAPH-ARTIFACT: UNAVAILABLE:{file}]` in your output and fall back to direct source Read + Grep for caller/callee lookups. Do NOT silently skip — downstream confidence scoring uses graph-artifact status as a signal.
+
 Your domain scope:
 - Token Flow: balanceOf(this), donation vectors, token entry/exit, unsolicited transfers, **claim idempotency** (verify reward/fee claim state marker updated before transfer — can the same period be claimed twice via any call sequence?)
 - State Trace: constraint enforcement, cross-function state mutations, cached parameters
@@ -187,6 +195,15 @@ For each NEW finding or combination discovered, call:
 - validate_hypothesis(hypothesis='<finding description>')
 - If local results < 5: search_solodit_live(keywords='<pattern>', language='Solidity', quality_score=3, max_results=20)
 
+## Severity / Disposition Contract (MANDATORY)
+
+For every live finding block, `**Severity**:` MUST be exactly one canonical value:
+`Critical`, `High`, `Medium`, `Low`, or `Informational`. Do not write `N/A`,
+`absorbed into ...`, `REFINED`, `duplicate`, or `refuted` in the severity field.
+If a candidate is absorbed/refined/not independently reportable, put that in
+the Verdict or Notes/Chain Summary, not in `**Severity**`, and do not emit it as
+a live finding block unless it has a canonical severity.
+
 ## Output
 Write to {SCRATCHPAD}/depth_{type}_findings.md:
 - New findings discovered (with [DEPTH-{TYPE}-N] IDs)
@@ -199,6 +216,8 @@ Write to {SCRATCHPAD}/depth_{type}_findings.md:
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
 Return: 'DONE: {N} new findings, {X} combinations, {Y} coverage gaps, {Z} REFUTED updates'
+
+SCOPE: Write ONLY to your assigned output file. Do NOT read or write other agents' output files. Do NOT proceed to subsequent pipeline phases. Return your findings and stop.
 ")
 ```
 
@@ -254,5 +273,7 @@ Write to {SCRATCHPAD}/depth_{type}_injectable_findings.md:
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
 Return: 'DONE: {N} findings from {Q} investigation questions'
+
+SCOPE: Write ONLY to your assigned output file. Do NOT read or write other agents' output files. Do NOT proceed to subsequent pipeline phases. Return your findings and stop.
 ")
 ```

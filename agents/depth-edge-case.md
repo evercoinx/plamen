@@ -95,6 +95,13 @@ For comparison operators in critical logic:
 - Provide concrete numbers, not variables
 - State: "With fee = 300 BPS, underflow occurs when input < X"
 
+### 6. Always-on boundary checklist
+
+Do not stop after the flagged edge. For every numeric parameter or container
+bound touched by the target, record concrete behavior at `{0, 1, max,
+boundary-1, boundary, boundary+1, empty-container}` and note whether the code
+rejects, saturates, panics, wraps, or silently misroutes.
+
 ## Output Format
 
 Write to `{scratchpad}/depth_edge_case_findings.md`:

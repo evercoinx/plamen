@@ -82,11 +82,42 @@ You may NOT dismiss a defense parity gap as "Informational" or "design note".
 
 Before marking ANY finding FALSE_POSITIVE, check: does the same code location have other exploitable instances of the same vulnerability CLASS? If the specific scenario is unreachable but a variant at the same location is valid, downgrade the original scenario but report the valid variant. Example: if uint128→uint96 truncation is unreachable, check whether precision divergence between the two types causes rounding errors at realistic values.
 
-## MANDATORY PoC EXECUTION (v9.9.5)
+## MANDATORY PoC EXECUTION
 
 Follow `phase5-poc-execution.md`. Compile and run every PoC - a written test with no execution output is not evidence.
 
 **EVM commands**: `forge build` (compile), `forge test --match-test test_{HYPOTHESIS_ID} -vvv` (run), `forge test --match-test test_{HYPOTHESIS_ID} --fork-url {RPC_URL} -vvv` (fork). For fuzz variants: write a `testFuzz_` function with `bound()` inputs and run `forge test --match-test testFuzz_{HYPOTHESIS_ID} -vvv`. If project uses Hardhat only (no `foundry.toml`): use `npx hardhat compile` and `npx hardhat test --grep "{HYPOTHESIS_ID}"`, skip fuzz variant.
+
+## POC TESTABILITY TRIAGE (MANDATORY)
+
+Read the shard row's `PoC Class` before choosing evidence:
+
+- `unit`: write the smallest Foundry/Hardhat test that calls the exact queued
+  function/path and asserts the claimed harm. For arithmetic, accounting,
+  state-machine, revert/DoS, slippage, allocation, and access-control findings,
+  executable proof is expected.
+- `property`: write a targeted invariant/fuzz or bounded parameter test. Use
+  Foundry fuzzing when `foundry.toml` exists.
+- `integration` / `structural`: executable proof is preferred, but code trace
+  is allowed when no local harness can model the external system or design
+  property.
+
+Do not write "no Foundry test written", `Compiled: N/A`, or `Result: N/A` for
+a `unit` or `property` row unless the PoC ledger names a concrete
+environmental blocker. If you fall back to `[CODE-TRACE]` on a testable row,
+the verdict is `CONTESTED`, not `CONFIRMED`.
+
+Every output must include:
+
+```markdown
+### PoC Attempt
+- PoC Required: YES/NO
+- PoC Class: <unit|property|integration|structural>
+- Attempted: YES/NO
+- PoC Not Attempted Because: <NO_BUILD_ENVIRONMENT|EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS|DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL|PURE_SPEC_OR_DOCS_ONLY|STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION|N/A>
+- Test File: <path or N/A>
+- Command: <forge/hardhat command or N/A>
+```
 
 ## ANTI-HALLUCINATION RULES (MANDATORY)
 

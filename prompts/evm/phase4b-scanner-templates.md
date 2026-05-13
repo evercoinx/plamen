@@ -1,4 +1,4 @@
-# Phase 4b: Scanner & Sweep Templates
+﻿# Phase 4b: Scanner & Sweep Templates
 
 > **Usage**: Orchestrator reads this file to spawn the 3 Blind Spot Scanners, Validation Sweep Agent, and Design Stress Testing Agent in iteration 1.
 > Replace placeholders `{SCRATCHPAD}`, etc. with actual values.
@@ -29,7 +29,7 @@ Read:
 - {SCRATCHPAD}/findings_inventory.md (what WAS analyzed)
 - {SCRATCHPAD}/constraint_variables.md (governance-changeable parameters)
 
-## Processing Protocol (MANDATORY — applies to every CHECK below)
+## Processing Protocol (MANDATORY â€” applies to every CHECK below)
 
 For each CHECK, execute three steps in order:
 1. **ENUMERATE targets**: List every entity the CHECK applies to (tokens, parameters, call sites, contracts) as a numbered list before analysis begins.
@@ -43,25 +43,25 @@ For each external token in the Token Flow Matrix:
 | External Token | Analyzed by Agent? | Finding IDs | Dimensions Covered (R11) | Missing Dimensions |
 |----------------|-------------------|-------------|--------------------------|-------------------|
 
-If ANY external token has 0 findings AND is transferable to the protocol → BLIND SPOT.
-If ANY external token has findings covering ≤2 of 5 R11 dimensions AND uncovered dimensions are applicable → PARTIAL BLIND SPOT.
+If ANY external token has 0 findings AND is transferable to the protocol â†’ BLIND SPOT.
+If ANY external token has findings covering â‰¤2 of 5 R11 dimensions AND uncovered dimensions are applicable â†’ PARTIAL BLIND SPOT.
 
-**Dimension coverage gate**: For each token with ≥1 finding, verify coverage breadth:
+**Dimension coverage gate**: For each token with â‰¥1 finding, verify coverage breadth:
 
 | External Token | R11-D1: Transferability | R11-D2: Accounting | R11-D3: Op Blocking | R11-D4: Loop/Gas | R11-D5: Side Effects | Dimensions Covered |
 |----------------|------------------------|--------------------:|--------------------:|-----------------|---------------------|-------------------|
 
-If ANY token has findings covering ≤2 of 5 dimensions AND the uncovered dimensions are applicable → PARTIAL BLIND SPOT.
+If ANY token has findings covering â‰¤2 of 5 dimensions AND the uncovered dimensions are applicable â†’ PARTIAL BLIND SPOT.
 Applicable = the token type supports that interaction (e.g., NFTs don't have D4:Loop/Gas unless enumerable).
 
 ## CHECK 1b: Unchecked ERC20 Transfer Return Values (Slither fallback)
 Skip this check if `SLITHER: AVAILABLE` in build_status.md (Slither's `unchecked-transfer` detector covers this).
-Grep for raw `.transfer(` and `.transferFrom(` calls (NOT `safeTransfer`/`safeTransferFrom`) on external token addresses. For each: is the return value checked (`require(token.transfer(...))`) or is SafeERC20 used? If neither, tokens like USDT that return false on failure will silently fail — state updates proceed but no tokens move.
+Grep for raw `.transfer(` and `.transferFrom(` calls (NOT `safeTransfer`/`safeTransferFrom`) on external token addresses. For each: is the return value checked (`require(token.transfer(...))`) or is SafeERC20 used? If neither, tokens like USDT that return false on failure will silently fail â€” state updates proceed but no tokens move.
 
 | Call Site | Token | Uses SafeERC20? | Return Value Checked? | Gap? |
 |-----------|-------|-----------------|----------------------|------|
 
-If raw `.transfer()`/`.transferFrom()` without return-value handling found → FINDING (MEDIUM: silent transfer failure with non-reverting tokens like USDT).
+If raw `.transfer()`/`.transferFrom()` without return-value handling found â†’ FINDING (MEDIUM: silent transfer failure with non-reverting tokens like USDT).
 
 ## CHECK 2: Governance-Changeable Parameter Coverage
 From constraint_variables.md, for each parameter with a setter function:
@@ -72,13 +72,13 @@ From constraint_variables.md, for each parameter with a setter function:
 **Apply Rule 13**: For each parameter change, model BOTH directions:
 - Parameter INCREASES: who is harmed?
 - Parameter DECREASES: who is harmed?
-- If either direction harms users AND no finding covers it → BLIND SPOT
+- If either direction harms users AND no finding covers it â†’ BLIND SPOT
 
 **Apply Rule 14**: For each parameter:
 - Does its setter enforce bounds? (min/max checks before writing storage)
 - Can the new value be set below accumulated state? (setter regression)
 - Is there a related parameter that must maintain coherence? (constraint coherence)
-- **Silent misconfiguration**: If the setter has NO bounds check, trace downstream math with an accepted-but-extreme value. Does the system revert, or does it silently produce wrong results? A setter that accepts any value AND downstream math silently breaks for part of the accepted range is a finding — even without an attacker.
+- **Silent misconfiguration**: If the setter has NO bounds check, trace downstream math with an accepted-but-extreme value. Does the system revert, or does it silently produce wrong results? A setter that accepts any value AND downstream math silently breaks for part of the accepted range is a finding â€” even without an attacker.
 
 ## CHECK 2b: Native Value in Loops (IF msg.value detected in scope)
 Skip this check if `msg.value` is not detected in the scoped contracts.
@@ -87,7 +87,7 @@ Grep for `msg.value` inside `for`/`while` loops or in functions called by `multi
 | Function | Contains msg.value? | Inside Loop/Batch? | Total msg.value Uses | Gap? |
 |----------|--------------------|--------------------|---------------------|------|
 
-If msg.value is read more than once in a single call context (loop iteration, multicall delegate) → each iteration reuses the same msg.value → FINDING (HIGH: direct fund theft via double-spend).
+If msg.value is read more than once in a single call context (loop iteration, multicall delegate) â†’ each iteration reuses the same msg.value â†’ FINDING (HIGH: direct fund theft via double-spend).
 
 ## CHECK 2c: Unbounded Return Data (IF .call{|.call(|.delegatecall( detected in scope)
 Skip this check if low-level `.call{`, `.call(`, or `.delegatecall(` is not detected in the scoped contracts.
@@ -96,7 +96,7 @@ Grep for low-level `.call(` where the return data is copied without size cap:
 | External Call Site | Return Data Bounded? | Copy Method | Gap? |
 |-------------------|---------------------|-------------|------|
 
-Vulnerable pattern: `(bool success, bytes memory data) = target.call(...)` where `data` is unbounded and caller pays gas for copy. Safe pattern: `ExcessivelySafeCall` or `assembly { returndatacopy(..., ..., min(returndatasize(), CAP)) }`. If unbounded AND in a loop or user-triggered path → FINDING (MEDIUM: gas griefing / DoS).
+Vulnerable pattern: `(bool success, bytes memory data) = target.call(...)` where `data` is unbounded and caller pays gas for copy. Safe pattern: `ExcessivelySafeCall` or `assembly { returndatacopy(..., ..., min(returndatasize(), CAP)) }`. If unbounded AND in a loop or user-triggered path â†’ FINDING (MEDIUM: gas griefing / DoS).
 
 ## CHECK 2d: Relay/Meta-tx Gas Griefing (IF gasleft()|relayer|forwarder detected in scope)
 Skip this check if `gasleft()`, `relayer`, `forwarder`, or meta-transaction patterns are not detected in the scoped contracts.
@@ -105,18 +105,18 @@ Grep for `gasleft()`, `meta-transaction`, `relayer`, `forwarder`, or functions t
 | Relay Function | Gas Forwarding Pattern | Minimum Gas Check? | Refund on Failure? | Gap? |
 |---------------|----------------------|-------------------|-------------------|------|
 
-If a relay function forwards a user-specified call without ensuring sufficient gas remains for post-call logic → FINDING (MEDIUM: relayer can be griefed into paying gas for failed txs, or insufficient gas causes silent partial execution).
+If a relay function forwards a user-specified call without ensuring sufficient gas remains for post-call logic â†’ FINDING (MEDIUM: relayer can be griefed into paying gas for failed txs, or insufficient gas causes silent partial execution).
 
 ## CHECK 2e: Approval/Delegate Sequence Conflicts (IF approve/safeApprove/increaseAllowance detected in scope)
-Skip this check if no `approve`, `safeApprove`, `increaseAllowance`, or `permit` patterns are detected in the scoped contracts. If `{SCRATCHPAD}/niche_multi_step_safety_findings.md` exists and is non-empty, limit this to listing affected functions in a table [Function | Pattern | Note] — do NOT trace execution, compute impacts, or construct exploitation scenarios. The niche agent handles deep analysis.
-For each multi-step operation (batch calls, multicall, loops over tokens), enumerate all approve/increaseAllowance/safeApprove calls. If the same (spender, token) pair is approved more than once in the same sequence, verify amounts are additive or the second accounts for the first. Sequential overwrites → FINDING.
+Skip this check if no `approve`, `safeApprove`, `increaseAllowance`, or `permit` patterns are detected in the scoped contracts. If `{SCRATCHPAD}/niche_multi_step_safety_findings.md` exists and is non-empty, limit this to listing affected functions in a table [Function | Pattern | Note] â€” do NOT trace execution, compute impacts, or construct exploitation scenarios. The niche agent handles deep analysis.
+For each multi-step operation (batch calls, multicall, loops over tokens), enumerate all approve/increaseAllowance/safeApprove calls. If the same (spender, token) pair is approved more than once in the same sequence, verify amounts are additive or the second accounts for the first. Sequential overwrites â†’ FINDING.
 
 ## CHECK 2f: Infrastructure Address Targeting (IF depositFor/stakeFor/delegateTo detected in scope)
-Skip this check if no `depositFor`, `stakeFor`, `delegateTo`, `mintFor`, `withdrawFor`, or similar on-behalf-of function patterns are detected. If `{SCRATCHPAD}/niche_multi_step_safety_findings.md` exists and is non-empty, limit this to listing affected functions in a table [Function | Target Param | Note] — do NOT trace execution or compute impacts.
-For each public/external function that writes state keyed by an address parameter (e.g., `depositFor(target)`, `stakeFor(target)`, `delegateTo(target)`): can any protocol infrastructure contract (router, vault, pool, strategy) be used as the target? If yes, what state is imposed on it, and does it break protocol operations? → FINDING.
+Skip this check if no `depositFor`, `stakeFor`, `delegateTo`, `mintFor`, `withdrawFor`, or similar on-behalf-of function patterns are detected. If `{SCRATCHPAD}/niche_multi_step_safety_findings.md` exists and is non-empty, limit this to listing affected functions in a table [Function | Target Param | Note] â€” do NOT trace execution or compute impacts.
+For each public/external function that writes state keyed by an address parameter (e.g., `depositFor(target)`, `stakeFor(target)`, `delegateTo(target)`): can any protocol infrastructure contract (router, vault, pool, strategy) be used as the target? If yes, what state is imposed on it, and does it break protocol operations? â†’ FINDING.
 
 ## CHECK 2g: Missing Native ETH Receiver
-For each contract in scope, determine whether it is **designed to accept native ETH**. Evidence of design intent (any one is sufficient): (1) design_context.md or docs state it handles native tokens/ETH, (2) code branches on native-ETH sentinel values (`Currency.isAddressZero()`, `token == address(0)`, `isNative`, `NATIVE_TOKEN`), (3) operational implications indicate ETH inflows from external sources (sweeps, refunds, WETH unwraps, Uniswap V4 native currency support), (4) a parent or caller contract sends ETH to `address(this)` via `.transfer()`, `.send()`, or `.call{value:}`. If the contract is designed to accept native ETH but declares no `receive()` or `fallback() payable` → FINDING (MEDIUM if it breaks a core lifecycle flow; LOW if convenience path only).
+For each contract in scope, determine whether it is **designed to accept native ETH**. Evidence of design intent (any one is sufficient): (1) design_context.md or docs state it handles native tokens/ETH, (2) code branches on native-ETH sentinel values (`Currency.isAddressZero()`, `token == address(0)`, `isNative`, `NATIVE_TOKEN`), (3) operational implications indicate ETH inflows from external sources (sweeps, refunds, WETH unwraps, Uniswap V4 native currency support), (4) a parent or caller contract sends ETH to `address(this)` via `.transfer()`, `.send()`, or `.call{value:}`. If the contract is designed to accept native ETH but declares no `receive()` or `fallback() payable` â†’ FINDING (MEDIUM if it breaks a core lifecycle flow; LOW if convenience path only).
 
 **Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
@@ -129,7 +129,7 @@ For each contract in scope, determine whether it is **designed to accept native 
 | Finding ID | Location | Root Cause (1-line) | Verdict | Severity | Precondition Type | Postcondition Type |
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
-Write to {SCRATCHPAD}/blind_spot_A_findings.md
+Write to {SCRATCHPAD}/blind_spot_a_findings.md
 
 Return: 'DONE: {N} blind spots - Check1: {A} token gaps, Check2: {B} parameter gaps'
 ")
@@ -152,7 +152,7 @@ Read:
 - {SCRATCHPAD}/function_list.md (complete function inventory)
 - {SCRATCHPAD}/state_variables.md (all state variables)
 
-## Processing Protocol (MANDATORY — applies to every CHECK below)
+## Processing Protocol (MANDATORY â€” applies to every CHECK below)
 
 For each CHECK, execute three steps in order:
 1. **ENUMERATE targets**: List every entity the CHECK applies to (guards, modifiers, overrides, functions) as a numbered list before analysis begins.
@@ -165,7 +165,7 @@ From function_list.md, for each function with access control modifiers:
 | Admin Function | Preconditions | User-Manipulable? | Analyzed by Agent? | Finding ID |
 |----------------|---------------|-------------------|-------------------|------------|
 
-If precondition is user-manipulable AND no finding covers it → BLIND SPOT.
+If precondition is user-manipulable AND no finding covers it â†’ BLIND SPOT.
 
 ## CHECK 4: Permissionless Function Visibility Audit
 From function_list.md, for each public/external function WITHOUT access control modifiers:
@@ -213,7 +213,7 @@ For each base contract with virtual functions:
 | Finding ID | Location | Root Cause (1-line) | Verdict | Severity | Precondition Type | Postcondition Type |
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
-Write to {SCRATCHPAD}/blind_spot_B_findings.md
+Write to {SCRATCHPAD}/blind_spot_b_findings.md
 
 Return: 'DONE: {N} blind spots - Check3: {A} admin gaps, Check4: {B} visibility gaps, Check5: {C} inheritance gaps, Check5b: {D} override gaps'
 ")
@@ -238,7 +238,7 @@ Read:
 - {SCRATCHPAD}/state_variables.md (all state variables)
 - Source files for all in-scope contracts
 
-## Processing Protocol (MANDATORY — applies to every CHECK below)
+## Processing Protocol (MANDATORY â€” applies to every CHECK below)
 
 For each CHECK, execute three steps in order:
 1. **ENUMERATE targets**: List every entity the CHECK applies to (roles, capabilities, functions, call paths) as a numbered list before analysis begins.
@@ -254,7 +254,7 @@ For each role identified in the codebase (via AccessControl, custom role mapping
 
 **Methodology**:
 - For each role granted via `grantRole`, `_setupRole`, constructor assignment, or custom setter: does a corresponding `revokeRole` or removal function exist?
-- If NO revocation function exists → FINDING: irrevocable role (minimum Medium if role modifies user-facing state)
+- If NO revocation function exists â†’ FINDING: irrevocable role (minimum Medium if role modifies user-facing state)
 - Check for circular dependencies: does revoking Role A require Role B, and granting Role B require Role A?
 - Check: can a role holder block their own removal? (e.g., role can pause the contract, and revocation requires unpaused state)
 
@@ -268,7 +268,7 @@ For each base contract inherited by in-scope contracts:
 **Methodology**:
 - List ALL internal/private functions provided by inherited base contracts (e.g., `_setPeriod`, `_pause`, `_setOracle`, `_mint`)
 - For each: is there a public/external function in the inheriting contract that exposes this capability?
-- If a base provides a critical configuration function (e.g., `_setPeriod`) but no in-scope contract exposes it → FINDING: inherited capability is unreachable post-deployment
+- If a base provides a critical configuration function (e.g., `_setPeriod`) but no in-scope contract exposes it â†’ FINDING: inherited capability is unreachable post-deployment
 - Severity: Medium if the unreachable function controls a parameter that affects protocol correctness; Low if it's a convenience function
 
 ## CHECK 8: Function Reachability Audit
@@ -283,7 +283,7 @@ For each public/external function in all in-scope contracts:
 - Identify functions that are defined but NEVER called by any other in-scope contract or expected external caller
 - For dead code with security implications: does the dead function have access control? Could it be called by anyone if discovered? Does it modify state?
 - Special focus: functions that WERE reachable in a previous version but became unreachable after refactoring (look for commented-out callers, TODO comments, or version indicators)
-- Flag: public functions with no callers that modify critical state → potential backdoor or forgotten migration artifact
+- Flag: public functions with no callers that modify critical state â†’ potential backdoor or forgotten migration artifact
 
 **Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
@@ -296,7 +296,7 @@ For each public/external function in all in-scope contracts:
 | Finding ID | Location | Root Cause (1-line) | Verdict | Severity | Precondition Type | Postcondition Type |
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
 
-Write to {SCRATCHPAD}/blind_spot_C_findings.md
+Write to {SCRATCHPAD}/blind_spot_c_findings.md
 
 Return: 'DONE: {N} blind spots - Check6: {A} role lifecycle gaps, Check7: {B} capability exposure gaps, Check8: {C} reachability gaps'
 ")
@@ -323,7 +323,7 @@ Read:
 ## INPUT FILTERING
 When cross-referencing against findings_inventory.md, focus on Medium+ severity findings only. Low/Info findings do not need cross-validation sweeps - the attention cost of processing 50+ findings outweighs the marginal value of sweeping Low/Info patterns.
 
-## Processing Protocol (MANDATORY — applies to every CHECK below)
+## Processing Protocol (MANDATORY â€” applies to every CHECK below)
 
 For each CHECK, execute three steps in order:
 1. **ENUMERATE targets**: List every entity the CHECK applies to (validations, operators, guards, functions) as a numbered list before analysis begins.
@@ -373,7 +373,7 @@ For EVERY modifier or access control guard applied to at least one function:
 **Methodology**:
 - For each modifier (e.g., `nonReentrant`, `whenNotPaused`, `onlyRole(X)`), list ALL functions it protects
 - Identify ALL other functions that write to the SAME state variables
-- If any function writes to the same state but lacks the guard → flag as potential gap
+- If any function writes to the same state but lacks the guard â†’ flag as potential gap
 - For access-controlled write functions: check if there is a permissionless function that achieves the same state mutation through a different path
 
 **Concrete test**: If `functionA` has `onlyOperator` and writes `stateVar`, and `functionB` also writes `stateVar` but has no access control, that is a guard gap.
@@ -388,7 +388,7 @@ For each user-facing action verb (stake, withdraw, claim, exit, getReward):
 **Methodology**:
 - Enumerate ALL contracts that expose a function for this user action
 - For each pair, compare: access control, timing guards (delays, cooldowns), reentrancy guards, state validation
-- If Contract A has a protection that Contract B lacks for the SAME user action → flag
+- If Contract A has a protection that Contract B lacks for the SAME user action â†’ flag
 
 **Concrete test**: If `ContractA.withdraw()` checks `block.number >= lastActionBlock + delay` but `ContractB.withdraw()` has no such delay for the same economic action, that is a parity gap.
 
@@ -420,8 +420,8 @@ or `funds.sender` is caller-supplied and passed directly to external DEX without
 
 **Untrusted call target check**: For every `InterfaceName(addr).function()` call where `addr` is decoded from calldata, function parameters, or user-supplied structs:
 1. Is `addr` validated against a registry, factory, or known-good set BEFORE being called?
-2. If NOT validated: the call target is attacker-deployable. All return values from the call are UNTRUSTED — an attacker can deploy a contract implementing the expected interface that returns arbitrary values to bypass validation logic.
-3. For each untrusted return value: trace how it is used downstream. If it gates access control, token movement, or accounting → FINDING (High if funds at risk, Medium if DoS only).
+2. If NOT validated: the call target is attacker-deployable. All return values from the call are UNTRUSTED â€” an attacker can deploy a contract implementing the expected interface that returns arbitrary values to bypass validation logic.
+3. For each untrusted return value: trace how it is used downstream. If it gates access control, token movement, or accounting â†’ FINDING (High if funds at risk, Medium if DoS only).
 
 ## CHECK 6: Helper Function Call-Site Parity
 
@@ -447,7 +447,7 @@ Read `{SCRATCHPAD}/semantic_invariants.md` (pre-computed by Phase 4a.5 agent). F
 | Variable | Flagged Gap | Confirmed? | Finding? |
 |----------|-----------|-----------|----------|
 
-Verify each flagged gap: does the value-changing function actually modify the tracked value without updating the variable? Filter false positives (e.g., view-only reads, functions that indirectly trigger an update elsewhere). Confirmed gaps → FINDING.
+Verify each flagged gap: does the value-changing function actually modify the tracked value without updating the variable? Filter false positives (e.g., view-only reads, functions that indirectly trigger an update elsewhere). Confirmed gaps â†’ FINDING.
 
 ## CHECK 8: Conditional Branch State Completeness
 
@@ -459,13 +459,13 @@ For EVERY state-modifying function that contains an if/else or early return:
 **Methodology**:
 - For each conditional branch in a state-modifying function, enumerate ALL state writes in the TRUE path
 - Enumerate ALL state writes in the FALSE path (including the implicit "nothing happens" path for early returns)
-- If a state variable is written in one branch but NOT the other, and both branches represent valid execution paths (not error/revert) → flag as potential stale state
+- If a state variable is written in one branch but NOT the other, and both branches represent valid execution paths (not error/revert) â†’ flag as potential stale state
 - Special focus: functions where fee accrual, timestamp updates, or checkpoint writes are inside a conditional block but downstream consumers assume they always executed
 - Special focus: functions where a "pause" or "skip" branch updates timestamps/counters but NOT accumulators, or vice versa
 
 **Concrete test**: If `functionA` writes `lastUpdate = now` inside an `if (amount > 0)` block, what value does `lastUpdate` retain when `amount == 0`? Trace all consumers of `lastUpdate` - do they produce correct results with the stale value?
 
-Tag: [TRACE:branch=false → stateVar={old_value} → consumer computes {wrong_result}]
+Tag: [TRACE:branch=false â†’ stateVar={old_value} â†’ consumer computes {wrong_result}]
 
 ## CHECK 9: Validation Semantic Adequacy
 
@@ -474,12 +474,12 @@ For EVERY validation that protects against value loss (slippage checks, balance 
 | Validation | What It Measures | What It Should Measure | Match? |
 |-----------|-----------------|----------------------|--------|
 
-**Classification** — for each validation, determine:
+**Classification** â€” for each validation, determine:
 - Does it check ABSOLUTE state (total balance) or RELATIVE change (delta per operation)?
 - Does it check AGGREGATE result (batch total) or PER-ITEM result (individual operation)?
 - Does it check a PROXY metric (correlated value) or the DIRECT metric (actual value at risk)?
 
-If the validation uses absolute/aggregate/proxy AND the protected operation is per-item or requires delta measurement → FINDING: validation measures the wrong granularity. A batch of operations where each individually loses value but the aggregate stays flat (cross-subsidized by profitable operations or prior balance) passes an aggregate check but fails a per-item check.
+If the validation uses absolute/aggregate/proxy AND the protected operation is per-item or requires delta measurement â†’ FINDING: validation measures the wrong granularity. A batch of operations where each individually loses value but the aggregate stays flat (cross-subsidized by profitable operations or prior balance) passes an aggregate check but fails a per-item check.
 
 **Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 
@@ -516,7 +516,7 @@ Return: 'DONE: {N} functions swept, {M} boundary issues, {K} reachability gaps, 
 ## Sibling Propagation Agent
 
 > **Trigger**: Always runs IN PARALLEL with Validation Sweep (iteration 1 only).
-> **Purpose**: Propagate confirmed root cause patterns to sibling functions. Extracted from Validation Sweep to avoid positional attention degradation (was CHECK 9 of 9 — highest cognitive load in worst attention position).
+> **Purpose**: Propagate confirmed root cause patterns to sibling functions. Extracted from Validation Sweep to avoid positional attention degradation (was CHECK 9 of 9 â€” highest cognitive load in worst attention position).
 > **Budget**: Scanner-tier (part of fixed base count, not depth budget).
 
 ```
@@ -535,7 +535,7 @@ For each Medium+ CONFIRMED or PARTIAL finding in findings_inventory.md:
 1. Extract the ROOT CAUSE PATTERN in one sentence (e.g., 'state variable updated inside conditional block that can be skipped', 'paired operation asymmetry between deposit/withdraw paths')
 2. Grep ALL other functions in scope for the SAME pattern (same variable types, same code structure, same operation sequence)
 3. For each sibling function found: does it exhibit the SAME bug?
-4. If YES and no existing finding covers it → new finding [SP-N]
+4. If YES and no existing finding covers it â†’ new finding [SP-N]
 
 | Finding | Root Cause Pattern | Sibling Functions | Same Bug? | New Finding? |
 |---------|-------------------|-------------------|-----------|-------------|
@@ -543,7 +543,7 @@ For each Medium+ CONFIRMED or PARTIAL finding in findings_inventory.md:
 ## Output
 Write to {SCRATCHPAD}/sibling_propagation_findings.md
 Use finding IDs [SP-1], [SP-2], etc. with standard finding format.
-Maximum 8 findings — prioritize by severity.
+Maximum 8 findings â€” prioritize by severity.
 
 ## Chain Summary (MANDATORY)
 | Finding ID | Location | Root Cause (1-line) | Verdict | Severity | Precondition Type | Postcondition Type |
@@ -583,7 +583,7 @@ For each bounded parameter (max array length, max users, capacity limits, max va
 1. What happens AT the design limit? (OOG? infinite loop? graceful degradation? revert?)
 2. Are administrative functions still usable at design limit? (emergency withdraw, pause, parameter update)
 3. Gas cost at limit vs block gas limit - does any function become uncallable?
-Tag: [BOUNDARY:param=MAX_VALUE → outcome]
+Tag: [BOUNDARY:param=MAX_VALUE â†’ outcome]
 
 ## CHECK 2: Rule 13 Design Adequacy
 For each user-facing function:
@@ -594,7 +594,7 @@ For each user-facing function:
 1. Does it fulfill its stated purpose COMPLETELY? (e.g., `emergencyWithdraw` that only handles LP tokens but not individual deposits)
 2. Are there user states with no exit path? (deposited but cannot withdraw, staked but cannot unstake)
 3. Does the function name promise something the implementation does not deliver?
-If incomplete → FINDING (Rule 13, design gap)
+If incomplete â†’ FINDING (Rule 13, design gap)
 
 ## CHECK 3: Constraint Coherence (Rule 14)
 For each pair of independently-settable limits in constraint_variables.md:
@@ -605,7 +605,7 @@ For each pair of independently-settable limits in constraint_variables.md:
 1. Must they satisfy a mathematical relationship for correctness? (e.g., `globalCap >= sum(localCaps)`, `maxTotal == sum(maxPerCategory)`)
 2. Can one be changed via setter without updating the other?
 3. Trace what breaks if desynchronized: infinite loops, underflows, bypasses, wasted gas
-Tag: [TRACE:limitA=X, limitB=Y → outcome at L{N}]
+Tag: [TRACE:limitA=X, limitB=Y â†’ outcome at L{N}]
 
 ## CHECK 4: Yield/Reward Timing Fairness
 For each yield distribution, reward streaming, or vesting mechanism:
@@ -616,10 +616,10 @@ For each yield distribution, reward streaming, or vesting mechanism:
 1. Can a user deposit IMMEDIATELY BEFORE a yield/reward distribution and capture a disproportionate share?
 2. Is there a cooldown, lock period, or time-weighted balance that prevents sandwich timing attacks?
 3. For streaming/vesting: can a user enter AFTER streaming starts but before it ends and capture already-vested gains at the current (inflated) share price?
-4. For multi-step distributions (vest → claim → transfer): can timing between steps be exploited?
-5. Trace: if user deposits at T, distribution occurs at T+1 block, user withdraws at T+2 - what is the user's profit vs a user who was deposited for the full period? If disproportionate → FINDING
+4. For multi-step distributions (vest â†’ claim â†’ transfer): can timing between steps be exploited?
+5. Trace: if user deposits at T, distribution occurs at T+1 block, user withdraws at T+2 - what is the user's profit vs a user who was deposited for the full period? If disproportionate â†’ FINDING
 
-Tag: [TRACE:deposit_at=T, distribution_at=T+1, withdraw_at=T+2 → profit={X} vs long_term_user={Y} → fairness_ratio={Z}]
+Tag: [TRACE:deposit_at=T, distribution_at=T+1, withdraw_at=T+2 â†’ profit={X} vs long_term_user={Y} â†’ fairness_ratio={Z}]
 
 ## Output
 Write to {SCRATCHPAD}/design_stress_findings.md:
@@ -633,3 +633,4 @@ Write to {SCRATCHPAD}/design_stress_findings.md:
 Return: 'DONE: {N} design stress findings'
 ")
 ```
+

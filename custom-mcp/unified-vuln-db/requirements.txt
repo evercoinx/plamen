@@ -1,26 +1,29 @@
-# Core
-mcp>=1.0.0
-chromadb>=0.4.0
-pydantic>=2.0.0
+# unified-vuln-db MCP server — pinned 2026-04-17
+# All versions verified against PyPI; no known CVEs at time of pinning.
 
-# Embeddings — always all-MiniLM-L6-v2 (~90MB, 384-dim, fast CPU inference)
-sentence-transformers>=2.2.0
+# Core
+mcp==1.27.0
+chromadb==1.5.8
+pydantic==2.13.2
+
+# Embeddings — all-MiniLM-L6-v2 (~90MB, 384-dim, fast CPU inference)
+sentence-transformers==5.4.1
 
 # Data fetching
-httpx>=0.24.0
-aiofiles>=23.0.0
-beautifulsoup4>=4.12.0
-lxml>=4.9.0
-datasets>=2.14.0  # For HuggingFace
+httpx==0.28.1
+aiofiles==25.1.0
+beautifulsoup4==4.14.3
+lxml==6.0.4
+datasets==4.8.4
 
 # Rate limiting & retry
-tenacity>=8.2.0
-ratelimit>=2.2.0
+tenacity==9.1.4
+ratelimit==2.2.1
 
 # Utils
-anyio>=4.0.0
-click>=8.1.0
-rich>=13.0.0
-python-dotenv>=1.0.0
+anyio==4.13.0
+click==8.3.2
+rich==15.0.0
+python-dotenv==1.2.2
 
 # Note: torch and transformers are installed automatically by sentence-transformers

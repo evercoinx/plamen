@@ -18,14 +18,10 @@
 | `blind_spot_c_findings.md` | Scanner C | 4b iter 1 |
 | `validation_sweep_findings.md` | Validation Sweep | 4b iter 1 |
 | `design_stress_findings.md` | Design Stress Testing | 4b iter 1 |
-| `symmetric_pairs.md` | Orchestrator (pre-depth) | 4b pre |
 | `perturbation_findings.md` | Finding Perturbation Agent | 4b post |
 | `skill_execution_gaps.md` | Skill Execution Checklist | 4b post |
 | `confidence_scores.md` | Scoring agent | 4b scoring |
-| `confidence_distribution.md` | Orchestrator | 4b scoring |
 | `adaptive_loop_log.md` | Orchestrator | 4b exit |
-| `phase4b_manifest.md` | Orchestrator | 4b exit |
-| `rag_validation.md` | RAG Sweep agent | 4b.5 |
 
 ## Niche Agent Artifacts (conditional — check template_recommendations.md)
 
@@ -38,10 +34,10 @@ For each niche agent marked `Required: YES` in `{SCRATCHPAD}/template_recommenda
 | HAS_MULTI_CONTRACT | `niche_semantic_consistency_findings.md` |
 | HAS_SIGNATURES | `niche_signature_findings.md` |
 | HAS_DOCS | `niche_spec_compliance_findings.md` |
-| MULTI_STEP_OPS | `niche_multi_step_findings.md` |
-| STABLESWAP_FORK | `niche_stableswap_findings.md` |
-| MIXED_DECIMALS | `niche_dimensional_findings.md` |
-| OUTCOME_CALLBACK (EVM only) | `niche_callback_findings.md` |
+| MULTI_STEP_OPS | `niche_multi_step_safety_findings.md` |
+| STABLESWAP_FORK | `niche_stableswap_compliance_findings.md` |
+| MIXED_DECIMALS | `niche_dimensional_analysis_findings.md` |
+| OUTCOME_CALLBACK (EVM only) | `niche_callback_safety_findings.md` |
 
 ## Checkpoint Protocol
 

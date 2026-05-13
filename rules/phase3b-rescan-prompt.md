@@ -1,8 +1,8 @@
-# Phase 3b/3c: Breadth Re-Scan & Per-Contract Analysis
+﻿# Phase 3b/3c: Breadth Re-Scan & Per-Contract Analysis
 
 > **Purpose**: Counter LLM attention saturation by re-running breadth analysis with an exclusion list of already-found findings. Finds vulnerabilities masked by attention to prominent bugs in pass 1.
 > **Model**: sonnet (discovery task - surfaces candidates for depth loop to verify; also provides implicit model diversity vs opus pass 1)
-> **Trigger**: Always runs at least 1 iteration after Phase 4a inventory completes.
+> **Trigger**: V2 runs this after first-pass breadth and before Phase 4a inventory.
 > **Protocol-agnostic**: No language-specific logic. Uses the same scope and artifacts as pass 1.
 
 ---
@@ -10,10 +10,12 @@
 ## Orchestrator Flow
 
 ```
-Phase 3 (pass 1) → Phase 4a (inventory) → Phase 3b (re-scan loop) → Phase 3c (per-contract) → Phase 4a merge → Phase 4a.5 → Phase 4b
+Phase 3 (pass 1) -> Phase 3b (re-scan loop) -> Phase 3c (per-contract) -> Phase 4a inventory -> Phase 4a.5 -> Phase 4b
 ```
 
-Phase 4a runs FIRST to produce the exclusion list (findings_inventory.md). Then Phase 3b re-scans. Then inventory is updated with new findings before proceeding to semantic invariants and depth.
+Phase 3b/3c are discovery phases only. They write additional analysis files.
+Phase 4a inventory runs after them and consumes first-pass breadth, re-scan,
+and per-contract outputs in one inventory build.
 
 ---
 
@@ -23,7 +25,7 @@ Phase 4a runs FIRST to produce the exclusion list (findings_inventory.md). Then 
 |-----------|-------|
 | **Hard cap** | 2 iterations (configurable) |
 | **Exit early** | Iteration N produces 0 new findings above Info severity |
-| **Hard exit** | If iteration 1 produces 0 new findings above Info severity → **skip iteration 2 unconditionally**. Do NOT spawn iteration 2 agents "just to be thorough." |
+| **Hard exit** | If iteration 1 produces 0 new findings above Info severity â†’ **skip iteration 2 unconditionally**. Do NOT spawn iteration 2 agents "just to be thorough." |
 | **Quality gate** | New findings must reference specific code locations (file:line). Vague speculation without code reference is not a valid new finding. |
 | **Agent count** | 2-3 agents per iteration (fewer than pass 1) |
 | **Scope per agent** | Broader than pass 1 - each agent covers half the codebase, not a narrow focus area. Overlapping scope is intentional. |
@@ -34,8 +36,10 @@ Phase 4a runs FIRST to produce the exclusion list (findings_inventory.md). Then 
 
 ### Step 1: Build Exclusion List
 
-Read `{SCRATCHPAD}/findings_inventory.md`. Extract for each finding:
-- Finding ID, title, location (file:line), 1-line root cause
+Read first-pass breadth outputs matching `{SCRATCHPAD}/analysis_*.md`, excluding
+`analysis_rescan_*.md` and `analysis_percontract_*.md`. Extract for each
+candidate finding:
+- Finding ID or heading, title, location (file:line), 1-line root cause
 
 Format as a compact exclusion list (~1 line per finding).
 
@@ -46,6 +50,8 @@ Spawn 2-3 agents in parallel as `general-purpose` with `model="sonnet"`:
 ```
 Task(subagent_type="general-purpose", model="sonnet", prompt="
 You are Breadth Re-Scan Agent #{N}.
+
+**FIRST ACTION**: Use the Write tool to create `{SCRATCHPAD}/analysis_rescan_{N}.md` with a one-line header `# Re-Scan Agent {N}`. This reserves your write budget so the file exists on disk even if your analysis is interrupted.
 
 ## Context
 You are performing a SECOND PASS analysis of a smart contract codebase. A first pass already identified {F} findings. Your job is to find vulnerabilities that the first pass MISSED.
@@ -94,14 +100,14 @@ After all re-scan agents return:
 1. Read each `analysis_rescan_*.md`
 2. Count new findings above Info severity
 3. Verify no finding duplicates an exclusion list entry (same location + same root cause = duplicate, discard)
-4. If 0 new findings above Info → **EXIT loop, proceed to inventory merge**
-5. If new findings found → **proceed to iteration 2**
+4. If 0 new findings above Info -> **EXIT loop, proceed to per-contract or inventory**
+5. If new findings found â†’ **proceed to iteration 2**
 
 ### MANDATORY EXIT ASSERTION (orchestrator inline)
 ```
 new_findings_above_info = count(iteration 1 findings where severity > Info)
-ASSERT: if new_findings_above_info > 0 → iteration 2 MUST be spawned
-Violation is a workflow error. Log: "Rescan exit check: {N} new findings above Info → CONTINUE/EXIT"
+ASSERT: if new_findings_above_info > 0 â†’ iteration 2 MUST be spawned
+Violation is a workflow error. Log: "Rescan exit check: {N} new findings above Info â†’ CONTINUE/EXIT"
 ```
 
 ---
@@ -121,20 +127,22 @@ Same as iteration 1, but with:
 
 ### Step 3: Evaluate Results
 
-Same as iteration 1 step 3. After iteration 2, proceed to inventory merge regardless of results (hard cap reached).
+Same as iteration 1 step 3. After iteration 2, proceed to per-contract or inventory regardless of results (hard cap reached).
 
 ---
 
-## Inventory Merge
+## Inventory Handoff
 
 After Phase 3b re-scan loop AND Phase 3c per-contract analysis both exit:
 
-1. If re-scan or per-contract analysis produced new findings:
-   - Re-run Phase 4a inventory agent with ADDITIONAL input: `{SCRATCHPAD}/analysis_rescan_*.md` and `{SCRATCHPAD}/analysis_percontract_*.md`
-   - Or: spawn a lightweight merge agent (haiku) that reads findings_inventory.md + rescan files + per-contract files and appends new entries
-2. If neither produced new findings: skip merge, proceed to Phase 4a.5
+1. Stop. Do not write or append `{SCRATCHPAD}/findings_inventory.md`.
+2. The next V2 phase is Phase 4a inventory. It consumes:
+   - `{SCRATCHPAD}/analysis_*.md`
+   - `{SCRATCHPAD}/analysis_rescan_*.md`
+   - `{SCRATCHPAD}/analysis_percontract_*.md`
+3. If no new findings were produced, still stop cleanly; Phase 4a handles the empty additional-input case.
 
-The merge must complete BEFORE Phase 4a.5 (semantic invariants) so that new findings are included in the invariant analysis and depth agent inputs.
+Inventory is the first phase allowed to write `findings_inventory.md`.
 
 ---
 
@@ -144,8 +152,8 @@ The merge must complete BEFORE Phase 4a.5 (semantic invariants) so that new find
 |-----------|------|
 | Iteration 1 | 2-3 sonnet agents |
 | Iteration 2 (conditional) | 2-3 sonnet agents |
-| Inventory merge | 1 haiku agent (if new findings) |
-| **Total max** | **7 sonnet + 1 haiku** |
+| Inventory handoff | 0 agents (Phase 4a handles synthesis) |
+| **Total max** | **6 sonnet** |
 
 Sonnet agents are ~3-5x cheaper than opus. Total re-scan cost is roughly equivalent to 1-2 opus breadth agents from pass 1.
 
@@ -164,20 +172,20 @@ Sonnet agents are ~3-5x cheaper than opus. Total re-scan cost is roughly equival
 
 > **Purpose**: Counter attention-spread by assigning one agent per contract/inheritance cluster. Where breadth agents analyze the entire codebase (catching cross-contract bugs) and re-scan agents look for masked findings, per-contract agents analyze each file at maximum depth with zero distraction from other contracts.
 > **Model**: sonnet (focused analysis within narrow scope)
-> **Trigger**: Always runs after Phase 3b re-scan completes, before Phase 4a merge.
+> **Trigger**: Always runs after Phase 3b re-scan completes, before Phase 4a inventory.
 > **Prerequisite**: Recon must have produced `contract_inventory.md` with dependency data.
 
 ### Orchestrator Flow
 
 ```
-Phase 3b (re-scan) → Phase 3c (per-contract) → Phase 4a merge → Phase 4a.5 → Phase 4b
+Phase 3b (re-scan) -> Phase 3c (per-contract) -> Phase 4a inventory -> Phase 4a.5 -> Phase 4b
 ```
 
-Phase 3c runs after Phase 3b. Its findings are merged into inventory alongside re-scan findings before proceeding to semantic invariants and depth.
+Phase 3c runs after Phase 3b. Its findings are consumed by the later inventory phase alongside first-pass and re-scan findings.
 
 ### Step 0: Feed Exclusion List to Per-Contract Agents
 
-Per-contract agents MUST receive the same exclusion list as Phase 3b re-scan agents. This prevents duplicate findings between 3c and breadth pass 1. Build the exclusion list from `{SCRATCHPAD}/findings_inventory.md` (same format as Phase 3b Step 1) and include it in every per-contract agent prompt.
+Per-contract agents MUST receive the same exclusion list as Phase 3b re-scan agents. This prevents duplicate findings between 3c and breadth pass 1. Build the exclusion list from first-pass `analysis_*.md` plus `analysis_rescan_*.md` outputs, not from `findings_inventory.md`.
 
 ### Step 1: Build Contract Clusters
 
@@ -187,10 +195,10 @@ Read `{SCRATCHPAD}/contract_inventory.md` and group contracts by inheritance/dep
 |---------|-----------|-------|-----------------|
 
 **Clustering rules**:
-- Contracts in the same inheritance chain → same cluster (e.g., base + derived)
-- Standalone contracts with no inheritance → own cluster
+- Contracts in the same inheritance chain â†’ same cluster (e.g., base + derived)
+- Standalone contracts with no inheritance â†’ own cluster
 - **Parent conditional override**: If `contract_inventory.md` flags any parent with `PARENT_CONDITIONAL_OVERRIDE`, include that parent in the cluster even if it is out of the primary audit scope. The per-contract agent MUST analyze the parent's conditional branches and virtual functions as part of the cluster - child contract behavior depends on parent branch paths.
-- **Parent standalone analysis (v9.9.5)**: When a parent contract is independently in the audit scope AND a child contract overrides its virtual functions, the parent MUST ALSO be analyzed as a **standalone cluster** (in addition to appearing in the child's inheritance cluster). The standalone agent examines the parent's own logic as if no child exists - this catches bugs in the parent's unconditional code paths (e.g., timestamp updates, fee calculations, state transitions that execute regardless of which child override is active) that are invisible when analyzing through the child's override lens.
+- **Parent standalone analysis**: When a parent contract is independently in the audit scope AND a child contract overrides its virtual functions, the parent MUST ALSO be analyzed as a **standalone cluster** (in addition to appearing in the child's inheritance cluster). The standalone agent examines the parent's own logic as if no child exists - this catches bugs in the parent's unconditional code paths (e.g., timestamp updates, fee calculations, state transitions that execute regardless of which child override is active) that are invisible when analyzing through the child's override lens.
 - Cluster size cap: max 1500 lines per cluster. If a cluster exceeds this, split by logical boundary.
 - Target: 1 agent per cluster. Max 8 agents total (cap for cost control).
 
@@ -211,6 +219,8 @@ Spawn all per-contract agents in parallel as `general-purpose` with `model="sonn
 Task(subagent_type="general-purpose", model="sonnet", prompt="
 You are Per-Contract Agent #{N}: focused on {CLUSTER_NAME}.
 
+**FIRST ACTION**: Use the Write tool to create `{SCRATCHPAD}/analysis_percontract_{N}.md` with a one-line header `# Per-Contract Agent {N}: {CLUSTER_NAME}`. This reserves your write budget so the file exists on disk even if your analysis is interrupted.
+
 ## CRITICAL INSTRUCTION
 You are analyzing ONLY the following contract(s). Do NOT analyze other contracts.
 Your goal is MAXIMUM DEPTH on this narrow scope - find bugs that broad-scope agents miss.
@@ -219,7 +229,7 @@ Your goal is MAXIMUM DEPTH on this narrow scope - find bugs that broad-scope age
 {CONTRACT_LIST with file paths and line ranges}
 
 ### Already-Known Findings (Exclusion List)
-{EXCLUSION_LIST - from findings_inventory.md + rescan, same format as Phase 3b}
+{EXCLUSION_LIST - from first-pass analysis + rescan outputs, same format as Phase 3b}
 
 ### Cross-Contract Context (flags only - do NOT analyze these contracts)
 {CROSS_CONTRACT_FLAGS - inbound/outbound deps, shared state}
@@ -238,7 +248,7 @@ For EACH function in your cluster:
 2. **Conditional branch audit**: For each if/else, what state is written in each branch? Is any state stale in the skip path?
 3. **Boundary values**: What happens at 0, 1, MAX, and type-boundary values for each parameter?
 4. **Pairing audit**: For each encode/normalize/hash operation, trace the inverse (decode/denormalize/verify) - do they use the same inputs in the same order?
-5. **Fee/reward trace**: If the function involves fees or rewards, trace the full flow: accrual → accumulation → claim → transfer. At each step, verify assets and shares remain consistent.
+5. **Fee/reward trace**: If the function involves fees or rewards, trace the full flow: accrual â†’ accumulation â†’ claim â†’ transfer. At each step, verify assets and shares remain consistent.
 
 ## Output Requirements
 Write to {SCRATCHPAD}/analysis_percontract_{N}.md
@@ -249,7 +259,7 @@ Maximum 5 findings per agent - prioritize by severity.
 ## File Coverage Checkpoint (MANDATORY)
 Before writing findings, list EVERY source file in your cluster and confirm you opened it:
 | File | Lines | Opened? | Functions Analyzed |
-If any file shows Opened: NO — open and analyze it before returning.
+If any file shows Opened: NO â€” open and analyze it before returning.
 
 ## Quality Gate
 Every finding MUST include a specific code location (file:line). Findings without code references will be discarded.
@@ -278,3 +288,4 @@ After all per-contract agents return:
 ### No Iteration Needed
 
 Per-contract analysis does NOT iterate. The narrow scope (single contract/cluster) IS the mechanism that provides depth - there is no attention saturation to counter via re-scanning. One pass per contract is sufficient.
+

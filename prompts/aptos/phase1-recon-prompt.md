@@ -13,7 +13,7 @@
 > | **3: Patterns + Surface + Templates** | opus | TASK 4, 5, 6, 7, 10 | Pure codebase analysis, fast; pattern detection needs reasoning |
 >
 >
-> **CRITICAL - RAG TIMEOUT POLICY (v9.9.6)**:
+> **CRITICAL - RAG TIMEOUT POLICY**:
 > Agent 1A is **FIRE-AND-FORGET**. The orchestrator MUST NOT block on Agent 1A completion.
 > - Spawn Agent 1A with `run_in_background: true`
 > - **DO NOT await Agent 1A** before proceeding to Phase 2. Wait ONLY for Agents 1B, 2, and 3.
@@ -24,7 +24,7 @@
 >
 > Agent 1A writes: `meta_buffer.md`
 > Agent 1B writes: `design_context.md`, `external_production_behavior.md`, fork section of `meta_buffer.md`
-> Agent 2 writes: `build_status.md`, `function_list.md`, `call_graph.md`, `state_variables.md`, `modifiers.md`, `event_definitions.md`, `external_interfaces.md`, `static_analysis.md`, `test_results.md`
+> Agent 2 writes: `build_status.md`, `function_list.md`, `call_graph.md`, `state_variables.md`, `modifiers.md`, `event_definitions.md`, `external_interfaces.md`, `static_analysis.md`, `test_results.md`, `caller_map.md`, `callee_map.md`, `state_write_map.md`, `function_summary.md`
 > Agent 3 writes: `contract_inventory.md`, `attack_surface.md`, `detected_patterns.md`, `setter_list.md`, `emit_list.md`, `constraint_variables.md`, `template_recommendations.md`
 > Orchestrator writes: `recon_summary.md` (after Agents 1B, 2, 3 complete - NOT waiting for 1A)
 
@@ -565,6 +565,80 @@ Write to {SCRATCHPAD}/event_definitions.md
 - List all imported modules and which functions are used from each
 Write to {SCRATCHPAD}/external_interfaces.md
 
+### TASK 2.1: Derived Graph Artifacts (depth-agent inputs, uniform schema across all 5 languages)
+
+Produce four derived artifacts that downstream phases consume via Read (V2
+driver disables MCP except in rag_sweep). Aptos Move has no Slither
+equivalent, so grep-based derivation is primary. The schema is IDENTICAL
+to EVM/Solana/Sui/Soroban so depth agents reuse the same read patterns.
+
+**Schema contract.** Every file opens with:
+```
+> **Status**: POPULATED | UNAVAILABLE: {reason}
+> **Source**: grep-based derivation (Aptos Move has no AST-level static analyzer)
+> **Generated**: {timestamp UTC}
+```
+
+#### Artifact 1: `caller_map.md`
+
+| Callee | Caller | Call Site |
+|--------|--------|-----------|
+| `module::function` | `module::function` | `file.move:L123` |
+
+Generation: For each public/entry/package-visible function in
+`function_list.md`, grep `\b(module::)?fn_name\s*[<(]` across .move
+files in scope (exclude tests/, build/). Identify containing function
+from the nearest preceding `fun `/`public fun `/`entry fun ` declaration.
+
+Write to `{SCRATCHPAD}/caller_map.md`.
+
+#### Artifact 2: `callee_map.md`
+
+| Caller | Callee | Call Site |
+|--------|--------|-----------|
+| `module::function` | `module::function` | `file.move:L45` |
+
+Generation: For each function body, grep:
+- Intra-module: `\b\w+\s*\(`
+- Cross-module: `\b\w+::\w+\s*\(`
+- Framework: `coin::`, `fungible_asset::`, `aptos_account::`, `object::`, `event::`, `table::`
+
+Callees in the Aptos framework use the fully-qualified form (`aptos_framework::coin::deposit`).
+
+Write to `{SCRATCHPAD}/callee_map.md`.
+
+#### Artifact 3: `state_write_map.md`
+
+Aptos state is resource/struct-field scoped under resource accounts.
+
+| State Variable | Writer Function | Write Site | Access |
+|----------------|-----------------|------------|--------|
+| `Pool.total_borrows` | `pool::borrow` | `pool.move:L89` | inc |
+
+Generation: For each field in `state_variables.md`, grep write patterns:
+- Borrow-mut: `borrow_global_mut<T>`, `borrow_mut`
+- Assignment: `\.\w+\s*=`
+- Framework: `move_to`, `move_from`, `event::emit`, `table::add`, `table::upsert`, `table::remove`, `vector::push_back`, `vector::pop_back`, `vector::swap_remove`
+
+Access column: `set` / `inc` / `dec` / `push` / `pop` / `add` / `remove` /
+`move_to` / `move_from`.
+
+Write to `{SCRATCHPAD}/state_write_map.md`.
+
+#### Artifact 4: `function_summary.md`
+
+| Function | Visibility | Modifiers | #Callers | #Callees | State Reads | State Writes |
+|----------|-----------|-----------|----------|----------|-------------|--------------|
+| `pool::deposit` | public entry | acquires Pool | 3 | 5 | Pool.balance | Pool.balance,Pool.shares |
+
+Generation: Aggregate from `function_list.md` + `modifiers.md` + the
+caller/callee/state-write maps above. `Visibility` =
+`public` / `public(friend)` / `public(package)` / `entry` / `friend` /
+`private`. `Modifiers` = `acquires` declarations + any framework-level
+capability types used.
+
+Write to `{SCRATCHPAD}/function_summary.md`.
+
 ## TASK 8: Run Static Detectors (grep-based)
 
 Run targeted grep checks for Aptos Move-specific vulnerability patterns:
@@ -652,6 +726,12 @@ Write to {SCRATCHPAD}/static_analysis.md:
 | Flag | Count | Locations | Severity |
 |------|-------|-----------|----------|
 ```
+
+**OpenGrep PRE-CHECK (v2.5.0)**: The Python recon prepass may have run OpenGrep
+with Aptos Move rules (aptos-labs/semgrep-move-rules). Check if
+`{SCRATCHPAD}/opengrep_findings.md` exists. If it does, read it and APPEND its
+findings to `static_analysis.md` under `## OpenGrep Findings`. This is
+complementary to Move Prover and grep-based analysis.
 
 ## TASK 9: Run Test Suite
 
@@ -808,7 +888,7 @@ Grep in .move source files (exclude build/, .aptos/, tests/):
 | Pattern | Flag |
 |---------|------|
 | `epoch\|timestamp\|duration\|interval\|period\|block::get_current\|timestamp::now` | TEMPORAL |
-| `oracle\|price_feed\|pyth\|switchboard\|price_oracle\|PriceFeed\|price_info` | ORACLE |
+| `oracle\|price_feed\|pyth\|switchboard\|price_oracle\|PriceFeed\|price_info\|sqrt_price\|current_tick\|pool_reserves` | ORACLE |
 | `randomness\|random\|aptos_framework::randomness\|#\[randomness\]` | RANDOMNESS |
 | `flash_loan\|flash\|hot_potato\|borrow.*repay\|FlashLoan` | FLASH_LOAN |
 | `fungible_asset\|FungibleAsset\|FungibleStore\|primary_fungible_store\|dispatchable` | FA_STANDARD |
