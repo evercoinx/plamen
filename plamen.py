@@ -740,6 +740,20 @@ def check_dependencies() -> bool:
 
 # ── Installer ───────────────────────────────────────────────
 
+# Defined early so _INSTALL_RECIPES below can use them in inline conditionals
+# at module-load time (e.g. the macOS+brew test for the rust-analyzer prereq).
+def _has_bash() -> bool:
+    return bool(shutil.which("bash"))
+
+
+def _has_brew() -> bool:
+    return bool(shutil.which("brew"))
+
+
+def _has_winget() -> bool:
+    return sys.platform == "win32" and bool(shutil.which("winget"))
+
+
 # ── Prerequisite installers (auto-installed when needed) ────
 
 _FOUNDRY_PATHS = ["~/.foundry/bin"]
@@ -1117,18 +1131,6 @@ _INSTALL_RECIPES = {
          "rust" if not (sys.platform == "darwin" and _has_brew()) else None),
     ],
 }
-
-
-def _has_bash() -> bool:
-    return bool(shutil.which("bash"))
-
-
-def _has_brew() -> bool:
-    return bool(shutil.which("brew"))
-
-
-def _has_winget() -> bool:
-    return sys.platform == "win32" and bool(shutil.which("winget"))
 
 
 def _needs_bash(cmd: str) -> bool:

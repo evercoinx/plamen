@@ -74,7 +74,10 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install pytest
-        run: pip install --upgrade pip pytest
+        # Use `python -m pip` form because plain `pip install --upgrade pip`
+        # fails on Windows ("ERROR: To modify pip, please run...") — pip
+        # cannot upgrade itself while it's the running entrypoint.
+        run: python -m pip install --upgrade pip pytest
       - name: Install Plamen Python deps if requirements.txt exists
         shell: bash
         run: |
