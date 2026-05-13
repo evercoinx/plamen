@@ -181,12 +181,24 @@ Works on all platforms. No special setup needed beyond Rust and the Stellar CLI.
 | Tool | Purpose | Install | Required? |
 |------|---------|---------|-----------|
 | Go | 1.22+ | Build Go-based node clients | [go.dev/dl](https://go.dev/dl/) | Yes (Go clients) |
-| Rust | stable | Build Rust-based node clients | [rustup.rs](https://rustup.rs) | Yes (Rust clients) |
+| Rust | stable | Build Rust-based node clients | [rustup.rs](https://rustup.rs) (preferred) | Yes (Rust clients) |
 | scip-go | SCIP indexer for Go | `go install github.com/sourcegraph/scip-go/cmd/scip-go@latest` | Recommended |
-| rust-analyzer | SCIP indexer for Rust | Via rustup or IDE | Recommended |
+| rust-analyzer | SCIP indexer for Rust | `rustup component add rust-analyzer` (or `brew install rust-analyzer` on Homebrew Rust) | Recommended |
 | Opengrep | Cross-ecosystem static analysis | [github.com/opengrep/opengrep](https://github.com/opengrep/opengrep) | Recommended |
-| ast-grep | Structural code search | `cargo install ast-grep` or `npm i -g @ast-grep/cli` | Optional |
+| ast-grep | Structural code search | `cargo install ast-grep --locked` (or `brew install ast-grep` on macOS); auto-installed by `plamen setup` | Recommended |
 | CodeQL CLI | Advanced static analysis | [github.com/github/codeql-cli-binaries](https://github.com/github/codeql-cli-binaries) | Optional |
+
+> **macOS — `brew install rust` vs `rustup`**: Plamen's auto-install of
+> `rust-analyzer` uses `rustup component add rust-analyzer`, which only works
+> when Rust came from [rustup.rs](https://rustup.rs). Homebrew's `rust` formula
+> ships the compiler but **not** the rustup multiplexer, so the
+> `component add` command fails. If you installed Rust via Homebrew, either
+> run `brew install rust-analyzer` separately or switch to rustup
+> (`brew uninstall rust && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
+> `plamen setup` detects Homebrew Rust and routes to `brew install` for
+> `rust-analyzer` and `ast-grep` automatically. Same applies to `ast-grep`
+> when installed via `cargo install` (needs rustup-managed cargo) vs
+> `brew install ast-grep` (standalone).
 
 These tools power the Phase 0.5 "Bake" step that batch-indexes repositories before depth analysis. The pipeline works without them (falls back to grep-based analysis), but SCIP indexing significantly improves cross-reference accuracy.
 

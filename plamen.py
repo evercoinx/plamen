@@ -581,7 +581,12 @@ def check_dependencies() -> bool:
         ]),
         ("L1 (Rust)", [
             ("cargo",          _find_bin("cargo", _CARGO_PATHS)),
-            ("rust-analyzer",  _find_bin("rust-analyzer", _CARGO_PATHS)),
+            ("rust-analyzer",  _find_bin("rust-analyzer", _CARGO_PATHS + (
+                ["/opt/homebrew/bin", "/usr/local/bin"] if sys.platform == "darwin" else []
+            ))),
+            ("ast-grep",       _find_bin("ast-grep", _CARGO_PATHS + (
+                ["/opt/homebrew/bin", "/usr/local/bin"] if sys.platform == "darwin" else []
+            )) or _find_bin("sg", _CARGO_PATHS)),
         ]),
     ]
 
@@ -970,7 +975,31 @@ def _opengrep_cmds():
 
 
 def _rust_analyzer_cmds():
-    return ['rustup component add rust-analyzer']
+    """Install rust-analyzer for L1 (Rust) SCIP indexing.
+
+    Two paths:
+      * rustup-managed toolchain — `rustup component add rust-analyzer`
+      * Homebrew Rust (`brew install rust`) — no rustup multiplexer, so
+        the `rustup component add` command fails. Fall back to
+        `brew install rust-analyzer`, which ships a standalone binary.
+      * Otherwise: try cargo as a generic fallback.
+    """
+    if shutil.which("rustup"):
+        return ['rustup component add rust-analyzer']
+    if sys.platform == "darwin" and _has_brew():
+        return ['brew install rust-analyzer']
+    # No rustup, no brew — cargo install is the last resort (slow but works).
+    return ['cargo install rust-analyzer']
+
+
+def _ast_grep_cmds():
+    """Install ast-grep. Prefer cargo (works on all platforms) with brew
+    fallback on macOS for a faster binary install."""
+    if sys.platform == "darwin" and _has_brew():
+        return ['brew install ast-grep']
+    if sys.platform != "win32" and _has_bash():
+        return ['curl -fsSL https://raw.githubusercontent.com/ast-grep/ast-grep/main/install.sh | bash || cargo install ast-grep --locked']
+    return ['cargo install ast-grep --locked']
 
 
 _INSTALL_RECIPES = {
@@ -1058,16 +1087,32 @@ _INSTALL_RECIPES = {
 
     "L1 (Rust)": [
         ("rust-analyzer (SCIP semantic index)",
-         lambda: _find_bin("rust-analyzer", _CARGO_PATHS),
+         lambda: bool(_find_bin("rust-analyzer", _CARGO_PATHS)
+                      or (sys.platform == "darwin" and _find_bin("rust-analyzer", ["/opt/homebrew/bin", "/usr/local/bin"]))),
          _rust_analyzer_cmds,
          ["rust-analyzer"], "~15s",
-         ["~/.cargo/bin"], "rust"),
+         ["~/.cargo/bin", "/opt/homebrew/bin", "/usr/local/bin"],
+         # Only require the `rust` (rustup) prereq when we'd use rustup.
+         # Brew-Rust users get rust-analyzer via `brew install rust-analyzer`.
+         "rust" if not (sys.platform == "darwin" and _has_brew()) else None),
 
         ("opengrep / semgrep (static analysis)",
          lambda: _find_bin("opengrep") or _find_bin("semgrep"),
          _opengrep_cmds,
          ["opengrep", "semgrep"], "~30s",
          [], None),
+    ],
+
+    "L1 (ast-grep)": [
+        ("ast-grep (structural pattern matching)",
+         lambda: bool(_find_bin("ast-grep", _CARGO_PATHS)
+                      or _find_bin("sg", _CARGO_PATHS)
+                      or (sys.platform == "darwin" and _find_bin("ast-grep", ["/opt/homebrew/bin", "/usr/local/bin"]))),
+         _ast_grep_cmds,
+         ["ast-grep"], "~30s",
+         ["~/.cargo/bin", "/opt/homebrew/bin", "/usr/local/bin"],
+         # cargo path needs rustup; brew path doesn't.
+         "rust" if not (sys.platform == "darwin" and _has_brew()) else None),
     ],
 }
 

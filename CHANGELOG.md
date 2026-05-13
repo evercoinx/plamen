@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.0.0] - 2026-05-13
 
 ### Added (release-candidate hardening)
+- **ast-grep auto-install**: added to `_INSTALL_RECIPES` under a new `L1 (ast-grep)` group and surfaced in the `check_dependencies` toolchain box. `plamen setup` now installs ast-grep alongside rust-analyzer; previously it was used by the L1 pipeline but never offered to install.
 - `plamen doctor` (aliases: `verify`, `check`) — fast install-verification subcommand. Checks Plamen home, PATH for `python`/`git`/`npx`/`claude`/`codex`, Python deps, `~/.claude` manifest items, `~/.codex/plamen` tree, submodule population, CLAUDE.md PLAMEN markers. Exits non-zero on hard failures; no audit run, no paid API calls. Suitable for CI smoke tests.
 - `plamen migrate` — atomic v1.x (Plamen-in-`~/.claude`) → v2.x (Plamen-in-`~/.plamen`) migration. Detects v1 markers (broad OR-heuristic across six paths), strips dangling Plamen hook entries from `settings.json`, renames or backs up, runs the non-interactive install, verifies CLAUDE.md markers.
 - `docs/glossary.md` — quick reference for pipeline / phase / breadth / depth / niche / skill / skeptic-judge / PoC / scratchpad / MCP / RAG vocabulary.
@@ -31,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/l1-mode/design.md` referenced a private staging branch in its header; `commands/plamen-l1.md` carried a stale "Do NOT run on production" disclaimer. Both rewritten with stable framing.
 - UTF-8/CP-1252 mojibake (`â€"`, `â€™`, `â€œ`, `âœ"`, `â—‹`) cleaned across 20+ prompt/rule/command files.
 - `scripts/write_helper.py` (0-byte stub) removed; `docs/repository-structure.md` updated to reflect the rename `codex/` → `codex-adapter/` and the removed stub.
+- **rust-analyzer install on Homebrew Rust (macOS)**: previously `rustup component add rust-analyzer` ran unconditionally and failed when Rust came from `brew install rust` (no rustup multiplexer). `_rust_analyzer_cmds()` now detects rustup vs brew and routes to `brew install rust-analyzer` when rustup is absent. The recipe's prereq flag drops `rust` on macOS+brew so the prereq check doesn't force-reinstall rustup. `docs/dependencies.md` documents the brew-vs-rustup distinction.
 
 ### Added
 - **V2 Resumable Pipeline**: Python driver (`plamen_driver.py`) runs one `claude -p` subprocess per phase with automatic checkpointing. Resumes from last successful phase on crash or usage exhaustion. Launched via `/plamen-wizard` or `plamen_driver.py`.
