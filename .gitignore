@@ -35,7 +35,7 @@ Thumbs.db
 backups/
 build/
 cache/
-codex/config.toml
+codex-adapter/config.toml
 custom-mcp/defihacklabs-rag/data/
 custom-mcp/solodit-scraper/data/
 custom-mcp/unified-vuln-db/*.egg-info/

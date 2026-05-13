@@ -148,7 +148,7 @@ python plamen.py install --codex    # macOS / Linux
 python plamen.py install --codex    # Windows
 ```
 
-This generates Codex config files, creates `~/.codex/plamen/` (symlinked to your Plamen checkout), and copies `codex/config.toml` and `codex/AGENTS.md` into `~/.codex/`. MCP servers are configured in `codex/config.toml` (TOML `[mcp_servers.*]` sections) instead of `mcp.json`. Permissions are controlled by `config.toml`'s `approval_mode` and `sandbox_mode` fields, not `settings.json`.
+This generates Codex config files, creates `~/.codex/plamen/` (symlinked to your Plamen checkout), and copies `codex-adapter/config.toml` and `codex-adapter/AGENTS.md` into `~/.codex/`. MCP servers are configured in `~/.codex/config.toml` (TOML `[mcp_servers.*]` sections) instead of `mcp.json`. Permissions are controlled by `config.toml`'s `approval_mode` and `sandbox_mode` fields, not `settings.json`.
 
 > **Both backends**: If you use both Claude Code and Codex CLI, run the installer twice — once without `--codex` (for `~/.claude/`) and once with `--codex` (for `~/.codex/plamen/`). The methodology files are shared via symlinks; only the runtime config differs.
 
@@ -162,11 +162,11 @@ cp settings.json.example ~/.claude/settings.json # if ~/.claude/settings.json do
 # Codex CLI
 mkdir -p ~/.codex
 ln -s ~/.plamen ~/.codex/plamen                  # shared methodology
-cp codex/config.toml ~/.codex/config.toml        # runtime config (copy, not symlink)
-cp codex/AGENTS.md ~/.codex/AGENTS.md            # orchestrator rules (copy, not symlink)
+cp codex-adapter/config.toml ~/.codex/config.toml        # runtime config (copy, not symlink)
+cp codex-adapter/AGENTS.md ~/.codex/AGENTS.md            # orchestrator rules (copy, not symlink)
 ```
 
-Edit `~/.claude/mcp.json` (Claude Code) or `codex/config.toml` (Codex CLI) with your API keys. See [MCP Servers](mcp-servers.md) for details.
+Edit `~/.claude/mcp.json` (Claude Code) or `~/.codex/config.toml` (Codex CLI) with your API keys. See [MCP Servers](mcp-servers.md) for details.
 
 **macOS/Linux — fix the Python command (Claude Code only):** The Python-based MCP servers in `mcp.json` use `"command": "python"` by default. If your system only has `python3` (check: `which python`), update mcp.json:
 
@@ -248,7 +248,7 @@ The default `settings.json.example` auto-approves all tool calls:
 
 The deny list blocks destructive operations (`rm -rf`, `sudo`, force push).
 
-**Codex CLI** (`codex/config.toml`):
+**Codex CLI** (`~/.codex/config.toml`):
 
 Permissions are controlled by two fields in `config.toml`:
 
@@ -284,8 +284,8 @@ cd ~/.plamen && git pull && plamen install --codex      # Codex CLI (if used)
 - **`mcp.json`** — new MCP server definitions added in a release
 
 **Codex CLI** (`plamen install --codex`):
-- **`codex/AGENTS.md`** — Codex orchestrator rules (equivalent to `CLAUDE.md`)
-- **`codex/config.toml`** — permissions, model config, and MCP server definitions
+- **`~/.codex/AGENTS.md`** — Codex orchestrator rules (equivalent to `CLAUDE.md`); generated from `codex-adapter/AGENTS.md` in the repo
+- **`~/.codex/config.toml`** — permissions, model config, and MCP server definitions; generated from `codex-adapter/config.toml` in the repo
 
 Without re-install, the orchestrator follows stale rules while skills and prompts are already updated. `plamen` will warn you on next launch if it detects a version mismatch.
 

@@ -50,7 +50,7 @@ These are **not symlinked** — they are merged/injected at install time:
 | **CLAUDE.md** (Claude Code) | User may have their own content | Strips old `<!-- PLAMEN:START -->...<!-- PLAMEN:END -->` section, re-injects current version. User content outside markers is preserved. |
 | **AGENTS.md** (Codex, `--codex`) | User may have their own content | Same marker-based injection as CLAUDE.md. Codex equivalent of the orchestrator config. |
 | **settings.json** (Claude Code) | User has their own API keys and permissions | Additive merge: adds new env vars and permissions that don't exist. Never overwrites existing keys. |
-| **config.toml** (Codex, `--codex`) | User has their own Codex settings | Full copy from `codex/config.toml`. Overwrites existing file — back up custom settings before re-install. |
+| **config.toml** (Codex, `--codex`) | User has their own Codex settings | Full copy from `codex-adapter/config.toml`. Overwrites existing file — back up custom settings before re-install. |
 | **mcp.json** (Claude Code only) | User has their own MCP servers and API keys | Additive merge: adds new server entries that don't exist. Fixes wrong-platform paths (e.g., Windows `C:/` on macOS) in existing servers while preserving env vars and API keys. |
 | **MCP packages** (Claude Code legacy only) | Only if `~/.claude.json` has bare `npx -y @pkg` without version pins | Installs pinned npm packages locally, updates config to use schema sanitizer. Skipped for fresh installs. |
 

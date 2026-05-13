@@ -7,7 +7,10 @@ This prevents drift -- when Claude-side files change, re-running this script
 updates the Codex files automatically.
 
 Usage:
-    python scripts/codex_adapter.py [--output-dir codex/]
+    python scripts/codex_adapter.py [--output-dir codex-adapter/]
+
+NOTE: The output directory is named `codex-adapter/` (not `codex/`) so that
+when ~/.plamen is on PATH it does not shadow the Codex CLI binary.
 
 Sources:
     - scripts/plamen_types.py       (phase/artifact specs)
@@ -42,7 +45,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PLAMEN_HOME = SCRIPT_DIR.parent
-OUTPUT_DIR = PLAMEN_HOME / "codex"
+OUTPUT_DIR = PLAMEN_HOME / "codex-adapter"
 
 
 def load_json(path: Path) -> dict:
@@ -93,7 +96,7 @@ def _windows_inherited_env() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 def generate_agents_md(out_dir: Path) -> None:
-    """Generate codex/AGENTS.md -- condensed orchestrator rules for Codex."""
+    """Generate codex-adapter/AGENTS.md -- condensed orchestrator rules for Codex."""
     content = textwrap.dedent("""\
     # Plamen -- Web3 Security Auditing Agent
 
@@ -202,7 +205,7 @@ def generate_agents_md(out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def generate_config_toml(out_dir: Path) -> None:
-    """Generate codex/config.toml -- Codex main config with MCP server mappings."""
+    """Generate codex-adapter/config.toml -- Codex main config with MCP server mappings."""
     # SECURITY: NEVER write real API keys into generated files.
     # Generated config.toml uses PLACEHOLDERS only. Users fill in their own keys
     # after install. This file is gitignored to prevent accidental key leaks.
@@ -824,7 +827,7 @@ AGENT_ROLES = [
 
 
 def generate_agent_tomls(out_dir: Path) -> None:
-    """Generate codex/agents/*.toml -- one TOML per agent role."""
+    """Generate codex-adapter/agents/*.toml -- one TOML per agent role."""
     agents_dir = out_dir / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
 
@@ -857,7 +860,7 @@ def generate_agent_tomls(out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def generate_skill_md(out_dir: Path) -> None:
-    """Generate codex/skills/plamen/SKILL.md -- the /plamen orchestrator skill for Codex."""
+    """Generate codex-adapter/skills/plamen/SKILL.md -- the /plamen orchestrator skill for Codex."""
     scripts_dir = str(Path.home() / ".codex" / "plamen" / "scripts").replace("\\", "\\\\")
     content = textwrap.dedent(f"""\
     ---
@@ -881,7 +884,7 @@ def generate_skill_md(out_dir: Path) -> None:
 
     1. Detect an existing audit and offer resume/fresh/new.
     2. Collect missing launch parameters.
-    3. Write or reuse `{PROJECT_ROOT}/.scratchpad/config.json`.
+    3. Write or reuse `{{PROJECT_ROOT}}/.scratchpad/config.json`.
     4. Launch the deterministic driver.
     5. Report the resume command and basic status.
 
@@ -1222,7 +1225,7 @@ def generate_skill_md(out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def generate_commands(out_dir: Path) -> None:
-    """Generate codex/commands/plamen*.md for Codex slash-command discovery."""
+    """Generate codex-adapter/commands/plamen*.md for Codex slash-command discovery."""
     commands_dir = out_dir / "commands"
     commands_dir.mkdir(parents=True, exist_ok=True)
     driver_path = str(Path.home() / ".codex" / "plamen" / "scripts" / "plamen_driver.py").replace("\\", "\\\\")
@@ -1290,7 +1293,7 @@ def generate_commands(out_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def generate_readme(out_dir: Path) -> None:
-    """Generate codex/README.md -- usage and installation docs."""
+    """Generate codex-adapter/README.md -- usage and installation docs."""
     content = textwrap.dedent("""\
     # Plamen Codex Adapter
 

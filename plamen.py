@@ -1722,6 +1722,101 @@ def _run_symlink_install(w):
     w(f"\n  {_C_GREEN}Linked {len(installed)} items into {CLAUDE_HOME}{_RST}\n\n")
 
 
+def _heal_dangling_hooks(w):
+    """Strip dangling Plamen-owned hook entries from ~/.claude/settings.json.
+
+    A previous install whose ~/.plamen/ source has been moved or renamed leaves
+    every PreToolUse Bash hook pointing into a vanished symlink target. Claude
+    Code's hook runner then blocks every Bash invocation — including a retry
+    of `plamen install` itself.
+
+    Convention: any hook whose `command` string contains `~/.claude/hooks/` is
+    Plamen-owned. We check whether that target resolves. If not, strip the
+    entry. The subsequent symlink install re-wires the hooks dir fresh.
+    Non-Plamen hooks (anything else in the command field) are preserved.
+    """
+    import json as _json
+
+    settings_path = os.path.join(CLAUDE_HOME, "settings.json")
+    if not os.path.isfile(settings_path):
+        return
+
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+    except (_json.JSONDecodeError, ValueError, OSError):
+        return  # _merge_settings_json will report.
+
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict) or not hooks:
+        return
+
+    claude_hooks_dir = os.path.normpath(os.path.expanduser(
+        os.path.join(CLAUDE_HOME, "hooks")
+    ))
+    plamen_marker = "~/.claude/hooks/"
+
+    def _entry_is_dangling(entry):
+        cmd = entry.get("command", "") if isinstance(entry, dict) else ""
+        if plamen_marker not in cmd:
+            return False  # not Plamen-owned; preserve.
+        for tok in cmd.split():
+            if tok.startswith("~/.claude/hooks/") or tok.startswith(claude_hooks_dir):
+                resolved = os.path.normpath(os.path.expanduser(tok))
+                try:
+                    real = os.path.realpath(resolved)
+                except OSError:
+                    return True
+                return not os.path.isfile(real)
+        return False
+
+    stripped = 0
+    new_hooks = {}
+    for event_name, event_groups in hooks.items():
+        if not isinstance(event_groups, list):
+            new_hooks[event_name] = event_groups
+            continue
+        kept_groups = []
+        for group in event_groups:
+            if not isinstance(group, dict):
+                kept_groups.append(group)
+                continue
+            group_hooks = group.get("hooks", [])
+            if not isinstance(group_hooks, list):
+                kept_groups.append(group)
+                continue
+            kept_entries = []
+            for entry in group_hooks:
+                if _entry_is_dangling(entry):
+                    stripped += 1
+                else:
+                    kept_entries.append(entry)
+            if kept_entries:
+                new_group = dict(group)
+                new_group["hooks"] = kept_entries
+                kept_groups.append(new_group)
+            # else: whole group was Plamen-owned and dangling — drop it
+        if kept_groups:
+            new_hooks[event_name] = kept_groups
+
+    if stripped == 0:
+        return
+
+    data["hooks"] = new_hooks
+    try:
+        with open(settings_path, "w", encoding="utf-8") as f:
+            _json.dump(data, f, indent=2)
+            f.write("\n")
+    except OSError as e:
+        w(f"  {_C_ORANGE}!{_RST} Could not rewrite settings.json: {e}\n")
+        return
+
+    w(f"  {_C_ORANGE}>{_RST} Healed {stripped} dangling Plamen hook entr"
+      f"{'y' if stripped == 1 else 'ies'} in settings.json\n")
+    w(f"    {_C_GRAY}(previous install location was moved or removed; "
+      f"fresh hooks will be wired below){_RST}\n")
+
+
 def _merge_settings_json(w):
     """Merge Plamen's permissions and env into ~/.claude/settings.json (additive only)."""
     import json as _json
@@ -2087,14 +2182,17 @@ def run_uninstall():
 def _install_codex_adapter(w):
     """Generate Codex config files and install into ~/.codex/.
 
-    1. Runs scripts/codex_adapter.py to (re)generate codex/ files
+    1. Runs scripts/codex_adapter.py to (re)generate codex-adapter/ files
     2. Creates ~/.codex/ if it doesn't exist
     3. Symlinks ~/.codex/plamen/ → PLAMEN_HOME (shared methodology)
     4. Copies Codex-specific files (AGENTS.md, config.toml, agents/, skills/, commands/)
+
+    The repo dir is named `codex-adapter/` (not `codex/`) to avoid shadowing the
+    Codex CLI binary when ~/.plamen is on PATH.
     """
     codex_home = os.path.normpath(os.path.expanduser("~/.codex"))
     codex_plamen = os.path.normpath(os.path.join(codex_home, "plamen"))
-    codex_dir = os.path.normpath(os.path.join(PLAMEN_HOME, "codex"))
+    codex_dir = os.path.normpath(os.path.join(PLAMEN_HOME, "codex-adapter"))
     generator = os.path.normpath(os.path.join(PLAMEN_HOME, "scripts", "codex_adapter.py"))
 
     # Step 1: Run the generator script
@@ -2106,7 +2204,7 @@ def _install_codex_adapter(w):
     if r.returncode != 0:
         w(f"  {_C_RED}Generator failed: {r.stderr[:300]}{_RST}\n")
         return False
-    w(f"  {_C_GREEN}✓{_RST} Generated Codex files in codex/\n")
+    w(f"  {_C_GREEN}✓{_RST} Generated Codex files in codex-adapter/\n")
 
     # Step 2: Create ~/.codex/
     os.makedirs(codex_home, exist_ok=True)
@@ -2182,9 +2280,112 @@ def _install_codex_adapter(w):
     return True
 
 
-def run_setup():
-    """Full setup flow: Python deps → config files → toolchain → RAG → re-check."""
+def run_migrate():
+    """Atomic v1.x → v2.x migration.
+
+    Three states handled:
+      (a) v1.x with .git/  → rename ~/.claude → ~/.plamen
+      (b) v1.x without .git/ → timestamped backup, then ask user to re-clone
+      (c) v2.x state → just run install
+
+    Heals dangling Plamen hook entries before touching anything (so a retry
+    inside Claude Code isn't blocked by PreToolUse Bash). Runs the
+    non-interactive install. Verifies CLAUDE.md PLAMEN markers.
+    """
+    import datetime as _dt
+
     w = sys.stdout.write
+    show_banner()
+    console.print(Rule(title="Plamen Migration", style="color(238)"))
+
+    plamen_dir = os.path.normpath(os.path.expanduser("~/.plamen"))
+    claude_dir = CLAUDE_HOME
+
+    looks_like_v1 = (
+        not os.path.isdir(plamen_dir)
+        and os.path.isfile(os.path.join(claude_dir, "commands", "plamen.md"))
+        and os.path.isdir(os.path.join(claude_dir, "agents"))
+    )
+    has_git = os.path.isdir(os.path.join(claude_dir, ".git"))
+
+    _heal_dangling_hooks(w)
+
+    if looks_like_v1:
+        w(f"  {_C_ORANGE}>{_RST} Detected v1.x install — Plamen files live in {claude_dir}\n")
+
+        if os.path.isdir(plamen_dir):
+            w(f"  {_C_RED}!{_RST} ~/.plamen already exists; cannot migrate over it.\n")
+            w(f"    {_C_GRAY}Move or remove ~/.plamen, then re-run `plamen migrate`.{_RST}\n\n")
+            return 1
+
+        if has_git:
+            try:
+                os.rename(claude_dir, plamen_dir)
+                w(f"  {_C_GREEN}✓{_RST} Moved {claude_dir} → {plamen_dir}\n")
+            except OSError as e:
+                w(f"  {_C_RED}Could not move {claude_dir}: {e}{_RST}\n\n")
+                return 1
+        else:
+            ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_dir = os.path.normpath(os.path.expanduser(f"~/.plamen-backup-{ts}"))
+            try:
+                os.rename(claude_dir, backup_dir)
+                w(f"  {_C_GREEN}✓{_RST} Backed up {claude_dir} → {backup_dir}\n")
+            except OSError as e:
+                w(f"  {_C_RED}Could not back up {claude_dir}: {e}{_RST}\n\n")
+                return 1
+            w(f"\n  {_C_WHITE}This install has no .git/ — re-clone the repo, then re-run install:{_RST}\n")
+            w(f"    git clone --recurse-submodules <repo-url> ~/.plamen\n")
+            w(f"    cd ~/.plamen && python plamen.py install\n\n")
+            return 0
+    else:
+        if not os.path.isdir(plamen_dir):
+            w(f"  {_C_ORANGE}!{_RST} No existing install detected at ~/.claude (v1.x) or ~/.plamen (v2.x).\n")
+            w(f"    {_C_GRAY}Clone the repo first:{_RST}\n")
+            w(f"    {_C_GRAY}  git clone --recurse-submodules <repo-url> ~/.plamen{_RST}\n")
+            w(f"    {_C_GRAY}  cd ~/.plamen && python plamen.py install{_RST}\n\n")
+            return 1
+        w(f"  {_C_GREEN}✓{_RST} Found existing Plamen repo at {plamen_dir}\n")
+
+    w(f"\n")
+    rc = run_install()
+    if rc != 0:
+        w(f"\n  {_C_RED}Install failed during migration.{_RST}\n\n")
+        return rc
+
+    claude_md = os.path.join(CLAUDE_HOME, "CLAUDE.md")
+    if os.path.isfile(claude_md):
+        try:
+            with open(claude_md, "r", encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            text = ""
+        if "<!-- PLAMEN:START -->" in text and "<!-- PLAMEN:END -->" in text:
+            w(f"  {_C_GREEN}✓{_RST} CLAUDE.md PLAMEN markers present\n")
+        else:
+            w(f"  {_C_ORANGE}!{_RST} CLAUDE.md PLAMEN markers missing — re-run `plamen install` to inject\n")
+
+    w(f"\n  {_C_GREEN}Migration complete.{_RST}\n")
+    w(f"  {_C_GRAY}Run `plamen` to verify, or `plamen setup` for the toolchain wizard.{_RST}\n\n")
+    return 0
+
+
+def run_install():
+    """Non-interactive install: symlinks, settings merge, CLAUDE.md inject,
+    submodules, Python deps, config files.
+
+    Idempotent. Safe to run from any non-TTY context (Claude Code Bash, Codex
+    shell, CI). Returns 0 on success. The interactive toolchain wizard lives
+    in `run_setup()` — keep this function free of `inquirer.*` calls.
+    """
+    w = sys.stdout.write
+
+    # ── Pre-flight: heal dangling Plamen hook references ──────
+    # If a previous install moved ~/.plamen away or settings.json points hooks
+    # at paths that no longer exist, Claude Code's PreToolUse Bash hook blocks
+    # every shell command — including a retry of `plamen install`. Strip those
+    # entries BEFORE the new install touches anything.
+    _heal_dangling_hooks(w)
 
     # ── Symlink install (if repo is not directly in ~/.claude) ─
     has_claude = bool(shutil.which("claude") or shutil.which("claude.cmd"))
@@ -2197,10 +2398,17 @@ def run_setup():
     # ── Submodules ─────────────────────────────────────────────
     slither_dir = os.path.join(PLAMEN_HOME, "custom-mcp", "slither-mcp")
     if os.path.isdir(slither_dir) and not os.listdir(slither_dir):
-        w(f"  {_C_ORANGE}>{_RST} Initializing git submodules...\n")
-        sys.stdout.flush()
-        _run_install_cmd(f'cd "{PLAMEN_HOME}" && git submodule update --init --recursive', retries=1)
-        w("\n")
+        if not os.path.isdir(os.path.join(PLAMEN_HOME, ".git")):
+            # ZIP download — `git submodule` would fail with "not a git
+            # repository". Tell the user how to fix it explicitly.
+            w(f"  {_C_ORANGE}!{_RST} Empty submodule {os.path.relpath(slither_dir, PLAMEN_HOME)}/ but no .git/ — looks like a ZIP download.\n")
+            w(f"    {_C_GRAY}Re-clone via `git clone --recurse-submodules <repo-url>`,{_RST}\n")
+            w(f"    {_C_GRAY}or run `git submodule update --init --recursive` after `git init`.{_RST}\n\n")
+        else:
+            w(f"  {_C_ORANGE}>{_RST} Initializing git submodules...\n")
+            sys.stdout.flush()
+            _run_install_cmd(f'cd "{PLAMEN_HOME}" && git submodule update --init --recursive', retries=1)
+            w("\n")
 
     # ── Python dependencies ───────────────────────────────────
     console.print(Rule(title="Python Dependencies", style="color(238)"))
@@ -2209,6 +2417,29 @@ def run_setup():
     # ── Config files ──────────────────────────────────────────
     console.print(Rule(title="Configuration", style="color(238)"))
     _setup_config_files(w)
+
+    return 0
+
+
+def run_setup():
+    """Full interactive setup: install + toolchain wizard + RAG build.
+
+    Calls `run_install()` first for the non-interactive symlink/config work,
+    then drops into the toolchain checkbox. In a non-TTY context, prints a
+    completion message and returns 0 — never calls `inquirer.*`.
+    """
+    w = sys.stdout.write
+
+    run_install()
+
+    # Non-TTY guard. The toolchain checkbox below uses prompt_toolkit, which
+    # crashes with `OSError: [Errno 22] Invalid argument` from add_reader when
+    # there is no controlling terminal (Claude Code Bash, Codex shell, CI).
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        w(f"\n  {_C_GREEN}Plamen install complete.{_RST}\n")
+        w(f"  {_C_GRAY}Run `plamen setup` from a real terminal to install missing{_RST}\n")
+        w(f"  {_C_GRAY}toolchains (Foundry / Solana / Anchor / etc.) and build the RAG DB.{_RST}\n\n")
+        return
 
     # ── Show toolchain box ──────────────────────────────────
     check_dependencies()
@@ -4052,7 +4283,9 @@ def main():
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}resume{_RST}                       Resume interrupted audit\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}resume{_RST} path/config.json      Resume specific config\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}compare{_RST}                      Diff reports\n")
-            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}setup{_RST}                        Install tools + build RAG\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}install{_RST}                      Non-interactive install (symlinks + config)\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}setup{_RST}                        Install + interactive toolchain wizard + RAG\n")
+            w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}migrate{_RST}                      Migrate v1.x install (~/.claude) to v2.x (~/.plamen)\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}rag{_RST}                          Rebuild RAG database only\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}uninstall{_RST}                    Remove from ~/.claude\n")
             w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}install --codex{_RST}             Install Codex adapter\n")
@@ -4089,7 +4322,11 @@ def main():
             print(_json.dumps(r))
             return
 
-        # ── Install / uninstall subcommands ───────────────────
+        # ── Install / setup / migrate / uninstall subcommands ─
+        # `install` is non-interactive (symlinks + config + Python deps + hook
+        # self-heal). Safe in Claude Code Bash, Codex shell, and CI. Exits 0.
+        # `setup` runs install, then the interactive toolchain checkbox + RAG.
+        # `--codex` runs only the Codex adapter generator (non-interactive).
         if arg in ("install", "setup"):
             if "--codex" in sys.argv:
                 show_banner()
@@ -4098,12 +4335,19 @@ def main():
                 _install_codex_adapter(w)
                 return
             show_banner()
-            run_setup()
+            if arg == "install":
+                run_install()
+            else:
+                run_setup()
             return
 
         if arg == "uninstall":
             show_banner()
             run_uninstall()
+            return
+
+        if arg == "migrate":
+            run_migrate()
             return
 
         if arg == "resume":

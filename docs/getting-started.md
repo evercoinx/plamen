@@ -11,8 +11,8 @@
 | Component | What it is | Status after install |
 |-----------|-----------|---------------------|
 | **Symlinks** | Links Plamen's agents, rules, commands, and prompts into `~/.claude/` (Claude Code) or `~/.codex/plamen/` (Codex CLI) | Done |
-| **Config** | Merged permissions, env vars, and MCP servers into `settings.json` (Claude Code) or `codex/config.toml` (Codex CLI) | Done |
-| **Orchestrator rules** | Injected `CLAUDE.md` (Claude Code) or `codex/AGENTS.md` (Codex CLI) — the orchestrator's top-level instructions | Done |
+| **Config** | Merged permissions, env vars, and MCP servers into `~/.claude/settings.json` (Claude Code) or `~/.codex/config.toml` (Codex CLI) | Done |
+| **Orchestrator rules** | Injected `~/.claude/CLAUDE.md` (Claude Code) or `~/.codex/AGENTS.md` (Codex CLI) — the orchestrator's top-level instructions | Done |
 | **Core Python deps** | `rich`, `InquirerPy` (wrapper UI) | Done |
 | **MCP server deps** | slither-mcp, solana-fender, farofino-mcp | Done |
 | **Chain toolchains** | Foundry, Solana CLI, Anchor, Aptos, Sui, etc. | Only if you selected them |
@@ -153,7 +153,7 @@ For Codex backend, add the `--codex` flag:
 cd ~/.plamen && git pull && plamen install --codex
 ```
 
-`git pull` alone updates symlinked files (agents, rules, skills, prompts), but `CLAUDE.md` / `codex/AGENTS.md` (the orchestrator's rules) are injected copies — not symlinks. Without `plamen install`, the orchestrator follows stale rules while everything else is updated. `plamen` will warn you if it detects a version mismatch.
+`git pull` alone updates symlinked files (agents, rules, skills, prompts), but `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` (the orchestrator's rules) are injected copies — not symlinks. Without `plamen install`, the orchestrator follows stale rules while everything else is updated. `plamen` will warn you if it detects a version mismatch.
 
 See [updating.md](updating.md) for details on what auto-updates and what doesn't.
 

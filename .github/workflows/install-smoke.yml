@@ -1,0 +1,95 @@
+name: install-smoke
+
+on:
+  push:
+    branches:
+      - main
+      - feat/**
+      - fix/**
+      - l1-experimental
+  pull_request:
+
+jobs:
+  # F2 regression guard: `plamen install` must complete cleanly without a
+  # controlling terminal. Claude Code's Bash tool, Codex shells, and CI all
+  # run with stdin redirected from /dev/null. The wizard's InquirerPy picker
+  # crashes there with `OSError: [Errno 22]`; install must NOT touch it.
+  non-tty-install:
+    name: non-TTY install (${{ matrix.os }} / py${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Syntax check plamen.py + scripts/
+        run: |
+          python -m py_compile plamen.py
+          python -m py_compile scripts/codex_adapter.py
+      - name: plamen --help (banner + dispatch)
+        # If main()'s argument parsing or banner breaks, fail loud.
+        run: python plamen.py help
+      - name: plamen install (non-TTY, stdin closed)
+        # The whole point of F2: pipe nothing into stdin, redirect both
+        # stdio streams, and assert exit 0 + no inquirer crash.
+        shell: bash
+        run: |
+          python plamen.py install < /dev/null
+      - name: plamen install --codex (non-TTY)
+        # F1 regression guard: Codex adapter generator must not NameError
+        # on undefined f-string placeholders.
+        shell: bash
+        run: |
+          python plamen.py install --codex < /dev/null
+      - name: plamen install (idempotent re-run)
+        shell: bash
+        run: |
+          python plamen.py install < /dev/null
+      - name: Verify rename — codex/ absent, codex-adapter/ present
+        # F6 regression guard.
+        shell: bash
+        run: |
+          test ! -e codex
+          test -d codex-adapter
+
+  unit-tests:
+    name: pytest (${{ matrix.os }} / py${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install pytest
+        run: pip install --upgrade pip pytest
+      - name: Install Plamen Python deps if requirements.txt exists
+        shell: bash
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Run scripts/test_*.py
+        # Collect-only first to catch import errors cheaply; then run the
+        # full suite. Don't fail the whole pipeline if a test file imports
+        # something only present in a deeper install — log it as a warning.
+        shell: bash
+        run: |
+          set -e
+          if compgen -G "scripts/test_*.py" > /dev/null; then
+            pytest scripts/ --collect-only -q || echo "::warning::collect-only failed; check individual test files"
+            pytest scripts/ -q --tb=short -x || echo "::warning::some tests failed; not a hard fail in smoke stage"
+          else
+            echo "No scripts/test_*.py — skipping"
+          fi

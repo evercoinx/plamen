@@ -68,7 +68,7 @@ L1 infrastructure skills live in `agents/skills/injectable/l1/`. They cover bloc
 
 ### 7. Codex Backend
 
-Codex-specific commands (`codex/commands/`) and skill overrides (`codex/skills/`) adapt the pipeline for the OpenAI Codex CLI sandbox. Contributions welcome for Codex-specific UX and tool translation improvements.
+Codex-specific commands (`codex-adapter/commands/`) and skill overrides (`codex-adapter/skills/`) adapt the pipeline for the OpenAI Codex CLI sandbox. Contributions welcome for Codex-specific UX and tool translation improvements.
 
 ## Development Setup
 

@@ -10,8 +10,24 @@ Supports **EVM/Solidity**, **Solana/Anchor**, **Aptos Move**, **Sui Move**, **So
 
 ## Prerequisites
 
-[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) or [Codex CLI](https://github.com/openai/codex), [Python 3.11-3.12](https://python.org) + pip, [Node.js 18+](https://nodejs.org), [Git](https://git-scm.com)
+[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) or [OpenAI Codex CLI](https://github.com/openai/codex), [Python 3.11-3.12](https://python.org) + pip, [Node.js 18+](https://nodejs.org), [Git](https://git-scm.com)
 
+> **Backend CLIs.** Install at least one:
+>
+> - **Claude Code**:
+>   ```bash
+>   npm install -g @anthropic-ai/claude-code
+>   ```
+> - **OpenAI Codex CLI** — install **without `sudo`** using a user-local npm prefix to avoid `EACCES` on Homebrew/system Node installs:
+>
+>   ```bash
+>   mkdir -p ~/.npm-global && npm config set prefix ~/.npm-global
+>   echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc
+>   npm install -g @openai/codex
+>   ```
+>
+>   Codex doesn't yet support every MCP server — pure-LLM phases use a WebSearch fallback. See [docs/mcp-servers.md](docs/mcp-servers.md).
+>
 > **macOS**: Also run `xcode-select --install` (needed for C++ dependency compilation).
 >
 > **Windows**: Enable Developer Mode before installing (required for symlinks). Settings > System > For Developers > toggle ON. Or in admin PowerShell: `reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock /v AllowDevelopmentWithoutDevLicense /t REG_DWORD /d 1 /f`
@@ -30,18 +46,32 @@ Open Claude Code (or Codex CLI) and paste the contents of [`SETUP.md`](SETUP.md)
 
 **Linux / macOS:**
 ```bash
-git clone https://github.com/PlamenTSV/plamen.git ~/.plamen
+git clone --recurse-submodules https://github.com/PlamenTSV/plamen.git ~/.plamen
 cd ~/.plamen && python3 plamen.py install
 python3 plamen.py install --codex    # optional: add Codex CLI backend
 ```
 
 **Windows (PowerShell):**
 ```powershell
-git clone https://github.com/PlamenTSV/plamen.git $HOME\.plamen
+git clone --recurse-submodules https://github.com/PlamenTSV/plamen.git $HOME\.plamen
 cd $HOME\.plamen; python plamen.py install
 python plamen.py install --codex     # optional: add Codex CLI backend
 ```
 
+> **Use `git clone --recurse-submodules`, not "Download ZIP"**. The repo ships
+> `custom-mcp/slither-mcp/` and `custom-mcp/farofino-mcp/` as git submodules; ZIP
+> downloads silently omit them. If you already cloned without
+> `--recurse-submodules`, run `git submodule update --init --recursive` from
+> inside `~/.plamen/` before `plamen install`.
+>
+> **`install` vs `setup`**: `plamen install` is non-interactive (symlinks +
+> config + Python deps + dangling-hook self-heal) and is safe in any context
+> — Claude Code Bash, Codex shell, CI, headless servers. `plamen setup` runs
+> the install then drops into an interactive toolchain wizard (Foundry,
+> Solana CLI, etc.) — run it from a real terminal. In a non-TTY context,
+> `plamen setup` exits cleanly after the install rather than crashing on the
+> picker.
+>
 > **Before building the RAG database**: add `SOLODIT_API_KEY` to `~/.claude/settings.json` → `"env"` section (or `~/.codex/config.toml` → `[env]` for Codex). Free key from [solodit.cyfrin.io](https://solodit.cyfrin.io). This is the only place the key is reliably visible to both `plamen rag` and audit agent subprocesses. A terminal `export` is not sufficient — Claude Code and Codex CLI spawn non-interactive subshells that don't source `.bashrc`/`.zshrc`.
 >
 > Python dependencies are installed automatically on first run. On macOS/Linux use `python3`, on Windows use `python`.
@@ -80,10 +110,10 @@ The installer (`plamen install`):
 - Injects Plamen instructions into `~/.claude/CLAUDE.md` between `<!-- PLAMEN:START/END -->` markers (preserves your content)
 - Installs Python dependencies (RAG database is built separately via `plamen rag`)
 
-For Codex CLI support, also run `plamen install --codex`. This sets up `~/.codex/plamen/` (symlinked from `~/.plamen/codex/`) with:
-- Codex orchestrator config in `codex/AGENTS.md` (equivalent of `CLAUDE.md`)
-- MCP/tool config in `codex/config.toml` (equivalent of `settings.json` + `mcp.json`)
-- Codex-specific commands in `codex/commands/`
+For Codex CLI support, also run `plamen install --codex`. This sets up `~/.codex/plamen/` (symlinked from `~/.plamen/`) with:
+- Codex orchestrator config in `~/.codex/AGENTS.md` (equivalent of `CLAUDE.md`), generated from `codex-adapter/AGENTS.md`
+- MCP/tool config in `~/.codex/config.toml` (equivalent of `settings.json` + `mcp.json`), generated from `codex-adapter/config.toml`
+- Codex-specific slash commands in `~/.codex/commands/`, generated from `codex-adapter/commands/`
 
 Your existing Claude Code and Codex CLI configuration is preserved.
 
@@ -93,7 +123,7 @@ Your existing Claude Code and Codex CLI configuration is preserved.
 The Plamen repo stays at `~/.plamen`. The installer creates symlinks (shortcuts) pointing back to `~/.plamen/`:
 
 - **Claude Code** (`plamen install`): symlinks into `~/.claude/` — agents, rules, skills, prompts, commands
-- **Codex CLI** (`plamen install --codex`): symlinks into `~/.codex/plamen/` (via `~/.plamen/codex/`) — agents, skills, Codex-specific commands
+- **Codex CLI** (`plamen install --codex`): symlinks `~/.codex/plamen/` → `~/.plamen/` (shared methodology), and copies `codex-adapter/{AGENTS.md,config.toml,agents/,skills/,commands/}` into `~/.codex/`
 
 When the AI runtime reads `~/.claude/agents/depth-edge-case.md` (or `~/.codex/plamen/agents/depth-edge-case.md`), the OS transparently reads `~/.plamen/agents/depth-edge-case.md`. This means:
 - `git pull` in `~/.plamen` updates symlinked files (agents, rules, skills, prompts) automatically for both backends
@@ -109,13 +139,24 @@ When the AI runtime reads `~/.claude/agents/depth-edge-case.md` (or `~/.codex/pl
 
 </details>
 
-> **Migrating from v1.0.x** (installed directly in `~/.claude`): Close Claude Code (and Codex CLI if running) first, then run both commands together:
+> **Migrating from v1.0.x** (installed directly in `~/.claude`): Close Claude Code (and Codex CLI if running) first, then run:
+>
+> ```bash
+> cd ~/.plamen 2>/dev/null || cd ~/.claude    # cd into whichever exists
+> python3 plamen.py migrate                    # or `python plamen.py migrate` on Windows
+> ```
+>
+> `plamen migrate` strips any dangling Plamen hook references from
+> `~/.claude/settings.json` (which would otherwise block PreToolUse Bash
+> and lock you out of shell commands in Claude Code), moves the repo to
+> `~/.plamen`, runs the non-interactive install, and verifies the
+> `CLAUDE.md` marker block. If you prefer the manual path:
 >
 > Linux/macOS: `mv ~/.claude ~/.plamen && cd ~/.plamen && python3 plamen.py install`
 >
 > Windows (PowerShell): `Rename-Item $HOME\.claude $HOME\.plamen; cd $HOME\.plamen; python plamen.py install`
 >
-> This moves the repo to `~/.plamen` and immediately recreates `~/.claude` with symlinks + merged config. Claude Code will not work between the move and install — run them together. For Codex support, follow up with `plamen install --codex` to set up `~/.codex/plamen/`.
+> Either route moves the repo to `~/.plamen` and recreates `~/.claude` with symlinks + merged config. Claude Code will not work between the move and install — run them together (or just use `plamen migrate`). For Codex support, follow up with `plamen install --codex`.
 
 ### Option C: Manual dependency install
 
