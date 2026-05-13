@@ -10,8 +10,8 @@
 
 | Component | What it is | Status after install |
 |-----------|-----------|---------------------|
-| **Symlinks** | Links Plamen's agents, rules, commands, and hooks into `~/.claude/` | Done |
-| **Config** | Merged permissions, env vars, MCP servers, and hook triggers into your Claude Code config | Done |
+| **Symlinks** | Links Plamen's agents, rules, commands, and hooks into `~/.claude/` (and `~/.codex/plamen/` if `--codex`) | Done |
+| **Config** | Merged permissions, env vars, MCP servers, and hook triggers into your Claude Code / Codex config | Done |
 | **Watchdog** | Pipeline enforcement hooks that prevent the orchestrator from skipping steps during audits | Done (runs automatically, zero overhead outside audits) |
 | **Core Python deps** | `rich`, `InquirerPy` (wrapper UI) | Done |
 | **MCP server deps** | slither-mcp, solana-fender, farofino-mcp | Done |
@@ -24,7 +24,7 @@
 
 These are installed automatically. If any are missing, `plamen` will tell you.
 
-- **Claude Code** (`claude` in PATH)
+- **Claude Code** (`claude` in PATH) or **Codex CLI** (`codex` in PATH)
 - **Python 3.11-3.12** (`python` / `python3`)
 - **Node.js 18+** (`npx`, `npm`)
 - **Git**
@@ -60,7 +60,7 @@ You can always build it later. Run the same command to rebuild after updates.
 
 ### Optional: API keys
 
-Set in `~/.claude/mcp.json` (edit the file, replace `YOUR_*` placeholders):
+Set in `~/.claude/mcp.json` or `~/.codex/plamen/mcp.json` (edit the file, replace `YOUR_*` placeholders):
 
 | Key | What it does | Impact if missing | Get it |
 |-----|-------------|-------------------|--------|

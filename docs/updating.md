@@ -65,8 +65,8 @@ npm-based MCP servers (`evm-chain-data`, `foundry-suite`, `tavily-search`, `memo
 
 If you add a new npm MCP server or update a version:
 1. Edit `mcp-packages/package.json`
-2. Run `cd ~/.claude/mcp-packages && npm install` (or just `plamen install`)
-3. Restart Claude Code
+2. Run `cd ~/.plamen/mcp-packages && npm install` (or just `plamen install`)
+3. Restart Claude Code (or Codex CLI)
 
 The `schema-sanitizer.js` proxy wraps `evm-chain-data` and `foundry-suite` — it strips `oneOf`/`allOf`/`anyOf` from tool schemas before they reach the API. Safe servers run directly without the proxy.
 
@@ -79,7 +79,7 @@ The `schema-sanitizer.js` proxy wraps `evm-chain-data` and `foundry-suite` — i
 | RAG database | `~/.plamen/custom-mcp/unified-vuln-db/data/` (gitignored) | `plamen rag` (manual, explicit). Re-run after update if new indexers were added (e.g., Immunefi Competitions in v1.1.5). |
 | Toolchains (Foundry, Solana CLI, etc.) | System-level installs | `plamen setup` (interactive, checkbox) |
 | API keys | In `settings.json` and `mcp.json` | Manual edit only |
-| User's own Claude Code agents/rules | `~/.claude/` (non-Plamen files) | Never modified |
+| User's own agents/rules | `~/.claude/` or `~/.codex/` (non-Plamen files) | Never modified |
 
 ---
 

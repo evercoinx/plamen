@@ -21,16 +21,15 @@ The setup wizard detects your OS and installed tools, then offers to install mis
 
 | Tool | Version | Purpose | Install |
 |------|---------|---------|---------|
-| Claude Code | latest | AI runtime | `npm install -g @anthropic-ai/claude-code` |
+| Claude Code or Codex CLI | latest | AI runtime | `npm install -g @anthropic-ai/claude-code` or [github.com/openai/codex](https://github.com/openai/codex) |
 | Python | 3.11-3.12 (recommended) | MCP servers, wrapper | [python.org](https://python.org) |
 | Node.js | 18+ | npm-based MCP servers | [nodejs.org](https://nodejs.org) |
 | Git | any | Submodules, version control | [git-scm.com](https://git-scm.com) |
 | Rust | stable | Solana toolchain (Trident fuzzer) | [rustup.rs](https://rustup.rs) — Solana only |
-| Codex CLI | latest | Alternative AI runtime (optional) | [github.com/openai/codex](https://github.com/openai/codex) — optional, only if using Codex backend |
 
 ### Windows: Developer Mode (required)
 
-Plamen's installer creates symlinks from `~/.plamen/` into Claude Code's `~/.claude/` directory. On Windows, **file symlinks require Developer Mode** (directory junctions work without it, but file symlinks do not).
+Plamen's installer creates symlinks from `~/.plamen/` into `~/.claude/` (and `~/.codex/plamen/` with `--codex`). On Windows, **file symlinks require Developer Mode** (directory junctions work without it, but file symlinks do not).
 
 **Enable Developer Mode** (one-time):
 - **Settings UI**: Settings > System > For Developers > toggle ON

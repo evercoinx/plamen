@@ -4,7 +4,7 @@ Thank you for your interest in contributing to Plamen! This guide will help you 
 
 ## How Plamen Works
 
-Plamen is a multi-agent security auditing pipeline built on Claude Code. It consists of:
+Plamen is a multi-agent security auditing pipeline that runs on Claude Code or OpenAI Codex CLI. It consists of:
 
 - **Orchestration rules** (`rules/`) - Phase definitions, scoring models, report templates
 - **Language prompts** (`prompts/{evm,solana,aptos,sui,soroban}/`) - Per-chain agent prompts and templates
@@ -66,13 +66,17 @@ The unified-vuln-db MCP server (`custom-mcp/unified-vuln-db/`) powers RAG search
 
 L1 infrastructure skills live in `agents/skills/injectable/l1/`. They cover blockchain node-client concerns: consensus safety, p2p networking, mempool analysis, RPC surfaces, validator lifecycle, state sync, and execution engines. L1 skills follow the same quality bar as SC skills but target Go and Rust codebases.
 
+### 7. Codex Backend
+
+Codex-specific commands (`codex/commands/`) and skill overrides (`codex/skills/`) adapt the pipeline for the OpenAI Codex CLI sandbox. Contributions welcome for Codex-specific UX and tool translation improvements.
+
 ## Development Setup
 
 ### Prerequisites
 
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) or [Codex CLI](https://github.com/openai/codex) installed
 - Python 3.11-3.12 (for CLI wrapper and MCP servers)
-- Node.js 18+ (for Claude Code)
+- Node.js 18+ (for MCP servers)
 
 ### Local Setup
 

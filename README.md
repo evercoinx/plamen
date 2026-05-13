@@ -1,16 +1,16 @@
 # Plamen (v2.0.0)
 
-Autonomous smart contract security auditor for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+Autonomous Web3 security auditor for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [OpenAI Codex CLI](https://github.com/openai/codex).
 
-Orchestrates 18-100 AI agents across 8 phases to produce audit reports with verified PoC exploits.
+Orchestrates 18-100 AI agents across 8 phases to produce audit reports with verified PoC exploits — for **smart contracts** and **L1 node-client infrastructure**.
 
-Supports **EVM/Solidity**, **Solana/Anchor**, **Aptos Move**, **Sui Move**, and **Soroban/Stellar**.
+Supports **EVM/Solidity**, **Solana/Anchor**, **Aptos Move**, **Sui Move**, **Soroban/Stellar**, and **L1 Go/Rust node clients**.
 
 ---
 
 ## Prerequisites
 
-[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code), [Python 3.11-3.12](https://python.org) + pip, [Node.js 18+](https://nodejs.org), [Git](https://git-scm.com)
+[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) or [Codex CLI](https://github.com/openai/codex), [Python 3.11-3.12](https://python.org) + pip, [Node.js 18+](https://nodejs.org), [Git](https://git-scm.com)
 
 > **macOS**: Also run `xcode-select --install` (needed for C++ dependency compilation).
 >
@@ -22,9 +22,9 @@ Supports **EVM/Solidity**, **Solana/Anchor**, **Aptos Move**, **Sui Move**, and 
 
 ## Install
 
-### Option A: Let Claude set it up (recommended)
+### Option A: Let your AI assistant set it up (recommended)
 
-Open Claude Code and paste the contents of [`SETUP.md`](SETUP.md). Claude handles cloning, symlink installation, and dependency setup automatically. RAG database is optional and should be built separately via `plamen rag` in your terminal (requires ~6GB free RAM).
+Open Claude Code (or Codex CLI) and paste the contents of [`SETUP.md`](SETUP.md). The assistant handles cloning, symlink installation, and dependency setup automatically. RAG database is optional and should be built separately via `plamen rag` in your terminal (requires ~6GB free RAM).
 
 ### Option B: Terminal
 
@@ -40,7 +40,7 @@ git clone https://github.com/PlamenTSV/plamen.git $HOME\.plamen
 cd $HOME\.plamen; python plamen.py install
 ```
 
-> **Before building the RAG database**: add `SOLODIT_API_KEY` to `~/.claude/settings.json` → `"env"` section (free key from [solodit.cyfrin.io](https://solodit.cyfrin.io)). This is the only place the key is reliably visible to both `plamen rag` and audit agent subprocesses. A terminal `export` is not sufficient — Claude Code spawns non-interactive subshells that don't source `.bashrc`/`.zshrc`.
+> **Before building the RAG database**: add `SOLODIT_API_KEY` to `~/.claude/settings.json` → `"env"` section (free key from [solodit.cyfrin.io](https://solodit.cyfrin.io)). This is the only place the key is reliably visible to both `plamen rag` and audit agent subprocesses. A terminal `export` is not sufficient — Claude Code and Codex CLI spawn non-interactive subshells that don't source `.bashrc`/`.zshrc`.
 >
 > Python dependencies are installed automatically on first run. On macOS/Linux use `python3`, on Windows use `python`.
 
@@ -66,7 +66,7 @@ Then use `plamen` from anywhere:
 plamen                              # interactive wizard
 plamen setup                        # install tools + build RAG
 plamen rag                          # rebuild RAG database only
-plamen uninstall                    # remove Plamen from ~/.claude
+plamen uninstall                    # remove Plamen symlinks
 ```
 
 > **Important**: Always use `plamen` (not `python3 plamen.py`) after PATH is set. The `python3 plamen.py` form only works from inside `~/.plamen/`.
@@ -79,15 +79,17 @@ The installer:
 - Injects Plamen instructions into `CLAUDE.md` between `<!-- PLAMEN:START/END -->` markers (preserves your content)
 - Installs Python dependencies (RAG database is built separately via `plamen rag`)
 
-Your existing Claude Code configuration is preserved.
+For Codex CLI support, also run `plamen install --codex` — this sets up `~/.codex/plamen/` with Codex-specific config and commands.
+
+Your existing Claude Code and Codex CLI configuration is preserved.
 
 <details>
 <summary>How symlinks work</summary>
 
-The Plamen repo stays at `~/.plamen`. The installer creates symlinks (shortcuts) in `~/.claude/` that point back to `~/.plamen/`. When Claude Code reads `~/.claude/agents/depth-edge-case.md`, the OS transparently reads `~/.plamen/agents/depth-edge-case.md`. This means:
+The Plamen repo stays at `~/.plamen`. The installer creates symlinks (shortcuts) in `~/.claude/` (and optionally `~/.codex/plamen/`) that point back to `~/.plamen/`. When the AI runtime reads `~/.claude/agents/depth-edge-case.md`, the OS transparently reads `~/.plamen/agents/depth-edge-case.md`. This means:
 - `git pull` in `~/.plamen` updates symlinked files (agents, rules, skills, prompts) automatically
 - **You still need `plamen install` after pull** — `CLAUDE.md`, `settings.json`, and `mcp.json` are injected/merged copies, not symlinks. Without re-install, the orchestrator follows stale rules. See [docs/updating.md](docs/updating.md).
-- Your own Claude Code files in `~/.claude/` (custom agents, commands, hooks) are untouched
+- Your own files in `~/.claude/` or `~/.codex/` (custom agents, commands, hooks) are untouched
 - Deleting `~/.plamen` would break the symlinks — don't delete it while Plamen is installed
 
 | Platform | How links are created | Requirements |
@@ -163,7 +165,7 @@ See [docs/updating.md](docs/updating.md) for details on what updates automatical
 plamen                    # terminal wrapper with interactive wizard
 ```
 
-Or inside Claude Code: `/plamen`
+Or inside Claude Code: `/plamen` · Inside Codex CLI: `$plamen core /path/to/project`
 
 ---
 
@@ -271,6 +273,7 @@ Codex configuration lives in `~/.codex/plamen/` (symlinked from `~/.plamen/codex
 | **Aptos Move** | aptos CLI | Move Prover | Parameterized tests |
 | **Sui Move** | sui CLI | -- | Parameterized tests |
 | **Soroban/Stellar** | Stellar CLI | -- | proptest, cargo-fuzz |
+| **L1 Go/Rust** | go build, cargo | scip-go, rust-analyzer, Opengrep | proptest, go test -fuzz |
 
 Language detection is automatic based on config files.
 
@@ -311,3 +314,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Skills are the most impactful contributi
 - [Solodit](https://solodit.xyz) — Audit finding database
 - [Immunefi](https://immunefi.com) — Bug bounty & audit competition findings
 - [Anthropic](https://anthropic.com) — Claude Code runtime
+- [OpenAI](https://openai.com) — Codex CLI runtime

@@ -97,7 +97,7 @@
 
 > **Skip on macOS/Linux.** Symlinks work without elevated privileges on Unix systems.
 
-The installer creates symlinks from `~/.plamen/` into `~/.claude/`. On Windows, file symlinks require Developer Mode:
+The installer creates symlinks from `~/.plamen/` into `~/.claude/` (and `~/.codex/plamen/` with `--codex`). On Windows, file symlinks require Developer Mode:
 - **Settings UI**: Settings > System > For Developers > toggle ON
 - **Admin PowerShell**: `reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock /v AllowDevelopmentWithoutDevLicense /t REG_DWORD /d 1 /f`
 
@@ -109,7 +109,7 @@ cd ~/.plamen
 git submodule update --init --recursive
 ```
 
-> This clones into `~/.plamen`, keeping it separate from Claude Code's `~/.claude`. The installer creates symlinks so Claude Code discovers Plamen's agents, rules, and commands. Your existing `~/.claude` settings are preserved via additive config merging.
+> This clones into `~/.plamen`, keeping it separate from Claude Code's `~/.claude` (or Codex's `~/.codex/`). The installer creates symlinks so your AI runtime discovers Plamen's agents, rules, and commands. Your existing settings are preserved via additive config merging.
 
 ### 2. Install core Python dependencies
 
@@ -130,7 +130,7 @@ pip install -e custom-mcp/slither-mcp
 
 ### 3. Configure MCP servers
 
-If using `python plamen.py install`, config files are merged automatically (settings.json, mcp.json, CLAUDE.md, hooks). The installer also symlinks watchdog hooks into `~/.claude/hooks/` and merges hook triggers into `settings.json` — no manual configuration needed. For manual setup:
+If using `python plamen.py install`, config files are merged automatically (settings.json, mcp.json, CLAUDE.md, hooks). The installer also symlinks watchdog hooks into `~/.claude/hooks/` and merges hook triggers into `settings.json` — no manual configuration needed. For Codex CLI, also run `plamen install --codex`. For manual setup:
 
 ```bash
 cp mcp.json.example ~/.claude/mcp.json      # if ~/.claude/mcp.json doesn't exist
