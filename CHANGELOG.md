@@ -9,32 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Impact vs v1.1.8 — quality, cost, time
 
-These are the observed deltas comparing v2.0.0 to the last v1.x release
-on the internal recall-benchmark corpus. Numbers are indicative, not
-contractual — your-mileage-may-vary on individual targets.
+These deltas describe the **structural** changes between v1.1.8 and
+v2.0.0. v2.0.0 ships **the same methodology and the same agent set** as
+v1.1.8 — no new analytical techniques, no new agent classes. The
+practical impact comes from the new driver enforcing what v1 only
+described in prose. Numbers below are not from a measured benchmark
+comparison; they are the directional expectation. Treat as a
+qualitative read, not a contract.
 
-- **Findings**: roughly **2× recall** over v1.1.8 on the benchmark
-  corpus. The deterministic Python driver enables a wider agent fan-out
-  per phase without the context-saturation skip class that bit v1
-  Thorough runs late in the pipeline, and the dynamic-retry gate
-  resurfaces files that were missed first time around.
-- **False positives**: meaningfully lower. The post-depth Skeptic-Judge
-  pass on HIGH/CRITICAL, the cross-batch consistency check, and the
-  mandatory PoC-execution rule with harm-identity enforcement collapse
-  the "looks-bad in prose, doesn't actually exploit" class of finding.
+- **Findings**: a slight potential increase over v1.1.8, not from new
+  methodology but from gates that stop the pipeline from silently
+  skipping mandatory steps under context pressure. In v1, late-Thorough
+  context saturation could cause the orchestrator to skip
+  Skeptic-Judge, validation sweeps, or niche-agent fan-out without
+  reporting it. v2's deterministic driver runs each of those as its
+  own subprocess and gates its output. The dynamic-retry gate also
+  re-surfaces files that the first breadth pass didn't read.
+- **False positives**: at most a slight decrease, again from
+  enforcement rather than new logic. The Skeptic-Judge pass on
+  HIGH/CRITICAL, the cross-batch consistency check, and the mandatory
+  PoC-execution rule with harm-identity enforcement all existed as
+  prose directives in v1; v2 turns them into per-phase gates that
+  actually run. If you ran v1 Thorough end-to-end without any silent
+  skip, you'd see roughly the same precision.
 - **Cost**: roughly the same dollar envelope as v1.1.8 at equivalent
   modes. The pipeline spawns more agents than v1, but the model cap is
   **Sonnet for breadth + Opus 4.6 for depth** — Opus 4.7 was tested,
   showed diminishing returns on the audit corpus, and burned tokens
-  faster than the recall gain justified. The cost table in `README.md`
-  and `docs/audit-modes.md` covers the per-mode ranges.
+  faster than the recall gain justified. See the cost table in
+  `README.md` and `docs/audit-modes.md` for per-mode ranges.
 - **Wall-clock time**: slightly shorter than v1.1.8 at equivalent
   modes. Several phases that v1 ran through an LLM (report assembly,
   dedup, severity index) are now mechanical Python steps in v2 —
   milliseconds instead of minutes. The time budget those steps freed
   up was reinvested as longer per-agent timeouts (recon, breadth,
   depth, verify shards all 2× v1.1.8) so the analytical phases have
-  more room on large codebases.
+  more room on large codebases. Net effect is roughly flat to
+  slightly faster, depending on codebase size.
 - **Surface coverage**: 5 SC chains (added **Soroban/Stellar**) plus
   the new **L1 mode** for Go/Rust node clients — broader than v1.1.8.
 - **Backend**: V2 driver runs against **either Claude Code or Codex
