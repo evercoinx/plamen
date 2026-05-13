@@ -2951,6 +2951,42 @@ AST_GREP_AVAILABLE=false
 Then attempt each tool. For each tool that SUCCEEDS, update the corresponding
 line in `primitive_status.md` to `=true`. If a tool is not installed or errors,
 leave its line as `=false` and move on. Do NOT block on any single tool.
+
+## PORTABILITY: Do NOT use the GNU `timeout` command
+
+`timeout` is GNU coreutils. It's on Linux by default but **absent on macOS**
+unless the user ran `brew install coreutils` (which only provides `gtimeout`,
+not `timeout`). Wrapping `rust-analyzer scip`, `scip-go`, or `opengrep` with
+`timeout 120 ...` fails on macOS with `timeout: command not found`, which
+makes the bake script wrongly mark the tool unavailable even when the binary
+itself works perfectly. The downstream effect is silent SCIP/opengrep
+degradation across every Mac install.
+
+When you need to cap a single command, pick in priority order:
+
+1. **Best — no per-command wrapper.** The Python driver already enforces a
+   phase-level timeout that bounds the whole bake step. SCIP indexing on
+   targets Plamen supports finishes well under that budget. Just run the
+   command directly:
+   ```
+   rust-analyzer scip . --exclude-vendored-libraries
+   ```
+2. **Acceptable — wrap in Python.** `python3` is a Plamen prerequisite and
+   guaranteed to be on PATH on every supported OS:
+   ```
+   python3 -c "import subprocess, sys; \
+   sys.exit(subprocess.run(['rust-analyzer','scip','.','--exclude-vendored-libraries'], \
+   timeout=120).returncode)"
+   ```
+3. **Last resort — detect coreutils.** If you genuinely need a shell timeout,
+   prefer whichever of `timeout` or `gtimeout` is on PATH:
+   ```
+   TO=$(command -v timeout || command -v gtimeout || true)
+   if [ -n "$TO" ]; then $TO 120 rust-analyzer scip ...; else rust-analyzer scip ...; fi
+   ```
+
+Never emit a bare `timeout N <cmd>` line into any shell script you write
+during this phase.
 """
         resumption_action = "checking or writing"
         resumption_missing_action = "refresh"
