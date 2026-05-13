@@ -575,17 +575,19 @@ class TestV245_AccumulateOnRetry:
 
 
 class TestV245_BreadthTimeout:
-    """Breadth base_timeout_s bumped from 3600 to 5400 for manifest recovery."""
+    """Breadth base_timeout_s — bumped 3600 → 5400 in v2.4.5 for manifest
+    recovery, then 5400 → 10800 in v2.0.0's "2x major LLM phases" pass to
+    accommodate large-repo workloads (UniswapV4-class, 50K+ LOC)."""
 
     def test_sc_breadth_timeout(self):
         sc_phases = T.SC_PHASES
         breadth = [p for p in sc_phases if p.name == "breadth"][0]
-        assert breadth.base_timeout_s == 5400
+        assert breadth.base_timeout_s == 10800
 
     def test_l1_breadth_timeout(self):
         l1_phases = T.L1_PHASES
         breadth = [p for p in l1_phases if p.name == "breadth"][0]
-        assert breadth.base_timeout_s == 5400
+        assert breadth.base_timeout_s == 10800
 
     def test_scale_timeout_small_codebase(self):
         """For small codebases (<5K LOC), scale_timeout returns the base."""

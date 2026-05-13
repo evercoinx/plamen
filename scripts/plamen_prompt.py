@@ -1016,7 +1016,7 @@ def scale_timeout(
     base: int,
     project_root: str,
     language: str,
-    ceiling: int = 10800,
+    ceiling: int = 14400,
     mode: Optional[str] = None,
     hypothesis_count: int = 0,
     backend: str = "",
