@@ -106,8 +106,8 @@ def test_ADV_excessive_timeout_flagged():
     p = D.Phase("recon", ["A"], ["x.md"], base_timeout_s=99999)
     issues = D.validate_phase_graph([p], "thorough", "sc")
     check(
-        "ADV.excessive-timeout (>2h) flagged",
-        any("exceeds 2-hour ceiling" in s for s in issues),
+        "ADV.excessive-timeout (>4h) flagged",
+        any("exceeds 4-hour ceiling" in s for s in issues),
         repr(issues),
     )
 

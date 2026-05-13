@@ -1016,7 +1016,7 @@ def scale_timeout(
     base: int,
     project_root: str,
     language: str,
-    ceiling: int = 5400,
+    ceiling: int = 10800,
     mode: Optional[str] = None,
     hypothesis_count: int = 0,
     backend: str = "",
@@ -1047,7 +1047,7 @@ def scale_timeout(
     extra_hyp = max(0, hypothesis_count - 8) * 90
     effective_ceiling = ceiling
     if mode == "thorough":
-        effective_ceiling = min(ceiling * 2, 10800)  # cap at 3 hours
+        effective_ceiling = min(ceiling * 2, 14400)  # cap at 4 hours (matches validator)
     if backend == "codex":
         effective_ceiling = min(effective_ceiling * 3, 21600)  # 6 hours max
     scaled = min(base + extra_loc * 60 + extra_hyp, effective_ceiling)

@@ -733,9 +733,9 @@ def validate_phase_graph(phases: list, mode: str, pipeline: str) -> list[str]:
         timeout = getattr(phase, "base_timeout_s", None)
         if not isinstance(timeout, (int, float)) or timeout <= 0:
             issues.append(f"phase {name!r} has invalid timeout: {timeout!r}")
-        elif timeout > 7200:  # 2 hours upper bound for any single phase
+        elif timeout > 14400:  # 4 hours upper bound for any single phase
             issues.append(
-                f"phase {name!r} timeout {timeout}s exceeds 2-hour ceiling"
+                f"phase {name!r} timeout {timeout}s exceeds 4-hour ceiling"
             )
 
         expected = getattr(phase, "expected_artifacts", []) or []
