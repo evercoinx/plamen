@@ -2726,8 +2726,16 @@ def run_install():
     _setup_python_deps(w)
 
     # ── Config files ──────────────────────────────────────────
-    console.print(Rule(title="Configuration", style="color(238)"))
-    _setup_config_files(w)
+    # All four merge steps target ~/.claude/ — only meaningful when Claude
+    # Code is installed. On Codex-only machines (or CI runners with neither
+    # backend installed), there's nothing to merge INTO and the writes
+    # would fail with FileNotFoundError on the missing ~/.claude/ dir.
+    if has_claude:
+        console.print(Rule(title="Configuration", style="color(238)"))
+        _setup_config_files(w)
+    else:
+        w(f"  {_C_GRAY}Claude Code not detected -- skipping ~/.claude/ config merge{_RST}\n")
+        w(f"  {_C_GRAY}(Codex side, if installed, is handled by `plamen install --codex`){_RST}\n")
 
     return 0
 
