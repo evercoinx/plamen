@@ -1,4 +1,8 @@
-"""Setup script for unified-vuln-db."""
+"""Setup script for unified-vuln-db.
+
+Original Plamen work. Licensed under MIT — see LICENSE in this directory
+(same terms as the root Plamen LICENSE).
+"""
 
 from setuptools import setup, find_packages
 

@@ -1,4 +1,8 @@
-"""Setup configuration for solana-fender MCP wrapper"""
+"""Setup configuration for solana-fender MCP wrapper.
+
+Original Plamen work. Licensed under MIT — see LICENSE in this directory
+(same terms as the root Plamen LICENSE).
+"""
 from setuptools import setup, find_packages
 
 setup(

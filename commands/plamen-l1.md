@@ -4,7 +4,12 @@ description: "L1 infrastructure audit mode (experimental). Audit Go/Rust node cl
 
 # Plamen L1 Infrastructure Audit Pipeline
 
-> **EXPERIMENTAL**: This mode is active-development work on the `l1-experimental` branch of `PlamenTSV/plamen-l1-experimental`. Do NOT run L1 audits on production smart-contract targets. See `docs/l1-mode/design.md` for the full specification.
+> **Experimental.** L1 mode is newer than the SC pipeline and being validated
+> against benchmark targets (Geth, Reth, CometBFT, Cosmos SDK). Bug classes,
+> phase ordering, and evidence tags are L1-specific (see below) and **do not
+> apply to smart-contract codebases** — run `/plamen` (without `l1`) for
+> Solidity / Move / Solana / Soroban. See `docs/l1-mode/design.md` for the
+> full specification.
 
 > **Scope**: Go and Rust L1 / L2 node clients — Geth, Erigon, Reth, Lighthouse, CometBFT, Cosmos SDK, Substrate, op-geth, op-reth, and their forks. Targets T0 (patch review) / T1 (subsystem audit) / T2 (whole-client via multi-scoped runs) / T3 (full client, shallower coverage).
 

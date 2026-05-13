@@ -33,14 +33,30 @@ Supports **EVM/Solidity**, **Solana/Anchor**, **Aptos Move**, **Sui Move**, **So
 > **Windows**: Enable Developer Mode before installing (required for symlinks). Settings > System > For Developers > toggle ON. Or in admin PowerShell: `reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock /v AllowDevelopmentWithoutDevLicense /t REG_DWORD /d 1 /f`
 >
 > Per-language tools (Foundry, Solana CLI, etc.) are installed automatically via `plamen setup`.
+>
+> **PEP 668 / externally-managed Python**: On Homebrew Python and Ubuntu 23.04+, system `pip` refuses to write into the system site-packages. `plamen install` detects this and adds `--break-system-packages` to its pip invocations, printing a notice on stderr. If you'd rather isolate Plamen's Python deps in a virtualenv, activate one before `plamen install` and set `PIP_BREAK_SYSTEM_PACKAGES=0` to opt out.
 
 ---
 
 ## Install
 
-### Option A: Let your AI assistant set it up (recommended)
+### Option A: Let your AI assistant set it up
 
-Open Claude Code (or Codex CLI) and paste the contents of [`SETUP.md`](SETUP.md). The assistant handles cloning, symlink installation, and dependency setup automatically. RAG database is optional and should be built separately via `plamen rag` in your terminal (requires ~6GB free RAM).
+Open Claude Code or Codex CLI in any project directory and paste the contents
+of [`SETUP.md`](SETUP.md). It is the only Plamen doc designed for AI-assistant
+consumption — it has step-by-step error handling, expected-output anchors,
+and stops the assistant from running the heavy RAG build or the toolchain
+wizard from a non-TTY context. The assistant handles cloning, the
+non-interactive install (`plamen install`), and `plamen install --codex` if
+you have Codex.
+
+> Do **not** paste [`docs/setup.md`](docs/setup.md) or
+> [`docs/getting-started.md`](docs/getting-started.md) into the AI — those
+> are long-form manuals for humans and contain the RAG build inline.
+
+After paste-setup, run `plamen setup` from a real terminal yourself to install
+chain toolchains (Foundry, Solana CLI, Anchor, etc.) and `plamen rag` to
+build the optional vulnerability DB (~6GB RAM).
 
 ### Option B: Terminal
 

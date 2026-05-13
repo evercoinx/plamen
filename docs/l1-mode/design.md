@@ -1,9 +1,10 @@
 # Plamen L1 Mode — Design Document
 
-> **Status**: Draft v0.4, 2026-04-11 (scope reframe — T2/T3 are in-scope, not non-goals)
+> **Status**: Draft v0.4 (scope reframe — T2/T3 are in-scope, not non-goals)
 > **Owner**: PlamenTSV
-> **Branch**: `l1-experimental` on `PlamenTSV/plamen-l1-experimental` (private mirror)
-> **Merge target**: `PlamenTSV/plamen` main — only when Phase 1 is validated on benchmark targets
+> **Branches**: development happens on `feat/codex-phase2-hardening` in this repo
+> (`PlamenTSV/plamen-l1-experimental`). Merges to `PlamenTSV/plamen` mainline
+> when each phase passes its benchmark targets.
 
 ## 1. Why this mode exists
 

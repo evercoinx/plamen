@@ -14,8 +14,18 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
 # ── Bootstrap: auto-install core deps on first run ──────────
+_BREAK_SYSTEM_PACKAGES_NOTICE_SHOWN = False
+
+
 def _pip_install_args():
-    """Build pip install flags that work on PEP 668 systems (macOS Homebrew, Ubuntu 23.04+)."""
+    """Build pip install flags that work on PEP 668 systems (macOS Homebrew, Ubuntu 23.04+).
+
+    On externally-managed Python installs, pip refuses to write into the
+    system site-packages without `--break-system-packages`. Plamen adds it
+    automatically; set `PIP_BREAK_SYSTEM_PACKAGES=0` to opt out (e.g. if you
+    want to confine the install to a venv yourself).
+    """
+    global _BREAK_SYSTEM_PACKAGES_NOTICE_SHOWN
     args = [sys.executable, "-m", "pip", "install"]
     if sys.platform != "win32":
         args.append("--user")
@@ -24,7 +34,25 @@ def _pip_install_args():
         import sysconfig
         marker = os.path.join(sysconfig.get_path("stdlib"), "EXTERNALLY-MANAGED")
         if os.path.isfile(marker):
-            args.append("--break-system-packages")
+            # Honor opt-out: PIP_BREAK_SYSTEM_PACKAGES=0 explicitly disables.
+            if os.environ.get("PIP_BREAK_SYSTEM_PACKAGES") == "0":
+                if not _BREAK_SYSTEM_PACKAGES_NOTICE_SHOWN:
+                    sys.stderr.write(
+                        "  Plamen: PIP_BREAK_SYSTEM_PACKAGES=0 honored — pip "
+                        "may refuse to install into externally-managed Python.\n"
+                        "  Activate a virtualenv first or unset the variable.\n"
+                    )
+                    _BREAK_SYSTEM_PACKAGES_NOTICE_SHOWN = True
+            else:
+                if not _BREAK_SYSTEM_PACKAGES_NOTICE_SHOWN:
+                    sys.stderr.write(
+                        "  Plamen: PEP 668 externally-managed Python detected; "
+                        "adding `--break-system-packages` to pip install.\n"
+                        "  Set PIP_BREAK_SYSTEM_PACKAGES=0 (and re-run from a "
+                        "virtualenv) if you'd rather isolate.\n"
+                    )
+                    _BREAK_SYSTEM_PACKAGES_NOTICE_SHOWN = True
+                args.append("--break-system-packages")
     except Exception:
         pass
     return args
@@ -1368,10 +1396,13 @@ def _setup_python_deps(w):
         ("unified-vuln-db", "custom-mcp/unified-vuln-db/requirements.txt"),
         ("farofino-mcp", "custom-mcp/farofino-mcp/requirements.txt"),
     ]
+    # (label, path, critical_for): critical_for is a human-readable note
+    # describing what the user loses if this fails. "non-critical" stays
+    # silent; anything else is surfaced loud after the install loop.
     editable_pkgs = [
-        ("unified-vuln-db", "custom-mcp/unified-vuln-db"),
-        ("solana-fender", "custom-mcp/solana-fender"),
-        ("slither-mcp (EVM)", "custom-mcp/slither-mcp"),
+        ("unified-vuln-db", "custom-mcp/unified-vuln-db", "non-critical"),
+        ("solana-fender", "custom-mcp/solana-fender", "Solana static analysis (Fender)"),
+        ("slither-mcp (EVM)", "custom-mcp/slither-mcp", "EVM static analysis (Slither)"),
     ]
 
     # Check if core deps already installed
@@ -1429,17 +1460,45 @@ def _setup_python_deps(w):
         else:
             w(f"  {_C_GREEN}  done{_RST}\n")
 
-    for label, pkg in editable_pkgs:
+    critical_failures = []   # list of (label, reason)
+    for label, pkg, critical_for in editable_pkgs:
         path = os.path.join(base, pkg)
         if not os.path.isdir(path):
             w(f"  {_C_DARK_GRAY}  skipping {label} — not found{_RST}\n")
             continue
+        # Detect unpopulated git submodule: dir exists but contains neither
+        # setup.py nor pyproject.toml. Without this check pip errors with
+        # "neither setup.py nor pyproject.toml found" and the install
+        # masks the failure as "non-critical". Caller needs to know.
+        has_setup = (
+            os.path.isfile(os.path.join(path, "setup.py"))
+            or os.path.isfile(os.path.join(path, "pyproject.toml"))
+        )
+        if not has_setup:
+            w(f"  {_C_RED}  skipping {label} — empty submodule "
+              f"({pkg}/ has no setup.py or pyproject.toml){_RST}\n")
+            w(f"    {_C_GRAY}Submodule not initialized. Run inside ~/.plamen:{_RST}\n")
+            w(f"    {_C_GRAY}  git submodule update --init --recursive{_RST}\n")
+            if critical_for != "non-critical":
+                critical_failures.append((label, f"empty submodule — {critical_for} unavailable"))
+            continue
         w(f"  {_C_ORANGE}>{_RST} {label}\n")
         sys.stdout.flush()
         if not _run_install_cmd(f'{pip_base} -e "{path}"', retries=1):
-            w(f"  {_C_RED}  failed (non-critical){_RST}\n")
+            if critical_for == "non-critical":
+                w(f"  {_C_DARK_GRAY}  failed (non-critical){_RST}\n")
+            else:
+                w(f"  {_C_RED}  failed — {critical_for} will be unavailable{_RST}\n")
+                critical_failures.append((label, f"pip install failed — {critical_for} unavailable"))
+                all_ok = False
         else:
             w(f"  {_C_GREEN}  done{_RST}\n")
+
+    if critical_failures:
+        w(f"\n  {_C_RED}{len(critical_failures)} critical Python dep(s) failed to install:{_RST}\n")
+        for label, reason in critical_failures:
+            w(f"    {_C_RED}• {label}{_RST}  {_C_GRAY}{reason}{_RST}\n")
+        w(f"  {_C_GRAY}Resolve and re-run `plamen install` before auditing affected chains.{_RST}\n")
 
     w("\n")
     return all_ok
@@ -2070,18 +2129,33 @@ def run_uninstall():
     w(f"  {_C_GRAY}The Plamen repo at {PLAMEN_HOME} will NOT be deleted.{_RST}\n\n")
     sys.stdout.flush()
 
-    confirm = inquirer.select(
-        message="Proceed with uninstall?",
-        choices=[
-            {"name": "Yes, uninstall Plamen", "value": True},
-            {"name": "Cancel", "value": False},
-        ],
-        default=False,
-        pointer="  >",
-        style=_STYLE,
-        qmark=">",
-        amark="✓",
-    ).execute()
+    # Non-TTY guard: refuse to proceed without an interactive confirm.
+    # Destructive ops should never silently auto-proceed; if you need a
+    # scripted uninstall, set PLAMEN_UNINSTALL_YES=1 in the environment.
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        if os.environ.get("PLAMEN_UNINSTALL_YES") == "1":
+            w(f"  {_C_ORANGE}>{_RST} Non-TTY context, PLAMEN_UNINSTALL_YES=1 — proceeding.\n")
+        else:
+            w(f"  {_C_ORANGE}!{_RST} Non-TTY context (Claude Code Bash / CI / piped stdio).\n")
+            w(f"    {_C_GRAY}Uninstall requires explicit confirmation. Either:{_RST}\n")
+            w(f"    {_C_GRAY}  - Run `plamen uninstall` from a real terminal, OR{_RST}\n")
+            w(f"    {_C_GRAY}  - Set PLAMEN_UNINSTALL_YES=1 to bypass the prompt.{_RST}\n\n")
+            return
+        # Non-TTY + PLAMEN_UNINSTALL_YES=1 path: skip the inquirer prompt.
+        confirm = True
+    else:
+        confirm = inquirer.select(
+            message="Proceed with uninstall?",
+            choices=[
+                {"name": "Yes, uninstall Plamen", "value": True},
+                {"name": "Cancel", "value": False},
+            ],
+            default=False,
+            pointer="  >",
+            style=_STYLE,
+            qmark=">",
+            amark="✓",
+        ).execute()
 
     if not confirm:
         w(f"  {_C_DARK_GRAY}Cancelled.{_RST}\n")
@@ -2194,6 +2268,21 @@ def _install_codex_adapter(w):
     codex_plamen = os.path.normpath(os.path.join(codex_home, "plamen"))
     codex_dir = os.path.normpath(os.path.join(PLAMEN_HOME, "codex-adapter"))
     generator = os.path.normpath(os.path.join(PLAMEN_HOME, "scripts", "codex_adapter.py"))
+
+    # Step 0: Verify codex CLI is on PATH. Without it, the adapter still
+    # generates files and the install reports success, but `codex` itself
+    # won't run — the user discovers this when they try to start an audit.
+    # Warn loud but don't block: a user may be staging configs for a machine
+    # where codex will be installed later.
+    codex_bin = _find_codex_bin()
+    if not codex_bin:
+        w(f"  {_C_ORANGE}!{_RST} `codex` not found on PATH. Adapter files will be generated,\n")
+        w(f"    {_C_GRAY}but the Codex backend will be unusable until you install the CLI:{_RST}\n")
+        w(f"    {_C_GRAY}  mkdir -p ~/.npm-global && npm config set prefix ~/.npm-global{_RST}\n")
+        w(f"    {_C_GRAY}  echo 'export PATH=\"$HOME/.npm-global/bin:$PATH\"' >> ~/.zshrc{_RST}\n")
+        w(f"    {_C_GRAY}  npm install -g @openai/codex{_RST}\n\n")
+    else:
+        w(f"  {_C_GREEN}✓{_RST} Codex CLI detected at {codex_bin}\n")
 
     # Step 1: Run the generator script
     w(f"  {_C_ORANGE}>{_RST} Generating Codex config files...\n")
@@ -4492,6 +4581,28 @@ def main():
             f"  {_C_GRAY}Install Claude Code or Codex CLI, plus python, npm, and git, then retry.{_RST}\n"
         )
         sys.exit(1)
+
+    # ── Non-TTY guard for the interactive wizard ─────────────
+    # `plamen` (no args), `plamen compare`, and any path that falls into
+    # the InquirerPy-driven wizard need a controlling terminal. Without
+    # one, `inquirer.select(...).execute()` crashes inside
+    # prompt_toolkit/input/vt100.py with
+    # `OSError: [Errno 22] Invalid argument`. Catch it here with an
+    # actionable message instead of a traceback.
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        show_banner()
+        w = sys.stdout.write
+        w(f"\n  {_C_ORANGE}!{_RST} Plamen wizard needs a real terminal.\n")
+        w(f"    {_C_GRAY}Detected non-TTY (Claude Code Bash / Codex shell / CI / piped stdio).{_RST}\n\n")
+        w(f"  {_C_WHITE}Choose one:{_RST}\n")
+        w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}install{_RST}                    Non-interactive install (safe here)\n")
+        w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}core{_RST} /path/to/project      Skip wizard with explicit mode + path\n")
+        w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}thorough{_RST} /path/to/project  Same, Thorough mode\n")
+        w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}light{_RST} /path/to/project     Same, Light mode\n")
+        w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}migrate{_RST}                    Migrate v1.x install layout\n")
+        w(f"    {_C_ORANGE}plamen{_RST} {_C_GRAY}help{_RST}                       Full subcommand list\n\n")
+        w(f"  {_C_GRAY}Or open a real terminal and run `plamen` again.{_RST}\n\n")
+        return
 
     pipeline = mode = target = docs = network = scope_file = scope_notes = ""
     language = tier = fork_mode = subsystem_scope = ""
