@@ -1,0 +1,40 @@
+# Plamen CODEOWNERS
+#
+# GitHub uses this file to require explicit reviewer approval on PRs
+# that touch sensitive paths. Combined with branch protection's
+# `require_code_owner_reviews: true`, any change to the paths below
+# can only be merged after an owner explicitly approves.
+#
+# Why each entry:
+#   .github/         — CI workflows + repo automation. The PR #12/#13
+#                      attack pattern (May 2026) injected a remote-fetch
+#                      step here to exfiltrate secrets. Owner review
+#                      mandatory.
+#   scripts/         — driver + validators. A malicious change here
+#                      executes on every user's machine via `plamen install`.
+#   plamen.py        — installer entry point. Same blast radius as scripts/.
+#   custom-mcp/      — vendored MCP server code that runs against user
+#                      target codebases. Compromised MCP = compromised
+#                      audit results.
+#   commands/        — orchestrator prompts. Malicious prompts could
+#                      steer audits toward false negatives or exfiltrate
+#                      target source via tool calls.
+#   rules/           — same as commands/, lower frequency of change.
+#   settings.json.example — shipped permissions/env template. Bad
+#                      defaults here become bad defaults on every install.
+#   mcp.json.example — same class for MCP servers.
+
+# Default ownership of everything else
+* @PlamenTSV
+
+# Sensitive paths — owner review required even if matched by * above
+.github/                  @PlamenTSV
+.github/workflows/        @PlamenTSV
+.github/CODEOWNERS        @PlamenTSV
+scripts/                  @PlamenTSV
+plamen.py                 @PlamenTSV
+custom-mcp/               @PlamenTSV
+commands/                 @PlamenTSV
+rules/                    @PlamenTSV
+settings.json.example     @PlamenTSV
+mcp.json.example          @PlamenTSV
