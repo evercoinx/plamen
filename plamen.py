@@ -563,10 +563,14 @@ def check_dependencies() -> bool:
             ("anchor",  _find_bin("anchor", ["~/.avm/bin"])),
             ("cargo",   _find_bin("cargo-build-sbf") or _find_bin("cargo")),
             ("trident", _find_bin("trident")),
+            ("scout",   _find_bin("cargo-scout-audit", _CARGO_PATHS)),
         ]),
         ("Move", [
-            ("aptos",   _find_bin("aptos", ["~/.aptoscli/bin"])),
-            ("sui",     _find_bin("sui", ["~/AppData/Local/bin", "~/.local/bin"])),
+            ("aptos",    _find_bin("aptos", ["~/.aptoscli/bin"])),
+            ("sui",      _find_bin("sui", ["~/AppData/Local/bin", "~/.local/bin"])),
+            ("ast-grep", _find_bin("ast-grep", _CARGO_PATHS + (
+                ["/opt/homebrew/bin", "/usr/local/bin"] if sys.platform == "darwin" else []
+            )) or _find_bin("sg", _CARGO_PATHS)),
         ]),
         ("Soroban", [
             ("stellar", _find_bin("stellar", ["~/.cargo/bin",
@@ -1203,6 +1207,78 @@ def _run_install_cmd(cmd: str, retries: int = 1, timeout: int = None) -> bool:
             w(f"  {_C_ORANGE}  retry {attempt + 1}/{retries}...{_RST}\n")
             sys.stdout.flush()
     return False
+
+
+# Per-binary version probes. Used after install to confirm the binary not
+# only exists on disk but actually runs. The flag is the lightest invocation
+# that produces output and exits zero on a healthy install. None means
+# "skip the probe" — used for tools that have no version flag, only show
+# a TTY-clearing banner, or whose CLI is too slow to reasonably probe.
+#
+# This is STRICTLY informational. A failed probe never blocks install
+# completion, never short-circuits other tools, never raises. The worst
+# possible outcome is a yellow "installed but couldn't verify" line in
+# the post-install report.
+_VERSION_PROBES = {
+    "forge":              "--version",
+    "cast":               "--version",
+    "anvil":              "--version",
+    "medusa":             "--version",
+    "slither":            "--version",
+    "solana":             "--version",
+    "anchor":             "--version",
+    "cargo-build-sbf":    "--version",
+    "trident":            "--version",
+    # Cargo plugin: direct binary has no --version, only `help` and the
+    # `scout-audit` subcommand. `--help` exits zero and prints the usage
+    # block, which is enough to confirm the binary runs.
+    "cargo-scout-audit":  "--help",
+    "aptos":              "--version",
+    "sui":                "--version",
+    "ast-grep":           "--version",
+    "stellar":            "--version",
+    "scip-go":            "--version",
+    "rust-analyzer":      "--version",
+    "opengrep":           "--version",
+    "semgrep":            "--version",
+    "go":                 "version",  # subcommand, not flag
+    "cargo":              "--version",
+}
+
+
+def _probe_tool_runtime(binary_name: str, search_paths: list = None) -> tuple[bool, str]:
+    """Return (ok, message) for a post-install runtime probe.
+
+    ok=True   → binary runs and version flag exits zero (with output).
+    ok=False  → binary missing, or runs but fails. Caller decides what to do.
+
+    A NotFound / timeout / OSError is captured and returned as ok=False with
+    a short message. This function NEVER raises and NEVER mutates state.
+    """
+    flag = _VERSION_PROBES.get(binary_name)
+    if flag is None:
+        return True, "skipped"  # no probe configured == not a failure
+    path = _find_bin(binary_name, search_paths or [])
+    if not path:
+        return False, "not on PATH"
+    try:
+        # 5s ceiling. cargo-installed binaries cold-start in 200-800ms.
+        # Anything past 5s is a hung process and we treat it as broken.
+        result = subprocess.run(
+            [path, flag],
+            timeout=5,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode == 0 and (result.stdout.strip() or result.stderr.strip()):
+            return True, "ok"
+        return False, f"exited {result.returncode}"
+    except subprocess.TimeoutExpired:
+        return False, "hung (>5s)"
+    except (FileNotFoundError, PermissionError, OSError) as exc:
+        return False, f"could not exec ({exc.__class__.__name__})"
 
 
 def _report_toolchain_visibility(w):
@@ -3217,6 +3293,28 @@ def run_setup():
             if paths:
                 _update_path_env(paths)
                 _refresh_system_path()
+
+            # Post-install runtime probe. Verifies each binary this recipe
+            # claims to "provide" actually runs (catches: cargo install
+            # finished but linker failed; Windows AppLocker blocked .exe;
+            # missing system .so/.dll; PATH refresh didn't pick it up).
+            # Output-only — never flips `success`, never aborts, never raises.
+            if success:
+                try:
+                    for binary in (provides or []):
+                        ok, msg = _probe_tool_runtime(binary, paths or [])
+                        if ok and msg == "ok":
+                            w(f"  {_C_GRAY}    ✓ {binary} runs{_RST}\n")
+                        elif ok and msg == "skipped":
+                            # No probe configured. Don't print — visual noise.
+                            pass
+                        else:
+                            w(f"  {_C_ORANGE}    ⚠ {binary}: {msg} "
+                              f"(installed but couldn't verify){_RST}\n")
+                except Exception:
+                    # Probe block is best-effort. Any exception here is a
+                    # bug in the probe itself, not the install — swallow.
+                    pass
             w("\n")
 
     # ── Re-check ─────────────────────────────────────────────
