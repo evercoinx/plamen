@@ -1184,16 +1184,29 @@ def _update_path_env(new_paths: list, persist: bool = False):
 
     If persist=True and on Windows, also adds to the user's persistent PATH via setx
     so future terminal sessions find the tools without manual configuration.
+
+    Persistence is decoupled from the current-PATH check: a directory that's
+    already in the running process PATH (e.g. inherited from `.bashrc`) may
+    still be MISSING from the Windows User PATH that Codex / Claude Code
+    subprocesses inherit at spawn time. We persist to the registry regardless
+    of whether the running process already has it. `_persist_path_windows`
+    is itself idempotent, so this is safe.
     """
     current = os.environ.get("PATH", "")
     for p in new_paths:
         expanded = os.path.normpath(os.path.expanduser(p))
-        if os.path.isdir(expanded) and expanded not in current:
+        if not os.path.isdir(expanded):
+            continue
+        if expanded not in current:
             os.environ["PATH"] = expanded + os.pathsep + os.environ.get("PATH", "")
             current = os.environ["PATH"]
-            # Persist to Windows user PATH so future terminals find the tool
-            if persist and sys.platform == "win32":
-                _persist_path_windows(expanded)
+        # Persist to Windows user PATH so future terminals AND subprocesses
+        # spawned by external CLI runtimes (codex exec, claude -p) find the
+        # tool. Done unconditionally because the in-process PATH check above
+        # cannot detect a gap between the running shell's PATH and the
+        # persistent Windows User PATH.
+        if persist and sys.platform == "win32":
+            _persist_path_windows(expanded)
 
 
 def _persist_path_windows(directory: str):
@@ -2824,6 +2837,34 @@ def run_install():
     # ── Windows-only: drop a `python3` shim so LLM-typed shell commands
     # don't hit the Microsoft Store App Execution Alias.
     _ensure_python3_shim_windows(w)
+
+    # ── Persist Plamen-managed toolchain dirs to the Windows User PATH ──
+    # Background: when Foundry / Solana / Aptos / Sui installers ran (either
+    # via `plamen setup` or out-of-band by the user), they put binaries in
+    # well-known per-tool directories. The dir is usually on Git Bash's
+    # transient PATH (sourced from .bashrc / .profile), so the interactive
+    # `which forge` check succeeds. BUT codex / claude subprocesses inherit
+    # PATH from the persistent Windows User PATH at spawn time, and the
+    # installers don't always write there. Result: agents report
+    # "forge: command not found" mid-audit even though the user (and
+    # `plamen doctor`) sees forge fine.
+    #
+    # Fix: scan the standard toolchain dirs; for any that EXIST on disk,
+    # persist them to the User PATH. Idempotent — already-present entries
+    # are a no-op via _persist_path_windows.
+    if sys.platform == "win32":
+        toolchain_dirs = [
+            "~/.foundry/bin",       # Foundry (forge / cast / anvil / chisel)
+            "~/go/bin",             # Medusa, scip-go, ast-grep (Go-based)
+            "~/.cargo/bin",         # Rust tooling (Stellar CLI, Scout, rust-analyzer)
+            "~/.aptoscli/bin",      # Aptos CLI
+            "~/AppData/Local/bin",  # Sui CLI (winget install location)
+            "~/.local/bin",         # Opengrep + npm user-local prefix
+            "~/.local/share/solana/install/active_release/bin",  # Solana
+            "~/.avm/bin",           # Anchor (Solana)
+            "~/.npm-global/bin",    # User-local npm prefix (Codex CLI)
+        ]
+        _update_path_env(toolchain_dirs, persist=True)
 
     # ── Symlink install (if repo is not directly in ~/.claude) ─
     has_claude = bool(shutil.which("claude") or shutil.which("claude.cmd"))
