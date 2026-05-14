@@ -9836,8 +9836,25 @@ def _validate_recon_coverage(scratchpad: Path, project_root: str,
         "go": [".go"], "rust": [".rs"],
         "l1": [".go", ".rs"], "mixed": [".go", ".rs"],
     }.get(lang_key, [".sol", ".rs", ".move", ".go"])
-    skip_tokens = ("vendor", "target", "node_modules", ".git", "out",
-                   "build", "dist", ".idea", ".vscode")
+    # Build-system / IDE noise + universally out-of-scope audit conventions.
+    # Without the audit-convention tokens (interfaces, test, mock, script,
+    # fixture) every SC repo with external-protocol interface stubs or a
+    # tests directory false-tripped this gate — even though the parallel
+    # _validate_sc_subsystem_coverage already excludes the same patterns.
+    # Comparison is case-insensitive: matches `Test/`, `Tests/`, `Mocks/`
+    # etc. that don't follow the lowercase convention.
+    skip_tokens = (
+        # Build / vendoring / IDE
+        "vendor", "target", "node_modules", ".git", "out",
+        "build", "dist", ".idea", ".vscode",
+        # Out-of-scope by audit convention (matches the SC subsystem
+        # coverage gate's `test_markers` + `non_auditable_prefixes`)
+        "interfaces", "interface",
+        "mock", "mocks",
+        "test", "tests",
+        "script", "scripts",
+        "fixture", "fixtures",
+    )
     root = Path(project_root)
     scope_prefix = _normalize_subsystem_scope(subsystem_scope)
     if not root.exists():
@@ -9869,8 +9886,8 @@ def _validate_recon_coverage(scratchpad: Path, project_root: str,
                     rel = p.relative_to(root).as_posix()
                 except Exception:
                     continue
-                parts = rel.split("/")
-                if any(tok in parts for tok in skip_tokens):
+                parts_lower = [seg.lower() for seg in rel.split("/")]
+                if any(tok in parts_lower for tok in skip_tokens):
                     continue
                 if scope_prefix and not _path_in_subsystem_scope(rel, scope_prefix):
                     # Belt-and-suspenders: scope walk guarantees this is
