@@ -1880,13 +1880,17 @@ def _ensure_python3_shim_windows(w):
         return  # already present — newer Python or prior plamen install
 
     # Tier 1: copy python.exe -> python3.exe in the Python install dir.
+    # Python's `except ... as e` unbinds the variable after the block, so
+    # we capture the exception into a function-scope name to reference it
+    # in tier 2's diagnostics. None == tier 1 succeeded.
+    tier1_error: Exception | None = None
     try:
         shutil.copy2(py_exe, py3_exe)
         w(f"  {_C_GREEN}>{_RST} Created python3.exe shim at {py3_exe}\n")
         w(f"    {_C_GRAY}prevents `python3` from opening the Microsoft Store{_RST}\n")
         return
-    except (OSError, PermissionError) as e_copy:
-        pass  # fall through to tier 2
+    except (OSError, PermissionError) as e:
+        tier1_error = e
 
     # Tier 2: PLAMEN_HOME/.python3.bat as a softer fallback. Works only
     # if PLAMEN_HOME is on PATH ahead of WindowsApps. The README install
@@ -1900,12 +1904,12 @@ def _ensure_python3_shim_windows(w):
             f.write(f'"{py_exe}" %*\r\n')
             f.write("exit /b %ERRORLEVEL%\r\n")
         w(f"  {_C_ORANGE}!{_RST} Couldn't write python3.exe next to {py_exe}\n")
-        w(f"    {_C_GRAY}Reason: {e_copy}{_RST}\n")
+        w(f"    {_C_GRAY}Reason: {tier1_error}{_RST}\n")
         w(f"    {_C_GRAY}Fallback shim: {shim_path}{_RST}\n")
         w(f"    {_C_GRAY}Effective only if ~/.plamen is on PATH before WindowsApps.{_RST}\n")
     except OSError as e_shim:
         w(f"  {_C_RED}!{_RST} Could not create any python3 shim\n")
-        w(f"    {_C_GRAY}python.exe dir: {e_copy}{_RST}\n")
+        w(f"    {_C_GRAY}python.exe dir: {tier1_error}{_RST}\n")
         w(f"    {_C_GRAY}PLAMEN_HOME shim: {e_shim}{_RST}\n")
         w(f"    {_C_GRAY}Workaround: Settings > Apps > Advanced app{_RST}\n")
         w(f"    {_C_GRAY}settings > App execution aliases > turn OFF{_RST}\n")

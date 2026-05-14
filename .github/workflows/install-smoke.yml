@@ -57,6 +57,42 @@ jobs:
         run: |
           test ! -e codex
           test -d codex-adapter
+      - name: Verify python3 shim landed (Windows only)
+        # python3.exe shim regression guard. The Python installer for
+        # Windows creates python.exe but not python3.exe, so LLM-typed
+        # `python3 ...` falls through to the Microsoft Store App
+        # Execution Alias stub. `_ensure_python3_shim_windows` should
+        # have copied python.exe → python3.exe in the same dir.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -e
+          PYEXE=$(python -c "import sys; print(sys.executable)")
+          PYDIR=$(dirname "$PYEXE")
+          # Either tier 1 (python3.exe next to python.exe) OR tier 2
+          # (python3.bat in PLAMEN_HOME / repo root) must exist.
+          if [ -f "$PYDIR/python3.exe" ]; then
+            echo "OK: tier-1 shim at $PYDIR/python3.exe"
+          elif [ -f "./python3.bat" ]; then
+            echo "OK: tier-2 fallback shim at ./python3.bat"
+          else
+            echo "FAIL: no python3 shim found"
+            echo "  expected: $PYDIR/python3.exe OR ./python3.bat"
+            ls -la "$PYDIR" | head -20
+            exit 1
+          fi
+          # Confirm `python3` actually runs and returns a real interpreter
+          # path — not the Microsoft Store stub. Stub output contains
+          # "Python was not found; run without arguments to install
+          # from the Microsoft Store".
+          OUT=$(python3 -c "import sys; print(sys.executable)" 2>&1)
+          echo "python3 -> $OUT"
+          case "$OUT" in
+            *"WindowsApps"*|*"Microsoft Store"*|*"not found"*)
+              echo "FAIL: python3 still resolves to the Store stub"
+              exit 1
+              ;;
+          esac
 
   unit-tests:
     name: pytest (${{ matrix.os }} / py${{ matrix.python }})
