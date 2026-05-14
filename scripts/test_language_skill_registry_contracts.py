@@ -21,6 +21,62 @@ def test_language_toolchain_registry_exists_and_paths_are_valid():
     assert (ROOT / soroban_template).exists()
 
 
+def test_language_toolchain_registry_covers_all_supported_chains():
+    """Every supported chain must have build+test commands and evidence tags
+    registered. Pre-v2.0.1 only sui+soroban were populated, so phase5 verifiers
+    on EVM/Solana/Aptos had to hardcode commands from phase5-poc-execution.md.
+    Now the registry is the source of truth.
+    """
+    registry = json.loads(_read(ROOT / "rules" / "language-toolchain-registry.json"))
+    expected = {"evm", "solana", "aptos", "sui", "soroban"}
+    assert set(registry["languages"]) == expected, (
+        f"registry coverage drift: {set(registry['languages']) ^ expected}"
+    )
+    for lang, body in registry["languages"].items():
+        assert body.get("build_command"), f"{lang}: missing build_command"
+        assert body.get("test_command"), f"{lang}: missing test_command"
+        tags = body.get("evidence_tags") or []
+        assert "POC-PASS" in tags and "CODE-TRACE" in tags, (
+            f"{lang}: evidence_tags must include POC-PASS and CODE-TRACE — got {tags}"
+        )
+        # fuzz_engines list may be empty (Aptos has no native fuzzer), but
+        # the field must exist so the schema is uniform across languages.
+        assert "fuzz_engines" in body, f"{lang}: fuzz_engines key missing"
+
+
+def test_language_toolchain_commands_match_phase5_authoritative_table():
+    """The phase5-poc-execution.md command table is documented authority for
+    verifiers. The registry must agree on the primary build+test commands —
+    otherwise verifiers and the registry will drift.
+    """
+    registry = json.loads(_read(ROOT / "rules" / "language-toolchain-registry.json"))
+    poc = _read(ROOT / "rules" / "phase5-poc-execution.md")
+    # Spot-check each language's primary build command.
+    expectations = {
+        "evm": ("forge build", "forge test --match-test"),
+        "solana": ("cargo build-sbf", "cargo test"),
+        "aptos": ("aptos move compile", "aptos move test"),
+        "sui": ("sui move build", "sui move test"),
+        "soroban": ("stellar contract build", "cargo test"),
+    }
+    for lang, (build, test_prefix) in expectations.items():
+        body = registry["languages"][lang]
+        assert build in body["build_command"], (
+            f"{lang}: registry build_command {body['build_command']!r} "
+            f"does not contain {build!r}"
+        )
+        assert test_prefix in body["test_command"], (
+            f"{lang}: registry test_command {body['test_command']!r} "
+            f"does not start with {test_prefix!r}"
+        )
+        # The phase5 table must mention this build command somewhere — a
+        # cheap drift detector.
+        assert build in poc, (
+            f"{lang}: build_command {build!r} not found in "
+            "phase5-poc-execution.md (drift between registry and prompt)"
+        )
+
+
 def test_skill_registry_resolves_aliases_and_paths():
     registry = json.loads(_read(ROOT / "rules" / "skill-registry.json"))
     storage = registry["standard_skills"]["STORAGE_LIFECYCLE"]
