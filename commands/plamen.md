@@ -1,8 +1,49 @@
 ﻿---
-description: "Launch Plamen security audit pipeline. Usage: /plamen [core|thorough|l1]"
+description: "Launch the V2 deterministic Smart Contract audit pipeline (same as /plamen-wizard). Usage: /plamen [light|core|thorough] [path]"
 ---
 
 # Plamen Audit Pipeline
+
+## Step -1: Route to V2 Wizard (MANDATORY first check)
+
+> **For interactive users**: this is the entry point for the V2 deterministic
+> driver. Reads better as `/plamen-wizard` if you want clarity, but `/plamen`
+> works identically and is what most users type.
+
+**Routing rule** (evaluate `$ARGUMENTS` exactly once, before any other step):
+
+- If `$ARGUMENTS` is empty OR does NOT contain the literal token `wrapper-launch`:
+  - **STOP processing this file.** Read and execute `~/.claude/commands/plamen-wizard.md`
+    from its Step 1 onward, passing `$ARGUMENTS` through unchanged. The wizard
+    collects audit parameters and launches the deterministic Python driver at
+    `~/.claude/scripts/plamen_driver.py`. The driver runs each phase as an
+    isolated subprocess with gates, dynamic retry, and crash-resumable
+    checkpoints — replacing the legacy V1 LLM orchestrator that previously
+    lived in this file.
+  - Do NOT run any of the Step 0..Step 6 sections below in interactive mode.
+    Those sections remain in this file ONLY because the driver invokes them
+    via `claude -p --resume` with `wrapper-launch` set, section-extracting one
+    phase block at a time. They are NOT a complete interactive pipeline.
+
+- If `$ARGUMENTS` contains `wrapper-launch`:
+  - You are running INSIDE a driver subprocess. The driver has section-
+    extracted a specific phase block from this file and you should execute
+    only that block. Proceed to Step 0 below; the existing logic handles
+    the per-phase invocation correctly.
+
+> **Why this routing exists**: pre-v2.0.0, `/plamen` was an LLM-orchestrator
+> prompt that ran the entire audit pipeline inside a single Claude Code
+> conversation. That worked on small audits but drifted on large ones —
+> context saturation late in the run caused mandatory steps to be silently
+> skipped, output files to be claimed-written-but-missing on disk, and
+> findings to be lost to compaction. v2.0.0 replaced the LLM orchestrator
+> with a deterministic Python driver. The interactive surface now points at
+> the V2 wizard so users get the reliable path by default, while the driver
+> still uses this file's per-phase sections as subprocess prompts.
+
+---
+
+
 
 ## Orchestration Protocol
 

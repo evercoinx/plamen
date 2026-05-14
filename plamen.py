@@ -1179,6 +1179,91 @@ def _run_install_cmd(cmd: str, retries: int = 1, timeout: int = None) -> bool:
     return False
 
 
+def _report_toolchain_visibility(w):
+    """Cross-OS report after install: which chain toolchains are visible.
+
+    Background: `plamen install` is the non-interactive install. It
+    does NOT install per-chain toolchains (Foundry, Solana CLI, Anchor,
+    Aptos, Sui, etc.) — that's `plamen setup`. But users often:
+      - install `plamen` non-interactively (Claude Code Bash, CI, docs)
+      - skip `plamen setup` ("I'll do it later")
+      - launch an audit
+      - watch the fuzz phases report COMPILATION_FAILED because
+        forge / cargo / sui isn't on PATH for the audit subprocess
+
+    The fast-fail isn't a bug — `phase4b-required-artifacts.md`
+    explicitly accepts COMPILATION_FAILED as a present-artifact value.
+    But silently degrading the EVM fuzz campaign on a user's first
+    Thorough run is bad UX.
+
+    Fix: surface a one-screen report at install time showing exactly
+    which chain pipelines will be fully functional and which will
+    degrade. The user sees the truth before they spend $30 on a
+    Thorough run that won't fuzz.
+    """
+    # (label, binary_name, install_cmd_hint, used_by)
+    toolchains = [
+        ("Foundry (forge/cast/anvil)", "forge", "plamen setup → EVM, or `curl -L https://foundry.paradigm.xyz | bash && foundryup`", "EVM invariant + Medusa fuzz, Slither integration"),
+        ("Medusa",                     "medusa", "plamen setup → EVM, or `go install github.com/crytic/medusa@latest`", "EVM Medusa stateful fuzz"),
+        ("Slither",                    "slither", "plamen setup → EVM, or `pip install slither-analyzer`", "EVM static analysis"),
+        ("Solana CLI",                 "solana", "plamen setup → Solana", "Solana / Anchor audits"),
+        ("Anchor",                     "anchor", "plamen setup → Solana → Anchor", "Solana program audits"),
+        ("Aptos CLI",                  "aptos",  "plamen setup → Move", "Aptos Move audits"),
+        ("Sui CLI",                    "sui",    "plamen setup → Move", "Sui Move audits"),
+        ("Stellar CLI",                "stellar","plamen setup → Soroban", "Soroban audits"),
+        ("Go (scip-go, medusa)",       "go",     "plamen setup → installs Go, or system package manager", "L1 mode + Medusa"),
+        ("Rust (cargo)",               "cargo",  "plamen setup → installs Rust, or `curl https://sh.rustup.rs -sSf | sh`", "L1 mode + Soroban + Solana"),
+    ]
+    # Use the same search paths as check_dependencies() so we don't get
+    # a different answer here than `plamen doctor` would give.
+    search_paths = {
+        "forge": _FOUNDRY_PATHS,
+        "medusa": ["~/go/bin"],
+        "solana": _SOLANA_PATHS,
+        "anchor": _AVM_PATHS,
+        "aptos": ["~/.aptoscli/bin"],
+        "sui": ["~/AppData/Local/bin", "~/.local/bin"],
+        "stellar": _CARGO_PATHS + ["C:/Program Files/Stellar CLI", "C:/Program Files (x86)/Stellar CLI"],
+        "go": _GO_PATHS,
+        "cargo": _CARGO_PATHS,
+    }
+    found, missing = [], []
+    for label, bin_name, install_hint, used_by in toolchains:
+        paths = search_paths.get(bin_name, [])
+        if _find_bin(bin_name, paths) or _find_bin(bin_name + ".exe", paths):
+            found.append((label, bin_name))
+        else:
+            missing.append((label, bin_name, install_hint, used_by))
+
+    console.print(Rule(title="Toolchain Visibility (audit-subprocess view)", style="color(238)"))
+    if not missing:
+        w(f"  {_C_GREEN}All chain toolchains visible.{_RST} Every audit mode will run end-to-end.\n\n")
+        return
+    if found:
+        w(f"  {_C_GREEN}Detected:{_RST} {', '.join(label for label, _ in found)}\n")
+    w(f"  {_C_ORANGE}Not detected ({len(missing)}):{_RST}\n")
+    for label, bin_name, install_hint, used_by in missing:
+        w(f"    {_C_ORANGE}!{_RST} {_C_WHITE}{label}{_RST}\n")
+        w(f"      {_C_GRAY}needed for: {used_by}{_RST}\n")
+        w(f"      {_C_GRAY}install:    {install_hint}{_RST}\n")
+    w(f"\n")
+    w(f"  {_C_GRAY}Audits will run, but phases that depend on missing tools{_RST}\n")
+    w(f"  {_C_GRAY}will report `COMPILATION_FAILED` / `<TOOL>_UNAVAILABLE`{_RST}\n")
+    w(f"  {_C_GRAY}artifacts (accepted by the gate, but reduced coverage).{_RST}\n")
+    w(f"  {_C_GRAY}Run `plamen setup` from a real terminal to install missing{_RST}\n")
+    w(f"  {_C_GRAY}toolchains interactively.{_RST}\n")
+    if sys.platform != "win32":
+        w(f"\n")
+        w(f"  {_C_GRAY}macOS/Linux PATH note: if you installed a toolchain manually{_RST}\n")
+        w(f"  {_C_GRAY}(e.g. via `foundryup`), its installer may have only written{_RST}\n")
+        w(f"  {_C_GRAY}`export PATH=...` to .bashrc / .zshrc. Codex / Claude Code{_RST}\n")
+        w(f"  {_C_GRAY}subprocesses launched from a parent shell that didn't source{_RST}\n")
+        w(f"  {_C_GRAY}those files will not see the toolchain. Add the export to{_RST}\n")
+        w(f"  {_C_GRAY}~/.profile (sourced by login shells) instead, OR start the{_RST}\n")
+        w(f"  {_C_GRAY}backend CLI from a terminal that DOES source the rc file.{_RST}\n")
+    w(f"\n")
+
+
 def _update_path_env(new_paths: list, persist: bool = False):
     """Add directories to the current process PATH (for post-install detection and subprocesses).
 
@@ -2852,6 +2937,15 @@ def run_install():
     # Fix: scan the standard toolchain dirs; for any that EXIST on disk,
     # persist them to the User PATH. Idempotent — already-present entries
     # are a no-op via _persist_path_windows.
+    #
+    # Cross-OS coverage: the persist-to-registry half is Windows-only
+    # because there's no equivalent registry on POSIX. macOS / Linux
+    # users hit the same class of bug differently: Foundry's installer
+    # writes `export PATH=...` into `.bashrc` / `.zshrc`, but a Codex
+    # subprocess launched from a parent shell that didn't source those
+    # files inherits a PATH without `~/.foundry/bin`. The remediation
+    # there is shell-config-level, not registry-level — see the
+    # diagnostic block below for the user-facing message.
     if sys.platform == "win32":
         toolchain_dirs = [
             "~/.foundry/bin",       # Foundry (forge / cast / anvil / chisel)
@@ -2865,6 +2959,15 @@ def run_install():
             "~/.npm-global/bin",    # User-local npm prefix (Codex CLI)
         ]
         _update_path_env(toolchain_dirs, persist=True)
+
+    # ── Cross-OS toolchain visibility report (all platforms) ────
+    # Tell the user which chain-specific toolchains are detected and
+    # which are missing. Doesn't install anything — that's `plamen setup`.
+    # Surfacing the truth here means a user who runs `plamen install`
+    # and then launches an audit doesn't get bitten by silent
+    # COMPILATION_FAILED fuzz reports for missing forge / cargo / sui /
+    # aptos / solana.
+    _report_toolchain_visibility(w)
 
     # ── Symlink install (if repo is not directly in ~/.claude) ─
     has_claude = bool(shutil.which("claude") or shutil.which("claude.cmd"))

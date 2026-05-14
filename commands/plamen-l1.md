@@ -1,8 +1,36 @@
 ---
-description: "L1 infrastructure audit mode (experimental). Audit Go/Rust node clients. Usage: /plamen l1 [path]"
+description: "Launch the V2 deterministic L1 audit pipeline for Go/Rust node clients (same as /plamen-l1-wizard). Experimental."
 ---
 
 # Plamen L1 Infrastructure Audit Pipeline
+
+## Step -1: Route to V2 L1 Wizard (MANDATORY first check)
+
+**Routing rule** (evaluate `$ARGUMENTS` exactly once, before any other step):
+
+- If `$ARGUMENTS` is empty OR does NOT contain the literal token `wrapper-launch`:
+  - **STOP processing this file.** Read and execute
+    `~/.claude/commands/plamen-l1-wizard.md` from its Step 1 onward, passing
+    `$ARGUMENTS` through unchanged. The wizard collects L1 audit parameters
+    and launches `~/.claude/scripts/plamen_driver.py` with `pipeline=l1`.
+  - Do NOT run any of the Step 0..Step 6 sections below in interactive mode.
+    Those sections are section-extracted by the driver one phase at a time
+    via `claude -p --resume` invocations with `wrapper-launch` set; they
+    are not a complete interactive pipeline.
+
+- If `$ARGUMENTS` contains `wrapper-launch`:
+  - You are running INSIDE a driver subprocess. Proceed to Step 0 below.
+
+> **Why this routing exists**: pre-v2.0.0 `/plamen-l1` was an LLM orchestrator
+> with the same context-saturation failure modes as the SC V1 prompt
+> (silent step-skipping on long audits, files claimed-written-but-missing
+> on disk, compaction-induced data loss). v2.0.0 replaced it with the
+> deterministic Python driver. The interactive surface now points at the
+> wizard so users get the reliable path by default.
+
+---
+
+
 
 > **Experimental.** L1 mode is newer than the SC pipeline and being validated
 > against benchmark targets (Geth, Reth, CometBFT, Cosmos SDK). Bug classes,

@@ -396,14 +396,13 @@ def test_python3_shim_fallback_when_copy_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(plamen, "PLAMEN_HOME", str(plamen_home))
 
     import shutil as _sh
-    orig_copy = _sh.copy2
 
     def fail_copy(src, dst, **kw):
         raise PermissionError("simulated read-only install dir")
 
     monkeypatch.setattr(_sh, "copy2", fail_copy)
     captured: list = []
-    _import_plamen()._ensure_python3_shim_windows(captured.append)
+    plamen._ensure_python3_shim_windows(captured.append)
     # python3.exe was NOT created (copy failed)
     assert not (py_dir / "python3.exe").exists()
     # But python3.bat fallback IS created
@@ -412,5 +411,111 @@ def test_python3_shim_fallback_when_copy_fails(tmp_path, monkeypatch):
     content = shim.read_text(encoding="ascii")
     assert "@echo off" in content
     assert str(fake_py) in content
-    # restore for other tests
-    monkeypatch.setattr(_sh, "copy2", orig_copy)
+
+
+# ---------------------------------------------------------------------------
+# 7. _update_path_env: persists to registry even when shell already has path
+# ---------------------------------------------------------------------------
+
+def test_update_path_env_persists_when_already_in_current_path(monkeypatch):
+    """Regression guard for the Foundry-on-Windows bug.
+
+    User had `~/.foundry/bin` in their Git Bash session (sourced from
+    .bashrc) but NOT in the Windows User PATH (registry). Codex
+    subprocesses inherited from User PATH and didn't see forge, so the
+    fuzz phase reported COMPILATION_FAILED.
+
+    _update_path_env had an early-out: if the dir was already in the
+    current process PATH, it skipped _persist_path_windows. That's
+    exactly the case that needed persisting.
+
+    Fix: persist runs unconditionally, decoupled from current-PATH
+    check.
+    """
+    plamen = _import_plamen()
+    monkeypatch.setattr(sys, "platform", "win32")
+    # Simulate: directory is on disk AND already in current PATH
+    fake_dir = "/c/Users/test/.foundry/bin"
+    monkeypatch.setattr(os.path, "isdir", lambda p: True)
+    monkeypatch.setenv("PATH", fake_dir + os.pathsep + os.environ.get("PATH", ""))
+
+    persist_called: list = []
+    monkeypatch.setattr(plamen, "_persist_path_windows", persist_called.append)
+
+    plamen._update_path_env([fake_dir], persist=True)
+
+    assert persist_called, (
+        "regression: _persist_path_windows was skipped because the dir "
+        "was already in current PATH — exactly the bug we just fixed"
+    )
+
+
+def test_update_path_env_no_persist_on_non_windows(monkeypatch):
+    """Persist is a no-op on macOS / Linux even with persist=True."""
+    plamen = _import_plamen()
+    monkeypatch.setattr(sys, "platform", "linux")
+    persist_called: list = []
+    monkeypatch.setattr(plamen, "_persist_path_windows", persist_called.append)
+    plamen._update_path_env(["/tmp"], persist=True)
+    assert persist_called == [], \
+        "persist must not run on non-Windows"
+
+
+# ---------------------------------------------------------------------------
+# 8. _report_toolchain_visibility: cross-OS report runs on every install
+# ---------------------------------------------------------------------------
+
+def test_report_toolchain_visibility_runs_on_all_platforms(monkeypatch):
+    """The report must be callable on macOS / Linux / Windows alike.
+
+    It uses _find_bin which uses shutil.which under the hood — that's
+    OS-portable.
+    """
+    plamen = _import_plamen()
+    captured: list = []
+    plamen._report_toolchain_visibility(captured.append)
+    # Either "All chain toolchains visible" or "Not detected (N)"
+    output = "".join(captured)
+    assert "Toolchain Visibility" in output or "All chain" in output or "Not detected" in output
+    # Posix-only PATH-source hint must NOT appear on Windows
+    if sys.platform == "win32":
+        assert ".bashrc" not in output and ".zshrc" not in output, \
+            "POSIX-only PATH hint leaked on Windows"
+
+
+def test_report_toolchain_visibility_lists_all_chains(monkeypatch):
+    """The report must enumerate Foundry / Solana / Aptos / Sui /
+    Soroban / Go / Rust so a user sees what each missing tool unlocks."""
+    plamen = _import_plamen()
+    import shutil as _sh
+    monkeypatch.setattr(_sh, "which", lambda *a, **k: None)  # simulate empty PATH
+
+    captured: list = []
+    plamen._report_toolchain_visibility(captured.append)
+    output = "".join(captured)
+    # Every chain we support must appear when nothing is installed.
+    for chain in ("Foundry", "Solana", "Aptos", "Sui", "Stellar", "Go", "Rust"):
+        assert chain in output, f"missing {chain} in report: {output[:500]}"
+    # Posix-only PATH-source hint MUST appear on POSIX
+    if sys.platform != "win32":
+        assert ".bashrc" in output or ".zshrc" in output
+
+
+def test_run_install_calls_toolchain_report():
+    """run_install must call _report_toolchain_visibility on every OS."""
+    plamen = _import_plamen()
+    import inspect
+    src = inspect.getsource(plamen.run_install)
+    assert "_report_toolchain_visibility" in src, \
+        "run_install must call the toolchain report"
+    # Must NOT be wrapped in a Windows-only `if sys.platform == 'win32':`
+    # Check that the report-visibility line is at outer-indent (4 spaces)
+    # rather than inside a platform conditional (8+ spaces).
+    for line in src.splitlines():
+        if "_report_toolchain_visibility" in line:
+            leading = len(line) - len(line.lstrip())
+            assert leading == 4, (
+                f"toolchain report indented to {leading} spaces — "
+                f"likely wrapped in a platform-specific conditional; "
+                f"must be unconditional so macOS / Linux see it too"
+            )
