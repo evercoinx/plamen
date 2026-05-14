@@ -1696,9 +1696,16 @@ def _safe_link(src, dst, w):
     try:
         is_dir = os.path.isdir(src)
         if sys.platform == "win32" and is_dir:
-            # Junctions don't need admin privileges on Windows
-            subprocess.run(["cmd", "/c", "mklink", "/J", dst, src],
-                           check=True, capture_output=True)
+            # Junctions don't need admin privileges on Windows.
+            # mklink rejects paths with mixed separators (e.g.
+            # `C:\Users\plmnt/.claude\agents\skills` from expanduser +
+            # os.path.join). Normalise both args so they use the OS
+            # native separator before invoking cmd.
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J",
+                 os.path.normpath(dst), os.path.normpath(src)],
+                check=True, capture_output=True,
+            )
         else:
             os.symlink(src, dst, target_is_directory=is_dir)
         return True
