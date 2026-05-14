@@ -1820,6 +1820,40 @@ def _build_graph_sweeps_artifact_directive(scratchpad: Path) -> str:
         "The gate checks each artifact independently and will fail on ANY",
         "missing file.  Each file must be >= 200 bytes of substantive content.",
     ])
+
+    # Per-sweep content schema. `_validate_graph_sweeps` soft-warns when these
+    # tokens are missing from the corresponding sweep artifact.
+    if network_amplification or lifecycle_replay:
+        lines.extend([
+            "",
+            "### Per-sweep content schema",
+            "",
+            "Each conditional sweep artifact must contain these tokens "
+            "(case-insensitive substring match is sufficient):",
+            "",
+        ])
+        if network_amplification:
+            lines.extend([
+                "**`network_amplification_findings.md`** (Sweep F)",
+                "- `ingress`  — where untrusted bytes enter the node",
+                "- `dedup`    — deduplication / replay-resistance mechanism",
+                "- `validation` — input shape / size / bound checks",
+                "- `egress`   — outbound propagation cost analysis",
+                "- `verdict`  — CONFIRMED / PARTIAL / REFUTED per finding",
+                "- `evidence` — file:line cited code excerpt per finding",
+                "",
+            ])
+        if lifecycle_replay:
+            lines.extend([
+                "**`lifecycle_replay_findings.md`** (Sweep G)",
+                "- `insert`   — message / record write path",
+                "- `consume`  — message / record read path",
+                "- `evict`    — eviction / expiry / pruning policy",
+                "- `replay`   — replay-attack defense (nonce, txid, hash)",
+                "- `verdict`  — CONFIRMED / PARTIAL / REFUTED per finding",
+                "- `evidence` — file:line cited code excerpt per finding",
+                "",
+            ])
     return "\n".join(lines) + "\n"
 
 

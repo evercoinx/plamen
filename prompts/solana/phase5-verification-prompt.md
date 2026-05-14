@@ -81,6 +81,30 @@ Follow `phase5-poc-execution.md`. Compile and run every PoC - a written test wit
 
 **Solana commands**: `cargo build-sbf` or `anchor build` (compile), `cargo test test_{hypothesis_id} -- --nocapture` (run). For fuzz variants: check `build_status.md` for `trident_available`. If true (Anchor project): use Trident v0.11+ (`cd trident-tests && trident fuzz run fuzz_0` - no honggfuzz needed). If false: use proptest with bounded inputs or boundary-value parameterized tests. See `phase5-poc-execution.md` for templates and Trident commands.
 
+### PoC Attempt Ledger (MANDATORY)
+
+Every verifier output for this finding MUST include this ledger BEFORE
+the evidence tag is finalized. Source-of-truth schema:
+`rules/phase5-poc-execution.md` § "PoC Testability Ledger".
+
+```markdown
+### PoC Attempt
+- PoC Required: YES/NO
+- PoC Class: <unit|property|integration|structural>
+- Attempted: YES/NO
+- PoC Not Attempted Because: <NO_BUILD_ENVIRONMENT|EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS|DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL|PURE_SPEC_OR_DOCS_ONLY|STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION|N/A>
+- Test File: <path or N/A>
+- Command: <command or N/A>
+```
+
+`unit` and `property` rows require a real executable attempt when a
+build/test harness exists. "no test written" with `[CODE-TRACE]`
+fallback is INVALID unless the ledger names an environmental blocker
+from the allowed-reasons list. `STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION`
+is not an allowed skip reason for `unit` or `property` — reclassify
+the row or attempt the test.
+
+
 ## ANTI-HALLUCINATION RULES
 
 1. You MUST read the actual source files BEFORE writing any test or analysis. Do NOT guess function signatures, parameter types, or return values.

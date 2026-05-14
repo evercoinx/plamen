@@ -178,8 +178,7 @@ For each deduplicated finding, append a detail block:
 ```markdown
 ## [F-N] {Title}
 
-- **Source**: {agents that found it, comma-separated}
-- **Original IDs**: {source IDs, e.g., CI-3, NS-1}
+- **Source IDs**: {source IDs from upstream agents, e.g., CI-3, NS-1; prefix the list with the agent names in parens, e.g., (CI, NS)}
 - **Convergent**: {Yes if 2+ agents, No otherwise}
 - **Severity**: {severity}
 - **Verdict**: {CONFIRMED/PARTIAL/REFUTED/CONTESTED}
