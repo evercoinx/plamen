@@ -309,6 +309,64 @@ If DOCUMENTATION path/URL is provided, extract:
 
 Cross-check against the code: does the threat model in `threat_model.md` match the docs? Divergences are findings for `spec-compliance-audit` niche agent.
 
+### TASK 2 Step 2: Write design_context.md (MANDATORY)
+
+Every L1 audit MUST produce `{SCRATCHPAD}/design_context.md` with the
+two sections below. The phase gate
+(`_validate_recon_content_structure`) hard-fails if either section is
+absent.
+
+```markdown
+## Key Invariants
+
+List the consensus / safety / liveness invariants this client is
+required to preserve. Derive from docs (consensus algorithm, slashing
+conditions, finality rules) AND from the code (slashing trigger
+predicates, fork-choice rules, mempool eviction policies). Each
+invariant must reference at least one specific code location
+(`file:line`) or doc section. Examples for a typical L1:
+
+- INV-1: A single validator MUST NOT propose two blocks at the same
+  height — slashable. (consensus/proposer/proposer.go:L120; spec §4.2)
+- INV-2: A block's parent must already be finalized before the block's
+  state transition is applied. (engine/payload/builder.rs:L88)
+- INV-3: Mempool eviction must preserve the highest-fee transaction
+  in each (sender, nonce) bucket. (mempool/pool.go:L312)
+
+Minimum: 3 invariants. Cap: 12 (avoid restating the same property in
+different words). Cover at least one per active subsystem (consensus,
+network, execution, mempool, state).
+
+## Operational Implications
+
+For each Key Invariant above, write ONE corresponding implication:
+what does the invariant tell you about how the system's accounting,
+fork choice, peer state, or storage model actually works — not what
+the invariant CHECKS, but what its existence IMPLIES about the
+system's design.
+
+Each implication must reference specific data structures, formulas,
+or code paths. Restating the invariant in different words is NOT an
+implication.
+
+- IMP-1: INV-1 implies the equivocation evidence path
+  (slashing/double_sign.go) is the authoritative source of validator
+  jail state; downstream code reading
+  `validators[v].jailed_until` cannot ignore evidence that has not yet
+  been committed but is already in the mempool.
+- IMP-2: INV-2 implies the payload builder MUST refuse to start
+  execution on a parent header it has not seen finalized; this is why
+  `Engine::new_payload` blocks on `latest_finalized()` and not on
+  `latest_known()`.
+- ...
+```
+
+The two sections are mandatory because downstream agents
+(`depth-consensus-invariant`, `depth-state-trace`, niche agents)
+consume both. Without `Operational Implications`, depth agents
+analyse a system they don't understand and produce surface-level
+findings.
+
 ## TASK 3: Subsystem map
 
 For each layer identified in TASK 0 Step 1, build a subsystem map using SCIP `workspace/symbol` queries.

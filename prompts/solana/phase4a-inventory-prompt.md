@@ -28,6 +28,50 @@ Write to {SCRATCHPAD}/findings_inventory.md:
 **Total: {N} findings from {M} agents**
 | # | Finding ID | Agent | Severity | Location | Title | Verdict | Step Execution | Rules Applied | RAG Confidence |
 
+### Per-Finding Detail blocks (MANDATORY for every row in the table above)
+
+After the Master Table, emit a `## Per-Finding Detail` section. For every
+finding in the table, write ONE detail block in this **exact** field-label
+schema:
+
+```
+### Finding [<ID>]: <Title>
+
+**Source IDs**: <comma-separated upstream IDs, e.g. TF-1, B2-3>
+**Severity**: <Critical|High|Medium|Low|Informational>
+**Location**: <File.sol:Lstart-Lend>; <optional other locations>
+**Preferred Tag**: <bracketed-classes, e.g. [BALANCE], [ACCESS], [STATE]>
+**Verdict**: <CONFIRMED|PARTIAL|REFUTED|CONTESTED>
+**Root Cause**: <one paragraph; the mechanism by which the bug happens>
+**Description**: <one paragraph; what the bug IS, distinct from why.
+  Even when Root Cause already explains both, REPEAT the "what" here so
+  downstream report writers and dedup tooling can read this field
+  independently. Do NOT collapse Description into Root Cause prose —
+  every finding needs both labels emitted.>
+
+```solidity
+// Code excerpt(s) demonstrating the bug — pasted from the audited source
+```
+
+**Impact**: <one paragraph; user-facing consequence, who loses what>
+```
+
+### HARD CONSTRAINTS
+
+The 8 required field labels — `**Source IDs**`, `**Severity**`,
+`**Location**`, `**Preferred Tag**`, `**Verdict**`, `**Root Cause**`,
+`**Description**`, `**Impact**` — MUST appear in EVERY per-finding detail
+block. The validator rejects chunks where ≥30% of findings drop a
+required label. Stylistic conviction that "Root Cause already covers
+Description" is NOT acceptable — keep them as separate labeled
+paragraphs.
+
+The chunk-shard variants (`findings_inventory_chunk_a.md`, `..._b.md`,
+`..._c.md`) follow the same per-finding schema. Use the same `### Finding
+[<ID>]` heading style and the same 8 field labels in each chunk.
+
+
+
 ## Chain Summary
 | Finding ID | Location | Root Cause (1-line) | Verdict | Severity | Precondition Type | Postcondition Type |
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
