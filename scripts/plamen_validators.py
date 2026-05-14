@@ -8913,7 +8913,11 @@ def _validate_inventory_chunk_structure(scratchpad: Path, phase_name: str) -> li
         ("Description",),
         ("Impact", "Security Impact", "Risk"),
     ]
+    # Per-field miss counters. Soft-log up to 8 individual findings (to
+    # avoid log spam on huge chunks), but always count toward the global
+    # tally so we can promote pervasive field drift to a retry-hint.
     chunk_field_warnings = 0
+    field_miss_counts: dict[str, int] = {}
     for idx, match in enumerate(detail_matches):
         start = match.end()
         end = detail_matches[idx + 1].start() if idx + 1 < len(detail_matches) else len(text)
@@ -8922,15 +8926,43 @@ def _validate_inventory_chunk_structure(scratchpad: Path, phase_name: str) -> li
             group[0] for group in required_field_groups
             if not any(has_field(block, alias) for alias in group)
         ]
+        for field in missing:
+            field_miss_counts[field] = field_miss_counts.get(field, 0) + 1
         if missing:
             chunk_field_warnings += 1
-            log.warning(
-                "[_validate_inventory_chunk_structure] %s missing field(s): "
-                "%s — LLM prose format check (soft)",
-                match.group(1), ", ".join(missing),
+            if chunk_field_warnings <= 8:
+                log.warning(
+                    "[_validate_inventory_chunk_structure] %s missing field(s): "
+                    "%s — LLM prose format check (soft)",
+                    match.group(1), ", ".join(missing),
+                )
+
+    # Pervasive-drift promotion: if ANY required field is missing from
+    # >= 30% of detail blocks, promote to a hard retry-hint. The LLM's
+    # next attempt will see the explicit instruction to emit the field
+    # rather than silently collapsing it into Root Cause prose.
+    #
+    # Threshold rationale: 1-2 findings drifting in a 30-finding chunk is
+    # normal LLM variance — re-running burns budget for a cosmetic gain.
+    # 10+ findings dropping the same field is a prompt-template miss,
+    # and a targeted retry-hint typically converges in 1 attempt.
+    total = len(detail_matches)
+    if total >= 5:  # below 5 detail blocks, percentage is noise
+        pervasive: list[str] = []
+        for field, count in field_miss_counts.items():
+            if count / total >= 0.30:
+                pervasive.append(f"{field} ({count}/{total} findings)")
+        if pervasive:
+            issues.append(
+                "pervasive per-finding field drift: "
+                + ", ".join(sorted(pervasive))
+                + ". The Per-Finding Detail block for each ### [<ID>] heading "
+                + "MUST emit `**<Field>**: ...` lines for every required "
+                + "field (Source IDs, Severity, Location, Preferred Tag, "
+                + "Verdict, Root Cause, Description, Impact). Do NOT collapse "
+                + "Description into Root Cause prose; keep them as separate "
+                + "labeled fields so downstream report writers can find both."
             )
-            if chunk_field_warnings >= 8:
-                break
 
     return issues
 
