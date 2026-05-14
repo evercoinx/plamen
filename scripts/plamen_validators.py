@@ -2587,8 +2587,19 @@ def _validate_confidence_iter2_mandatory(scratchpad: Path) -> list[str]:
     if medium_plus_uncertain == 0:
         return []
 
-    da_files = list(scratchpad.glob("depth_da_*_findings.md")) + list(
-        scratchpad.glob("depth_iter2_*_findings.md")
+    # Tolerate filename drift. The driver's manifest instructs the LLM to
+    # write `depth_iter2_*_findings.md`, but the orchestrator routinely
+    # drops the `_findings` segment and writes `depth_iter2_state_trace.md`,
+    # `depth_iter2_edge_case.md`, etc. A strict glob falsely concludes
+    # "no iter2 artifacts exist" and re-runs the entire opus depth phase
+    # (~$15-30 waste). Same class as the v2.3.4 perturbation_findings
+    # canonicalization. iter3 outputs also imply iter2 completed, so they
+    # satisfy this gate too.
+    da_files = (
+        list(scratchpad.glob("depth_da_*_findings.md"))
+        + list(scratchpad.glob("depth_iter2_*_findings.md"))
+        + list(scratchpad.glob("depth_iter2_*.md"))
+        + list(scratchpad.glob("depth_iter3_*.md"))
     )
     if da_files:
         return []

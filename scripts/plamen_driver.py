@@ -908,6 +908,45 @@ def _precreate_codex_artifacts(phase: "Phase", scratchpad: Path) -> None:
                     pass
 
 
+def _canonicalize_depth_iter_filenames(scratchpad: Path) -> list[str]:
+    """Rename non-canonical iter2/iter3 outputs to the canonical _findings.md form.
+
+    The driver's depth manifest instructs the LLM to write
+    `depth_iter2_*_findings.md` (and `depth_iter3_*_findings.md`), but the
+    orchestrator routinely drops the `_findings` segment and emits
+    `depth_iter2_state_trace.md`, `depth_iter3_targeted.md`, etc. Multiple
+    downstream consumers (inventory parsers, validators, never-cut gate)
+    glob for the strict suffix and miss these files, causing false-fail
+    retries that re-spend the entire opus depth phase.
+
+    Same class as v2.3.4's `depth_perturbation_findings.md` →
+    `perturbation_findings.md` canonicalization. Idempotent and safe to
+    re-run — if the canonical name already exists we skip to avoid
+    clobbering.
+
+    Returns the list of (source, target) pairs renamed for logging.
+    """
+    renamed: list[str] = []
+    for prefix in ("depth_iter2_", "depth_iter3_"):
+        for src in sorted(scratchpad.glob(f"{prefix}*.md")):
+            stem = src.stem  # e.g. "depth_iter2_state_trace"
+            if stem.endswith("_findings"):
+                continue  # already canonical
+            target = src.with_name(stem + "_findings.md")
+            if target.exists():
+                continue  # don't clobber existing canonical
+            try:
+                src.rename(target)
+                renamed.append(f"{src.name} -> {target.name}")
+            except OSError:
+                # Best-effort: any FS error and we leave the file alone.
+                # The validator's tolerant glob catches the non-canonical
+                # form too, so we degrade to "works but downstream parsers
+                # may miss this file" rather than blocking the phase.
+                pass
+    return renamed
+
+
 def _synthesize_depth_lifecycle_artifacts(
     scratchpad: Path, pipeline: str, *, force: bool = False,
     mode: str = "core",
@@ -3180,6 +3219,17 @@ def _run_phase_validators(
 
     # --- depth (L1): full validator suite ---
     if phase.name == "depth" and config["pipeline"] == "l1":
+        # Canonicalize iter2/iter3 filenames BEFORE any downstream consumer
+        # (validators, never-cut, parsers) globs for `_findings.md`. Without
+        # this, the orchestrator's habit of dropping the `_findings` suffix
+        # causes a false "no iter2 artifacts exist" verdict and re-runs the
+        # whole opus depth phase.
+        renamed = _canonicalize_depth_iter_filenames(scratchpad)
+        if renamed:
+            log.info(
+                f"[{phase.name}] canonicalized iter filenames: "
+                f"{', '.join(renamed)}"
+            )
         # v2.6.3: synthesize lifecycle artifacts for ALL backends.
         # Codex: force-overwrite (mechanical version more reliable).
         # Claude: fill missing only (LLM may write prose-format files
@@ -3271,9 +3321,15 @@ def _run_phase_validators(
             # thinking all findings are CONFIDENT.  When the stub detector
             # fires, force iter2 regardless of the score values.
             if not conf_iter2_issues and conf_quality_issues:
+                # Tolerate iter2 filename drift (see
+                # _validate_confidence_iter2_mandatory for the contract +
+                # rationale). Keep this mirror aligned or the stub-detector
+                # branch will spuriously trigger a depth retry.
                 da_files = (
                     list(scratchpad.glob("depth_da_*_findings.md"))
                     + list(scratchpad.glob("depth_iter2_*_findings.md"))
+                    + list(scratchpad.glob("depth_iter2_*.md"))
+                    + list(scratchpad.glob("depth_iter3_*.md"))
                 )
                 if not da_files:
                     conf_iter2_issues = [
@@ -3306,6 +3362,14 @@ def _run_phase_validators(
 
     # --- depth (SC): full validator suite ---
     elif phase.name == "depth" and config["pipeline"] == "sc":
+        # Same canonicalization as the L1 branch — must run BEFORE any
+        # downstream consumer globs for `_findings.md`.
+        renamed = _canonicalize_depth_iter_filenames(scratchpad)
+        if renamed:
+            log.info(
+                f"[{phase.name}] canonicalized iter filenames: "
+                f"{', '.join(renamed)}"
+            )
         # v2.6.3: synthesize for all backends (same rationale as L1)
         _synth_force_sc = config.get("cli_backend") == "codex"
         synth = _synthesize_depth_lifecycle_artifacts(
@@ -3409,9 +3473,15 @@ def _run_phase_validators(
             conf_iter2_issues = _validate_confidence_iter2_mandatory(scratchpad)
             # v2.8.1: stub scores above 0.7 fool the iter2 check — see L1 block
             if not conf_iter2_issues and conf_quality_issues:
+                # Tolerate iter2 filename drift (see
+                # _validate_confidence_iter2_mandatory for the contract +
+                # rationale). Keep this mirror aligned or the stub-detector
+                # branch will spuriously trigger a depth retry.
                 da_files = (
                     list(scratchpad.glob("depth_da_*_findings.md"))
                     + list(scratchpad.glob("depth_iter2_*_findings.md"))
+                    + list(scratchpad.glob("depth_iter2_*.md"))
+                    + list(scratchpad.glob("depth_iter3_*.md"))
                 )
                 if not da_files:
                     conf_iter2_issues = [
