@@ -66,6 +66,7 @@ All tier writers MUST follow these rules without exception:
 | `[CONTESTED]` | Evidence is conflicting or confidence is low |
 | `[FALSE_POSITIVE]` | Verified NOT exploitable (appears only if retained in report for context) |
 | `[VERIFICATION NOT EXECUTED]` | verify_*.md file missing for this finding |
+| `[REPORT-BLOCKED]` | Manifest flagged this finding as report-blocked (e.g. severity demotion, dedup absorption); writer must keep the finding body but mark the tag. Body validator at `_validate_report_body` accepts this tag in addition to `[UNVERIFIED]` / `[VERIFICATION NOT EXECUTED]` when the manifest entry has `report_blocked=true`. |
 | `[UNRESOLVED — needs human review]` | Skeptic-Judge disagreement, demoted severity |
 
 ---
