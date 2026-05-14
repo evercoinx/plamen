@@ -253,12 +253,16 @@ class TestP18_QualityGateExemption:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestP2_ScaleTimeoutCeiling:
+    """`project_root=Path('.')` is environment-sensitive — when pytest runs
+    from the Plamen repo root, count_loc() reports ~42K LOC of .sol/.rs
+    examples in prompt files and adds LOC-scaling. Use a clean tmp dir
+    so each test exercises only the ceiling logic, not the LOC scaling."""
 
-    def test_sc_thorough_gets_doubled_ceiling(self):
+    def test_sc_thorough_gets_doubled_ceiling(self, tmp_path):
         """SC Thorough mode should get doubled ceiling, not just L1."""
         result = PR.scale_timeout(
             base=900,
-            project_root=Path("."),
+            project_root=tmp_path,
             language="evm",
             mode="thorough",
             hypothesis_count=0,
@@ -267,11 +271,11 @@ class TestP2_ScaleTimeoutCeiling:
         # With doubled ceiling (7200), base 900 should be returned as-is
         assert result == 900
 
-    def test_sc_thorough_ceiling_actually_doubles(self):
+    def test_sc_thorough_ceiling_actually_doubles(self, tmp_path):
         """With high base exceeding single ceiling but not double, the doubling matters."""
         result = PR.scale_timeout(
             base=5000,
-            project_root=Path("."),
+            project_root=tmp_path,
             language="evm",
             mode="thorough",
             hypothesis_count=0,
@@ -281,11 +285,11 @@ class TestP2_ScaleTimeoutCeiling:
         # With doubling: min(5000, 7200) = 5000
         assert result == 5000
 
-    def test_core_mode_no_doubling(self):
+    def test_core_mode_no_doubling(self, tmp_path):
         """Core mode should NOT get ceiling doubling."""
         result = PR.scale_timeout(
             base=5000,
-            project_root=Path("."),
+            project_root=tmp_path,
             language="evm",
             mode="core",
             hypothesis_count=0,
@@ -293,11 +297,11 @@ class TestP2_ScaleTimeoutCeiling:
         )
         assert result == 3600
 
-    def test_light_mode_no_doubling(self):
+    def test_light_mode_no_doubling(self, tmp_path):
         """Light mode should NOT get ceiling doubling."""
         result = PR.scale_timeout(
             base=5000,
-            project_root=Path("."),
+            project_root=tmp_path,
             language="evm",
             mode="light",
             hypothesis_count=0,

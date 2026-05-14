@@ -139,16 +139,23 @@ jobs:
         shell: bash
         run: |
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - name: Run scripts/test_*.py
+      - name: Run scripts/test_*.py (HARD FAIL on test failure)
         # Collect-only first to catch import errors cheaply; then run the
-        # full suite. Don't fail the whole pipeline if a test file imports
-        # something only present in a deeper install — log it as a warning.
+        # full suite as a HARD failure. Pre-v2.0.0 this step wrapped the
+        # pytest call in `|| echo "::warning::..."` which silently
+        # downgraded test failures to yellow warnings on every push —
+        # 5 real failures had been ignored for weeks. Now: any test
+        # failure blocks the workflow.
         shell: bash
         run: |
           set -e
           if compgen -G "scripts/test_*.py" > /dev/null; then
-            pytest scripts/ --collect-only -q || echo "::warning::collect-only failed; check individual test files"
-            pytest scripts/ -q --tb=short -x || echo "::warning::some tests failed; not a hard fail in smoke stage"
+            # Collect-only must succeed (import errors are real bugs)
+            pytest scripts/ --collect-only -q
+            # Then the full suite must pass.
+            # No -x — we want the full failure list, not just the first.
+            # No `|| echo` — failures fail the workflow.
+            pytest scripts/ -q --tb=short
           else
             echo "No scripts/test_*.py — skipping"
           fi

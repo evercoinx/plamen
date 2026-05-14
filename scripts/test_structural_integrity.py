@@ -657,7 +657,11 @@ def test_validator_dispatch_covers_all_critical_phases():
     # Filter out known non-phase config keys
     config_keys = {"project_root", "scratchpad", "pipeline", "language",
                    "mode", "subsystem_scope", "report_body_writer_",
-                   "finding_id", "report_", "cli_backend", "_"}
+                   "finding_id", "report_", "cli_backend", "_",
+                   # scope_file is a config.get key (wizard-provided audit
+                   # scope file). Added in the post-v2.0.0 recon coverage
+                   # gate scope-file consumption fix.
+                   "scope_file"}
     ghost_refs -= config_keys
 
     assert not ghost_refs, (
@@ -720,13 +724,16 @@ def test_build_phase_prompt_does_not_crash():
 
 def test_codex_top_level_route_uses_deterministic_driver():
     root = SCRIPTS_DIR.parent
+    # v2.0.0 F6 fix: source dir was renamed `codex/` → `codex-adapter/`
+    # so it doesn't shadow the Codex CLI binary when ~/.plamen is on PATH.
+    # The INSTALL target (~/.codex/) is unchanged.
     skill_paths = [
         Path.home() / ".codex" / "skills" / "plamen" / "SKILL.md",
-        root / "codex" / "skills" / "plamen" / "SKILL.md",
+        root / "codex-adapter" / "skills" / "plamen" / "SKILL.md",
     ]
     agent_paths = [
         Path.home() / ".codex" / "AGENTS.md",
-        root / "codex" / "AGENTS.md",
+        root / "codex-adapter" / "AGENTS.md",
     ]
     for path in skill_paths + agent_paths:
         assert path.exists(), f"missing Codex route contract: {path}"

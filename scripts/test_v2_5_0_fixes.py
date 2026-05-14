@@ -40,14 +40,23 @@ def test_rate_limit_wait_poll_interval():
 
 
 def test_verify_aggregate_timeout_scales():
-    """sc_verify_aggregate gets hypothesis-count-based timeout extension."""
+    """sc_verify_aggregate gets hypothesis-count-based timeout extension.
+
+    Ceiling note: post-v2.0.0 the scale_timeout default ceiling was raised
+    from 5400 to 14400 to accommodate the breadth-bump (10800s base) — see
+    commits 056a631, 5573f30, 2c76b3e (validator) and the
+    test_phase_graph regression guard. This test only verifies the
+    hyp-count extension is applied; the cap is whatever scale_timeout's
+    current default ceiling is.
+    """
     from plamen_prompt import scale_timeout
 
     # 47 hypotheses: extra_hyp = (47-8)*90 = 3510
-    # base 900 + 3510 = 4410 (well under 5400 ceiling)
+    # base 900 + 3510 = 4410 (well under any sane ceiling)
     timeout = scale_timeout(900, ".", "evm", mode="core", hypothesis_count=47)
     assert timeout >= 4000, f"Expected >4000s for 47 hyps, got {timeout}"
-    assert timeout <= 5400, f"Exceeded ceiling: {timeout}"
+    # Cap check against the current validator-side ceiling (14400s = 4h)
+    assert timeout <= 14400, f"Exceeded 4-hour ceiling: {timeout}"
 
 
 def test_verify_aggregate_timeout_block_exists():
