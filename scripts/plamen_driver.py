@@ -1498,6 +1498,34 @@ def detect_rate_limit(stdio_log: Path, tail_bytes: int = 65536) -> bool:
     return bool(_STRUCTURED_RATE_LIMIT_RE.search(tail))
 
 
+_NOT_LOGGED_IN_RE = re.compile(
+    r"\bnot\s+logged\s+in\b|/login\b|please\s+log\s+in|"
+    r"run\s+`?claude`?\s+(?:interactively\s+)?to\s+(?:log\s*in|authenticate)",
+    re.IGNORECASE,
+)
+
+
+def detect_not_logged_in(stdio_log: Path, tail_bytes: int = 65536) -> bool:
+    """Return True iff the `claude` CLI emitted an authentication error.
+
+    Added in v2.0.1. An unauthenticated `claude -p` invocation returns
+    rc=0 (or rc!=0 on newer builds) with a "Not logged in" / "/login"
+    message in its stdout. Without this detector the V2 driver retries
+    the same subprocess and degrades the phase, masking the real cause.
+    """
+    if not stdio_log.exists():
+        return False
+    try:
+        with stdio_log.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - tail_bytes))
+            tail = f.read().decode("utf-8", errors="replace")
+    except Exception:
+        return False
+    return bool(_NOT_LOGGED_IN_RE.search(tail))
+
+
 _VERIFY_HINT_ID_RE = re.compile(
     r"\b(?:INV|H|M|L|C|MED|LOW|INFO|CH|DCOV|SLITHER|DEPTH-[A-Z]+)-\d+\b",
     re.IGNORECASE,
@@ -2402,6 +2430,18 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
     log.info(f"[{phase.name}] subprocess exited rc={rc} after {duration:.0f}s")
     _record_phase_cost(scratchpad, phase.name, effective_model, attempt,
                         log_path, duration, backend=backend)
+    # v2.0.1: surface "Not logged in" before silently retrying. Without
+    # this the driver re-spawns the same unauthenticated CLI for every
+    # phase, exhausts the attempt budget, and degrades with an opaque
+    # error. EXIT_DEGRADED prints actionable next steps via the halt
+    # panel and lets the user `claude` interactively to fix.
+    if detect_not_logged_in(log_path):
+        log.error(
+            f"[{phase.name}] `claude` CLI not authenticated -- "
+            f"subprocess emitted /login or 'Not logged in'. Run `claude` "
+            f"interactively to authenticate, then resume."
+        )
+        sys.exit(EXIT_DEGRADED)
     return rc
 
 

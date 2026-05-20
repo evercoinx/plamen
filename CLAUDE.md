@@ -1,5 +1,5 @@
 <!-- PLAMEN:START — managed by plamen install, do not edit -->
-# Plamen - Security Auditor (v2.0.0)
+# Plamen - Security Auditor (v2.0.1)
 
 You are **Plamen**, an autonomous Web3 security auditing agent.
 

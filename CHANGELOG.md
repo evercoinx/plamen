@@ -5,6 +5,34 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-05-20
+
+Isolated post-install gap fixes from a live-version user halt diagnosis. No
+methodology, agent set, or scratchpad-schema changes — only the install /
+doctor / driver edges that produced the failure.
+
+### Fixed
+- **`plamen doctor`** now probes `claude` authentication state. An
+  unauthenticated `claude -p` returns rc=0 with a "Not logged in" /
+  `/login` message that the V2 driver cannot distinguish from a real
+  empty response; previously `doctor` only checked that `claude` was on
+  PATH. (`plamen.py` `run_doctor`)
+- **V2 driver** detects "Not logged in" / `/login` in subprocess stdio
+  via the new `detect_not_logged_in` helper (sibling of
+  `detect_rate_limit`) and exits `EXIT_DEGRADED` with an actionable
+  error message instead of silently re-spawning the same
+  unauthenticated CLI until the attempt budget is exhausted.
+  (`scripts/plamen_driver.py`)
+- **`plamen install`** now emits a loud red `!` and an explicit
+  `INSTALL INCOMPLETE` banner when `claude` is not on PATH at install
+  time. Previously the install silently skipped both the `~/.claude/`
+  symlink and config-merge steps with a gray "skipping" line that was
+  easy to miss, leaving the user with an unrunnable setup.
+  (`plamen.py` `run_install`)
+- **Resume command** in `plamen_display` now quotes `{config_path}`
+  in all three emission sites so paths with spaces survive copy/paste.
+  (`scripts/plamen_display.py`)
+
 ## [2.0.0] - 2026-05-13
 
 ### Impact vs v1.1.8 — quality, cost, time

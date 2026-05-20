@@ -2790,6 +2790,26 @@ def run_doctor():
     if claude_bin or codex_bin:
         if claude_bin:
             ok(f"`claude` on PATH ({claude_bin})")
+            # v2.0.1: probe authentication. An unauthenticated `claude -p`
+            # invocation returns rc=0 with a "Not logged in" / "/login"
+            # message on stdout, which the V2 driver cannot distinguish
+            # from a real subprocess response and ends up burning the
+            # phase budget on empty output. Surface this in `doctor`.
+            try:
+                probe = subprocess.run(
+                    [claude_bin, "-p", "ping"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                blob = (probe.stdout or "") + (probe.stderr or "")
+                if re.search(r"not logged in|/login\b|please log in|run `claude`",
+                             blob, re.IGNORECASE):
+                    warn("`claude` is on PATH but NOT logged in — "
+                         "run `claude` interactively to authenticate "
+                         "(V2 driver will produce empty subprocess output otherwise)")
+            except (subprocess.TimeoutExpired, OSError):
+                # 5s timeout means `claude` is alive and waiting on
+                # input — that is the authenticated path; no warning.
+                pass
         else:
             warn("`claude` not on PATH (Claude Code backend unavailable)")
         if codex_bin:
@@ -3077,7 +3097,12 @@ def run_install():
         console.print(Rule(title="Linking into Claude Code", style="color(238)"))
         _run_symlink_install(w)
     elif not has_claude:
-        w(f"  {_C_GRAY}Claude Code not detected -- skipping ~/.claude/ symlinks{_RST}\n")
+        # v2.0.1: loud, not silent. A user who installs Plamen without
+        # `claude` on PATH gets no symlinks AND no config merge, which
+        # leaves the V2 driver unable to spawn subprocesses on the
+        # Claude Code backend. Make it impossible to miss.
+        w(f"  {_C_RED}! Claude Code not detected -- skipping ~/.claude/ symlinks{_RST}\n")
+        w(f"    {_C_GRAY}Install via https://claude.com/code, then re-run `plamen install`.{_RST}\n")
 
     # ── Submodules ─────────────────────────────────────────────
     slither_dir = os.path.join(PLAMEN_HOME, "custom-mcp", "slither-mcp")
@@ -3107,8 +3132,18 @@ def run_install():
         console.print(Rule(title="Configuration", style="color(238)"))
         _setup_config_files(w)
     else:
-        w(f"  {_C_GRAY}Claude Code not detected -- skipping ~/.claude/ config merge{_RST}\n")
-        w(f"  {_C_GRAY}(Codex side, if installed, is handled by `plamen install --codex`){_RST}\n")
+        w(f"  {_C_RED}! Claude Code not detected -- skipping ~/.claude/ config merge{_RST}\n")
+        w(f"    {_C_GRAY}(Codex side, if installed, is handled by `plamen install --codex`){_RST}\n")
+        # v2.0.1: explicit INSTALL INCOMPLETE banner so the user does
+        # not assume `plamen install` succeeded when half of it was
+        # skipped. The exit code stays 0 (this is informational, not
+        # a hard failure — Codex-only or planned-later setups are
+        # valid), but the message must be unmissable.
+        console.print(Rule(title="INSTALL INCOMPLETE", style=f"color(160)"))
+        w(f"  {_C_RED}Claude Code backend NOT configured.{_RST}\n")
+        w(f"  {_C_GRAY}Install `claude` (https://claude.com/code), authenticate{_RST}\n")
+        w(f"  {_C_GRAY}with `claude` once, then re-run `plamen install`.{_RST}\n")
+        w(f"  {_C_GRAY}Run `plamen doctor` to verify.{_RST}\n")
 
     return 0
 

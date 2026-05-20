@@ -407,7 +407,7 @@ def print_halt_diagnostics(phase_name: str, scratchpad: str,
               file=sys.stderr)
         print(f"Prompt snapshots: {', '.join(str(p) for p in prompts)}",
               file=sys.stderr)
-        print(f"\nResume: python ~/.claude/scripts/plamen_driver.py {config_path}",
+        print(f"\nResume: python ~/.claude/scripts/plamen_driver.py \"{config_path}\"",
               file=sys.stderr)
         return
 
@@ -421,7 +421,7 @@ def print_halt_diagnostics(phase_name: str, scratchpad: str,
         size_kb = p.stat().st_size / 1024 if p.exists() else 0
         table.add_row("Prompt", f"[white]{p.name}[/] [dim]({size_kb:.0f}KB)[/]")
     table.add_row("", "")
-    table.add_row("Resume", f"[bold]python ~/.claude/scripts/plamen_driver.py {config_path}[/]")
+    table.add_row("Resume", f"[bold]python ~/.claude/scripts/plamen_driver.py \"{config_path}\"[/]")
 
     console.print(Panel(table, title="[dim]Diagnostics[/]", border_style="dim",
                         width=min(console.width, 72)))
