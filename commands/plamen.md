@@ -82,7 +82,7 @@ First, output the banner as text (no tool calls):
 â•šâ•â•     â•šâ•â•â•â•â•â•â•â•šâ•â•  â•šâ•â•â•šâ•â•     â•šâ•â•â•šâ•â•â•â•â•â•â•â•šâ•â•  â•šâ•â•â•â•
 ```
 
-**Web3 Security Auditor** v2.0.0
+**Web3 Security Auditor** v2.0.1
 
 ### Version Check (MANDATORY " run before toolchain probe)
 
@@ -92,11 +92,11 @@ Read the VERSION file and compare against the version in your CLAUDE.md context:
 cat ~/.claude/VERSION 2>/dev/null || cat ~/.plamen/VERSION 2>/dev/null || echo "unknown"
 ```
 
-The VERSION file should say `2.0.0`. Compare this against the version in the header of this prompt (`v2.0.0`). If they differ, warn the user:
+The VERSION file should say `2.0.1`. Compare this against the version in the header of this prompt (`v2.0.1`). If they differ, warn the user:
 
 > **Version mismatch detected.** Your CLAUDE.md rules are from v{your version} but the repo is at v{VERSION file}. Run `cd ~/.plamen && git pull && plamen install` to update. Proceeding with stale rules may cause wrong agent counts or skipped pipeline steps.
 
-If the VERSION file says a NEWER version than `2.0.0` (the version hardcoded in this prompt), it means the repo was updated but `plamen install` was not re-run to re-inject the updated CLAUDE.md. The same warning applies.
+If the VERSION file says a NEWER version than `2.0.1` (the version hardcoded in this prompt), it means the repo was updated but `plamen install` was not re-run to re-inject the updated CLAUDE.md. The same warning applies.
 
 **Do NOT skip this check.** A version mismatch means the orchestrator rules (agent counts, mandatory steps, mode table) in CLAUDE.md are out of sync with the skills, prompts, and templates on disk.
 
