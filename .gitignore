@@ -64,12 +64,16 @@ scripts/*
 !scripts/plamen_prompt.py
 !scripts/plamen_validators.py
 !scripts/recon_prepass.py
-!scripts/write_helper.py
 !scripts/banner.py
 !scripts/banner_rich.py
 !scripts/modularize.py
 !scripts/conftest.py
 !scripts/test_*.py
+!scripts/chain_prep.py
+!scripts/mechanical_verify.py
+!scripts/pty_exec.py
+!scripts/report_index_machinery.py
+!scripts/spike_mechanical_poc.py
 sessions/
 settings.json
 shell-snapshots/
