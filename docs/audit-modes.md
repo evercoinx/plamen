@@ -20,7 +20,7 @@
 | Chain analysis | 1 sonnet (merged) | 2 agents | 2 agents + iteration 2 |
 | Verification (PoC) | Chains + ALL Medium+ (sonnet) | Chains + ALL Medium+ | ALL severities (with fuzz) |
 | Skeptic-Judge | Skip | Skip | HIGH/CRIT |
-| Cross-batch consistency | Skip | 1 haiku | 1 haiku |
+| Cross-batch consistency | Skip | 1 sonnet | 1 sonnet |
 | Report | 2 agents (sonnet + haiku) | 5 agents (opus + sonnet + haiku) | 5 agents |
 | Agent count | **~18-22** | **~30-50** | **~40-100** |
 

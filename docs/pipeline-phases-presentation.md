@@ -264,9 +264,9 @@ Only runs when a tier was split into multiple shards (e.g., 30+ Medium findings 
 **Produces**: merged `report_*.md`
 
 ### `report_assemble` — Final Report Assembly
-**Model**: sonnet | **Timeout**: 30min | **Critical**: yes
+**Execution**: Python mechanical (no LLM) | **Runtime**: <1s | **Critical**: yes
 
-The final phase. Merges the three tier files into `AUDIT_REPORT.md` in the project root. The deterministic Python assembler handles concatenation (tier file content is pasted verbatim — no rewriting). The LLM contributes only two original sections: the Executive Summary (2-3 paragraphs summarizing the audit for a non-technical stakeholder) and the Priority Remediation Order (numbered list from most to least urgent, using report IDs). Also generates: Summary Table (severity counts), Components Audited Table (from contract_inventory.md), and Appendix A (internal traceability mapping report IDs back to hypothesis IDs — optional, for audit team reference only). Runs 5 quality checks before finalizing: finding count matches summary table, no internal ID patterns in the report body, all cross-references point to existing findings, no duplicate sections, no control characters leaked from tool output. If any check fails, the assembler auto-fixes and documents what it changed.
+The final phase. Fully deterministic Python assembler since v2.3.11 (no LLM call — prior LLM-driven concat would thrash for 1+ hour on large tier files). Merges the three tier files into `AUDIT_REPORT.md` in the project root with tier content pasted verbatim. Generates deterministically from `report_index.md` counts and the Master Finding Index: the Executive Summary, Priority Remediation Order (numbered list using report IDs), Summary Table (severity counts), Components Audited Table (from `contract_inventory.md`), and Appendix A (internal traceability — optional). Runs 5 quality checks before finalizing: finding count matches summary table, no internal ID patterns in the report body, all cross-references point to existing findings, no duplicate sections, no control characters leaked from tool output. If any check fails, the assembler auto-fixes and documents what it changed.
 
 **Produces**: `AUDIT_REPORT.md` (in project root)
 

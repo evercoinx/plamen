@@ -107,11 +107,13 @@ All paths invoke the same V2 deterministic driver. The backend difference is tra
 
 ## What mode should I pick?
 
-| Mode | When to use | Plan needed | Time |
-|------|-------------|-------------|------|
-| **Light** | Quick scan, small codebases (<3k lines), Pro plan | Pro | ~15-30 min |
-| **Core** | Standard audit, most projects | Max | ~30-90 min |
-| **Thorough** | High-value audit, complex DeFi, want fuzzing | Max | ~1-3 hours |
+| Mode | When to use | Plan needed | Time (small codebase) | Time (large codebase) |
+|------|-------------|-------------|-----------------------|-----------------------|
+| **Light** | Quick scan, small codebases (<3k lines), Pro plan | Pro | ~15-30 min | ~1-2 hours |
+| **Core** | Standard audit, most projects | Max | ~30-90 min | ~3-5 hours |
+| **Thorough** | High-value audit, complex DeFi, want fuzzing | Max | ~1-3 hours | ~6-12 hours |
+
+Small codebase = under ~3k lines of in-scope source. Large/complex codebases (multi-contract DeFi, L1 node clients) sit in the right-hand column — see `pipeline-phases-presentation.md` for per-phase budgets.
 
 Start with **Light** if you're on a Pro plan or just trying it out. Use **Core** for real audits.
 

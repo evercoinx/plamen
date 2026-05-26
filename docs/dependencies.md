@@ -182,7 +182,7 @@ Works on all platforms. No special setup needed beyond Rust and the Stellar CLI.
 |------|---------|---------|-----------|
 | Go | 1.22+ | Build Go-based node clients | [go.dev/dl](https://go.dev/dl/) | Yes (Go clients) |
 | Rust | stable | Build Rust-based node clients | [rustup.rs](https://rustup.rs) (preferred) | Yes (Rust clients) |
-| scip-go | SCIP indexer for Go | `go install github.com/scip-code/scip-go/cmd/scip-go@latest` | Recommended |
+| scip-go | SCIP indexer for Go | `go install github.com/sourcegraph/scip-go/cmd/scip-go@latest` | Recommended |
 | rust-analyzer | SCIP indexer for Rust | `rustup component add rust-analyzer` (or `brew install rust-analyzer` on Homebrew Rust) | Recommended |
 | Opengrep | Cross-ecosystem static analysis | [github.com/opengrep/opengrep](https://github.com/opengrep/opengrep) | Recommended |
 | ast-grep | Structural code search | `cargo install ast-grep --locked` (or `brew install ast-grep` on macOS); auto-installed by `plamen setup` | Recommended |

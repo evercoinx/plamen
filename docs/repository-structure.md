@@ -7,9 +7,12 @@
 ├── plamen.sh / plamen.bat             # Launcher scripts
 ├── VERSION                            # Semantic version (2.0.0)
 │
-├── commands/
-│   ├── plamen.md                      # /plamen slash command — wizard + full SC workflow
-│   └── plamen-l1.md                   # /plamen l1 slash command — L1 infrastructure workflow
+├── commands/                          # Claude Code slash commands (4 files)
+│   ├── plamen.md                      # /plamen — full SC audit workflow
+│   ├── plamen-wizard.md               # /plamen-wizard — interactive setup + driver launch
+│   ├── plamen-l1.md                   # /plamen-l1 — L1 infrastructure workflow
+│   └── plamen-l1-wizard.md            # /plamen-l1-wizard — interactive L1 setup
+│   # Codex slash commands live under codex-adapter/commands/ (same 4 names)
 │
 ├── rules/                             # Shared rules (all languages)
 │   ├── finding-output-format.md       # Finding template, Rules Applied, Depth Evidence Tags
@@ -54,21 +57,31 @@
 │   └── niche/                         # 9 flag-triggered niche agents
 │
 ├── scripts/                           # V2 driver and utilities
-│   ├── plamen_driver.py               # Phase scheduling, checkpointing, retry
-│   ├── plamen_types.py                # Canonical definitions (evidence tags, severities)
+│   ├── plamen_driver.py               # Phase scheduling, worker-pool orchestration, retry
+│   ├── plamen_types.py                # Canonical definitions (evidence tags, severities, plamen_home)
 │   ├── plamen_parsers.py              # LLM output parsing
 │   ├── plamen_validators.py           # Artifact quality gates
 │   ├── plamen_prompt.py               # Phase prompt building
-│   ├── plamen_mechanical.py           # Deterministic report assembly
+│   ├── plamen_mechanical.py           # Deterministic report assembly / mechanical phases
 │   ├── plamen_display.py              # Rich terminal UI for driver
+│   ├── plamen_contracts.py            # Worker artifact / marker-envelope contracts
+│   ├── plamen_markdown.py             # Markdown AST helpers (parser-side)
+│   ├── pty_exec.py                    # Claude PTY session (POSIX openpty + Popen / Win winpty)
+│   ├── preflight_pty_transports.py    # PTY transport probe + cache (schema v3)
+│   ├── mechanical_verify.py           # Phase 5 mechanical verification helpers
+│   ├── chain_prep.py                  # Chain-analysis pre-pass (candidate pair extraction)
+│   ├── report_index_machinery.py      # Report-index ID assignment / coverage
 │   ├── codex_adapter.py               # Codex CLI backend adapter
 │   └── recon_prepass.py               # Pre-recon static analysis
 │
 ├── codex-adapter/                     # Codex CLI backend config source
-│   ├── AGENTS.md                      # Codex orchestrator config
-│   ├── config.toml                    # Codex model/MCP settings (generated)
-│   ├── commands/                      # Codex slash commands
+│   ├── AGENTS.md                      # Codex orchestrator config (injected into ~/.codex/AGENTS.md)
+│   ├── README.md                      # Codex adapter notes
+│   ├── mcp_permissions.toml           # Per-server MCP permission gates
+│   ├── agents/                        # TOML role definitions (spawned via Codex spawn_agent)
+│   ├── commands/                      # Codex slash commands (4 files, mirror commands/)
 │   └── skills/                        # Codex skill overrides
+│   # ~/.codex/config.toml is generated at install time, not shipped in the repo
 │
 ├── custom-mcp/                        # MCP servers
 │   ├── unified-vuln-db/               # RAG database (code only, data/ gitignored)
