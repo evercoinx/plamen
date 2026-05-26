@@ -24,6 +24,8 @@
 | Report | 2 agents (sonnet + haiku) | 5 agents (opus + sonnet + haiku) | 5 agents |
 | Agent count | **~18-22** | **~30-50** | **~40-100** |
 
+> The "agent" counts above are role counts. Agents in the **breadth**, **rescan**, and **depth** rows now execute as a driver-owned PTY worker pool (one Claude PTY per agent artifact) rather than as `Task()` subagents under a Claude coordinator — see [pipeline-phases-presentation.md](pipeline-phases-presentation.md) for execution-shape details.
+
 ## When to Use Each
 
 - **Light**: Pro plan, codebases under 3000 lines, quick first pass. Reports all severities but skips semantic invariants, fuzzing, and design stress testing.

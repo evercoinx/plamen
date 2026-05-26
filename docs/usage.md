@@ -2,7 +2,7 @@
 
 > **Just installed?** See [getting-started.md](getting-started.md) first — what's required, what's optional, and how to run your first audit.
 
-All invocations -- terminal CLI, Claude Code slash commands, and Codex CLI -- launch the same V2 deterministic driver (`plamen_driver.py`). The driver runs each audit phase as an isolated subprocess with automatic checkpointing, gating, retry, and rate-limit pause/resume.
+All invocations -- terminal CLI, Claude Code slash commands, and Codex CLI -- launch the same V2 deterministic driver (`plamen_driver.py`). Most phases run as a single isolated `claude -p` (or `codex exec`) subprocess; **breadth, depth, and rescan** run as driver-supervised PTY worker pools with one Claude PTY per worker artifact and disk-derived completion (`<!-- PLAMEN_STATUS: COMPLETE -->`). See [pipeline-phases-presentation.md](pipeline-phases-presentation.md) for the per-phase execution shape. The driver provides automatic checkpointing, manifest-exact retry (only missing/bad worker rows re-spawn, not whole phases), gating, and rate-limit pause/resume.
 
 ---
 
@@ -136,6 +136,23 @@ python3 ~/.plamen/scripts/plamen_driver.py --fresh /path/to/project/.scratchpad/
 ```
 
 From Claude Code, running `/plamen-wizard` auto-detects an existing scratchpad and offers to resume.
+
+Each scratchpad has a `.plamen_run.lock` that prevents concurrent driver invocations against the same audit. If a stale process owns the lock from a previous crash, the driver refuses to start until the lock is cleared — `rm .scratchpad/.plamen_run.lock` removes it.
+
+---
+
+## Running from inside Claude Code
+
+`/plamen` and `/plamen-wizard` can be launched while a parent Claude Code session is active. The driver strips the parent's Claude identity env vars (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`, `AI_AGENT`) from every child subprocess so the nested `claude` invocations start as fresh sessions instead of detecting a nested-active-session and exiting rc=0 with no work done. The same applies on macOS/Linux where the POSIX PTY layer additionally resets inherited `SIGCHLD` disposition before each spawn (see [architecture.md § PTY Transport](architecture.md)).
+
+---
+
+## Operator controls and runtime behavior
+
+- **Escape / halt**: pressing Escape (or sending a halt signal) cancels every **queued** worker immediately via `_cancel_pending_worker_futures` and terminates **in-flight** workers with a 2-second grace (`_HALT_TERMINATE_GRACE_S = 2.0`) before SIGKILL. The driver then exits with rc=−3 so you can resume with `plamen resume`.
+- **Compaction heartbeat**: Claude auto-compacting its context during a worker turn prints a single informational line ("Claude compacted context; continuing normally (disk gate is source of truth)"). This is **not a warning** — the driver continues under disk-gate validation. If the artifact reaches `PLAMEN_STATUS: COMPLETE`, the worker is done regardless of compaction notice.
+- **Worker-pool progress**: operators see live per-worker progress directly in the UI (no longer hidden inside Claude's Task tool stdio). File creation, marker transitions (`IN_PROGRESS` → `COMPLETE`), and worker completion events are all visible.
+- **Multiple Claude PTY processes**: during breadth/rescan/depth you will see multiple `claude` processes in the process tree — one per worker artifact. This is expected (driver-owned worker pool), not duplication or runaway processes.
 
 ---
 

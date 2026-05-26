@@ -13,8 +13,32 @@ explained inline where it's used.
   `report_assemble`. Sequence is hard-coded in
   [`docs/architecture.md`](architecture.md).
 - **V1 / V2** — V1 was the legacy single-conversation LLM orchestrator. V2 is
-  the current deterministic Python driver (`scripts/plamen_driver.py`) that
-  spawns the same agents per phase in subprocesses. V2 is resumable on crash.
+  the current pipeline: a Python driver (`scripts/plamen_driver.py`) that runs
+  each phase. For the three parallel discovery phases (breadth, depth, rescan)
+  V2 spawns one Claude PTY worker per output artifact and trusts only disk
+  markers (`PLAMEN_STATUS: COMPLETE`) for completion. Other phases run as a
+  single phase LLM with disk-gated artifacts. V2 is resumable on crash.
+- **Execution shape** — every phase runs in one of three shapes: **LLM phase
+  session** (single `claude -p` / `codex exec` subprocess), **Python
+  mechanical** (no LLM), or **Direct PTY worker pool** (driver supervises one
+  Claude PTY per worker artifact). See `docs/pipeline-phases-presentation.md`
+  for the per-phase mapping.
+- **Worker pool** — the parallel execution shape used for breadth, depth, and
+  rescan. The Python driver schedules N concurrent Claude PTY workers via a
+  `ThreadPoolExecutor`, one per `analysis_*.md` / `depth_*_findings.md`
+  artifact, retries only missing or `IN_PROGRESS` rows, and treats Claude's
+  "done" text as advisory.
+- **PLAMEN_STATUS marker** — HTML comment markers written into worker output
+  files (e.g. `<!-- PLAMEN_STATUS: IN_PROGRESS -->`, then `... COMPLETE -->`).
+  The driver's disk gate uses these to distinguish complete artifacts from
+  crash-safety reservation headers. Full marker envelope is documented in
+  `docs/architecture.md`.
+- **Disk gate** — completion check that reads `PLAMEN_STATUS` markers from
+  disk, not LLM "DONE" prose. Source of truth for worker-pool phases.
+- **Compaction (informational)** — Claude auto-compacts a long session
+  mid-turn. For worker phases, the driver emits a single heartbeat line and
+  continues — disk markers still decide completion. Not a warning, not a
+  failure.
 
 ## Agent vocabulary
 
@@ -43,9 +67,20 @@ explained inline where it's used.
   confidence than POC-PASS.
 - **CONTESTED** — verdict where verifier and skeptic disagree; held back
   from final report or human-review-only.
+- **Provisional analysis ID** — finding IDs assigned by breadth/depth/chain
+  agents (e.g. `[CS-1]`, `[TF-3]`, `CH-2`). Internal pipeline IDs only — the
+  `report_index` phase later assigns the final client-facing IDs.
+- **Report ID** — final client-facing finding ID assigned by `report_index`:
+  `C-01` (Critical), `H-01` (High), `M-01`, `L-01`, `I-01`. These are the only
+  IDs that appear in `AUDIT_REPORT.md`.
+- **Canonical finding identity map** — refreshed after major discovery phases.
+  Detects re-minted / collision IDs across phases. Owned by the driver
+  (`_write_canonical_finding_identity_map`).
 - **`.scratchpad/`** — per-audit workspace inside the target project. Holds
   all intermediate artifacts (findings, traces, manifests). Created by
   recon, deleted on `--fresh` restart, otherwise preserved for resume.
+  Contains a per-scratchpad `.plamen_run.lock` that prevents concurrent
+  driver invocations against the same audit.
 
 ## Models & accounts
 
@@ -71,5 +106,20 @@ explained inline where it's used.
   attack surface, semantic invariants. Output drives every later phase.
 - **Inventory** — phase that lists every entry point, state variable, and
   external interaction for downstream agents to consume.
-- **Validation Sweep** — late-pipeline pass that re-verifies the
-  highest-priority candidates with a fresh model context.
+- **Validation Sweep** — one of the depth iteration-1 workers. Produces
+  `scanner_validation_findings.md` / `validation_sweep_findings.md`. Not a
+  separate late-pipeline phase.
+- **`plamen_home()`** — Python abstraction in `scripts/plamen_types.py`. At
+  runtime it resolves to the active backend's integration root (`~/.claude/`
+  for Claude Code, `~/.codex/plamen/` for Codex). The canonical repository is
+  always `~/.plamen` — the backend roots are install-created symlinks.
+- **PTY transport** — how the driver runs Claude PTY workers. On POSIX:
+  `pty.openpty()` + `subprocess.Popen` with a `preexec_fn` that calls
+  `os.setsid()`, claims the controlling TTY via `TIOCSCTTY`, and resets
+  inherited SIGCHLD. On Windows: `winpty.PtyProcess.spawn` via `pywinpty`.
+  Lets `/plamen` launch from inside a Claude Code session without parent
+  process state poisoning the children.
+- **Discovery aids** — feature-derived analysis prompts consumed by depth
+  workers: `security_obligations.md` (obligation ledger from recon) and
+  `asset_binding_matrix.md` (value-flow binding checklist). Protocol-agnostic
+  — generalize across DEX, vault, lending, bridge, L1 client, etc.
