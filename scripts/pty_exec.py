@@ -7,6 +7,7 @@ import os
 import re
 import select
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -556,12 +557,53 @@ class ClaudePtySession:
             )
         else:
             import pty
+            import fcntl
+            import termios
 
-            child_pid, master_fd = pty.fork()
-            if child_pid == 0:
-                os.chdir(self.cwd)
-                os.execvpe(self.argv[0], self.argv, self.env)
-            self._child_pid = child_pid
+            # When Plamen is launched from inside Claude Code on POSIX, the
+            # Python driver may inherit process-level signal state from the
+            # parent session. A raw POSIX fork plus manual child wait is fragile:
+            # inherited SIGCHLD disposition can make children appear reaped
+            # immediately. Use Popen ownership and reset SIGCHLD before spawn.
+            try:
+                if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+                    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+            except Exception:
+                pass
+
+            master_fd, slave_fd = pty.openpty()
+
+            def _child_setup() -> None:
+                try:
+                    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+                except Exception:
+                    pass
+                try:
+                    os.setsid()
+                except Exception:
+                    pass
+                try:
+                    fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+                except Exception:
+                    pass
+
+            try:
+                self.proc = subprocess.Popen(
+                    self.argv,
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    cwd=self.cwd,
+                    env=self.env,
+                    close_fds=True,
+                    preexec_fn=_child_setup,
+                )
+            finally:
+                try:
+                    os.close(slave_fd)
+                except Exception:
+                    pass
+            self._child_pid = self.proc.pid
             self._master_fd = master_fd
         self._start_reader()
 
@@ -623,11 +665,7 @@ class ClaudePtySession:
             return False
         if sys.platform == "win32":
             return bool(self.proc.isalive())
-        try:
-            pid, _status = os.waitpid(self._child_pid, os.WNOHANG)
-            return pid == 0
-        except ChildProcessError:
-            return False
+        return self.proc.poll() is None
 
     def terminate(self, grace_s: float = 5.0) -> None:
         self._reader_stop.set()
@@ -663,6 +701,10 @@ class ClaudePtySession:
                         os.killpg(os.getpgid(self._child_pid), signal.SIGKILL)
                     except Exception:
                         pass
+                try:
+                    self.proc.wait(timeout=1.0)
+                except Exception:
+                    pass
         finally:
             if self._reader_thread and self._reader_thread.is_alive():
                 self._reader_thread.join(timeout=1.0)

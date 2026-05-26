@@ -1,4 +1,5 @@
 import io
+import inspect
 import json
 import sys
 import time
@@ -156,3 +157,19 @@ def test_driver_rate_limit_detection_accepts_claude_session_jsonl(tmp_path):
     )
 
     assert D.detect_rate_limit(log) is True
+
+
+def test_posix_pty_spawn_uses_popen_not_raw_fork_waitpid():
+    """POSIX PTY launch must not use raw pty.fork()+waitpid.
+
+    Launching from inside Claude Code can inherit parent process signal state;
+    Popen ownership plus SIGCHLD reset is the durable path for macOS/Linux.
+    """
+    spawn_src = inspect.getsource(ClaudePtySession.spawn)
+    alive_src = inspect.getsource(ClaudePtySession.is_alive)
+
+    assert "pty.fork()" not in spawn_src
+    assert "subprocess.Popen" in spawn_src
+    assert "signal.SIGCHLD" in spawn_src
+    assert "os.waitpid" not in alive_src
+    assert ".poll()" in alive_src
