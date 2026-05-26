@@ -120,13 +120,22 @@ _completed_phases: int = 0
 _SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 _spinner_idx: int = 0
 _spinner_active: bool = False
+_last_spinner_draw: float = 0.0
+# Keep the live terminal visibly alive without adding log lines. The spinner
+# is a carriage-return redraw, so a sub-second cadence is safe for interactive
+# terminals and avoids the timer appearing to skip by two seconds.
+_SPINNER_REDRAW_INTERVAL_S = 0.20
 
 
 def spin(elapsed_s: int):
     """Update inline spinner with elapsed time. Overwrites current line via \\r."""
-    global _spinner_idx, _spinner_active
+    global _spinner_idx, _spinner_active, _last_spinner_draw
     if not RICH_AVAILABLE:
         return
+    now = time.time()
+    if now - _last_spinner_draw < _SPINNER_REDRAW_INTERVAL_S:
+        return
+    _last_spinner_draw = now
     _spinner_idx = (_spinner_idx + 1) % len(_SPINNER_FRAMES)
     frame = _SPINNER_FRAMES[_spinner_idx]
     mins, secs = divmod(elapsed_s, 60)
@@ -239,6 +248,9 @@ def print_phase_start(phase_idx: int, total: int, phase_name: str,
 
 def print_phase_heartbeat(phase_name: str, elapsed_s: int,
                           new_artifacts: Optional[list[str]] = None,
+                          updated_artifacts: Optional[list[str]] = None,
+                          status: Optional[str] = None,
+                          status_style: str = "warning",
                           tool_calls_delta_kb: Optional[float] = None):
     """Print heartbeat progress line."""
     _clear_spinner()
@@ -250,6 +262,14 @@ def print_phase_heartbeat(phase_name: str, elapsed_s: int,
             names = ", ".join(new_artifacts[:4])
             extra = f" +{len(new_artifacts) - 4} more" if len(new_artifacts) > 4 else ""
             print(f"         ... {time_str} | +{names}{extra}",
+                  file=sys.stderr, flush=True)
+        elif updated_artifacts:
+            names = ", ".join(updated_artifacts[:4])
+            extra = f" +{len(updated_artifacts) - 4} more" if len(updated_artifacts) > 4 else ""
+            print(f"         ... {time_str} | ~{names}{extra}",
+                  file=sys.stderr, flush=True)
+        elif status:
+            print(f"         ... {time_str} | {status}",
                   file=sys.stderr, flush=True)
         elif tool_calls_delta_kb is not None:
             print(f"         ... {time_str} | working (+{tool_calls_delta_kb:.0f}KB tool calls)",
@@ -264,6 +284,17 @@ def print_phase_heartbeat(phase_name: str, elapsed_s: int,
         extra = f" [dim]+{len(new_artifacts) - 4} more[/]" if len(new_artifacts) > 4 else ""
         console.print(
             f"         [dim]{time_str}[/] | [#22C72E]+{escape(names)}[/]{extra}"
+        )
+    elif updated_artifacts:
+        names = ", ".join(updated_artifacts[:4])
+        extra = f" [dim]+{len(updated_artifacts) - 4} more[/]" if len(updated_artifacts) > 4 else ""
+        console.print(
+            f"         [dim]{time_str}[/] | [#E6B800]~{escape(names)}[/]{extra}"
+        )
+    elif status:
+        color = "#66A3FF" if status_style == "info" else "#E6B800"
+        console.print(
+            f"         [dim]{time_str}[/] | [{color}]{escape(status)}[/]"
         )
     elif tool_calls_delta_kb is not None:
         console.print(
@@ -813,13 +844,13 @@ def print_halt_acknowledged():
     _clear_spinner()
     if not RICH_AVAILABLE:
         print(
-            "\n  Halting... subprocess will be terminated within 3s.\n",
+            "\n  Halting... terminating subprocesses now; cleanup may take a few seconds.\n",
             file=sys.stderr, flush=True,
         )
         return
     console.print()
     console.print(
-        "  [bold red]Halting...[/] subprocess will be terminated within 3s."
+        "  [bold red]Halting...[/] terminating subprocesses now; cleanup may take a few seconds."
     )
 
 

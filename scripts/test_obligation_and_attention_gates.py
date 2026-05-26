@@ -323,6 +323,20 @@ def test_perturbation_gate_clears_when_block_present(tmp_path):
     assert issues == []
 
 
+def test_perturbation_gate_accepts_bold_label_block(tmp_path):
+    v = _v()
+    (tmp_path / "depth_state_trace_findings.md").write_text(
+        "## Finding [DST-1]: Token drain\n"
+        "**Verdict**: CONFIRMED\n"
+        "**Severity**: High\n"
+        "**Location**: `Vault.sol:L100`\n\n"
+        "**Perturbation Block**:\n"
+        "- SIBLING: checked `Vault.sol:L120`; same invariant fails.\n",
+        encoding="utf-8",
+    )
+    assert v._check_perturbation_block_per_finding(tmp_path) == []
+
+
 def test_perturbation_gate_ignores_low_and_refuted(tmp_path):
     v = _v()
     (tmp_path / "depth_state_trace_findings.md").write_text(

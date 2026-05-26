@@ -1206,8 +1206,19 @@ def run_recon_prepass(config: dict) -> Dict[str, str]:
           lambda: _write_recon_summary_stub(scratch, proj, lang))
     _safe("meta_buffer.md", lambda: _write_meta_buffer_stub(scratch))
 
-    # v2.5.0 P2: OpenGrep cross-ecosystem scanner (SC pipelines only)
-    if pipeline != "l1":
+    # v2.5.0 P2: OpenGrep cross-ecosystem scanner (SC pipelines only).
+    #
+    # Do not run external scanners in the startup pre-pass by default. The
+    # driver has not planted `_v2_checkpoint.json` or printed the first phase
+    # yet, so a slow scanner looks like a dead launch. The driver runs this as
+    # an optional pre-breadth step where the TUI and disk gate are already
+    # active. Keep the old behavior behind an explicit escape hatch for local
+    # debugging.
+    run_startup_scanners = (
+        os.environ.get("PLAMEN_PREPASS_EXTERNAL_SCANNERS") == "1"
+        or bool(config.get("prepass_external_scanners"))
+    )
+    if pipeline != "l1" and run_startup_scanners:
         _safe("opengrep_scan", lambda: _run_opengrep_scan(scratch, proj, lang))
 
     # v2.5.0 P4: Sec3 X-Ray for Solana (Docker-based, SC only)

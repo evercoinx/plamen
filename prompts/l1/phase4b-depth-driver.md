@@ -218,7 +218,7 @@ has fewer than 2 entries, the agent degraded. Log but do not block.
 | Aspect | Core | Thorough |
 |--------|------|----------|
 | Depth iterations | 1 only | Up to 3 (DA role for iter 2-3) |
-| Confidence scoring | Skip | 4-axis after iter 1 |
+| Confidence scoring | Required 4-axis after iter 1 | 4-axis after iter 1 |
 | Design Stress Testing | Skip | 1 reserved slot, UNCONDITIONAL |
 | Finding Perturbation | Skip | 1 sonnet (structured mutations) |
 | Skill Execution Checklist | Skip | 1 haiku (gap verification) |

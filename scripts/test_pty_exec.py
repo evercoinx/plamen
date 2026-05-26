@@ -11,6 +11,7 @@ from pty_exec import (  # noqa: E402
     encode_claude_project_dir,
     inspect_transcript,
     parse_transcript_usage,
+    transcript_shows_compaction,
 )
 import plamen_driver as D  # noqa: E402
 
@@ -128,6 +129,16 @@ def test_parse_transcript_usage_accumulates_assistant_usage(tmp_path):
     assert usage["output_tokens"] == 22
     assert usage["cache_read_input_tokens"] == 33
     assert usage["cache_creation_input_tokens"] == 44
+
+
+def test_transcript_shows_compaction_from_claude_ui_markers(tmp_path):
+    log = tmp_path / "stdio.log"
+    log.write_text(
+        "13% until auto-compact\nConversation compacted (ctrl+o for history)\n",
+        encoding="utf-8",
+    )
+
+    assert transcript_shows_compaction(log) is True
 
 
 def test_driver_rate_limit_detection_accepts_claude_session_jsonl(tmp_path):

@@ -19,6 +19,7 @@ from typing import Any, Optional
 from plamen_types import (
     Phase, Checkpoint, SC_PHASES, L1_PHASES, log,
     L1_NEVER_CUT_ARTIFACT_GROUPS,
+    l1_never_cut_groups,
     SC_NEVER_CUT_BASE, SC_NEVER_CUT_CORE_EXTRAS, SC_NEVER_CUT_THOROUGH_EXTRAS,
     sc_never_cut_groups, _NEVER_CUT_SKIP_REASONS,
     L1_VERIFY_SHARD_MANIFESTS, L1_VERIFY_PHASE_NAMES,
@@ -27,6 +28,7 @@ from plamen_types import (
     SC_VERIFY_CRITHIGH_PHASE_NAMES,
     _VALID_PIPELINES, _VALID_MODES,
     EVIDENCE_TAGS_PROOF, EVIDENCE_TAG_NAMES_RE, has_mechanical_proof,
+    FINDING_BLOCK_HEADING_RE,
     normalize_severity,
 )
 from plamen_parsers import *  # noqa: F403,F401
@@ -48,6 +50,9 @@ __all__ = [
     "_check_notread_priority_coverage",
     "_check_opengrep_obligation_coverage",
     "_check_dedup_decision_coverage",
+    "_dedup_decision_coverage_detail",
+    "_repair_dedup_missing_dispositions",
+    "_generate_dedup_decision_retry_hint",
     "_check_function_summary_obligation",
     "_check_pde_section_present",
     "_check_perturbation_block_per_finding",
@@ -76,6 +81,7 @@ __all__ = [
     "_compute_tier_completeness_delta",
     "_detect_foreign_phase_writes",
     "_protected_phase_write_patterns",
+    "_live_protected_phase_write_patterns",
     "_record_phase_artifact_state",
     "_phase_artifacts_have_active_owner_state",
     "_ensure_report_consolidation_map",
@@ -126,6 +132,9 @@ __all__ = [
     "_quarantine_phase_overreach",
     "_quarantine_report_without_completed_assemble",
     "_quarantine_stale_on_retry",
+    "_pattern_implicated_by_missing",
+    "_parse_rescan_manifest_files",
+    "_rescan_manifest_exact_missing",
     "_read_retry_hint",
     "_read_artifact_state",
     "_write_artifact_state",
@@ -151,6 +160,7 @@ __all__ = [
     "_validate_invariants_pass2",
     "_validate_chain_iter2",
     "_validate_chain_anti_absorption",
+    "_repair_chain_anti_absorption_splits",
     "_validate_id_ledger_collisions",
     "_validate_consumer_ids_in_ledger",
     "_parse_hypothesis_id_title_pairs",
@@ -183,6 +193,7 @@ __all__ = [
     "_validate_report_body",
     "_validate_report_index_inputs",
     "_validate_report_index_prewrite_inputs",
+    "_validate_report_coverage_semantic_contract",
     "_validate_report_index_severity_provenance",
     "_validate_report_index_triage_safety",
     "_validate_report_tier_completeness",
@@ -223,7 +234,15 @@ __all__ = [
     "_write_skeptic_manifest",
     "_semantic_gap_trigger_counts",
     "_semantic_gap_required",
+    "_AUDIT_FRESH_SENTINEL_NAME",
+    "validate_breadth_artifact_ownership",
+    "validate_depth_artifact_ownership",
+    "compute_breadth_row_statuses",
+    "compute_depth_row_statuses",
+    "compute_verify_row_statuses",
+    "compute_phase_row_statuses",
     "gate_passes",
+    "scratchpad_is_fresh_audit",
     "is_verification_queue_empty",
     "identify_missing_verify_ids",
     "stub_missing_verify_files",
@@ -821,6 +840,776 @@ def _verify_shard_gate_missing(scratchpad: Path, phase_name: str, *, min_bytes: 
     ]
 
 
+_AUDIT_FRESH_SENTINEL_NAME = "_audit_started_with_markers.json"
+
+
+def scratchpad_is_fresh_audit(scratchpad: Path) -> bool:
+    """Return True iff the scratchpad has a fresh-audit sentinel.
+
+    The sentinel `{scratchpad}/_audit_started_with_markers.json` is written
+    by the driver at the start of phase 1 (recon) on fresh audits that run
+    under the new artifact-marker contract (Ship 6 wires the write). Its
+    presence tells the gate to require PLAMEN markers and structural
+    completeness from spawned-worker artifacts.
+
+    Absence means the audit pre-dates marker enforcement (resumed
+    scratchpad) and the gate should fall back to legacy size-based
+    semantics with a warning log on unmarked / in-progress files.
+    """
+    try:
+        return (scratchpad / _AUDIT_FRESH_SENTINEL_NAME).exists()
+    except Exception:
+        return False
+
+
+# Structural-check kwargs are configured per phase. Centralizing here keeps
+# Ship 3 phase-aware without introducing a `Phase.structural_checks` field
+# (Ship 8 may promote this to a Phase attribute when generalizing to other
+# spawned-worker phases). Returning kwargs (rather than (ok, reasons))
+# defers the actual file read to _structural_completeness_ok at gate time.
+_BREADTH_STRUCTURAL_REQUIRED_HEADINGS: tuple[str, ...] = ("Findings",)
+_BREADTH_STRUCTURAL_PLACEHOLDERS: tuple[str, ...] = (
+    "TODO:", "FILL_ME", "<placeholder>",
+)
+
+
+# Per-row breadth status taxonomy. Ship 3 surfaced these buckets as
+# substrings of the gate's failure message; Ship 6 lifts them into a
+# structured per-row datum so the PTY supervision loop can build a
+# continuation message that names each incomplete row without
+# re-parsing the gate's aggregated string. ``gate_passes`` consumes
+# this same helper for the same buckets, so both call sites stay
+# byte-equivalent.
+_BREADTH_STATUS_MISSING = "missing"
+_BREADTH_STATUS_STUB = "stub"
+_BREADTH_STATUS_IN_PROGRESS = "in_progress"
+_BREADTH_STATUS_STRUCTURAL_FAIL = "structural_fail"
+_BREADTH_STATUS_LEGACY_UNMARKED = "legacy_unmarked"
+_BREADTH_STATUS_COMPLETE = "complete"
+
+_BREADTH_INCOMPLETE_STATUSES: tuple[str, ...] = (
+    _BREADTH_STATUS_MISSING,
+    _BREADTH_STATUS_STUB,
+    _BREADTH_STATUS_IN_PROGRESS,
+    _BREADTH_STATUS_STRUCTURAL_FAIL,
+)
+
+# Ship 8 reuses the same status vocabulary for every supervised
+# spawned-worker phase (breadth, depth). The string constants above
+# are phase-agnostic; only the prefix names keep the historical
+# `_BREADTH_` spelling for backward-compat with existing imports.
+
+# Depth structural config. Depth findings use the `### Finding [ID]`
+# block format (NOT breadth's `## Findings` heading) and a
+# `## Semantic Proof Checks` section, so the depth structural check
+# does NOT impose breadth's `## Findings` required heading. It keeps
+# the COMPLETE marker + findings-count + zero-findings-rationale +
+# no-placeholder contract, which are artifact-type-neutral. Depth has
+# no opengrep obligation shard, so the receipts check is not applied.
+_DEPTH_STRUCTURAL_PLACEHOLDERS: tuple[str, ...] = (
+    "TODO:", "FILL_ME", "<placeholder>",
+)
+
+# Canonical depth roles. Pulled from the phase's example_tokens at
+# call time (deterministic, independent of what is on disk -- unlike
+# the observational _expected_depth_agent_roles, which cannot see a
+# role whose file was never written). Falls back to this tuple when a
+# phase config carries no example_tokens.
+_DEPTH_CANONICAL_ROLES: tuple[str, ...] = (
+    "token_flow", "state_trace", "edge_case", "external",
+)
+
+
+def _classify_artifact_row(
+    path: Path,
+    *,
+    fresh_audit: bool,
+    min_bytes: int,
+    structural_kwargs: dict,
+) -> tuple[str, list[str]]:
+    """Classify a single spawned-worker artifact into one of the
+    `_BREADTH_STATUS_*` buckets. Shared by every supervised phase's
+    per-row status helper (breadth, depth) so the marker semantics
+    stay identical across phases.
+
+    ``structural_kwargs`` are forwarded to ``_structural_completeness_ok``
+    when the file is COMPLETE on a fresh audit. Pass phase-appropriate
+    kwargs (breadth requires the `## Findings` heading + obligation
+    receipts; depth does not). Returns ``(status, reasons)``.
+    """
+    if not path.exists():
+        return _BREADTH_STATUS_MISSING, []
+    try:
+        size_ok = path.stat().st_size >= min_bytes
+    except Exception:
+        size_ok = False
+    if not size_ok:
+        return _BREADTH_STATUS_STUB, []
+
+    if is_artifact_legacy_unmarked(path):
+        if fresh_audit:
+            return _BREADTH_STATUS_IN_PROGRESS, ["legacy-unmarked on fresh audit"]
+        return _BREADTH_STATUS_LEGACY_UNMARKED, []
+
+    if not is_artifact_complete(path, min_bytes):
+        return _BREADTH_STATUS_IN_PROGRESS, []
+
+    if fresh_audit:
+        ok, reasons = _structural_completeness_ok(path, **structural_kwargs)
+        if not ok:
+            return _BREADTH_STATUS_STRUCTURAL_FAIL, reasons
+
+    return _BREADTH_STATUS_COMPLETE, []
+
+
+def validate_breadth_artifact_ownership(
+    path: Path,
+    *,
+    expected_output: str,
+    expected_owner: str | None = None,
+) -> tuple[bool, list[str]]:
+    """Validate marker-level ownership for a fresh breadth row artifact.
+
+    The breadth worker pool launches one top-level Claude PTY per manifest
+    row. A row is only complete when the file's markers prove that the
+    assigned worker wrote the assigned output, not just any manifest output.
+    """
+    markers = _extract_artifact_status(path)
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        raw = _strip_fenced_code_blocks(raw)
+    except Exception:
+        raw = ""
+
+    def _plain_marker(name: str) -> str:
+        match = re.search(
+            rf"<!--\s*{re.escape(name)}\s*:\s*(.*?)\s*-->",
+            raw,
+        )
+        return match.group(1).strip() if match else ""
+
+    reasons: list[str] = []
+    if markers.get("ARTIFACT") != expected_output:
+        reasons.append(
+            "marker PLAMEN_ARTIFACT does not match expected output "
+            f"{expected_output}"
+        )
+    if markers.get("PHASE") != "breadth":
+        reasons.append("marker PLAMEN_PHASE is not breadth")
+
+    expected_marker = _plain_marker("EXPECTED_OUTPUT")
+    if expected_marker != expected_output:
+        reasons.append(
+            "marker EXPECTED_OUTPUT does not match expected output "
+            f"{expected_output}"
+        )
+
+    if expected_owner:
+        owner = markers.get("OWNER")
+        agent_row = _plain_marker("AGENT_ROW")
+        if owner != expected_owner:
+            reasons.append(
+                "marker PLAMEN_OWNER does not match manifest row "
+                f"{expected_owner}"
+            )
+        if agent_row != expected_owner:
+            reasons.append(
+                "marker AGENT_ROW does not match manifest row "
+                f"{expected_owner}"
+            )
+    return not reasons, reasons
+
+
+def validate_depth_artifact_ownership(
+    path: Path,
+    *,
+    expected_output: str,
+    expected_owner: str | None = None,
+) -> tuple[bool, list[str]]:
+    """Validate marker-level ownership for a fresh depth worker artifact."""
+    markers = _extract_artifact_status(path)
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        raw = _strip_fenced_code_blocks(raw)
+    except Exception:
+        raw = ""
+
+    def _plain_marker(name: str) -> str:
+        match = re.search(
+            rf"<!--\s*{re.escape(name)}\s*:\s*(.*?)\s*-->",
+            raw,
+        )
+        return match.group(1).strip() if match else ""
+
+    reasons: list[str] = []
+    if markers.get("ARTIFACT") != expected_output:
+        reasons.append(
+            "marker PLAMEN_ARTIFACT does not match expected output "
+            f"{expected_output}"
+        )
+    if markers.get("PHASE") != "depth":
+        reasons.append("marker PLAMEN_PHASE is not depth")
+
+    expected_marker = _plain_marker("EXPECTED_OUTPUT")
+    if expected_marker != expected_output:
+        reasons.append(
+            "marker EXPECTED_OUTPUT does not match expected output "
+            f"{expected_output}"
+        )
+
+    if expected_owner:
+        owner = markers.get("OWNER")
+        agent_row = _plain_marker("AGENT_ROW")
+        if owner != expected_owner:
+            reasons.append(
+                "marker PLAMEN_OWNER does not match depth row "
+                f"{expected_owner}"
+            )
+        if agent_row != expected_owner:
+            reasons.append(
+                "marker AGENT_ROW does not match depth row "
+                f"{expected_owner}"
+            )
+    return not reasons, reasons
+
+
+def _read_breadth_worker_pool_contract(scratchpad: Path) -> dict[str, Any]:
+    path = scratchpad / "_breadth_worker_pool_contract.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _breadth_worker_pool_contract_active(scratchpad: Path) -> bool:
+    return bool(_read_breadth_worker_pool_contract(scratchpad))
+
+
+def _read_depth_worker_pool_contract(scratchpad: Path) -> dict[str, Any]:
+    path = scratchpad / "_depth_worker_pool_contract.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _depth_worker_pool_contract_active(scratchpad: Path) -> bool:
+    return bool(_read_depth_worker_pool_contract(scratchpad))
+
+
+def compute_breadth_row_statuses(
+    scratchpad: Path, phase: Phase
+) -> list[dict[str, Any]]:
+    """Return per-row status for every expected breadth output.
+
+    Each entry is::
+
+        {
+          "name": "analysis_<focus_area>.md",
+          "status": one of _BREADTH_STATUS_*,
+          "reasons": list[str],   # structural_fail reasons; empty otherwise
+        }
+
+    Ship 6 of the artifact-complete PTY supervision plan. Used by:
+
+      - ``gate_passes`` (this module) to build its failure-detail
+        string; the breadth block delegates to this helper rather
+        than inlining the marker-aware checks (kept byte-equivalent
+        to the Ship 3 behavior).
+      - The PTY supervision loop in ``plamen_driver`` to build a
+        continuation message that lists ONLY incomplete rows by name
+        and status, so already-COMPLETE rows are never re-run.
+
+    Returns ``[]`` when the manifest is absent or no spawned-agent
+    rows can be derived. Callers fall back to the legacy ``analysis_*.md``
+    quorum check in that case (gate_passes does this automatically).
+
+    Marker semantics (matching Ship 3):
+
+      - missing:          file does not exist
+      - stub:             file exists but size < min_artifact_bytes
+      - in_progress:      file has PLAMEN markers but STATUS != COMPLETE,
+                          OR file is unmarked on a FRESH-audit scratchpad
+                          (sentinel present); fresh audits require markers
+                          for new artifacts.
+      - structural_fail:  file is COMPLETE on a fresh audit but fails a
+                          structural completeness check (missing required
+                          heading, zero-findings-no-rationale, residual
+                          placeholder strings, missing obligation receipts
+                          section). Returns the same ``reasons`` the gate
+                          surfaces today.
+      - legacy_unmarked:  file exists with substantive content but no
+                          PLAMEN_ARTIFACT marker, on a LEGACY/resumed
+                          scratchpad. Treated as pass (with warning) by
+                          ``gate_passes``; the supervision loop ignores
+                          these rows (they are not incomplete).
+      - complete:         file is COMPLETE and (on fresh audits) passes
+                          structural checks.
+    """
+    expected_outputs = parse_breadth_manifest_outputs(scratchpad)
+    contract = _read_breadth_worker_pool_contract(scratchpad)
+    if not expected_outputs and contract.get("phase") == "breadth":
+        outputs = contract.get("outputs")
+        if isinstance(outputs, list):
+            expected_outputs = [
+                str(name).strip()
+                for name in outputs
+                if str(name).strip().endswith(".md")
+            ]
+    if not expected_outputs:
+        return []
+
+    fresh_audit = scratchpad_is_fresh_audit(scratchpad)
+    # Ship 8.2 semantic-minimum contract: no required literal heading
+    # (findings are detected via `## Finding [` / `### Finding [` blocks or
+    # a `## Findings` section), and the obligation-receipts section is NOT a
+    # hard structural gate (receipt coverage is warning-only, owned by
+    # `_check_opengrep_obligation_coverage`). FINDINGS_COUNT is informational.
+    # The remaining hard checks: fresh marker present, last STATUS COMPLETE,
+    # findings-or-rationale, no residual placeholders.
+    structural_kwargs = dict(
+        required_headings=(),
+        placeholder_strings=_BREADTH_STRUCTURAL_PLACEHOLDERS,
+    )
+
+    agents = parse_breadth_manifest_agents(scratchpad) or []
+    expected_owner_by_output: dict[str, str] = {}
+    for idx, name in enumerate(expected_outputs):
+        if idx < len(agents):
+            owner = str(agents[idx].get("agent_id") or "").strip()
+            if owner:
+                expected_owner_by_output[name] = owner
+    contract_jobs = contract.get("jobs")
+    if isinstance(contract_jobs, list):
+        for job in contract_jobs:
+            if not isinstance(job, dict):
+                continue
+            output = str(job.get("output") or "").strip()
+            owner = str(job.get("agent_id") or "").strip()
+            if output and owner:
+                expected_owner_by_output[output] = owner
+
+    statuses: list[dict[str, Any]] = []
+    for name in expected_outputs:
+        status, reasons = _classify_artifact_row(
+            scratchpad / name,
+            fresh_audit=fresh_audit,
+            min_bytes=phase.min_artifact_bytes,
+            structural_kwargs=structural_kwargs,
+        )
+        if (
+            status == _BREADTH_STATUS_COMPLETE
+            and fresh_audit
+            and _breadth_worker_pool_contract_active(scratchpad)
+        ):
+            ok, marker_reasons = validate_breadth_artifact_ownership(
+                scratchpad / name,
+                expected_output=name,
+                expected_owner=expected_owner_by_output.get(name),
+            )
+            if not ok:
+                status = _BREADTH_STATUS_STRUCTURAL_FAIL
+                reasons = list(reasons) + marker_reasons
+        statuses.append({"name": name, "status": status, "reasons": reasons})
+    return statuses
+
+
+def _depth_expected_outputs(phase: Phase) -> list[str]:
+    """Return the canonical depth output filenames for the phase.
+
+    Uses ``phase.example_tokens`` (the 4 standard depth roles --
+    token_flow, state_trace, edge_case, external) when present, else
+    the ``_DEPTH_CANONICAL_ROLES`` fallback. This is deterministic and
+    independent of disk state, so a role whose file was never written
+    is still expected (and therefore flagged MISSING) -- exactly the
+    DODO failure mode the supervision loop must catch.
+    """
+    roles = list(getattr(phase, "example_tokens", None) or _DEPTH_CANONICAL_ROLES)
+    return [f"depth_{role}_findings.md" for role in roles if role]
+
+
+def compute_depth_row_statuses(
+    scratchpad: Path, phase: Phase
+) -> list[dict[str, Any]]:
+    """Depth analog of ``compute_breadth_row_statuses`` (Ship 8).
+
+    Returns per-row status for the canonical depth output files
+    (``depth_<role>_findings.md`` for each role in the phase's
+    ``example_tokens``). Same status vocabulary and marker semantics
+    as breadth, via the shared ``_classify_artifact_row`` helper, but
+    with DEPTH-appropriate structural kwargs:
+
+      - NO ``## Findings`` required heading (depth uses ``### Finding
+        [ID]`` blocks and a ``## Semantic Proof Checks`` section).
+      - require COMPLETE marker + FINDINGS_COUNT + zero-findings
+        rationale + no residual placeholders.
+      - NO opengrep obligation-receipts requirement (depth agents do
+        not own opengrep shards).
+
+    Returns ``[]`` when no canonical roles can be derived (caller
+    falls back to the legacy glob+quorum gate).
+    """
+    expected = _depth_expected_outputs(phase)
+    contract = _read_depth_worker_pool_contract(scratchpad)
+    expected_owner_by_output: dict[str, str] = {}
+    if contract.get("phase") == "depth":
+        contract_jobs = contract.get("jobs")
+        if isinstance(contract_jobs, list):
+            for job in contract_jobs:
+                if not isinstance(job, dict):
+                    continue
+                output = str(job.get("output") or "").strip()
+                owner = str(job.get("agent_id") or "").strip()
+                if output and owner:
+                    expected_owner_by_output[output] = owner
+        outputs = contract.get("canonical_outputs")
+        if isinstance(outputs, list):
+            contract_expected = [
+                str(name).strip()
+                for name in outputs
+                if str(name).strip().startswith("depth_")
+                and str(name).strip().endswith("_findings.md")
+            ]
+            if contract_expected:
+                expected = contract_expected
+    if not expected:
+        return []
+    fresh_audit = scratchpad_is_fresh_audit(scratchpad)
+    # Ship 8.2 semantic-minimum contract (same as breadth): findings are
+    # detected via `### Finding [` / `## Finding [` blocks or a `## Findings`
+    # section; FINDINGS_COUNT and obligation-receipts are no longer hard
+    # gates. No required literal heading (depth uses `### Finding [ID]`).
+    structural_kwargs = dict(
+        required_headings=(),
+        placeholder_strings=_DEPTH_STRUCTURAL_PLACEHOLDERS,
+    )
+    statuses: list[dict[str, Any]] = []
+    for name in expected:
+        status, reasons = _classify_artifact_row(
+            scratchpad / name,
+            fresh_audit=fresh_audit,
+            min_bytes=phase.min_artifact_bytes,
+            structural_kwargs=structural_kwargs,
+        )
+        if (
+            status == _BREADTH_STATUS_COMPLETE
+            and fresh_audit
+            and _depth_worker_pool_contract_active(scratchpad)
+        ):
+            ok, marker_reasons = validate_depth_artifact_ownership(
+                scratchpad / name,
+                expected_output=name,
+                expected_owner=expected_owner_by_output.get(name),
+            )
+            if not ok:
+                status = _BREADTH_STATUS_STRUCTURAL_FAIL
+                reasons = list(reasons) + marker_reasons
+        if (
+            status == _BREADTH_STATUS_COMPLETE
+            and fresh_audit
+            and name in {
+                "depth_token_flow_findings.md",
+                "depth_state_trace_findings.md",
+            }
+        ):
+            try:
+                text = (scratchpad / name).read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            except Exception:
+                text = ""
+            missing_perturbation = _missing_perturbation_block_ids(text)
+            if missing_perturbation:
+                status = _BREADTH_STATUS_STRUCTURAL_FAIL
+                reasons = list(reasons) + [
+                    "missing perturbation block(s) for Medium+ CONFIRMED "
+                    f"finding(s): {', '.join(missing_perturbation[:5])}"
+                ]
+        statuses.append({"name": name, "status": status, "reasons": reasons})
+    return statuses
+
+
+def compute_verify_row_statuses(
+    scratchpad: Path,
+    phase_name: str,
+    *,
+    min_bytes: int = 100,
+) -> list[dict[str, Any]]:
+    """Return per-finding status for a manifest-driven verify shard.
+
+    Verify shard outputs are dynamic (`verify_<finding_id>.md`) and derive
+    from the queue shard manifest, not from `Phase.expected_artifacts`. This
+    helper gives the PTY supervision loop the same row-level visibility breadth
+    and depth already have, so a partial verifier shard can recover only the
+    missing files instead of re-running the whole shard.
+    """
+    if phase_name in SC_VERIFY_PHASE_NAMES:
+        shards = compute_sc_verify_shards(scratchpad)
+    elif phase_name in L1_VERIFY_PHASE_NAMES:
+        shards = compute_verify_shards(scratchpad)
+    else:
+        return []
+    rows = shards.get(phase_name, [])
+    statuses: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        fid = str(row.get("finding id") or "").strip()
+        if not fid:
+            continue
+        name = f"verify_{fid}.md"
+        present = _verify_file_present_for_id(
+            scratchpad,
+            fid,
+            min_bytes=min_bytes,
+        )
+        statuses.append({
+            "name": name,
+            "finding_id": fid,
+            "status": (
+                _BREADTH_STATUS_COMPLETE
+                if present
+                else _BREADTH_STATUS_MISSING
+            ),
+            "reasons": [] if present else ["missing verifier file"],
+            "row": row,
+        })
+    return statuses
+
+
+def compute_phase_row_statuses(
+    scratchpad: Path, phase: Phase
+) -> list[dict[str, Any]]:
+    """Dispatch to the per-phase row-status helper for a supervised
+    spawned-worker phase. Returns ``[]`` for any phase that is not
+    supervised (the supervision loop and gate then fall back to their
+    legacy paths). Ship 8 dispatcher: breadth -> breadth helper,
+    depth -> depth helper.
+    """
+    if phase.name == "breadth":
+        return compute_breadth_row_statuses(scratchpad, phase)
+    if phase.name == "depth":
+        return compute_depth_row_statuses(scratchpad, phase)
+    if phase.name in L1_VERIFY_PHASE_NAMES or phase.name in SC_VERIFY_PHASE_NAMES:
+        return compute_verify_row_statuses(
+            scratchpad,
+            phase.name,
+            min_bytes=max(100, getattr(phase, "min_artifact_bytes", 0) or 0),
+        )
+    return []
+
+
+def _aggregate_supervised_row_statuses(
+    phase: Phase,
+    row_statuses: list[dict[str, Any]],
+    scratchpad: Path,
+    artifact_label: str,
+) -> Optional[str]:
+    """Aggregate per-row statuses into a single gate failure-detail
+    string, or ``None`` when every row passes.
+
+    Shared by the breadth and depth gate branches (Ship 8). Emits the
+    ``legacy-unmarked-artifact`` and ``in-progress-tolerated-legacy``
+    warning logs as a side effect, exactly as the Ship 3/6 breadth
+    block did. ``artifact_label`` is the glob shown in the failure
+    message (e.g. ``analysis_*.md`` or ``depth_*_findings.md``).
+
+    Legacy/resumed scratchpads (no fresh-audit sentinel) never block on
+    in_progress rows -- they are downgraded to tolerated warnings, so
+    resumed audits keep forward progress.
+    """
+    fresh_audit = scratchpad_is_fresh_audit(scratchpad)
+    missing_expected: list[str] = []
+    stub_expected: list[str] = []
+    in_progress_expected: list[str] = []
+    structural_fail_expected: list[tuple[str, list[str]]] = []
+    legacy_unmarked_expected: list[str] = []
+    for row in row_statuses:
+        s = row.get("status")
+        n = row.get("name", "")
+        if s == _BREADTH_STATUS_MISSING:
+            missing_expected.append(n)
+        elif s == _BREADTH_STATUS_STUB:
+            stub_expected.append(n)
+        elif s == _BREADTH_STATUS_IN_PROGRESS:
+            in_progress_expected.append(n)
+            if "legacy-unmarked on fresh audit" in (row.get("reasons") or []):
+                legacy_unmarked_expected.append(n)
+        elif s == _BREADTH_STATUS_STRUCTURAL_FAIL:
+            structural_fail_expected.append((n, row.get("reasons") or []))
+        elif s == _BREADTH_STATUS_LEGACY_UNMARKED:
+            legacy_unmarked_expected.append(n)
+        # _BREADTH_STATUS_COMPLETE -> no action
+
+    if legacy_unmarked_expected:
+        mode_label = "fresh-audit" if fresh_audit else "legacy"
+        disposition = (
+            "treated as IN_PROGRESS for continuation"
+            if fresh_audit
+            else "tolerated as legacy pass"
+        )
+        sample = ", ".join(legacy_unmarked_expected[:12])
+        if len(legacy_unmarked_expected) > 12:
+            sample += f", ... (+{len(legacy_unmarked_expected) - 12} more)"
+        log.warning(
+            f"[gate_passes] {phase.name}: legacy-unmarked-artifact "
+            f"({mode_label} scratchpad; {disposition}): {sample}"
+        )
+
+    # Ship 8.18: explicit IN_PROGRESS (a file carrying PLAMEN markers but not
+    # COMPLETE) must NEVER pass -- not even on a resumed/legacy scratchpad. An
+    # actively-incomplete file means work was started and not finished; resume
+    # must finish it, not skip it. (Previously ALL in_progress rows were
+    # downgraded to a tolerated warning on non-fresh audits, letting incomplete
+    # work pass the gate.) legacy-UNMARKED files (no markers at all) remain
+    # tolerated on resume: they are classified _BREADTH_STATUS_LEGACY_UNMARKED
+    # (never in_progress here) and are non-blocking via the warning above.
+    if not fresh_audit and in_progress_expected:
+        log.warning(
+            f"[gate_passes] {phase.name}: explicit IN_PROGRESS artifact(s) on "
+            f"a resumed scratchpad now BLOCK (Ship 8.18): "
+            f"{', '.join(in_progress_expected[:12])}"
+        )
+
+    if not (
+        missing_expected
+        or stub_expected
+        or in_progress_expected
+        or structural_fail_expected
+    ):
+        return None
+
+    detail = []
+    if missing_expected:
+        sample = ", ".join(missing_expected[:12])
+        if len(missing_expected) > 12:
+            sample += f", ... (+{len(missing_expected) - 12} more)"
+        detail.append(f"missing: {sample}")
+    if stub_expected:
+        sample = ", ".join(stub_expected[:12])
+        if len(stub_expected) > 12:
+            sample += f", ... (+{len(stub_expected) - 12} more)"
+        detail.append(f"stub: {sample}")
+    if in_progress_expected:
+        sample = ", ".join(in_progress_expected[:12])
+        if len(in_progress_expected) > 12:
+            sample += f", ... (+{len(in_progress_expected) - 12} more)"
+        detail.append(f"in_progress: {sample}")
+    if structural_fail_expected:
+        samples = []
+        for n, reasons in structural_fail_expected[:6]:
+            first_reason = reasons[0] if reasons else "structural fail"
+            samples.append(f"{n} ({first_reason})")
+        sample = "; ".join(samples)
+        if len(structural_fail_expected) > 6:
+            sample += f"; ... (+{len(structural_fail_expected) - 6} more)"
+        detail.append(f"structural_fail: {sample}")
+    return (
+        f"{artifact_label} manifest-exact incomplete "
+        f"({len(row_statuses)} expected; {'; '.join(detail)})"
+    )
+
+
+# Ship C (fixes SW04-4): accept hyphen and dot in the slug
+# (analysis_percontract_core-vault.md, analysis_percontract_v1.2.md). The old
+# `[A-Za-z0-9_]+` silently dropped such declared filenames from the exact gate,
+# and when ALL declared names were non-matching the gate fell back to the
+# permissive glob -- defeating the Ship 8.17 exact gate. Mirrors the
+# plamen_contracts._RESCAN_OUTPUT_RE character class.
+_RESCAN_MANIFEST_FILE_RE = re.compile(
+    r"\b(analysis_(?:rescan|percontract)_[A-Za-z0-9][A-Za-z0-9_.\-]*\.md)\b"
+)
+
+
+def _parse_rescan_manifest_files(text: str) -> list[str]:
+    """Extract the concrete output filenames a rescan coordinator declared in
+    rescan_manifest.md. Matches the two rescan output families with a literal
+    suffix (analysis_rescan_<id>.md, analysis_percontract_<id>.md, including
+    analysis_percontract_scope_review.md). Glob exemplars like
+    `analysis_rescan_*.md` are intentionally NOT matched (the `*` is not a
+    word char), so a manifest that only shows the glob form declares nothing
+    and the caller falls back to the legacy glob gate.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in _RESCAN_MANIFEST_FILE_RE.findall(text or ""):
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def _rescan_manifest_exact_missing(
+    scratchpad: Path, phase: Phase
+) -> Optional[list[str]]:
+    """Ship 8.17 (Option A): bounded exact rescan completion gate.
+
+    When ``rescan_manifest.md`` exists and declares concrete output files, this
+    is the AUTHORITATIVE rescan gate: return the declared files that are
+    missing or not substantive (``< phase.min_artifact_bytes``). An empty list
+    means every declared file is present and substantive.
+
+    Returns ``None`` when ``rescan_manifest.md`` is ABSENT or declares no
+    parseable files -- the caller then falls back to the legacy glob/quorum
+    gate, so old or in-flight runs (no manifest) never false-fail. This ship
+    deliberately does NOT require PLAMEN markers for rescan (presence + size
+    only); supervised missing-only continuation is a later Option B.
+    """
+    manifest = scratchpad / "rescan_manifest.md"
+    fresh_audit = scratchpad_is_fresh_audit(scratchpad)
+    if not manifest.exists():
+        return None
+    try:
+        text = manifest.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    declared = _parse_rescan_manifest_files(text)
+    if not declared:
+        return None
+    min_bytes = max(phase.min_artifact_bytes, 1000) if fresh_audit else phase.min_artifact_bytes
+    missing: list[str] = []
+    if fresh_audit and not any(
+        name.startswith("analysis_percontract_") for name in declared
+    ):
+        missing.append(
+            "rescan_manifest.md declares no concrete analysis_percontract_*.md file"
+        )
+    for name in declared:
+        p = scratchpad / name
+        try:
+            if not p.exists() or p.stat().st_size < min_bytes:
+                missing.append(name)
+                continue
+            text = p.read_text(encoding="utf-8", errors="replace")
+            markers = {
+                m.group(1).strip().upper(): m.group(2).strip().upper()
+                for m in re.finditer(
+                    r"<!--\s*PLAMEN_([A-Z_]+):\s*([^>]+?)\s*-->",
+                    text,
+                )
+            }
+            if markers and markers.get("STATUS") != "COMPLETE":
+                missing.append(f"{name} has PLAMEN_STATUS != COMPLETE")
+                continue
+            if fresh_audit or markers:
+                ok, reasons = _structural_completeness_ok(
+                    p,
+                    required_headings=(),
+                    placeholder_strings=("TODO", "FILL_ME", "<placeholder>"),
+                )
+                if not ok:
+                    missing.append(f"{name} structural_fail: {'; '.join(reasons[:3])}")
+        except OSError:
+            missing.append(name)
+    return missing
+
+
 def gate_passes(scratchpad: Path, project_root: str, phase: Phase) -> tuple:
     """Return (passed, missing). Two-mode gate:
     - Explicit filename (no glob wildcards): THAT file must exist and be
@@ -840,6 +1629,22 @@ def gate_passes(scratchpad: Path, project_root: str, phase: Phase) -> tuple:
                 f"[gate_passes] {phase.name}: no expected_artifacts and no any_of — "
                 f"vacuous pass (phase may be misconfigured)"
             )
+    # Ship 8.17 (Option A): when the rescan coordinator declared its planned
+    # outputs in rescan_manifest.md, that manifest is the AUTHORITATIVE gate --
+    # every declared file must exist and be substantive. This closes the weak
+    # glob/quorum hole where a partial rescan (coordinator intended N files,
+    # only some landed) passed on >=1 matching file. When the manifest is
+    # absent/empty, fall through to the legacy glob loop (no false-fail on
+    # old/in-flight runs). PLAMEN markers are intentionally NOT required here.
+    if phase.name == "rescan":
+        rescan_missing = _rescan_manifest_exact_missing(scratchpad, phase)
+        if rescan_missing is not None:
+            return (len(rescan_missing) == 0), rescan_missing
+        if scratchpad_is_fresh_audit(scratchpad):
+            return False, [
+                "rescan_manifest.md missing or declares no concrete "
+                "analysis_rescan_*.md / analysis_percontract_*.md files"
+            ]
     for pattern in phase.expected_artifacts:
         if pattern == "AUDIT_REPORT.md":
             p = Path(project_root) / "AUDIT_REPORT.md"
@@ -847,37 +1652,37 @@ def gate_passes(scratchpad: Path, project_root: str, phase: Phase) -> tuple:
                 missing.append(pattern)
             continue
         if phase.name == "breadth" and pattern == "analysis_*.md":
-            expected_outputs = parse_breadth_manifest_outputs(scratchpad)
-            if expected_outputs:
-                missing_expected = []
-                stub_expected = []
-                for name in expected_outputs:
-                    p = scratchpad / name
-                    if not p.exists():
-                        missing_expected.append(name)
-                    elif p.stat().st_size < phase.min_artifact_bytes:
-                        stub_expected.append(name)
-                if missing_expected or stub_expected:
-                    detail = []
-                    if missing_expected:
-                        sample = ", ".join(missing_expected[:12])
-                        if len(missing_expected) > 12:
-                            sample += f", ... (+{len(missing_expected) - 12} more)"
-                        detail.append(f"missing: {sample}")
-                    if stub_expected:
-                        sample = ", ".join(stub_expected[:12])
-                        if len(stub_expected) > 12:
-                            sample += f", ... (+{len(stub_expected) - 12} more)"
-                        detail.append(f"stub: {sample}")
-                    missing.append(
-                        "analysis_*.md manifest-exact incomplete "
-                        f"({len(expected_outputs)} expected; {'; '.join(detail)})"
-                    )
-                    continue
-                # The manifest is the authoritative breadth contract. If it
-                # names two spawned agents, requiring the phase's legacy
-                # static min_artifacts_count=3 reintroduces a false retry.
+            row_statuses = compute_breadth_row_statuses(scratchpad, phase)
+            if row_statuses:
+                # The manifest is the authoritative breadth contract.
+                # Aggregate per-row statuses (Ship 6 helper, byte-equivalent
+                # to the Ship 3 inline logic) instead of the legacy
+                # min_artifacts_count quorum.
+                detail = _aggregate_supervised_row_statuses(
+                    phase, row_statuses, scratchpad, "analysis_*.md"
+                )
+                if detail:
+                    missing.append(detail)
                 continue
+        if phase.name == "depth" and pattern == "depth_*_findings.md":
+            # Ship 8: marker-aware depth gate on FRESH audits only. The
+            # canonical 4 depth role files (from phase.example_tokens)
+            # must each be COMPLETE + structurally sound. Legacy/resumed
+            # depth audits fall through to the existing glob+quorum
+            # below (no behavior change for in-flight audits, and no
+            # canonical-role tightening that the old quorum did not
+            # enforce).
+            if scratchpad_is_fresh_audit(scratchpad):
+                row_statuses = compute_depth_row_statuses(scratchpad, phase)
+                if row_statuses:
+                    detail = _aggregate_supervised_row_statuses(
+                        phase, row_statuses, scratchpad, "depth_*_findings.md"
+                    )
+                    if detail:
+                        missing.append(detail)
+                    continue
+            # Legacy audit OR no canonical roles -> fall through to the
+            # generic glob+quorum path (min_artifacts_count).
         is_glob = any(ch in pattern for ch in "*?[")
         matches = list(scratchpad.glob(pattern))
         if phase.name == "breadth" and pattern == "analysis_*.md":
@@ -1246,6 +2051,9 @@ _PROTECTED_WRITE_PATTERNS_BY_PHASE: dict[str, tuple[str, ...]] = {
         "../AUDIT_REPORT.md",
     ),
     "breadth": (
+        "analysis_rescan_*.md",
+        "analysis_percontract_*.md",
+        "analysis_merged_into_*.md",
         "findings_inventory*.md",
         "semantic_invariants.md",
         "depth_*",
@@ -1266,7 +2074,106 @@ def _protected_phase_write_patterns(phase_name: str) -> tuple[str, ...]:
     return _PROTECTED_WRITE_PATTERNS_BY_PHASE.get(phase_name, ())
 
 
+def _future_phase_write_patterns(
+    scratchpad: Path,
+    pipeline: str,
+    phase_name: str,
+    phase_names: list[str],
+) -> list[str]:
+    """Return artifact patterns owned by phases after ``phase_name``.
+
+    This is the shared source of truth for both live subprocess containment
+    and post-run containment. Keeping the pattern derivation in one place
+    prevents the bug class where post-run detects a phase leak only after the
+    model has already spent a full turn writing later-phase artifacts.
+    """
+    owned = _owned_artifact_patterns(pipeline, scratchpad)
+    try:
+        idx = phase_names.index(phase_name)
+    except ValueError:
+        return list(_protected_phase_write_patterns(phase_name))
+
+    future_patterns: list[str] = []
+    for later_name in phase_names[idx + 1:]:
+        future_patterns.extend(owned.get(later_name, []))
+    future_patterns.extend(_protected_phase_write_patterns(phase_name))
+
+    current_owned = set(owned.get(phase_name, []))
+    if current_owned:
+        future_patterns = [p for p in future_patterns if p not in current_owned]
+
+    if phase_name.startswith("report_body_writer_"):
+        future_patterns = [
+            p for p in future_patterns
+            if not re.fullmatch(
+                r"report_(?:critical_high|medium|low_info)(?:_[a-z])?\.md",
+                p,
+            )
+        ]
+
+    return sorted(set(future_patterns))
+
+
+def _live_protected_phase_write_patterns(
+    scratchpad: Path,
+    pipeline: str,
+    phase_name: str,
+    active_phase_names: list[str] | tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    """Return downstream artifact patterns for live PTY/headless aborts."""
+    if active_phase_names:
+        phase_names = [str(name) for name in active_phase_names]
+    else:
+        phases = L1_PHASES if pipeline == "l1" else SC_PHASES
+        phase_names = [p.name for p in phases]
+    patterns = _future_phase_write_patterns(
+        scratchpad,
+        pipeline,
+        phase_name,
+        phase_names,
+    )
+    blocking: list[str] = []
+    for pattern in patterns:
+        if not _live_foreign_pattern_is_benign(phase_name, pattern):
+            blocking.append(pattern)
+    return tuple(sorted(set(blocking)))
+
+
+def _live_foreign_pattern_is_benign(phase_name: str, pattern: str) -> bool:
+    """Pattern-level mirror of the driver's benign quarantine policy."""
+    from fnmatch import fnmatch
+
+    if phase_name == "report_index":
+        return (
+            fnmatch(pattern, "report_critical_high*.md")
+            or fnmatch(pattern, "report_medium*.md")
+            or fnmatch(pattern, "report_low_info*.md")
+        )
+    if phase_name == "depth":
+        benign = (
+            "hypotheses.md",
+            "finding_mapping.md",
+            "enabler_results.md",
+            "chain_*.md",
+            "synthesis_*.md",
+            "composition_coverage.md",
+        )
+        return any(fnmatch(pattern, p) for p in benign)
+    if phase_name.startswith("inventory_chunk_"):
+        benign = (
+            "findings_inventory_chunk_*.md",
+            "findings_inventory.md",
+            "semantic_invariants.md",
+        )
+        return any(fnmatch(pattern, p) for p in benign)
+    if phase_name == "breadth":
+        benign = ("analysis_rescan_*.md", "analysis_percontract_*.md")
+        return any(fnmatch(pattern, p) for p in benign)
+    return False
+
+
 _ARTIFACT_STATE_NAME = "_artifact_state.json"
+_BREADTH_WORKER_POOL_CONTRACT_NAME = "_breadth_worker_pool_contract.json"
 
 
 def _artifact_state_path(scratchpad: Path) -> Path:
@@ -1690,38 +2597,10 @@ def _detect_foreign_phase_writes(scratchpad: Path, project_root: str,
                                  pipeline: str,
                                  before_state: dict[str, tuple[int, int]]) -> list[str]:
     """Return later-phase artifacts created/modified by the current phase attempt."""
-    owned = _owned_artifact_patterns(pipeline, scratchpad)
     phase_names = [p.name for p in phases]
-    try:
-        idx = phase_names.index(phase_name)
-    except ValueError:
-        return []
-
-    future_patterns: list[str] = []
-    for later_name in phase_names[idx + 1:]:
-        future_patterns.extend(owned.get(later_name, []))
-    future_patterns.extend(_protected_phase_write_patterns(phase_name))
-    # Phase E11: body-writer phase shares its tier file with the legacy
-    # tier phase that runs AFTER it (the legacy phase is now a deterministic
-    # confirmation handler). Don't flag the body writer's legitimate write
-    # as a "later-phase artifact" violation.
-    current_owned = set(owned.get(phase_name, []))
-    if current_owned:
-        future_patterns = [p for p in future_patterns if p not in current_owned]
-    # Report body writers produce peer tier files that are later confirmed by
-    # legacy tier phases. A writer shard must not be allowed to lose a valid
-    # already-written peer body just because the confirmation phase owns the
-    # same filename later in the expanded graph. Body quality is enforced by
-    # `_validate_tier_body_against_manifest`; containment here is only for
-    # true cross-phase artifacts, not tier-body handoff files.
-    if phase_name.startswith("report_body_writer_"):
-        future_patterns = [
-            p for p in future_patterns
-            if not re.fullmatch(
-                r"report_(?:critical_high|medium|low_info)(?:_[a-z])?\.md",
-                p,
-            )
-        ]
+    future_patterns = _future_phase_write_patterns(
+        scratchpad, pipeline, phase_name, phase_names
+    )
     if not future_patterns:
         return []
 
@@ -1984,8 +2863,11 @@ def _promote_depth_findings_to_inventory(scratchpad: Path, min_confidence: float
             "",
         ]
         for item in candidates:
-            inv_id = f"INV-{next_n:02d}"
-            next_n += 1
+            inv_id, next_n = _allocate_depth_promotion_inventory_id(
+                scratchpad,
+                preferred_n=next_n,
+                title=item["title"],
+            )
             promoted_ids.append(item["id"])
             dup_line = f"**Dedup Signal**: {item['_dup_tag']}\n" if item.get("_dup_tag") else ""
             additions.extend([
@@ -2026,6 +2908,102 @@ def _promote_depth_findings_to_inventory(scratchpad: Path, min_confidence: float
         "\n".join(receipt_lines), encoding="utf-8",
     )
     return promoted_ids
+
+
+def _allocate_depth_promotion_inventory_id(
+    scratchpad: Path,
+    *,
+    preferred_n: int,
+    title: str,
+) -> tuple[str, int]:
+    """Allocate/register an INV id for a depth-promoted inventory row.
+
+    Depth promotion appends driver-owned inventory rows after the inventory
+    phase. Those rows are first-class consumer IDs, so they must be ledger
+    registered at the same time they are written.
+    """
+    n = max(1, int(preferred_n or 1))
+    for _ in range(1000):
+        candidate = f"INV-{n:03d}"
+        try:
+            result = id_ledger_register(
+                scratchpad,
+                finding_id=candidate,
+                owner_phase="depth_promotion",
+                owner_attempt=1,
+                owning_artifact="findings_inventory.md",
+                title=title,
+            )
+        except Exception as exc:
+            log.debug(f"[depth_promotion] ledger register skipped for {candidate}: {exc}")
+            return candidate, n + 1
+        if result.get("status") != "COLLISION":
+            return candidate, n + 1
+        try:
+            ledger_nums = [
+                int(m.group(1))
+                for rec in id_ledger_all_records(scratchpad)
+                for m in [re.match(r"^INV-(\d+)$", str(rec.get("id", "")).upper())]
+                if m
+            ]
+            n = max([n] + ledger_nums) + 1
+        except Exception:
+            n += 1
+    return f"INV-{n:03d}", n + 1
+
+
+def _backfill_inventory_ids_into_ledger(scratchpad: Path) -> int:
+    """Register existing `findings_inventory.md` INV headings if absent.
+
+    This is a conservative repair path for resumed/fresh audits where a
+    deterministic inventory mutation wrote valid rows but missed ledger
+    registration. It never invents IDs: it only records headings already on
+    disk so consumer phases stop treating real inventory rows as hallucinated
+    references.
+    """
+    inv = scratchpad / "findings_inventory.md"
+    if not inv.exists():
+        return 0
+    try:
+        text = inv.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    try:
+        ledger_ids = {
+            str(rec.get("id", "")).upper()
+            for rec in id_ledger_all_records(scratchpad)
+            if rec.get("id")
+        }
+    except Exception:
+        ledger_ids = set()
+    registered = 0
+    matches = list(FINDING_BLOCK_HEADING_RE.finditer(text))
+    for idx, match in enumerate(matches):
+        raw_id = (match.group(1) or "").strip().upper()
+        if not re.match(r"^INV-\d+$", raw_id) or raw_id in ledger_ids:
+            continue
+        line_end = text.find("\n", match.start())
+        if line_end < 0:
+            line_end = len(text)
+        heading = text[match.start():line_end]
+        title_m = re.search(r"\]\s*[:\-–—]?\s*(.+)$", heading)
+        title = _strip_md(title_m.group(1)).strip() if title_m else raw_id
+        try:
+            result = id_ledger_register(
+                scratchpad,
+                finding_id=raw_id,
+                owner_phase="inventory_backfill",
+                owner_attempt=1,
+                owning_artifact="findings_inventory.md",
+                title=title or raw_id,
+            )
+        except Exception as exc:
+            log.debug(f"[id-ledger] inventory backfill skipped for {raw_id}: {exc}")
+            continue
+        if result.get("status") in {"REGISTERED", "REUSED"}:
+            ledger_ids.add(raw_id)
+            registered += 1
+    return registered
 
 
 _SEMANTIC_GAP_COUNTER_RE = re.compile(
@@ -2451,7 +3429,10 @@ def _depth_artifact_is_stub(path: Path) -> Optional[str]:
                         body = p.read_text(encoding="utf-8", errors="replace")
                     except Exception:
                         continue
-                    if re.search(r"(?im)^##\s+Finding\s+\[[^\]\n]+\]", body):
+                    # Ship D (SW07-1): accept H2 AND H3 finding blocks (depth
+                    # uses `### Finding [ID]`); the old H2-only check matched
+                    # the driver's old H2-only blindness.
+                    if FINDING_BLOCK_HEADING_RE.search(body):
                         has_real_findings = True
                         break
                 if has_real_findings:
@@ -2820,6 +3801,10 @@ def _validate_confidence_iter2_mandatory(scratchpad: Path) -> list[str]:
         + list(scratchpad.glob("depth_*iter3*.md"))
         + list(scratchpad.glob("depth_*iteration2*.md"))
         + list(scratchpad.glob("depth_*iteration3*.md"))
+        + list(scratchpad.glob("da_iter2_*.md"))
+        + list(scratchpad.glob("da_iter3_*.md"))
+        + list(scratchpad.glob("da-iter2-*.md"))
+        + list(scratchpad.glob("da-iter3-*.md"))
     )
     if da_files:
         return []
@@ -3798,9 +4783,37 @@ def _parse_hypothesis_id_title_pairs(text: str) -> list[tuple[str, str]]:
     """
     from plamen_parsers import _HYPO_HEADING_RE
     pairs: list[tuple[str, str]] = []
+    table_id_re = re.compile(
+        r"^(H-[CHMLI]?\d+|CH-\d+|L1-[CHMLI]-\d+|GRP-\d+|H[CHMLI]-\d+)$",
+        re.IGNORECASE,
+    )
     for line in text.splitlines():
         m = _HYPO_HEADING_RE.match(line)
         if not m:
+            stripped = line.strip()
+            if not stripped.startswith("|") or stripped.count("|") < 2:
+                continue
+            if re.fullmatch(
+                r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?",
+                stripped,
+            ):
+                continue
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            if not cells:
+                continue
+            tm = table_id_re.fullmatch(cells[0])
+            if not tm:
+                continue
+            title = ""
+            for cell in cells[1:]:
+                if re.fullmatch(
+                    r"(?i)(critical|high|medium|low|informational|info|severity|title)",
+                    cell or "",
+                ):
+                    continue
+                title = cell
+                break
+            pairs.append((tm.group(1).upper(), title))
             continue
         fid = m.group(1).upper()
         # Everything after the matched ID on the heading is the title;
@@ -3809,6 +4822,62 @@ def _parse_hypothesis_id_title_pairs(text: str) -> list[tuple[str, str]]:
         rest = rest.lstrip("]")  # `### Finding [GRP-01]: title`
         rest = rest.lstrip(":–—-").strip()
         pairs.append((fid, rest))
+    return pairs
+
+
+def _parse_chain_agent2_id_title_pairs(text: str) -> list[tuple[str, str]]:
+    """Extract only chain-agent2-local `CH-*` mints with stable content keys.
+
+    `chain_hypotheses.md` is a composition artifact. It necessarily references
+    upstream `H-*` findings, but those are consumers, not new allocations. The
+    generic hypotheses parser sees detail lines such as `**ID**: H-01` and can
+    falsely try to re-mint upstream IDs under `chain_agent2`.
+
+    For `CH-*` rows, natural-language titles drift across retries
+    ("H-09 (fee)" vs "H-09: full title"). The stable identity is the ordered
+    source-ID tuple in the row/block, so use that as the ledger title.
+    """
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    ch_re = re.compile(r"^CH-\d+$", re.IGNORECASE)
+    source_re = re.compile(r"\bH-\d+\b", re.IGNORECASE)
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.count("|") >= 2:
+            if re.fullmatch(
+                r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?",
+                stripped,
+            ):
+                continue
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            if not cells or not ch_re.fullmatch(cells[0]):
+                continue
+            fid = cells[0].upper()
+            if fid in seen:
+                continue
+            source_ids: list[str] = []
+            for cell in cells[1:]:
+                for m in source_re.finditer(cell):
+                    sid = m.group(0).upper()
+                    if sid not in source_ids:
+                        source_ids.append(sid)
+            title = " + ".join(source_ids) if source_ids else " | ".join(cells[1:4])
+            pairs.append((fid, title))
+            seen.add(fid)
+            continue
+        m = re.match(
+            r"^#{2,4}\s*(?:Chain\s+Hypothesis\s+)?(CH-\d+)\b\s*:?\s*(.*)$",
+            stripped,
+            re.IGNORECASE,
+        )
+        if not m:
+            continue
+        fid = m.group(1).upper()
+        if fid in seen:
+            continue
+        title = m.group(2).strip() or fid
+        pairs.append((fid, title))
+        seen.add(fid)
     return pairs
 
 
@@ -3845,10 +4914,34 @@ def _validate_id_ledger_collisions(
         text = artifact_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
-    pairs = _parse_hypothesis_id_title_pairs(text)
+    if phase_name == "chain_agent2":
+        pairs = _parse_chain_agent2_id_title_pairs(text)
+    else:
+        pairs = _parse_hypothesis_id_title_pairs(text)
     if not pairs:
         return []
-    from plamen_parsers import id_ledger_register
+    from plamen_parsers import _id_ledger_load, _id_ledger_save, id_ledger_register
+
+    # Failed retries are quarantined and are not downstream truth. Do not let
+    # their same-phase allocations poison the next attempt. Cross-phase
+    # collisions still remain blocking because those indicate a real identity
+    # conflict against accepted upstream artifacts.
+    if attempt > 1 and phase_name == "chain_agent2":
+        try:
+            ledger = _id_ledger_load(scratchpad)
+            before = len(ledger.get("allocations", []))
+            ledger["allocations"] = [
+                r for r in ledger.get("allocations", [])
+                if not (
+                    str(r.get("owner_phase", "")) == phase_name
+                    and str(r.get("owning_artifact", "")) == artifact_name
+                )
+            ]
+            if len(ledger.get("allocations", [])) != before:
+                _id_ledger_save(scratchpad, ledger)
+        except Exception:
+            pass
+
     collisions: list[str] = []
     seen_in_this_phase: set[str] = set()
     for fid, title in pairs:
@@ -3918,6 +5011,7 @@ def _validate_consumer_ids_in_ledger(
     artifact_path = scratchpad / artifact_name
     if not artifact_path.exists():
         return []
+    _backfill_inventory_ids_into_ledger(scratchpad)
     # Import lazily to keep modularization clean.
     from plamen_parsers import (
         _INTERNAL_FINDING_ID_RE, id_ledger_all_records,
@@ -3941,14 +5035,29 @@ def _validate_consumer_ids_in_ledger(
     # and not part of the same namespace.
     import re as _re
     report_tier_re = _re.compile(r"^[CHMLI]-\d+$")
+    fresh_audit = scratchpad_is_fresh_audit(scratchpad)
     finding_refs = {
         r for r in referenced
-        if not report_tier_re.match(r) and not r.startswith("INV-")
+        if not report_tier_re.match(r) and (fresh_audit or not r.startswith("INV-"))
     }
-    # INV- is intentionally allowed even without ledger entry, because
-    # legacy audits may not have registered them. Once P2.2 is fully
-    # exercised on a fresh audit, this exception can tighten.
-    unregistered = finding_refs - ledger_ids
+    # INV-* remains legacy-tolerant only on pre-marker audits. Fresh audits
+    # must have driver-registered INV allocations so stale retry collisions
+    # cannot silently reuse an inventory ID for different content.
+    synthetic_traces: dict[str, dict[str, str]] = {}
+    unregistered: set[str] = set()
+    for ref in sorted(finding_refs - ledger_ids):
+        trace = _trace_synthetic_consumer_id(scratchpad, ref)
+        if trace:
+            synthetic_traces[ref] = trace
+            continue
+        unregistered.add(ref)
+    if synthetic_traces:
+        _write_id_ledger_synthetic_map(
+            scratchpad,
+            phase_name=phase_name,
+            consumer_artifact=artifact_name,
+            traces=synthetic_traces,
+        )
     if not unregistered:
         return []
     # WARNING-only signal. Format names a sample.
@@ -3959,6 +5068,128 @@ def _validate_consumer_ids_in_ledger(
         f"{len(unregistered)} unregistered ID(s): "
         f"{', '.join(sample)}{extra}"
     ]
+
+
+def _trace_synthetic_consumer_id(
+    scratchpad: Path, ref: str
+) -> dict[str, str] | None:
+    """Trace non-ledger internal IDs to a durable upstream artifact.
+
+    Some methodology-owned artifacts mint local IDs that are not part of the
+    chain/inventory ledger namespace: depth concern IDs (DCI/DST/DA/etc.),
+    cross-batch IDs (CBS), skill-gap IDs (SGI), and chain-composition IDs
+    (CC). Ledger-owned chain IDs (GRP/HH/HM/HL/HI/CH) are deliberately not
+    accepted through this synthetic path.
+    """
+    ref = (ref or "").upper()
+    exact: list[str] = []
+    globs: list[str] = []
+    if re.match(r"^(?:DCI|DEC|DX|DN|DNS)-", ref) or ref.startswith("DA-"):
+        globs.extend([
+            "depth_*_findings.md",
+            "blind_spot_*_findings.md",
+            "niche_*_findings.md",
+        ])
+        exact.extend([
+            "validation_sweep_findings.md",
+            "consensus_map.md",
+            "confidence_scores.md",
+        ])
+    elif ref.startswith("DST-"):
+        exact.extend(["design_stress_findings.md", "depth_design_stress_findings.md"])
+        globs.extend(["depth_*_findings.md", "niche_*_findings.md"])
+    elif ref.startswith("PERT-"):
+        exact.extend(["perturbation_findings.md", "depth_perturbation_findings.md"])
+        globs.extend(["depth_*_findings.md", "niche_*_findings.md"])
+    elif ref.startswith("SGI-"):
+        exact.extend([
+            "skill_execution_gaps.md",
+            "skill_execution_checklist.md",
+            "niche_semantic_gap_findings.md",
+            "niche_semantic_consistency_findings.md",
+        ])
+    elif ref.startswith("CBS-"):
+        exact.extend(["cross_batch_consistency.md"])
+    elif ref.startswith("CC-"):
+        exact.extend([
+            "chain_hypotheses.md",
+            "hypotheses.md",
+            "chain_summaries_compact.md",
+            "chain_topology.md",
+        ])
+    else:
+        return None
+
+    candidates: list[Path] = []
+    for name in exact:
+        p = scratchpad / name
+        if p.exists() and p.is_file():
+            candidates.append(p)
+    for pattern in globs:
+        candidates.extend(sorted(p for p in scratchpad.glob(pattern) if p.is_file()))
+
+    token_re = re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(ref)}(?![A-Za-z0-9_-])")
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if token_re.search(text):
+            return {
+                "id": ref,
+                "source_artifact": path.name,
+                "source_kind": "synthetic-local-id",
+            }
+    return None
+
+
+def _write_id_ledger_synthetic_map(
+    scratchpad: Path,
+    *,
+    phase_name: str,
+    consumer_artifact: str,
+    traces: dict[str, dict[str, str]],
+) -> None:
+    """Best-effort audit trail for non-ledger IDs accepted by traceability."""
+    path = scratchpad / "_id_ledger_synthetic_map.json"
+    try:
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            payload = {"schema_version": 1, "traces": []}
+    except Exception:
+        payload = {"schema_version": 1, "traces": []}
+    existing = {
+        (
+            str(t.get("id") or "").upper(),
+            str(t.get("consumer_phase") or ""),
+            str(t.get("consumer_artifact") or ""),
+            str(t.get("source_artifact") or ""),
+        )
+        for t in payload.get("traces", [])
+        if isinstance(t, dict)
+    }
+    for ref, trace in sorted(traces.items()):
+        key = (
+            ref.upper(),
+            phase_name,
+            consumer_artifact,
+            str(trace.get("source_artifact", "")),
+        )
+        if key in existing:
+            continue
+        payload.setdefault("traces", []).append({
+            "id": ref.upper(),
+            "consumer_phase": phase_name,
+            "consumer_artifact": consumer_artifact,
+            "source_artifact": trace.get("source_artifact", ""),
+            "source_kind": trace.get("source_kind", "synthetic-local-id"),
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        })
+    try:
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError:
+        return
 
 
 def _generate_id_ledger_collision_retry_hint(
@@ -4108,6 +5339,213 @@ def _validate_chain_anti_absorption(scratchpad: Path, mode: str) -> list[str]:
             f"with anti-absorption violations: {'; '.join(violations)}"
         )
     return issues
+
+
+def _highest_constituent_severity(meta_list: list[tuple[str, dict[str, str]]]) -> str:
+    rank_to_sev = {4: "Critical", 3: "High", 2: "Medium", 1: "Low", 0: "Informational"}
+    ranks = [_severity_tier(m.get("severity", "")) for _, m in meta_list]
+    ranks = [r for r in ranks if r >= 0]
+    if not ranks:
+        return "Medium"
+    return rank_to_sev.get(max(ranks), "Medium")
+
+
+def _chain_hyp_prefix_for_severity(severity: str) -> str:
+    sev = normalize_severity(severity)
+    return {
+        "Critical": "HC",
+        "High": "HH",
+        "Medium": "HM",
+        "Low": "HL",
+        "Informational": "HI",
+    }.get(sev, "HM")
+
+
+def _next_chain_hyp_id(prefix: str, used: set[str], counters: dict[str, int]) -> str:
+    n = counters.get(prefix, 0) + 1
+    while f"{prefix}-{n:02d}" in used:
+        n += 1
+    counters[prefix] = n
+    hid = f"{prefix}-{n:02d}"
+    used.add(hid)
+    return hid
+
+
+def _chain_group_violates_anti_absorption(
+    meta_list: list[tuple[str, dict[str, str]]],
+) -> bool:
+    if len(meta_list) < 2:
+        return False
+    file_func_pairs = set()
+    for _, m in meta_list:
+        f = _extract_file_name(m.get("location", ""))
+        fn = (
+            _extract_function_name(m.get("location", ""))
+            or _extract_function_name(m.get("root_cause", ""))
+        )
+        file_func_pairs.add((f.lower(), fn.lower()))
+    file_func_pairs.discard(("", ""))
+    if len(file_func_pairs) >= 2:
+        return True
+    sev_ranks = [_severity_tier(m.get("severity", "")) for _, m in meta_list]
+    sev_ranks = [r for r in sev_ranks if r >= 0]
+    if sev_ranks and max(sev_ranks) - min(sev_ranks) > 1:
+        return True
+    rcs = [m.get("root_cause") or m.get("title", "") for _, m in meta_list]
+    for i in range(len(rcs)):
+        for j in range(i + 1, len(rcs)):
+            if _jaccard_token_similarity(rcs[i], rcs[j]) < 0.30:
+                return True
+    return False
+
+
+def _hypothesis_override_present(hyp_text: str, hyp_id: str) -> bool:
+    if not hyp_text:
+        return False
+    block_pat = re.compile(
+        rf"(?:^|\n)[^\n]*\b{re.escape(hyp_id)}\b[^\n]*\n",
+        re.IGNORECASE,
+    )
+    for match in block_pat.finditer(hyp_text):
+        start = match.start()
+        end = min(start + 2000, len(hyp_text))
+        snippet = hyp_text[start:end].lower()
+        if any(kw in snippet for kw in _NICHE_AGENT_AAB_KEYWORD_GUARD):
+            return True
+    return False
+
+
+def _repair_chain_anti_absorption_splits(scratchpad: Path) -> int:
+    """Mechanically split over-absorbed chain hypotheses.
+
+    The safe repair for anti-absorption failure is never another merge. If a
+    multi-constituent hypothesis violates the rule and lacks an explicit
+    override, split each unique constituent into its own hypothesis. This
+    preserves every source finding and avoids spending a retry on an obvious
+    deterministic transformation.
+    """
+    try:
+        from plamen_parsers import _parse_hypothesis_constituents
+    except Exception:
+        return 0
+
+    inventory = _parse_inventory_finding_meta(scratchpad)
+    if not inventory:
+        return 0
+    mapping = _parse_hypothesis_constituents(scratchpad)
+    if not mapping:
+        return 0
+    hyp_path = scratchpad / "hypotheses.md"
+    try:
+        hyp_text = hyp_path.read_text(encoding="utf-8", errors="replace") if hyp_path.exists() else ""
+    except Exception:
+        hyp_text = ""
+
+    used: set[str] = set(mapping)
+    counters: dict[str, int] = {}
+    for hid in used:
+        m = re.match(r"^([A-Z]+)-(\d+)$", hid)
+        if m:
+            counters[m.group(1)] = max(counters.get(m.group(1), 0), int(m.group(2)))
+
+    repaired_rows: list[dict[str, str]] = []
+    final_groups: list[dict[str, object]] = []
+    split_count = 0
+
+    for hyp_id in sorted(mapping):
+        constituent_ids = list(dict.fromkeys(cid for cid in mapping[hyp_id] if cid in inventory))
+        meta_list = [(cid, inventory[cid]) for cid in constituent_ids]
+        if (
+            len(meta_list) >= 2
+            and not _hypothesis_override_present(hyp_text, hyp_id)
+            and _chain_group_violates_anti_absorption(meta_list)
+        ):
+            split_count += 1
+            used.discard(hyp_id)
+            for cid, meta in meta_list:
+                sev = normalize_severity(meta.get("severity", "")) or "Medium"
+                prefix = _chain_hyp_prefix_for_severity(sev)
+                new_id = _next_chain_hyp_id(prefix, used, counters)
+                title = (meta.get("title") or f"Recovered {cid}").replace("|", "/")
+                final_groups.append({
+                    "id": new_id,
+                    "severity": sev,
+                    "title": title,
+                    "source_ids": [cid],
+                    "reason": "MECHANICAL_ANTI_ABSORPTION_SPLIT",
+                })
+                repaired_rows.append({
+                    "old": hyp_id,
+                    "new": new_id,
+                    "source": cid,
+                    "reason": "distinct root cause/function/fix risk",
+                })
+            continue
+        if meta_list:
+            sev = _highest_constituent_severity(meta_list)
+            first_title = meta_list[0][1].get("title") or hyp_id
+            final_groups.append({
+                "id": hyp_id,
+                "severity": sev,
+                "title": first_title.replace("|", "/"),
+                "source_ids": [cid for cid, _ in meta_list],
+                "reason": "preserved original chain grouping",
+            })
+
+    if not repaired_rows:
+        return 0
+
+    hyp_lines = [
+        "# Hypotheses",
+        "",
+        "Driver-repaired chain hypotheses. Over-absorbed groups that violated "
+        "anti-absorption were split mechanically to preserve every source "
+        "finding and avoid retry-cost loops.",
+        "",
+        "| Hypothesis ID | Severity | Title | Source Findings | Reason |",
+        "|---------------|----------|-------|-----------------|--------|",
+    ]
+    map_lines = [
+        "# Finding Mapping",
+        "",
+        "| Finding ID | Hypothesis ID | Mapping Status |",
+        "|------------|---------------|----------------|",
+    ]
+    for group in final_groups:
+        hid = str(group["id"])
+        sources = [str(x) for x in group.get("source_ids", [])]
+        hyp_lines.append(
+            f"| {hid} | {group['severity']} | {group['title']} | "
+            f"{', '.join(sources)} | {group['reason']} |"
+        )
+        for cid in sources:
+            map_lines.append(f"| {cid} | {hid} | {group['reason']} |")
+    hyp_lines.append("")
+    map_lines.append("")
+
+    try:
+        (scratchpad / "hypotheses.md").write_text("\n".join(hyp_lines), encoding="utf-8")
+        (scratchpad / "finding_mapping.md").write_text("\n".join(map_lines), encoding="utf-8")
+        receipt_lines = [
+            "# Anti-Absorption Mechanical Repair",
+            "",
+            f"**Split groups**: {split_count}",
+            f"**Reassigned findings**: {len(repaired_rows)}",
+            "",
+            "| Old Hypothesis | New Hypothesis | Source Finding | Reason |",
+            "|----------------|----------------|----------------|--------|",
+        ]
+        for row in repaired_rows:
+            receipt_lines.append(
+                f"| {row['old']} | {row['new']} | {row['source']} | {row['reason']} |"
+            )
+        receipt_lines.append("")
+        (scratchpad / "anti_absorption_repair.md").write_text(
+            "\n".join(receipt_lines), encoding="utf-8"
+        )
+    except OSError:
+        return 0
+    return len(repaired_rows)
 
 
 def _generate_anti_absorption_retry_hint(issues: list[str]) -> str:
@@ -5000,6 +6438,49 @@ def _collect_obligation_receipts(scratchpad: Path, artifact: str,
     return receipts
 
 
+def _dedup_decision_coverage_detail(scratchpad: Path) -> dict[str, Any]:
+    """Return structured candidate/disposition coverage for semantic dedup."""
+    pairs_path = scratchpad / "dedup_candidate_pairs.md"
+    decisions_path = scratchpad / "dedup_decisions.md"
+    empty = {"pair_count": 0, "accounted": 0, "missing_count": 0, "missing_rows": []}
+    if not pairs_path.exists() or not decisions_path.exists():
+        return empty
+    try:
+        pairs_text = pairs_path.read_text(encoding="utf-8", errors="replace")
+        decisions_text = decisions_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return empty
+    pair_rows: list[str] = []
+    for line in pairs_text.splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        cells = [c.strip() for c in s.split("|") if c.strip()]
+        if len(cells) < 2:
+            continue
+        if cells[0].startswith("-") or cells[0].lower() in ("finding a", "pair", "id"):
+            continue
+        pair_rows.append(s)
+    if not pair_rows:
+        return empty
+    accounted = 0
+    allowed_re = re.compile(
+        r"\b(MERGE|GROUP|KEEP[\s_-]?SEPARATE|N[/\s]?A|PASSTHROUGH)\b",
+        re.IGNORECASE,
+    )
+    for line in decisions_text.splitlines():
+        s = line.strip()
+        if s.startswith("|") and allowed_re.search(s):
+            accounted += 1
+    missing_count = max(0, len(pair_rows) - accounted)
+    return {
+        "pair_count": len(pair_rows),
+        "accounted": accounted,
+        "missing_count": missing_count,
+        "missing_rows": pair_rows[accounted:],
+    }
+
+
 def _check_dedup_decision_coverage(scratchpad: Path) -> list[str]:
     """v2.0.10 (P5): coverage gate for sc_semantic_dedup.
 
@@ -5056,18 +6537,105 @@ def _check_dedup_decision_coverage(scratchpad: Path) -> list[str]:
     ]
 
 
+def _repair_dedup_missing_dispositions(
+    scratchpad: Path, phase_name: str
+) -> int:
+    """Append deterministic PASSTHROUGH rows for missing dedup dispositions."""
+    detail = _dedup_decision_coverage_detail(scratchpad)
+    missing_rows = [str(x) for x in (detail.get("missing_rows") or [])]
+    if not missing_rows:
+        return 0
+    path = scratchpad / "dedup_decisions.md"
+    try:
+        existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    except OSError:
+        existing = ""
+
+    def _cell(value: str) -> str:
+        return re.sub(r"\s+", " ", value.replace("|", "/")).strip()
+
+    lines: list[str] = []
+    if existing and not existing.endswith("\n"):
+        lines.append("")
+    lines.extend([
+        "",
+        "## Mechanical Missing Disposition Repair",
+        "",
+        f"**Phase**: `{phase_name}`",
+        "",
+        "Rows below were candidate pairs that lacked explicit semantic-dedup "
+        "dispositions. They are marked PASSTHROUGH to preserve upstream "
+        "findings rather than silently dropping or merging them.",
+        "",
+        "| Repair Row | Candidate Pair | Disposition | Reason |",
+        "|---|---|---|---|",
+    ])
+    for idx, row in enumerate(missing_rows, start=1):
+        lines.append(
+            f"| {idx} | {_cell(row)} | PASSTHROUGH | missing explicit LLM disposition |"
+        )
+    try:
+        path.write_text(existing + "\n".join(lines) + "\n", encoding="utf-8")
+    except OSError:
+        return 0
+    return len(missing_rows)
+
+
+def _generate_dedup_decision_retry_hint(
+    scratchpad: Path, phase_name: str, limit: int = 40
+) -> str:
+    detail = _dedup_decision_coverage_detail(scratchpad)
+    missing_rows = [str(x) for x in (detail.get("missing_rows") or [])]
+    missing_count = int(detail.get("missing_count") or 0)
+    pair_count = int(detail.get("pair_count") or 0)
+    accounted = int(detail.get("accounted") or 0)
+    lines = [
+        "## RETRY HINT - semantic dedup missing dispositions",
+        "",
+        f"`{phase_name}` left {missing_count}/{pair_count} candidate pair(s) "
+        f"without explicit disposition rows in `dedup_decisions.md`.",
+        "",
+        "Repair only the missing dispositions. Preserve existing MERGE/GROUP/"
+        "KEEP SEPARATE/N/A/PASSTHROUGH rows and preserve the existing deduped "
+        "output unless a listed missing pair requires a narrowly scoped update.",
+        "",
+        f"Accounted rows before retry: {accounted}/{pair_count}.",
+        "",
+        "Missing candidate pair rows:",
+    ]
+    for row in missing_rows[:limit]:
+        lines.append(f"- `{row}`")
+    if len(missing_rows) > limit:
+        lines.append(f"- ... (+{len(missing_rows) - limit} more)")
+    lines.extend([
+        "",
+        "Completion contract:",
+        "- Every candidate row in `dedup_candidate_pairs.md` must have a "
+        "matching disposition row in `dedup_decisions.md`.",
+        "- Do not introduce new finding IDs or change unrelated phase outputs.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
 def _check_opengrep_obligation_coverage(
     scratchpad: Path, mode: str
 ) -> list[str]:
-    """WARNING-class: every opengrep_findings.md row needs a breadth-emitted receipt.
+    """COVERAGE TELEMETRY (warning-only, NOT enforced): reports how many
+    opengrep_findings.md rows have a breadth-emitted receipt.
 
-    First ship: emits issues but never returns a hard-FAIL. Driver logs
-    the issues and writes `opengrep_obligation_gap.md` for observation.
+    Ship 8.6-lite: this is telemetry, not a completeness contract. It emits
+    issue strings for the driver to log and writes `opengrep_obligation_gap.md`
+    for observation, but its issues NEVER contribute to the artifact gate's
+    `missing` list (`gate_passes`). A missing `## Obligation Receipts` section
+    does not fail breadth -- that hard-coupling was removed in Ship 8.2 (it was
+    internally inconsistent with this check already being warning-only).
     Vacuous-pass when opengrep_findings.md is absent or has 0 rows.
 
-    Promotion to FAIL (planned after one observed audit) requires only
-    flipping the caller's branch from `log.warning(...)` to appending to
-    the missing list and writing a retry hint — no change to this function.
+    Receipts remain warning-only by design: real agents do not reliably emit
+    them, and forcing them would create a noisy halt class. A future,
+    explicitly-scoped change could derive receipts mechanically from shard
+    disposition (keyed by DEDUP_KEY) -- but that stays warning-only for >=1
+    clean run before any promotion is even considered.
     """
     rows = _parse_opengrep_row_count(scratchpad)
     if rows == 0:
@@ -5097,10 +6665,11 @@ def _check_opengrep_obligation_coverage(
         except Exception:
             pass
         return [
-            f"opengrep obligation: {rows} row(s) in opengrep_findings.md, "
-            "0 receipts in breadth output. Add a `## Obligation Receipts — "
-            "opengrep_findings.md` section to your breadth output emitting "
-            "one [OBLIG:opengrep_findings.md:<row>] line per row."
+            f"opengrep coverage telemetry (not enforced): {rows} row(s) in "
+            "opengrep_findings.md, 0 receipts in breadth output. Receipts are "
+            "warning-only and never fail the artifact gate; emitting a "
+            "`## Obligation Receipts — opengrep_findings.md` section improves "
+            "the coverage number."
         ]
 
     accounted = set(receipts.keys())
@@ -5130,9 +6699,10 @@ def _check_opengrep_obligation_coverage(
         except Exception:
             pass
         issues.append(
-            f"opengrep obligation: {len(unaccounted)}/{rows} "
-            "row(s) in opengrep_findings.md have no breadth receipt "
-            "(see opengrep_obligation_gap.md)"
+            f"opengrep coverage telemetry (not enforced): "
+            f"{len(unaccounted)}/{rows} row(s) in opengrep_findings.md have "
+            "no breadth receipt (see opengrep_obligation_gap.md). Warning-only; "
+            "does not fail the artifact gate."
         )
 
     # Validate dismissal vocabulary on emitted DISMISSED receipts (lenient —
@@ -5312,9 +6882,38 @@ def _check_pde_section_present(scratchpad: Path) -> list[str]:
 
 
 _PERTURBATION_BLOCK_RE = re.compile(
-    r"###\s+Perturbation\s+Block",
-    re.IGNORECASE,
+    r"(?:^###\s+Perturbation\s+Block\b|^\*\*Perturbation\s+Block\*\*\s*:)",
+    re.IGNORECASE | re.MULTILINE,
 )
+
+
+def _missing_perturbation_block_ids(text: str) -> list[str]:
+    """Return Medium+ CONFIRMED finding IDs missing an inline perturbation block."""
+    findings: list[tuple[int, str]] = []
+    for m in re.finditer(
+        r"##\s+Finding\s+\[(?P<id>[A-Z]{1,8}-\d+[A-Z\d-]*)\]",
+        text,
+    ):
+        findings.append((m.start(), m.group("id")))
+    missing_blocks: list[str] = []
+    for i, (start, fid) in enumerate(findings):
+        end = findings[i + 1][0] if i + 1 < len(findings) else len(text)
+        block = text[start:end]
+        verdict_m = re.search(
+            r"\*\*Verdict\*\*:\s*(\w+)", block, re.IGNORECASE,
+        )
+        sev_m = re.search(
+            r"\*\*Severity\*\*:\s*(\w+)", block, re.IGNORECASE,
+        )
+        if not verdict_m or not sev_m:
+            continue
+        if verdict_m.group(1).upper() != "CONFIRMED":
+            continue
+        if sev_m.group(1).capitalize() not in ("Critical", "High", "Medium"):
+            continue
+        if not _PERTURBATION_BLOCK_RE.search(block):
+            missing_blocks.append(fid)
+    return missing_blocks
 
 
 def _check_perturbation_block_per_finding(scratchpad: Path) -> list[str]:
@@ -5335,34 +6934,7 @@ def _check_perturbation_block_per_finding(scratchpad: Path) -> list[str]:
             text = path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        # Find Medium+ CONFIRMED findings
-        findings: list[tuple[int, str]] = []
-        for m in re.finditer(
-            r"##\s+Finding\s+\[(?P<id>[A-Z]{1,8}-\d+[A-Z\d-]*)\]",
-            text,
-        ):
-            findings.append((m.start(), m.group("id")))
-        if not findings:
-            continue
-        # For each finding span, check Verdict + Severity, then Perturbation Block
-        missing_blocks: list[str] = []
-        for i, (start, fid) in enumerate(findings):
-            end = findings[i + 1][0] if i + 1 < len(findings) else len(text)
-            block = text[start:end]
-            verdict_m = re.search(
-                r"\*\*Verdict\*\*:\s*(\w+)", block, re.IGNORECASE,
-            )
-            sev_m = re.search(
-                r"\*\*Severity\*\*:\s*(\w+)", block, re.IGNORECASE,
-            )
-            if not verdict_m or not sev_m:
-                continue
-            if verdict_m.group(1).upper() != "CONFIRMED":
-                continue
-            if sev_m.group(1).capitalize() not in ("Critical", "High", "Medium"):
-                continue
-            if not _PERTURBATION_BLOCK_RE.search(block):
-                missing_blocks.append(fid)
+        missing_blocks = _missing_perturbation_block_ids(text)
         if missing_blocks:
             issues.append(
                 f"perturbation block: {role_file} has "
@@ -5988,6 +7560,76 @@ def _ensure_report_consolidation_map(
     except Exception:
         return 0
     return len(unique)
+
+
+def _load_report_reference_aliases(
+    scratchpad: Path,
+    defined_report_ids: set[str],
+) -> dict[str, str]:
+    """Map internal source IDs to delivered report IDs for public prose.
+
+    Public report IDs reuse the H-* namespace, so only undefined references
+    are rewritten. `report_traceability_internal.md` is authoritative because
+    it records the report-index assignment before verifier prose can introduce
+    incidental cross-references.
+    """
+    aliases: dict[str, str] = {}
+    trace = scratchpad / "report_traceability_internal.md"
+    if not trace.exists():
+        return aliases
+    try:
+        text = trace.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return aliases
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("|") or re.fullmatch(
+            r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?",
+            line,
+        ):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 2 or cells[0].lower() == "report id":
+            continue
+        report_id = _normalize_report_id(cells[0]) or cells[0].upper()
+        if report_id not in defined_report_ids:
+            continue
+        for src in _INTERNAL_FINDING_ID_RE.findall(cells[1]):
+            src_u = src.upper()
+            if src_u not in defined_report_ids:
+                aliases.setdefault(src_u, report_id)
+    return aliases
+
+
+def _rewrite_public_report_references(
+    text: str,
+    aliases: dict[str, str],
+    defined_report_ids: set[str],
+) -> tuple[str, int]:
+    """Rewrite mapped internal IDs in prose references to public report IDs."""
+    if not aliases:
+        return text, 0
+    changed = 0
+    ref_re = re.compile(
+        r"(?i)\b(?:see|related to|duplicate of|duplicates|same as|"
+        r"cross-reference|cross reference|absorbed by|absorbs)\b"
+        r"(?P<mid>[^\n]{0,120}?)(?P<id>H-\d{1,3}|CH-\d{1,3}|"
+        r"HM-\d{1,3}|HL-\d{1,3}|HI-\d{1,3})"
+    )
+
+    def repl(match: re.Match[str]) -> str:
+        nonlocal changed
+        old = match.group("id").upper()
+        norm = _normalize_report_id(old) or old
+        if norm in defined_report_ids:
+            return match.group(0)
+        new = aliases.get(old) or aliases.get(norm)
+        if not new or new == old:
+            return match.group(0)
+        changed += 1
+        return match.group(0)[:match.start("id") - match.start()] + new
+
+    return ref_re.sub(repl, text), changed
 
 
 def _check_promotion_symmetry(
@@ -7718,6 +9360,32 @@ def _run_report_quality_gate(
             f"wrote {mapped} source-ID consolidation row(s)",
         ))
 
+    aliases = _load_report_reference_aliases(
+        scratchpad,
+        {rid.upper() for rid in body_report_ids_for_counts},
+    )
+    rtxt_new, alias_rewrites = _rewrite_public_report_references(
+        rtxt,
+        aliases,
+        {rid.upper() for rid in body_report_ids_for_counts},
+    )
+    if alias_rewrites:
+        try:
+            pr.write_text(rtxt_new, encoding="utf-8")
+            rtxt = rtxt_new
+            checks.append((
+                "public_reference_alias_selfheal",
+                "INFO",
+                f"rewrote {alias_rewrites} internal prose reference(s) "
+                "to public report IDs",
+            ))
+        except Exception as e:
+            checks.append((
+                "public_reference_alias_selfheal",
+                "WARN",
+                f"rewrite failed: {e}",
+            ))
+
     # Check 2: no internal IDs leaked into AUDIT_REPORT.md.
     # `_ID_ALL_NONHYPO` excludes H/CH because H-01 is also a report ID. Add
     # explicit privacy patterns for chain IDs and non-report-shaped hypothesis
@@ -9267,6 +10935,20 @@ def _retry_quarantine_dir(scratchpad: Path, phase_name: str) -> Path:
     return scratchpad / "_retry_quarantine" / phase_name
 
 
+def _pattern_implicated_by_missing(pattern: str, missing: list[str]) -> bool:
+    """Ship 8.15: True iff an artifact `pattern` is named in any gate-failure
+    message in `missing`. For concrete filenames, substring match. For glob
+    patterns (e.g. `graph_*.md`), match on the literal prefix before the first
+    wildcard so a message naming `graph_foo.md` implicates `graph_*.md`.
+    """
+    if not missing:
+        return False
+    if any(ch in pattern for ch in "*?["):
+        prefix = re.split(r"[*?\[]", pattern, 1)[0]
+        return bool(prefix) and any(prefix in m for m in missing)
+    return any(pattern in m for m in missing)
+
+
 def _quarantine_stale_on_retry(
     scratchpad: Path, phase: Phase, missing: list[str]
 ) -> list[str]:
@@ -9296,6 +10978,20 @@ def _quarantine_stale_on_retry(
     patterns: list[str] = list(phase.expected_artifacts or [])
     extras = _RETRY_QUARANTINE_EXTRAS.get(phase.name, [])
     patterns.extend(extras)
+
+    # Ship 8.15: TARGETED REPAIR. Quarantine ONLY the artifacts implicated by
+    # the gate-failure messages, not every expected artifact. DODO: a 443-byte
+    # recon_summary.md failure broadly quarantined 5 VALID drafts
+    # (design_context, contract_inventory, state_variables, function_list,
+    # template_recommendations), forcing a full re-run + recompaction. The
+    # `missing` messages name the failing file(s); use them so the retry
+    # repairs only what failed and the RESUMPTION PROTOCOL keeps valid work.
+    # Fallback: if NO expected artifact is named in any message (a global /
+    # structural failure that doesn't cite a file), keep the old broad
+    # behavior so the retry is not left blind with all-present artifacts.
+    implicated = [p for p in patterns if _pattern_implicated_by_missing(p, missing)]
+    if implicated:
+        patterns = implicated
 
     # For skeptic, exclude skeptic_judge_decisions.md (it's a downstream
     # artifact consumed by report_index, not a skeptic-phase own output
@@ -10055,14 +11751,23 @@ _DEPTH_CORE_ARTIFACTS = (
 )
 
 
-def _depth_core_artifacts_present(scratchpad: Path) -> bool:
+def _depth_core_artifacts_present(
+    scratchpad: Path,
+    pipeline: str = "sc",
+    mode: str = "core",
+) -> bool:
     """S1.6: True when depth's CORE deliverables are all present + substantive.
 
-    Core = the 4 depth-role findings files + the 3 blind-spot scanners.
+    SC core = the 4 depth-role findings files + the 3 blind-spot scanners.
+    L1 core = the five L1 depth role findings files.
     When this holds, depth has produced usable input for chain analysis and
     a remaining tail-artifact gap must degrade-and-continue, not halt.
     """
-    for name in _DEPTH_CORE_ARTIFACTS:
+    if (pipeline or "sc") == "l1":
+        core = tuple(group[0] for group in l1_never_cut_groups(mode)[:5])
+    else:
+        core = _DEPTH_CORE_ARTIFACTS
+    for name in core:
         p = scratchpad / name
         if not p.exists() or _depth_artifact_is_stub(p) is not None:
             return False
@@ -11477,6 +13182,174 @@ def _read_severity_override_ledger(scratchpad: Path) -> list[dict]:
     return overrides
 
 
+def _scratchpad_audit_mode(scratchpad: Path) -> str:
+    cfg = scratchpad / "config.json"
+    if not cfg.exists():
+        return ""
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return ""
+    return str(data.get("mode") or "").strip().lower()
+
+
+def _load_candidate_semantic_facets_for_validator(
+    scratchpad: Path,
+) -> dict[str, dict[str, object]]:
+    path = scratchpad / "candidate_semantic_facets.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    if not isinstance(candidates, list):
+        return {}
+    out: dict[str, dict[str, object]] = {}
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        fid = str(item.get("id") or "").strip().upper()
+        if not fid:
+            continue
+        out[fid] = item
+    return out
+
+
+def _parse_report_coverage_rows_for_contract(text: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    active_headers: list[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s.startswith("|") or _is_separator_row(s):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        lower = [_norm_key(c) for c in cells]
+        if any(k in lower for k in (
+            "candidate id", "candidate id / label", "internal finding id",
+            "canonical id",
+        )) or (
+            "status" in lower and any("reason" in k or "refutation" in k for k in lower)
+        ):
+            active_headers = lower
+            continue
+        if not active_headers:
+            continue
+        d = {
+            active_headers[i]: cells[i].strip()
+            for i in range(min(len(active_headers), len(cells)))
+        }
+        rows.append(d)
+    return rows
+
+
+def _coverage_row_value(row: dict[str, str], *keys: str) -> str:
+    for key in keys:
+        norm = _norm_key(key)
+        if norm in row:
+            return row[norm]
+    return ""
+
+
+def _validate_report_coverage_semantic_contract(scratchpad: Path) -> list[str]:
+    """Report-index recall contract.
+
+    Hard-fail only on low-ambiguity loss classes. Broader semantic hints are
+    written to `report_semantic_retention_risks.md` for human/post-run review
+    so this does not become a noisy halt source.
+    """
+    coverage_path = scratchpad / "report_coverage.md"
+    if not coverage_path.exists():
+        return []
+    try:
+        text = _llm_norm(coverage_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+
+    mode = _scratchpad_audit_mode(scratchpad)
+    facets = _load_candidate_semantic_facets_for_validator(scratchpad)
+    rows = _parse_report_coverage_rows_for_contract(text)
+    issues: list[str] = []
+    risk_rows: list[str] = []
+
+    for row in rows:
+        raw_id = _coverage_row_value(
+            row, "candidate id", "candidate id / label",
+            "internal finding id", "canonical id", "finding id",
+        )
+        ids = [m.group(1).upper() for m in _INTERNAL_FINDING_ID_RE.finditer(raw_id)]
+        status = _coverage_row_value(row, "status", "disposition", "action").upper()
+        reason = _coverage_row_value(
+            row, "report id / refutation / reason", "reason", "notes",
+            "exclusion reason", "verdict / reason",
+        )
+        sev = normalize_severity(
+            _coverage_row_value(row, "severity", "severity signal")
+        )
+        candidate_facet_text = ""
+        for fid in ids:
+            item = facets.get(fid)
+            if not item:
+                continue
+            f = item.get("facets") if isinstance(item, dict) else {}
+            if isinstance(f, dict):
+                candidate_facet_text += " " + " ".join(
+                    ", ".join(str(x) for x in f.get(k, []) if x)
+                    for k in ("mechanisms", "branch_conditions", "decoded_fields", "entrypoints")
+                )
+
+        combined = f"{status} {reason}".upper()
+        if (
+            mode == "thorough"
+            and sev in {"Critical", "High", "Medium"}
+            and "DEFERRED" in combined
+            and re.search(r"\bmode[-_ ]?limited|lane\s+did\s+not\s+run|not\s+run\s+in\s+mode\b", combined, re.IGNORECASE)
+        ):
+            issues.append(
+                "report_coverage semantic contract: Thorough mode cannot "
+                f"mode-limit/defer Medium+ candidate {raw_id or '(unknown)'}"
+            )
+            continue
+
+        # Non-blocking retention risk: a Medium+ merge/drop with extracted
+        # facets but no target report ID or concrete refutation vocabulary.
+        if (
+            sev in {"Critical", "High", "Medium"}
+            and candidate_facet_text.strip()
+            and re.search(r"\b(MERGED|MERGE_INTO|DUPLICATE|APPENDIX_ONLY|DROP_|DEFERRED)\b", combined)
+            and not re.search(r"\b[CHMLI]-\d{1,3}\b", reason, re.IGNORECASE)
+            and not re.search(
+                r"\b(FALSE_POSITIVE|REFUTED|INFEASIBLE|NO_REACHABLE|NO_TRACE|"
+                r"INSUFFICIENT|UNRESOLVED|CONTESTED|DUPLICATE OF|MERGE_INTO)\b",
+                combined,
+                re.IGNORECASE,
+            )
+        ):
+            risk_rows.append(
+                f"| {raw_id or '(unknown)'} | {sev} | {status or '(none)'} | "
+                f"{reason.replace('|', '/') or '(missing reason)'} | "
+                f"{candidate_facet_text.replace('|', '/').strip()} |"
+            )
+
+    if risk_rows:
+        try:
+            (scratchpad / "report_semantic_retention_risks.md").write_text(
+                "# Report Semantic Retention Risks\n\n"
+                "Non-blocking retention telemetry. Rows below have Medium+ "
+                "semantic facets and a non-body disposition whose reason does "
+                "not name an absorbing report ID or concrete refutation token.\n\n"
+                "| Candidate | Severity | Status | Reason | Extracted Facets |\n"
+                "|-----------|----------|--------|--------|------------------|\n"
+                + "\n".join(risk_rows)
+                + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+    return issues[:10]
+
+
 def _validate_report_coverage_accounting(scratchpad: Path) -> list[str]:
     """Fail report_index when any raw candidate ID is left unaccounted.
 
@@ -11533,15 +13406,17 @@ def _validate_report_coverage_accounting(scratchpad: Path) -> list[str]:
             unaccounted.append((candidate, source))
 
     if not unaccounted:
-        return []
+        return _validate_report_coverage_semantic_contract(scratchpad)
     sample = ", ".join(
         f"{fid} from {source}" for fid, source in unaccounted[:8]
     )
     more = f" (+{len(unaccounted) - 8} more)" if len(unaccounted) > 8 else ""
-    return [
+    issues = [
         "report_index: raw candidate ledger has "
         f"{len(unaccounted)} UNACCOUNTED candidate(s): {sample}{more}"
     ]
+    issues.extend(_validate_report_coverage_semantic_contract(scratchpad))
+    return issues
 
 
 def _clear_stale_degraded_sentinels(scratchpad: Path) -> list[str]:

@@ -259,7 +259,7 @@ Maximum 5 findings per agent - prioritize by severity.
 ## File Coverage Checkpoint (MANDATORY)
 Before writing findings, list EVERY source file in your cluster and confirm you opened it:
 | File | Lines | Opened? | Functions Analyzed |
-If any file shows Opened: NO " open and analyze it before returning.
+If any file shows Opened: NO â€” open and analyze it before returning.
 
 ## Quality Gate
 Every finding MUST include a specific code location (file:line). Findings without code references will be discarded.

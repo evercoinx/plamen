@@ -61,12 +61,9 @@ def test_breadth_orchestrator_termination_contract():
     _assert_termination_contract(
         "breadth",
         must_contain=(
-            "analysis_rescan_*.md",        # explicit prohibition
-            "analysis_percontract_*.md",   # explicit prohibition
-            "findings_inventory.md",       # explicit prohibition
-            "semantic_invariants.md",      # explicit prohibition
-            "_overflow/breadth/",          # cost-discipline explanation
-            "DONE:",                       # return signal format
+            "manifest-derived breadth set",
+            "Quarantined overflow",
+            "DONE:",
         ),
     )
 
@@ -75,10 +72,8 @@ def test_rescan_orchestrator_termination_contract():
     _assert_termination_contract(
         "rescan",
         must_contain=(
-            "findings_inventory.md",       # prohibition
-            "semantic_invariants.md",      # prohibition
-            "depth_*.md",                  # prohibition
-            "DONE:",                       # return signal format
+            "files outside the two artifact families",
+            "DONE:",
         ),
     )
 

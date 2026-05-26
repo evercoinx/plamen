@@ -775,7 +775,7 @@ class TestV246_DepthSanitization:
         result = PR._sanitize_depth_forward_refs(text)
         assert "Phase 4c" not in result
         assert "STOP" in result
-        assert "separate subprocess" in result
+        assert "phase-owned work" in result
 
     def test_core_mode_proceed_stripped(self):
         """'proceed to chain analysis and verification as-is' is replaced."""
@@ -793,7 +793,7 @@ class TestV246_DepthSanitization:
         )
         result = PR._sanitize_depth_forward_refs(text)
         assert "After Phase 5" not in result
-        assert "later subprocess" in result
+        assert "outside this subprocess" in result
 
     def test_depth_own_content_preserved(self):
         """Depth phase's own scoring/iteration instructions are not stripped."""

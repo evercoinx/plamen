@@ -117,6 +117,28 @@ _STUB_BODY = (
     "padding " * 20 + "\n"
 )
 
+# Ship 8.1: depth is now a supervised phase, so on a fresh audit (which
+# the smoke test is -- main() plants the fresh-audit sentinel) each
+# canonical depth file must carry COMPLETE markers and pass the
+# depth-appropriate structural check. This body is a marker-complete,
+# zero-findings depth stub (No Findings rationale present) used wherever
+# a scenario writes a depth_*_findings.md that should COUNT as complete.
+# Scenarios that intentionally omit depth files still fail the gate via
+# the MISSING bucket, preserving their quorum/halt intent.
+_DEPTH_COMPLETE_BODY = (
+    "<!-- PLAMEN_ARTIFACT: depth_role_findings.md -->\n"
+    "<!-- PLAMEN_STATUS: IN_PROGRESS -->\n"
+    "<!-- PLAMEN_PHASE: depth -->\n"
+    "<!-- PLAMEN_VERSION: 1 -->\n"
+    "# Depth findings (smoke stub)\n\n"
+    "## No Findings\n\n"
+    "Smoke-test stub: no findings; body clears min_artifact_bytes.\n"
+    + "padding " * 20 + "\n"
+    "## Semantic Proof Checks\n\nstub\n"
+    "<!-- PLAMEN_STATUS: COMPLETE -->\n"
+    "<!-- PLAMEN_FINDINGS_COUNT: 0 -->\n"
+)
+
 # Real-ish manifest with 5 breadth agent rows. Parsed by
 # parse_breadth_manifest_count() via the `| Template | Required |` header.
 _MANIFEST_5_ROWS = (
@@ -236,6 +258,25 @@ def _analysis_low_unique(fid, line):
 def _write(p, text):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, encoding="utf-8")
+
+
+def _breadth_marked(name, body, count):
+    # Ship 8.1: when a multi-row spawn_manifest.md is present (scenarios
+    # B/C), breadth runs manifest-exact and -- on a fresh audit (sentinel
+    # planted by main()) -- requires each output to be COMPLETE-marked and
+    # structurally sound (## Findings heading + FINDINGS_COUNT). Wrap the
+    # analysis body so the success-path scenario's breadth files pass.
+    return (
+        f"<!-- PLAMEN_ARTIFACT: {name} -->\n"
+        "<!-- PLAMEN_STATUS: IN_PROGRESS -->\n"
+        "<!-- PLAMEN_PHASE: breadth -->\n"
+        "<!-- PLAMEN_VERSION: 1 -->\n"
+        "# Analysis\n\n"
+        "## Findings\n\n"
+        f"{body}\n"
+        "<!-- PLAMEN_STATUS: COMPLETE -->\n"
+        f"<!-- PLAMEN_FINDINGS_COUNT: {count} -->\n"
+    )
 
 
 def _write_depth_support_artifacts(scratch, *, valid_checkpoint=True,
@@ -503,9 +544,10 @@ def stub_run_phase(phase, config, attempt):
                 _write(scratch / name, _STUB_BODY)
             return 0
         if SCENARIO == "C":
-            # Pass the manifest-exact gate comfortably (5 files).
+            # Pass the manifest-exact gate comfortably (5 files). Fresh
+            # mode requires COMPLETE markers + ## Findings structure.
             for name in _MANIFEST_5_OUTPUTS:
-                _write(scratch / name, _ANALYSIS_LOW_ONLY)
+                _write(scratch / name, _breadth_marked(name, _ANALYSIS_LOW_ONLY, 2))
             return 0
         if SCENARIO in ("D", "E", "F", "G", "I"):
             for i in range(5):
@@ -527,11 +569,11 @@ def stub_run_phase(phase, config, attempt):
         # depth is critical and needs >=3 substantial depth_*_findings.md.
         # Scenario C requires clearing this to reach verify short-circuit.
         if SCENARIO == "K":
-            _write(scratch / "depth_consensus_invariant_findings.md", _STUB_BODY)
-            _write(scratch / "depth_network_surface_findings.md", _STUB_BODY)
-            _write(scratch / "depth_state_trace_findings.md", _STUB_BODY)
-            _write(scratch / "depth_external_findings.md", _STUB_BODY)
-            _write(scratch / "depth_edge_case_findings.md", _STUB_BODY)
+            _write(scratch / "depth_consensus_invariant_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_network_surface_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_state_trace_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_external_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_edge_case_findings.md", _DEPTH_COMPLETE_BODY)
             _write_depth_support_artifacts(scratch)
             _write(
                 scratch / "depth_exit.md",
@@ -547,49 +589,49 @@ def stub_run_phase(phase, config, attempt):
             )
             return 0
         if SCENARIO == "D":
-            _write(scratch / "depth_consensus_invariant_findings.md", _STUB_BODY)
-            _write(scratch / "depth_network_surface_findings.md", _STUB_BODY)
-            _write(scratch / "depth_state_trace_findings.md", _STUB_BODY)
+            _write(scratch / "depth_consensus_invariant_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_network_surface_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_state_trace_findings.md", _DEPTH_COMPLETE_BODY)
             _write_depth_support_artifacts(scratch)
             return 0
         if SCENARIO == "E":
-            _write(scratch / "depth_consensus_invariant_findings.md", _STUB_BODY)
-            _write(scratch / "depth_network_surface_findings.md", _STUB_BODY)
-            _write(scratch / "depth_state_trace_findings.md", _STUB_BODY)
-            _write(scratch / "depth_external_findings.md", _STUB_BODY)
-            _write(scratch / "depth_edge_case_findings.md", _STUB_BODY)
+            _write(scratch / "depth_consensus_invariant_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_network_surface_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_state_trace_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_external_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_edge_case_findings.md", _DEPTH_COMPLETE_BODY)
             _write_depth_support_artifacts(scratch)
             with (scratch / "violations.md").open("a", encoding="utf-8") as f:
                 f.write("[GATE FAIL] depth_consensus_invariant: 0 pre-baked reads (need >=2)\n")
             return 0
         if SCENARIO == "F":
-            _write(scratch / "depth_consensus_invariant_findings.md", _STUB_BODY)
-            _write(scratch / "depth_network_surface_findings.md", _STUB_BODY)
-            _write(scratch / "depth_state_trace_findings.md", _STUB_BODY)
-            _write(scratch / "depth_external_findings.md", _STUB_BODY)
-            _write(scratch / "depth_edge_case_findings.md", _STUB_BODY)
+            _write(scratch / "depth_consensus_invariant_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_network_surface_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_state_trace_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_external_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_edge_case_findings.md", _DEPTH_COMPLETE_BODY)
             _write_depth_support_artifacts(
                 scratch, valid_checkpoint=False, include_skill_gap=False
             )
             return 0
         if SCENARIO == "G":
-            _write(scratch / "depth_consensus_invariant_findings.md", _STUB_BODY)
-            _write(scratch / "depth_network_surface_findings.md", _STUB_BODY)
-            _write(scratch / "depth_state_trace_findings.md", _STUB_BODY)
-            _write(scratch / "depth_external_findings.md", _STUB_BODY)
-            _write(scratch / "depth_edge_case_findings.md", _STUB_BODY)
+            _write(scratch / "depth_consensus_invariant_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_network_surface_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_state_trace_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_external_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_edge_case_findings.md", _DEPTH_COMPLETE_BODY)
             _write_depth_support_artifacts(scratch, valid_exit=False)
             return 0
         if SCENARIO == "H":
-            _write(scratch / "depth_consensus_invariant_findings.md", _STUB_BODY)
-            _write(scratch / "depth_network_surface_findings.md", _STUB_BODY)
-            _write(scratch / "depth_state_trace_findings.md", _STUB_BODY)
-            _write(scratch / "depth_external_findings.md", _STUB_BODY)
-            _write(scratch / "depth_edge_case_findings.md", _STUB_BODY)
+            _write(scratch / "depth_consensus_invariant_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_network_surface_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_state_trace_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_external_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_edge_case_findings.md", _DEPTH_COMPLETE_BODY)
             _write_depth_support_artifacts(scratch)
             return 0
         for role in ("token_flow", "state_trace", "edge_case", "external"):
-            _write(scratch / f"depth_{role}_findings.md", _STUB_BODY)
+            _write(scratch / f"depth_{role}_findings.md", _DEPTH_COMPLETE_BODY)
         if SCENARIO == "C":
             _write_depth_support_artifacts(scratch)
         return 0
@@ -773,8 +815,15 @@ def _run_driver(tmp: Path, config_path: Path, call_log: Path,
               .replace("__CALL_LOG__", str(call_log))
               .replace("__CONFIG_PATH__", str(config_path))
               .replace("__SCENARIO__", scenario))
+    # Write the runner to a temp file rather than passing it inline via
+    # `python -c "<script>"`. The template grows as the pipeline gains
+    # phases/fixtures and on Windows an inline `-c` argument is capped at
+    # ~32K chars (CreateProcess lpCommandLine -> WinError 206 "filename or
+    # extension is too long"). A temp file has no such limit.
+    runner_path = tmp / "_smoke_runner.py"
+    runner_path.write_text(script, encoding="utf-8")
     proc = subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, str(runner_path)],
         capture_output=True,
         text=True,
         cwd=str(tmp),

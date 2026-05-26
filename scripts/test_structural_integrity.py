@@ -812,6 +812,14 @@ def test_display_plain_output_for_captured_shell():
 # Runner (for standalone execution outside pytest)
 # ═══════════════════════════════════════════════════════════════════
 
+def test_display_spinner_cadence_is_smooth():
+    import importlib
+
+    d = importlib.import_module("plamen_display")
+
+    assert d._SPINNER_REDRAW_INTERVAL_S <= 0.5
+
+
 ALL_TESTS = [
     # Class 1: Export completeness
     test_all_defined_functions_are_exported,
@@ -840,6 +848,7 @@ ALL_TESTS = [
     test_build_phase_prompt_does_not_crash,
     test_codex_top_level_route_uses_deterministic_driver,
     test_display_plain_output_for_captured_shell,
+    test_display_spinner_cadence_is_smooth,
 ]
 
 

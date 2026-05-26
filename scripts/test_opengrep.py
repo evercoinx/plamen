@@ -270,8 +270,8 @@ def test_ensure_rules_clones_missing(tmp_path):
 
 # ── run_recon_prepass wiring ─────────────────────────────────────────────
 
-def test_prepass_evm_triggers_opengrep(tmp_path):
-    """SC EVM pipeline triggers opengrep scan."""
+def test_prepass_evm_skips_opengrep_by_default(tmp_path):
+    """Startup pre-pass does not block on external OpenGrep scans by default."""
     scratch = _mkscratch(tmp_path)
     proj = _mkproj(tmp_path)
     config = {
@@ -282,12 +282,29 @@ def test_prepass_evm_triggers_opengrep(tmp_path):
     }
     with mock.patch("recon_prepass._run_opengrep_scan", return_value="SKIPPED:test") as m:
         results = run_recon_prepass(config)
+    m.assert_not_called()
+    assert "opengrep_scan" not in results
+
+
+def test_prepass_evm_triggers_opengrep_when_enabled(tmp_path):
+    """Explicit startup scanner opt-in still triggers OpenGrep."""
+    scratch = _mkscratch(tmp_path)
+    proj = _mkproj(tmp_path)
+    config = {
+        "scratchpad": str(scratch),
+        "project_root": str(proj),
+        "language": "evm",
+        "pipeline": "sc",
+        "prepass_external_scanners": True,
+    }
+    with mock.patch("recon_prepass._run_opengrep_scan", return_value="SKIPPED:test") as m:
+        results = run_recon_prepass(config)
     m.assert_called_once_with(scratch, proj, "evm")
     assert results.get("opengrep_scan") == "SKIPPED:test"
 
 
-def test_prepass_solana_triggers_opengrep(tmp_path):
-    """SC Solana pipeline triggers opengrep scan."""
+def test_prepass_solana_triggers_opengrep_when_enabled(tmp_path):
+    """SC Solana startup OpenGrep runs only with explicit opt-in."""
     scratch = _mkscratch(tmp_path)
     proj = _mkproj(tmp_path, lang="solana")
     config = {
@@ -295,6 +312,7 @@ def test_prepass_solana_triggers_opengrep(tmp_path):
         "project_root": str(proj),
         "language": "solana",
         "pipeline": "sc",
+        "prepass_external_scanners": True,
     }
     with mock.patch("recon_prepass._run_opengrep_scan", return_value="SKIPPED:test") as m, \
          mock.patch("recon_prepass._bake_rust_scip", return_value="SKIPPED:test"):
@@ -318,7 +336,7 @@ def test_prepass_l1_does_not_trigger_opengrep(tmp_path):
 
 
 def test_prepass_opengrep_failure_does_not_crash(tmp_path):
-    """OpenGrep exception doesn't crash prepass."""
+    """Opt-in OpenGrep exception doesn't crash prepass."""
     scratch = _mkscratch(tmp_path)
     proj = _mkproj(tmp_path)
     config = {
@@ -326,6 +344,7 @@ def test_prepass_opengrep_failure_does_not_crash(tmp_path):
         "project_root": str(proj),
         "language": "evm",
         "pipeline": "sc",
+        "prepass_external_scanners": True,
     }
     with mock.patch("recon_prepass._run_opengrep_scan", side_effect=RuntimeError("boom")):
         results = run_recon_prepass(config)
@@ -432,8 +451,8 @@ def test_sui_still_skipped_no_rules(tmp_path):
     assert result.startswith("SKIPPED:")
 
 
-def test_prepass_aptos_triggers_opengrep(tmp_path):
-    """SC Aptos pipeline triggers opengrep scan."""
+def test_prepass_aptos_triggers_opengrep_when_enabled(tmp_path):
+    """SC Aptos startup OpenGrep runs only with explicit opt-in."""
     scratch = _mkscratch(tmp_path)
     proj = _mkproj(tmp_path, lang="aptos")
     config = {
@@ -441,6 +460,7 @@ def test_prepass_aptos_triggers_opengrep(tmp_path):
         "project_root": str(proj),
         "language": "aptos",
         "pipeline": "sc",
+        "prepass_external_scanners": True,
     }
     with mock.patch("recon_prepass._run_opengrep_scan", return_value="SKIPPED:test") as m:
         results = run_recon_prepass(config)

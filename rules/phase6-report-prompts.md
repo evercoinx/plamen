@@ -36,7 +36,6 @@ Read:
 - {SCRATCHPAD}/validation_sweep_findings.md or {SCRATCHPAD}/scanner_validation_findings.md (validation findings)
 - {SCRATCHPAD}/dedup_candidate_pairs.md (OPTIONAL — pre-computed same-file finding pairs with high title overlap or shared code identifiers, produced by the depth promotion pipeline. Use these pairs as HINTS for Step 1.5 consolidation — each pair is a candidate for merging, not a mandate.)
 - {SCRATCHPAD}/poc_demotions.md (OPTIONAL — mechanically-computed severity caps for findings where PoC execution disproved the claimed harm. If present, apply caps in STEP 1 rule 7.)
-- {SCRATCHPAD}/poc_demotion_carveouts.md (OPTIONAL — v2.x Fix 4 carveouts: when the demoted hypothesis absorbed multiple constituents and the verifier only tested ONE constituent's claim well, this file lists the spared constituents that should be split into separate report rows at their original severity. Apply in STEP 1.5 consolidation: emit each spared constituent as a standalone report finding using its original severity from findings_inventory.md, with a note "Verifier tested sibling constituent — this finding's claim was not tested.")
 
 Forbidden inputs:
 - Do NOT read `{SCRATCHPAD}/report_index.md`, `{SCRATCHPAD}/report_coverage.md`,
@@ -74,13 +73,6 @@ For every Master Finding Index row:
    - `PROVEN(original_sev)` only when `PROVEN_ONLY: true`
    - `CHAIN-UPGRADE(original_sev)` / `CHAIN-DOWNGRADE(original_sev)` with the
      chain ID and enabling relation
-   - `SEVERITY_OVERRIDE(upstream=<sev>, llm=<sev>, reason=...)` —
-     **DRIVER-ONLY token, v2.0.7**. Emitted automatically by
-     `_repair_report_index_severity_provenance` when the LLM's severity
-     is below upstream AND Trust Adj. was left empty. The Index Agent
-     MUST NOT emit this token manually — the driver's authenticity gate
-     will reject any `SEVERITY_OVERRIDE(...)` stamp that lacks a
-     matching record in `_severity_override_ledger.json`.
 5. A bare `-` / `—` Trust Adj. is valid only when final severity equals
    upstream severity.
 6. If no canonical adjustment applies, restore the upstream severity and

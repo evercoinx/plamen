@@ -280,6 +280,51 @@ class TestVerificationNotExecutedExemption:
                     f"PoC Result check: {ln}"
                 )
 
+    def test_public_report_rewrites_internal_hypothesis_reference(self, audit_env):
+        """An undefined internal H-* reference in prose should resolve through
+        the internal traceability map instead of shipping a dangling public
+        cross-reference."""
+        from plamen_validators import _run_report_quality_gate
+        sp, proj = audit_env
+        (sp / "report_traceability_internal.md").write_text(
+            textwrap.dedent("""\
+                # Internal Report Traceability
+
+                | Report ID | Internal Hypothesis | Chain | Verification | Agent Sources |
+                |-----------|---------------------|-------|--------------|---------------|
+                | H-01 | H-1 | n/a | verify_H-1.md | H-1 |
+                | H-02 | H-64 | n/a | verify_H-64.md | H-64 |
+            """),
+            encoding="utf-8",
+        )
+        report = self._build_report([
+            "### [H-01] Fee Swap Revert [VERIFIED]",
+            "",
+            "**Severity**: High",
+            "**Location**: `src/A.sol:L10`",
+            "**Description**: Fee-bearing swaps revert and the fallback path can strand funds; see H-64 for the related refund overwrite condition.",
+            "**Impact**: Users can lose funds because the revert path depends on an unsafe refund record that can be overwritten before recovery.",
+            "**PoC Result**: Code trace confirmed the revert and refund-path dependency.",
+            "",
+            "### [H-02] Refund Overwrite [VERIFIED]",
+            "",
+            "**Severity**: High",
+            "**Location**: `src/B.sol:L20`",
+            "**Description**: The refund slot is user-controlled and can be overwritten before the victim claims the refund.",
+            "**Impact**: The attacker can redirect or block refund recovery for the affected external identifier.",
+            "**PoC Result**: Code trace confirmed the overwrite precondition.",
+            "",
+        ])
+        (proj / "AUDIT_REPORT.md").write_text(report, encoding="utf-8")
+        issues = _run_report_quality_gate(sp, str(proj))
+        rewritten = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        quality_md = (sp / "report_quality.md").read_text(encoding="utf-8")
+
+        assert "see H-02" in rewritten
+        assert "see H-64" not in rewritten
+        assert "undefined report ID references" not in quality_md
+        assert not any("H-64" in issue for issue in issues)
+
 
 # ---------------------------------------------------------------------------
 # Fix 3: Section-aware niche agent filtering

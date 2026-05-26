@@ -269,9 +269,11 @@ or an explicit duplicate/merge already listed with the absorbing report ID.
 Before finalizing the index, produce an accounting receipt in
 `report_coverage.md`. Keep this bounded: use `verification_queue.md`,
 `verify_core.md`, `finding_mapping.md`, and the final Master Finding Index as
-the coverage sources. Do NOT bulk-read raw breadth/depth/scanner artifacts in
-this phase. Raw promotion checks are enforced mechanically by the Python gate;
-the indexer owns the reportable verification-to-report mapping.
+the coverage sources. Also read `candidate_semantic_facets.md` when present;
+it is a compact driver-extracted preservation ledger, not a raw analysis
+artifact. Do NOT bulk-read raw breadth/depth/scanner artifacts in this phase.
+Raw promotion checks are enforced mechanically by the Python gate; the indexer
+owns the reportable verification-to-report mapping.
 
 Coverage reasoning must preserve upstream semantics, not re-derive them. For each candidate, keep the broken invariant, branch precondition, terminal failure mechanism, verification disposition, and source IDs visible in the existing `Report ID / Refutation / Reason` free-text field when those details affect whether the candidate is promoted, duplicated, false-positive, or deferred. If a candidate is marked `DUPLICATE`, the reason must make clear that no distinct branch precondition or terminal mechanism was dropped; otherwise assign it a separate report ID or mark it with the correct non-duplicate status.
 
@@ -297,6 +299,9 @@ For each verification/finding-mapping candidate, assign one of:
    a report ID or explicitly mark it duplicate / false positive / deferred with
    reasoning.
 5. Do not use `DUPLICATE`, `MERGED`, `APPENDIX_ONLY`, or any `DROP_*` status as a convenience status when the candidate carries a distinct broken invariant, branch precondition, terminal mechanism, verification disposition, or source ID that is not retained by the absorbing report ID and ledger reason.
+6. In Thorough mode, do NOT use `DEFERRED: mode-limited` for Medium+ candidates.
+   Thorough runs the full methodology; a Medium+ non-body decision needs a real
+   verifier/judge/refutation reason or an absorbing report ID.
 
 ---
 

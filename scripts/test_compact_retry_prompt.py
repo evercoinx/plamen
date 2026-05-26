@@ -1,11 +1,10 @@
 """Tests for the Pattern 2 compact retry prompt refactor.
 
 When a phase fails its gate, `_write_retry_hint` is called and the next
-attempt's prompt is built via `build_phase_prompt`. For non-accumulate
-phases, the new behavior REPLACES the full prompt with a compact
-error-primary prompt; for accumulate phases (breadth/rescan/depth) the
-existing prepend-to-full-prompt behavior is preserved because their
-RESUMPTION PROTOCOL depends on it.
+attempt's prompt is built via `build_phase_prompt`. Retry prompts are
+compact and error-primary for every phase. Accumulate phases
+(breadth/rescan/depth) still preserve complete artifacts on disk, but no
+longer replay the full original prompt by default.
 """
 
 from __future__ import annotations
@@ -120,29 +119,30 @@ class TestCompactRetryNonAccumulate:
         assert "LOTS_OF_ORIGINAL_PROMPT_BODY" not in prompt
 
 
-# --- Accumulate phases: preserve existing prepend behavior ------------------
+# --- Accumulate phases: compact repair mode, preserve artifacts -------------
 
 
 class TestAccumulatePhasesUnchanged:
-    def test_breadth_retry_uses_prepend_not_compact(self, scratch_and_project):
+    def test_breadth_retry_uses_compact_repair_not_prepend(self, scratch_and_project):
         scratch, project, v1 = scratch_and_project
         v._write_retry_hint(scratch, "breadth", "breadth hint")
         phase = next(ph for ph in SC_PHASES if ph.name == "breadth")
         prompt = p.build_phase_prompt(v1, phase, _config(scratch, project))
-        # Existing prepend format header
-        assert "RETRY HINT (injected by driver" in prompt
-        # Does NOT use the new compact format
-        assert not prompt.startswith("# RETRY ATTEMPT")
+        assert prompt.startswith("# RETRY ATTEMPT")
+        assert "RETRY HINT (injected by driver" not in prompt
+        assert "preserve" in prompt.lower()
+        assert "Do NOT overwrite completed rows/files" in prompt
 
-    def test_depth_retry_uses_prepend_not_compact(self, scratch_and_project):
+    def test_depth_retry_uses_compact_repair_not_prepend(self, scratch_and_project):
         scratch, project, v1 = scratch_and_project
         v._write_retry_hint(scratch, "depth", "depth hint")
         phase = next(ph for ph in SC_PHASES if ph.name == "depth")
         prompt = p.build_phase_prompt(v1, phase, _config(scratch, project))
-        assert "RETRY HINT (injected by driver" in prompt
-        assert not prompt.startswith("# RETRY ATTEMPT")
+        assert prompt.startswith("# RETRY ATTEMPT")
+        assert "RETRY HINT (injected by driver" not in prompt
+        assert "Repair ONLY" in prompt
 
-    def test_rescan_retry_uses_prepend_not_compact(self, scratch_and_project):
+    def test_rescan_retry_uses_compact_repair_not_prepend(self, scratch_and_project):
         scratch, project, v1 = scratch_and_project
         v._write_retry_hint(scratch, "rescan", "rescan hint")
         try:
@@ -150,8 +150,9 @@ class TestAccumulatePhasesUnchanged:
         except StopIteration:
             pytest.skip("rescan phase not in SC_PHASES")
         prompt = p.build_phase_prompt(v1, phase, _config(scratch, project))
-        assert "RETRY HINT (injected by driver" in prompt
-        assert not prompt.startswith("# RETRY ATTEMPT")
+        assert prompt.startswith("# RETRY ATTEMPT")
+        assert "RETRY HINT (injected by driver" not in prompt
+        assert "Repair ONLY" in prompt
 
 
 # --- Attempt 1 unchanged (no retry hint -> no special branch) ---------------

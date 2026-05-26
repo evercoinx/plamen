@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import logging
 import math
@@ -29,6 +30,7 @@ __all__ = [
     "_apply_mechanical_dedup_from_pairs",
     "_assemble_report_python",
     "_build_attention_repair_items",
+    "_build_asset_binding_repair_items",
     "_build_body_writer_manifests",
     "_build_sc_body_writer_manifests",
     "_collect_raw_candidate_ledger_rows",
@@ -50,8 +52,13 @@ __all__ = [
     "_synth_report_section_from_verify",
     "_synthesize_components_audited",
     "_write_attention_repair_queue",
+    "_write_asset_binding_matrix",
+    "_allocate_inventory_ledger_id",
+    "_write_canonical_finding_identity_map",
+    "_write_candidate_semantic_facets",
     "_write_finding_records_from_inventory",
     "_write_attention_repair_skip",
+    "_write_security_obligations",
     "_write_spec_expectations",
     "_write_location_recovery_skip",
     "_write_mechanical_inventory_from_chunks",
@@ -468,6 +475,255 @@ def _write_finding_records_from_inventory(scratchpad: Path) -> int:
         )
     except Exception:
         return 0
+    return len(records)
+
+
+_CANONICAL_FINDING_ID_MAP_NAME = "_canonical_finding_ids.json"
+_CANONICAL_FINDING_ID_SCHEMA = "plamen.canonical_finding_ids.v1"
+_UNMAPPED_ID_TOKENS_NAME = "_unmapped_id_tokens.json"
+_UNMAPPED_ID_SCHEMA = "plamen.unmapped_id_tokens.v1"
+
+_CANONICAL_ID_PRODUCER_PATTERNS: tuple[str, ...] = (
+    "analysis_*.md",
+    "analysis_rescan_*.md",
+    "analysis_percontract_*.md",
+    "graph_sweep*.md",
+    "coverage_fill_*.md",
+    "panic_audit_*.md",
+    "panic_audit_summary.md",
+    "symmetric_pair_findings.md",
+    "field_validation_matrix.md",
+    "primitive_correctness_findings.md",
+    "network_amplification_findings.md",
+    "lifecycle_replay_findings.md",
+    "findings_inventory.md",
+    "findings_inventory_chunk_*.md",
+    "depth_*_findings.md",
+    "blind_spot_*_findings.md",
+    "validation_sweep_findings.md",
+    "niche_*_findings.md",
+    "medusa_fuzz_findings.md",
+    "invariant_fuzz_results.md",
+    "design_stress_findings.md",
+    "depth_design_stress_findings.md",
+    "perturbation_findings.md",
+    "depth_perturbation_findings.md",
+    "attention_repair_summary.md",
+    "rag_validation.md",
+    "hypotheses.md",
+    "chain_hypotheses.md",
+    "chain_iteration2.md",
+    "post_verify_new_observations.md",
+    "skeptic_findings.md",
+    "cross_batch_consistency.md",
+    "report_index.md",
+)
+
+_CANONICAL_ID_SKIP_PREFIXES: tuple[str, ...] = (
+    "_prompt_", "_stdio_", "_continuation_", "_retry_", "_canonical_",
+)
+
+_GENERIC_ID_TOKEN_RE = re.compile(
+    r"\b[A-Z]{2,12}[A-Z0-9]*(?:-[A-Z0-9_]+)*-\d+\b"
+)
+_COMMON_NON_FINDING_ID_RE = re.compile(
+    r"^(?:ERC|EIP|BIP|RFC|CAIP|SLIP|CVE|CWE|PR|IP|HTTP|TLS)-\d+",
+    re.IGNORECASE,
+)
+
+
+def _canonical_id_norm(value: str) -> str:
+    return re.sub(r"\s+", " ", _strip_md(value or "")).strip().lower()
+
+
+def _canonical_finding_hash(parts: dict[str, str]) -> str:
+    immutable = {
+        "artifact": parts.get("artifact", ""),
+        "local_id": _canonical_id_norm(parts.get("local_id", "")),
+        "title": _canonical_id_norm(parts.get("title", "")),
+        "location": _canonical_id_norm(parts.get("location", "")),
+        "root_cause": _canonical_id_norm(parts.get("root_cause", "")),
+        "source_ids": _canonical_id_norm(parts.get("source_ids", "")),
+    }
+    blob = json.dumps(immutable, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _iter_finding_blocks_with_meta(text: str) -> list[dict[str, Any]]:
+    matches = list(FINDING_BLOCK_HEADING_RE.finditer(text or ""))
+    out: list[dict[str, Any]] = []
+    for idx, match in enumerate(matches):
+        start = match.start()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        block = text[start:end].strip()
+        line_end = text.find("\n", match.start(), end)
+        if line_end < 0:
+            line_end = end
+        heading = text[match.start():line_end]
+        title = ""
+        m_title = re.search(r"\]\s*[:\-–—]?\s*(.+)$", heading)
+        if m_title:
+            title = _strip_md(m_title.group(1)).strip()
+        out.append({
+            "local_id": match.group(1).strip(),
+            "title": title,
+            "block": block,
+            "offset": start,
+        })
+    return out
+
+
+def _producer_artifact_paths_for_identity(scratchpad: Path) -> list[Path]:
+    seen: set[str] = set()
+    paths: list[Path] = []
+    for pattern in _CANONICAL_ID_PRODUCER_PATTERNS:
+        for p in sorted(scratchpad.glob(pattern)):
+            if not p.is_file():
+                continue
+            if p.name in seen or p.name.startswith(_CANONICAL_ID_SKIP_PREFIXES):
+                continue
+            if p.name.startswith("analysis_merged_into_"):
+                continue
+            seen.add(p.name)
+            paths.append(p)
+    return paths
+
+
+def _canonical_identity_records_from_artifact(path: Path) -> list[dict[str, Any]]:
+    try:
+        text = _llm_norm(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    records: list[dict[str, Any]] = []
+    for item in _iter_finding_blocks_with_meta(text):
+        block = str(item.get("block") or "")
+        local_id_raw = str(item.get("local_id") or "").strip()
+        local_id = _normalize_finding_id(local_id_raw) or local_id_raw
+        title = str(item.get("title") or "").strip()
+        if not title:
+            title = _field_from_markdown(block, ("Title", "Finding", "Issue")) or local_id
+        severity = normalize_severity(_field_from_markdown(block, ("Severity", "Risk Level", "Level")))
+        location = _field_from_markdown(block, ("Location", "Locations", "Code Location", "File"))
+        root_cause = _field_from_markdown(block, ("Root Cause", "Cause", "Invariant Broken"))
+        source_ids = _field_from_markdown(
+            block,
+            ("Source IDs", "Source ID", "Sources", "Constituent Findings", "Internal Finding IDs"),
+        )
+        parts = {
+            "artifact": path.name,
+            "local_id": local_id,
+            "title": title,
+            "location": location,
+            "root_cause": root_cause,
+            "source_ids": source_ids,
+        }
+        digest = _canonical_finding_hash(parts)
+        referenced = sorted({
+            m.group(1).upper()
+            for m in _INTERNAL_FINDING_ID_RE.finditer(block)
+            if m.group(1).upper() != local_id.upper()
+        })
+        records.append({
+            "canonical_id": "CID-" + digest[:16].upper(),
+            "fingerprint": "sha256:" + digest,
+            "artifact": path.name,
+            "offset": int(item.get("offset") or 0),
+            "local_id": local_id,
+            "local_id_raw": local_id_raw,
+            "title": title,
+            "severity": severity,
+            "location": location,
+            "root_cause": root_cause,
+            "source_ids_text": source_ids,
+            "referenced_ids": referenced,
+            "raw_block_len": len(block),
+        })
+    return records
+
+
+def _collect_unmapped_id_tokens(scratchpad: Path) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for p in sorted(scratchpad.glob("*.md")):
+        if not p.is_file() or p.name.startswith(_CANONICAL_ID_SKIP_PREFIXES):
+            continue
+        try:
+            text = _llm_norm(p.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        for match in _GENERIC_ID_TOKEN_RE.finditer(text):
+            token = match.group(0).upper()
+            if _COMMON_NON_FINDING_ID_RE.match(token):
+                continue
+            if _INTERNAL_FINDING_ID_RE.fullmatch(token):
+                continue
+            key = (p.name, token)
+            if key in seen:
+                continue
+            seen.add(key)
+            start = max(0, match.start() - 80)
+            end = min(len(text), match.end() + 80)
+            context = re.sub(r"\s+", " ", text[start:end]).strip()
+            rows.append({
+                "artifact": p.name,
+                "token": token,
+                "context": context[:240],
+            })
+    return rows
+
+
+def _write_canonical_finding_identity_map(
+    scratchpad: Path,
+    *,
+    phase_name: str = "",
+    pipeline: str = "",
+    mode: str = "",
+) -> int:
+    """Write deterministic finding-identity sidecars without mutating artifacts.
+
+    This is the first step toward Python-owned final IDs: producers may still
+    emit local IDs, but the driver records a stable content fingerprint and
+    CID alias for every parseable finding block. Nothing is dropped or merged.
+    """
+    records: list[dict[str, Any]] = []
+    for path in _producer_artifact_paths_for_identity(scratchpad):
+        records.extend(_canonical_identity_records_from_artifact(path))
+    records.sort(key=lambda r: (str(r.get("artifact")), int(r.get("offset") or 0), str(r.get("local_id"))))
+    payload = {
+        "schema_version": _CANONICAL_FINDING_ID_SCHEMA,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "last_phase": phase_name,
+        "pipeline": pipeline,
+        "mode": mode,
+        "record_count": len(records),
+        "records": records,
+    }
+    try:
+        (scratchpad / _CANONICAL_FINDING_ID_MAP_NAME).write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        return 0
+
+    unmapped = _collect_unmapped_id_tokens(scratchpad)
+    try:
+        (scratchpad / _UNMAPPED_ID_TOKENS_NAME).write_text(
+            json.dumps(
+                {
+                    "schema_version": _UNMAPPED_ID_SCHEMA,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "last_phase": phase_name,
+                    "token_count": len(unmapped),
+                    "tokens": unmapped,
+                },
+                indent=2,
+                sort_keys=True,
+            ) + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
     return len(records)
 
 
@@ -1459,8 +1715,12 @@ def _assemble_report_python(
 
     # --- Split tier files into per-severity sections -------------------------
     def _sections_by_prefix(text: str, prefixes: set[str]) -> str:
+        # Ship D (SW14-2/3/4): accept H2 AND H3 report-ID headings, and inner
+        # whitespace `[ C-01 ]`. The old `###`-only / no-whitespace form dropped
+        # a `## [C-01]` (or `### [ C-01 ]`) finding from assembly while the
+        # count gate still counted it -> finding silently vanished.
         headers = list(re.finditer(
-            r"(?im)^(?:###\s*(?:[^\n]*\[REPORT-BLOCKED[^\]]*\]\s*)?\[([CHMLI])-\d+\][^\n]*|##\s+\S[^\n]*)",
+            r"(?im)^(?:#{2,3}\s*(?:[^\n]*\[REPORT-BLOCKED[^\]]*\]\s*)?\[\s*([CHMLI])-\d+\s*\][^\n]*|##\s+\S[^\n]*)",
             text or "",
         ))
         parts: list[str] = []
@@ -1721,6 +1981,46 @@ def write_inventory_chunk_placeholder(scratchpad: Path, phase_name: str, reason:
     )
 
 
+def _allocate_inventory_ledger_id(
+    scratchpad: Path,
+    *,
+    preferred_id: str,
+    owner_phase: str,
+    owning_artifact: str,
+    title: str,
+) -> str:
+    """Register an INV id, allocating a fresh one if a stale retry collided."""
+    candidate = preferred_id
+    for _ in range(1000):
+        try:
+            result = id_ledger_register(
+                scratchpad,
+                finding_id=candidate,
+                owner_phase=owner_phase,
+                owner_attempt=1,
+                owning_artifact=owning_artifact,
+                title=title,
+            )
+        except Exception as e:
+            log.debug(f"[{owner_phase}] ledger register skipped for {candidate}: {e}")
+            return candidate
+        if result.get("status") != "COLLISION":
+            return candidate
+        try:
+            nums = [
+                int(m.group(1))
+                for rec in id_ledger_all_records(scratchpad)
+                for m in [re.match(r"^INV-(\d+)$", str(rec.get("id", "")).upper())]
+                if m
+            ]
+            candidate = f"INV-{(max(nums) if nums else 0) + 1:03d}"
+        except Exception:
+            m = re.search(r"(\d+)$", candidate)
+            n = int(m.group(1)) + 1 if m else 1
+            candidate = f"INV-{n:03d}"
+    return candidate
+
+
 def _write_mechanical_inventory_from_chunks(scratchpad: Path) -> tuple[int, int]:
     """Write final findings_inventory.md from completed inventory chunks.
 
@@ -1785,7 +2085,13 @@ def _write_mechanical_inventory_from_chunks(scratchpad: Path) -> tuple[int, int]
         desc = _strip_md(str(item.get("description", ""))) or root
         impact = _strip_md(str(item.get("impact", ""))) or "Impact requires verifier confirmation."
         verdict = _strip_md(str(item.get("verdict", ""))) or "NEEDS_VERIFICATION"
-        inv_id = f"INV-{i:03d}"
+        inv_id = _allocate_inventory_ledger_id(
+            scratchpad,
+            preferred_id=f"INV-{i:03d}",
+            owner_phase="inventory",
+            owning_artifact="findings_inventory.md",
+            title=title,
+        )
         # v2.0.6 (P2.2): register the INV allocation in the ID ledger.
         # Inventory consolidation is mechanical / driver-owned, so true
         # collisions cannot happen here — but the registration makes
@@ -1974,8 +2280,14 @@ def promote_niche_to_inventory(scratchpad: Path) -> tuple[int, int]:
     mapping_lines: list[str] = []
     for idx, entry in enumerate(new_entries, start=1):
         inv_n = max_inv + idx
-        inv_id = f"INV-{inv_n:03d}"
         title = entry["title"] or "Untitled niche finding"
+        inv_id = _allocate_inventory_ledger_id(
+            scratchpad,
+            preferred_id=f"INV-{inv_n:03d}",
+            owner_phase="niche_promotion",
+            owning_artifact="findings_inventory.md",
+            title=title,
+        )
         # v2.0.6 (P2.2): register the niche-promoted INV in the ledger.
         try:
             from plamen_parsers import id_ledger_register
@@ -2060,6 +2372,699 @@ def promote_niche_to_inventory(scratchpad: Path) -> tuple[int, int]:
 
 
 _ATTENTION_REPAIR_MAX_ITEMS = 32
+
+
+_SECURITY_OBLIGATION_RULES: tuple[dict[str, object], ...] = (
+    {
+        "class": "asset_binding",
+        "pattern": r"\b(?:asset|token|coin|amount|balance|transfer|swap|route|path|toToken|fromToken|target)\b",
+        "question": "Are asset-in, asset-out, recipient, and amount fields bound to trusted execution context before value moves?",
+    },
+    {
+        "class": "swap_execution",
+        "pattern": r"\b(?:swap|router|pool|pair|quote|min(?:imum)?(?:Amount)?Out|slippage|path|reserve)\b",
+        "question": "Can swap execution, pool selection, min-out checks, or approval/execution amounts diverge from the value path?",
+    },
+    {
+        "class": "refund_revert",
+        "pattern": r"\b(?:refund|revert|rollback|onRevert|failed|return(?:ed)?\s+funds?|fallback)\b",
+        "question": "Is the refund recipient derived from authenticated source context and the original asset custody path?",
+    },
+    {
+        "class": "cross_domain_message",
+        "pattern": r"\b(?:bridge|cross[-_ ]?chain|gateway|message|payload|decode|encode|source|sender|chainid|xcall|cpi)\b",
+        "question": "Are decoded message fields, source chain, and source sender authenticated before privileged state/value effects?",
+    },
+    {
+        "class": "native_wrapped_asset",
+        "pattern": r"\b(?:native|wrapped|wrap|unwrap|deposit|withdraw|msg\.value|payable|sentinel|WETH|W[ A-Z0-9_]*|gas token)\b",
+        "question": "Are native-asset and token-contract branches separated so approve/transfer/wrap/unwrap/accounting cannot mismatch?",
+    },
+    {
+        "class": "external_call_surface",
+        "pattern": r"\b(?:call|delegatecall|staticcall|callback|hook|receiver|external\s+call|arbitrary\s+target|target\s+address)\b",
+        "question": "Can untrusted call targets, callbacks, hooks, or reentrant external effects violate state or value assumptions?",
+    },
+    {
+        "class": "privileged_exit",
+        "pattern": r"\b(?:admin|owner|governance|role|permission|onlyOwner|withdraw|sweep|rescue|emergency|upgrade)\b",
+        "question": "Are privileged exits, rescue paths, and upgrades access-controlled and constrained to intended assets/recipients?",
+    },
+    {
+        "class": "encoding_schema",
+        "pattern": r"\b(?:abi\.decode|decode|deserialize|serialize|bytes\d*|address\(|cast|length|schema|struct|layout|endianness)\b",
+        "question": "Do encoded/decoded schemas preserve field widths, ordering, permissions, and address formats across boundaries?",
+    },
+)
+
+
+_FACET_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("asset-binding-mismatch", r"\b(?:mismatch|not\s+match|does\s+not\s+match|diverge|different)\b.*\b(?:asset|token|coin|amount|target|recipient|params|decoded|input|output)\b|\b(?:asset|token|coin|amount|target|recipient|params|decoded|input|output)\b.*\b(?:mismatch|not\s+match|does\s+not\s+match|diverge|different)\b"),
+    ("swap-skip-or-divergence", r"\b(?:skip|empty|bypass|not\s+execute|without\s+swap|swapData|swap)\b"),
+    ("refund-provenance", r"\b(?:refund|revert|rollback|failed)\b.*\b(?:recipient|sender|source|address|provenance)\b"),
+    ("source-authentication", r"\b(?:source\s+sender|sender|origin|source\s+chain|chainid|authenticat|verify)\b"),
+    ("native-token-branch", r"\b(?:native|wrapped|wrap|unwrap|msg\.value|payable|sentinel|WETH|W[A-Z0-9_]+)\b"),
+    ("approval-execution-amount", r"\b(?:approve|allowance)\b.*\b(?:amount|fee|deduct|full|original|mismatch)\b|\b(?:fee|deduct)\b.*\b(?:approve|swap|amount)\b"),
+    ("slippage-minout", r"\b(?:slippage|min(?:imum)?(?:Amount)?Out|minReturn|amountOutMin|sandwich|MEV)\b"),
+    ("pool-or-route-trust", r"\b(?:pool|pair|router|route|reserve|oracle|quote)\b.*\b(?:exist|select|trust|manipulat|check)\b"),
+    ("access-control", r"\b(?:public|external|onlyOwner|role|access\s+control|permission|admin|owner|withdraw|sweep)\b"),
+    ("encoding-width-or-layout", r"\b(?:bytes\d*|length|cast|decode|encode|deserialize|layout|struct|writable|signer|permission)\b"),
+)
+
+
+def _read_security_signal_text(scratchpad: Path) -> str:
+    names = (
+        "recon_summary.md", "design_context.md", "attack_surface.md",
+        "detected_patterns.md", "template_recommendations.md",
+        "contract_inventory.md", "external_interfaces.md",
+        "integration_points.md", "function_summary.md", "caller_map.md",
+        "callee_map.md", "state_write_map.md", "opengrep_findings.md",
+        "findings_inventory.md",
+    )
+    chunks: list[str] = []
+    for name in names:
+        p = scratchpad / name
+        if not p.exists() or not p.is_file():
+            continue
+        try:
+            chunks.append(p.read_text(encoding="utf-8", errors="replace")[:120_000])
+        except Exception:
+            continue
+    return "\n".join(chunks)
+
+
+def _write_security_obligations(scratchpad: Path, mode: str = "core") -> int:
+    """Write generic feature-triggered audit obligations.
+
+    These are target-shape obligations, not benchmark hints. They are derived
+    from recon/graph/static artifacts and ask broad methodology questions that
+    downstream agents must answer or carry forward.
+    """
+    signal_text = _llm_norm(_read_security_signal_text(scratchpad))
+    out = scratchpad / "security_obligations.md"
+    if not signal_text.strip():
+        out.write_text(
+            "# Security Obligations\n\n"
+            "**Status**: SKIPPED - no recon or graph signal artifacts available.\n",
+            encoding="utf-8",
+        )
+        return 0
+
+    obligations: list[dict[str, str]] = []
+    for rule in _SECURITY_OBLIGATION_RULES:
+        pattern = str(rule["pattern"])
+        matches = list(re.finditer(pattern, signal_text, re.IGNORECASE))
+        if not matches:
+            continue
+        snippets: list[str] = []
+        for m in matches[:3]:
+            start = max(0, m.start() - 80)
+            end = min(len(signal_text), m.end() + 80)
+            snippet = re.sub(r"\s+", " ", signal_text[start:end]).strip()
+            if snippet:
+                snippets.append(snippet.replace("|", "/"))
+        obligations.append({
+            "id": f"SO-{len(obligations) + 1:03d}",
+            "class": str(rule["class"]),
+            "question": str(rule["question"]),
+            "signals": " ; ".join(snippets[:3]) or "(signal present)",
+        })
+
+    lines = [
+        "# Security Obligations",
+        "",
+        "Generated mechanically from recon, graph, inventory, and static-analysis "
+        "signals. These are generic vulnerability-class obligations. They are "
+        "not expected findings and must not be treated as protocol-specific "
+        "answers.",
+        "",
+        f"**Mode**: {mode}",
+        f"**Count**: {len(obligations)}",
+        "",
+        "| Obligation ID | Class | Audit Question | Trigger Signals |",
+        "|---------------|-------|----------------|-----------------|",
+    ]
+    if obligations:
+        for item in obligations:
+            lines.append(
+                f"| {item['id']} | {item['class']} | {item['question']} | {item['signals']} |"
+            )
+    else:
+        lines.append("| n/a | none | No generic feature obligations triggered. | n/a |")
+    lines.extend([
+        "",
+        "## Receipt Contract",
+        "",
+        "When a later phase directly evaluates an obligation, it may emit:",
+        "",
+        "`[OBLIG:security_obligations.md:<SO-ID>] STATUS:R|D|C KEY:<summary> -> <finding_id|reason|phase>`",
+        "",
+        "`R` means reported, `D` means dismissed with evidence, and `C` means "
+        "carried to a named later phase. Missing receipts are telemetry unless "
+        "a dedicated phase explicitly consumes this file.",
+    ])
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return len(obligations)
+
+
+def _parse_security_obligation_items(scratchpad: Path) -> list[dict[str, str]]:
+    path = scratchpad / "security_obligations.md"
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    items: list[dict[str, str]] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s.startswith("|") or _is_separator_row(s):
+            continue
+        cells = [c.strip().strip("`") for c in s.strip("|").split("|")]
+        if len(cells) < 4 or cells[0].lower().startswith("obligation"):
+            continue
+        if not re.fullmatch(r"SO-\d{3}", cells[0], re.IGNORECASE):
+            continue
+        items.append({
+            "id": cells[0].upper(),
+            "class": cells[1],
+            "question": cells[2],
+            "signals": cells[3],
+        })
+    return items
+
+
+_ASSET_BINDING_SIGNAL_FILES: tuple[str, ...] = (
+    "design_context.md", "attack_surface.md", "detected_patterns.md",
+    "function_list.md", "contract_inventory.md", "template_recommendations.md",
+    "analysis_token_flow.md", "analysis_external_dependencies.md",
+    "analysis_core_state.md", "analysis_access_control.md",
+    "depth_token_flow_findings.md", "depth_external_findings.md",
+    "depth_state_trace_findings.md", "depth_edge_case_findings.md",
+    "findings_inventory.md", "hypotheses.md", "chain_hypotheses.md",
+    "verification_queue.md", "report_index.md",
+)
+
+_ASSET_BINDING_COVERAGE_FILES: tuple[str, ...] = (
+    "findings_inventory.md", "hypotheses.md", "chain_hypotheses.md",
+    "verification_queue.md", "report_index.md", "report_coverage.md",
+)
+
+_BINDING_FIELD_CLASS: dict[str, str] = {
+    "asset": "token",
+    "inputasset": "token",
+    "outputasset": "token",
+    "token": "token",
+    "inputtoken": "token",
+    "outputtoken": "token",
+    "fromtoken": "token",
+    "totoken": "token",
+    "targetzrc20": "token",
+    "zrc20": "token",
+    "gaszrc20": "token",
+    "collateral": "token",
+    "debttoken": "token",
+    "amount": "amount",
+    "fromtokenamount": "amount",
+    "outputamount": "amount",
+    "targetamount": "amount",
+    "minamountout": "amount",
+    "minreturnamount": "amount",
+    "expretrunamount": "amount",
+    "expreturnamount": "amount",
+    "msg.value": "amount",
+    "fee": "amount",
+    "receiver": "recipient",
+    "recipient": "recipient",
+    "sender": "recipient",
+    "walletaddress": "recipient",
+    "assetto": "recipient",
+    "to": "recipient",
+    "refundrecipient": "recipient",
+    "sourcesender": "provenance",
+    "sourcechain": "provenance",
+    "chainid": "provenance",
+    "context.sender": "provenance",
+}
+
+_BINDING_PAIR_TEMPLATES: tuple[tuple[str, str, str, str], ...] = (
+    ("toToken", "targetZRC20", "token", "swap output token must match withdrawal/refund asset"),
+    ("fromToken", "zrc20", "token", "swap input token must match bridged or deposited asset"),
+    ("asset", "targetZRC20", "token", "gateway asset must match decoded withdrawal target"),
+    ("outputToken", "targetZRC20", "token", "output token must match withdrawal target"),
+    ("fromTokenAmount", "amount", "amount", "swap input amount must match actual held amount"),
+    ("msg.value", "amount", "amount", "native value must match declared bridge/swap amount"),
+    ("outputAmount", "targetAmount", "amount", "post-swap amount must match amount approved/withdrawn"),
+    ("minReturnAmount", "outputAmount", "amount", "minimum output/slippage check must bind to actual output"),
+    ("assetTo", "receiver", "recipient", "router output recipient must match intended receiver"),
+    ("walletAddress", "receiver", "recipient", "refund wallet must map to intended receiver"),
+    ("sender", "receiver", "recipient", "source sender must not be confused with refund receiver"),
+    ("sourceSender", "context.sender", "provenance", "message sender must be authenticated to gateway context"),
+)
+
+
+def _canonical_binding_base(raw: str) -> str:
+    s = str(raw or "").strip().strip("`")
+    if not s:
+        return ""
+    if s == "msg.value":
+        return s
+    if "." in s:
+        s = s.rsplit(".", 1)[-1]
+    return s
+
+
+def _binding_class(raw: str) -> str:
+    base = _canonical_binding_base(raw)
+    key = base.lower()
+    if raw == "context.sender":
+        key = "context.sender"
+    return _BINDING_FIELD_CLASS.get(key, "")
+
+
+def _read_asset_binding_signal_text(scratchpad: Path) -> str:
+    chunks: list[str] = []
+    for name in _ASSET_BINDING_SIGNAL_FILES:
+        p = scratchpad / name
+        if not p.exists() or not p.is_file():
+            continue
+        try:
+            chunks.append(f"\n\n# {name}\n")
+            chunks.append(p.read_text(encoding="utf-8", errors="replace")[:160_000])
+        except Exception:
+            continue
+    return _llm_norm("\n".join(chunks))
+
+
+def _read_asset_binding_coverage_text(scratchpad: Path) -> str:
+    chunks: list[str] = []
+    for name in _ASSET_BINDING_COVERAGE_FILES:
+        p = scratchpad / name
+        if not p.exists() or not p.is_file():
+            continue
+        try:
+            chunks.append(f"\n\n# {name}\n")
+            chunks.append(p.read_text(encoding="utf-8", errors="replace")[:180_000])
+        except Exception:
+            continue
+    return _llm_norm("\n".join(chunks))
+
+
+def _extract_binding_fields(text: str) -> dict[str, dict[str, object]]:
+    """Extract value-flow fields without assuming a protocol-specific schema."""
+    fields: dict[str, dict[str, object]] = {}
+
+    def add(name: str, source: str) -> None:
+        display = name.strip()
+        base = _canonical_binding_base(display)
+        cls = _binding_class(display)
+        if not base or not cls:
+            return
+        key = base.lower()
+        rec = fields.setdefault(key, {
+            "base": base,
+            "class": cls,
+            "forms": set(),
+            "sources": set(),
+        })
+        rec["forms"].add(display)  # type: ignore[index,union-attr]
+        rec["sources"].add(source)  # type: ignore[index,union-attr]
+
+    for m in re.finditer(
+        r"\b(params|decoded|context|message|payload|data|refundInfo|revertInfo)"
+        r"\.([A-Za-z_][A-Za-z0-9_]*)\b",
+        text,
+    ):
+        add(f"{m.group(1)}.{m.group(2)}", "dotted")
+    if re.search(r"\bmsg\.value\b", text):
+        add("msg.value", "native")
+    bare_names = (
+        "asset", "token", "fromToken", "toToken", "targetZRC20", "zrc20",
+        "gasZRC20", "outputToken", "inputToken", "amount", "fromTokenAmount",
+        "outputAmount", "targetAmount", "minAmountOut", "minReturnAmount",
+        "fee", "receiver", "recipient", "sender", "walletAddress", "assetTo",
+        "sourceSender", "sourceChain", "chainId",
+    )
+    for name in bare_names:
+        if re.search(rf"\b{re.escape(name)}\b", text):
+            add(name, "bare")
+
+    normalized: dict[str, dict[str, object]] = {}
+    for key, rec in fields.items():
+        normalized[key] = {
+            "base": rec["base"],
+            "class": rec["class"],
+            "forms": sorted(rec["forms"]),  # type: ignore[arg-type]
+            "sources": sorted(rec["sources"]),  # type: ignore[arg-type]
+        }
+    return normalized
+
+
+def _binding_domain_flags(text: str) -> list[str]:
+    flags: list[str] = []
+    if re.search(r"\b(?:bridge|cross[-_\s]?chain|gateway|onCall|onRevert|onAbort)\b", text, re.I):
+        flags.append("cross-chain")
+    if re.search(r"\b(?:swap|router|mixSwap|amountOut|minReturn|slippage|pool|pair)\b", text, re.I):
+        flags.append("swap-router")
+    if re.search(r"\b(?:refund|revertMessage|claimRefund|refundInfo)\b", text, re.I):
+        flags.append("refund")
+    if re.search(r"\b(?:native|wrapped|msg\.value|WETH|WZETA|sentinel)\b", text, re.I):
+        flags.append("native-wrapped")
+    if re.search(r"\b(?:vault|share|deposit|withdraw|redeem|asset)\b", text, re.I):
+        flags.append("asset-accounting")
+    if re.search(r"\b(?:borrow|repay|liquidat|collateral|debt)\b", text, re.I):
+        flags.append("lending")
+    return sorted(set(flags))
+
+
+def _active_binding_pair_covered(coverage_text: str, a: str, b: str) -> bool:
+    """Return true when an active candidate/report already binds both fields."""
+    if not coverage_text:
+        return False
+    terms_a = {a, _canonical_binding_base(a)}
+    terms_b = {b, _canonical_binding_base(b)}
+    claim_re = re.compile(
+        r"\b(?:mismatch|not\s+match|does\s+not\s+match|not\s+validated|"
+        r"missing\s+validation|consistency|consistent|bound|binding|"
+        r"equals?|same\s+as|against|validated\s+against)\b",
+        re.IGNORECASE,
+    )
+
+    def explicit_claim(blob: str) -> bool:
+        low = blob.lower()
+        for ta in terms_a:
+            if not ta:
+                continue
+            for tb in terms_b:
+                if not tb:
+                    continue
+                ta_l = ta.lower()
+                tb_l = tb.lower()
+                for m in re.finditer(re.escape(ta_l), low):
+                    idx = low.find(tb_l, max(0, m.start() - 500), m.end() + 500)
+                    if idx == -1:
+                        continue
+                    lo = max(0, min(m.start(), idx) - 300)
+                    hi = min(len(blob), max(m.end(), idx + len(tb_l)) + 300)
+                    if claim_re.search(blob[lo:hi]):
+                        return True
+        return False
+
+    # Split into finding-like chunks first so unrelated global mentions do not
+    # count as coverage. Fall back to a short-window search for JSON/queue rows.
+    chunks = re.split(r"(?im)^#{2,3}\s+Finding\s+\[[^\]\n]+\]", coverage_text)
+    for chunk in chunks:
+        low = chunk.lower()
+        if any(t and t.lower() in low for t in terms_a) and any(
+            t and t.lower() in low for t in terms_b
+        ) and explicit_claim(chunk[:6000]):
+            return True
+    for line in coverage_text.splitlines():
+        if "|" in line or line.lstrip().startswith(("-", "*")):
+            if explicit_claim(line):
+                return True
+    return False
+
+
+def _representative_binding_form(fields: dict[str, dict[str, object]], base: str) -> str:
+    rec = fields.get(base.lower()) or {}
+    forms = [str(x) for x in rec.get("forms", [])]
+    dotted = [f for f in forms if "." in f]
+    return (dotted or forms or [base])[0]
+
+
+def _build_asset_binding_rows(scratchpad: Path) -> tuple[list[dict[str, object]], list[str]]:
+    signal_text = _read_asset_binding_signal_text(scratchpad)
+    if not signal_text.strip():
+        return [], []
+    fields = _extract_binding_fields(signal_text)
+    domains = _binding_domain_flags(signal_text)
+    coverage_text = _read_asset_binding_coverage_text(scratchpad)
+    rows: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for a_base, b_base, cls, rationale in _BINDING_PAIR_TEMPLATES:
+        if a_base.lower() not in fields or b_base.lower() not in fields:
+            continue
+        # Keep domain packs audit-shape aware. Amount/token/recipient pairs are
+        # only useful when the protocol has a value-moving surface.
+        if cls in {"token", "amount", "recipient"} and not (
+            {"cross-chain", "swap-router", "refund", "asset-accounting", "lending"} & set(domains)
+        ):
+            continue
+        a_form = _representative_binding_form(fields, a_base)
+        b_form = _representative_binding_form(fields, b_base)
+        key = tuple(sorted((a_form.lower(), b_form.lower())))
+        if key in seen:
+            continue
+        seen.add(key)
+        covered = _active_binding_pair_covered(coverage_text, a_form, b_form)
+        gap_id = f"AB-{len(rows) + 1:03d}"
+        rows.append({
+            "id": gap_id,
+            "class": cls,
+            "field_a": a_form,
+            "field_b": b_form,
+            "status": "covered" if covered else "gap",
+            "rationale": rationale,
+            "domains": domains,
+            "question": (
+                f"Is `{a_form}` explicitly bound to `{b_form}` before value "
+                "moves, or is a mismatch reported as a candidate finding?"
+            ),
+        })
+    return rows, domains
+
+
+def _write_asset_binding_matrix(scratchpad: Path, mode: str = "core") -> tuple[int, int]:
+    """Write a deterministic value-field binding matrix.
+
+    This is a generic discovery backstop. It does not assert findings and does
+    not block a phase. In Thorough mode, gap rows can be consumed by attention
+    repair as bounded questions.
+    """
+    rows, domains = _build_asset_binding_rows(scratchpad)
+    payload = {
+        "schema_version": "plamen.asset_binding_matrix.v1",
+        "mode": mode,
+        "domains": domains,
+        "row_count": len(rows),
+        "gap_count": sum(1 for r in rows if r.get("status") == "gap"),
+        "rows": rows,
+    }
+    (scratchpad / "asset_binding_matrix.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    lines = [
+        "# Asset Binding Matrix",
+        "",
+        "Driver-generated semantic binding obligations for value-moving fields. "
+        "Rows are generic field-pair questions, not expected findings. A `gap` "
+        "means no active inventory/hypothesis/report row was found that mentions "
+        "both fields together.",
+        "",
+        f"**Mode**: {mode}",
+        f"**Detected Domains**: {', '.join(domains) or 'none'}",
+        f"**Rows**: {len(rows)}",
+        f"**Gaps**: {sum(1 for r in rows if r.get('status') == 'gap')}",
+        "",
+        "| ID | Class | Field A | Field B | Status | Obligation |",
+        "|----|-------|---------|---------|--------|------------|",
+    ]
+    if rows:
+        for row in rows:
+            lines.append(
+                f"| {row['id']} | {row['class']} | `{row['field_a']}` | "
+                f"`{row['field_b']}` | {row['status']} | {row['rationale']} |"
+            )
+    else:
+        lines.append("| n/a | n/a | - | - | none | No value-binding pairs triggered. |")
+    (scratchpad / "asset_binding_matrix.md").write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
+    return len(rows), int(payload["gap_count"])
+
+
+def _build_asset_binding_repair_items(scratchpad: Path, limit: int = 5) -> list[dict[str, str]]:
+    path = scratchpad / "asset_binding_matrix.json"
+    if not path.exists():
+        try:
+            _write_asset_binding_matrix(scratchpad)
+        except Exception:
+            return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    items: list[dict[str, str]] = []
+    for row in payload.get("rows", []) or []:
+        if str(row.get("status", "")).lower() != "gap":
+            continue
+        rid = str(row.get("id", "AB-???"))
+        a = str(row.get("field_a", "field_a"))
+        b = str(row.get("field_b", "field_b"))
+        target = f"{rid}: {a} <-> {b}"
+        reason = str(row.get("question") or row.get("rationale") or "unresolved asset binding")
+        items.append({
+            "kind": "asset-binding-gap",
+            "target": target,
+            "reason": reason,
+            "source": "asset_binding_matrix.md",
+            "evidence": f"{rid} in asset_binding_matrix.md",
+        })
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _extract_skill_execution_repair_items(scratchpad: Path, limit: int = 8) -> list[dict[str, str]]:
+    path = scratchpad / "skill_execution_checklist.md"
+    if not path.exists():
+        return []
+    try:
+        text = _llm_norm(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    items: list[dict[str, str]] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s.startswith("|") or _is_separator_row(s):
+            continue
+        cells = [c.strip().strip("`") for c in s.strip("|").split("|")]
+        if len(cells) < 5 or cells[0].lower() == "skill":
+            continue
+        status = cells[2].upper()
+        if "PARTIAL" not in status and "NOT_EXECUTED" not in status:
+            continue
+        skill = cells[0]
+        agent = cells[1]
+        gap = cells[4]
+        items.append({
+            "kind": "skill-execution-gap",
+            "target": skill,
+            "reason": f"{status}: required methodology gap for {agent}: {gap}",
+            "source": "skill_execution_checklist.md",
+            "evidence": f"{skill} row in skill_execution_checklist.md",
+        })
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _extract_candidate_facets(text: str) -> dict[str, list[str]]:
+    norm = _llm_norm(text or "")
+    mechanisms: list[str] = []
+    for name, pattern in _FACET_KEYWORDS:
+        if re.search(pattern, norm, re.IGNORECASE | re.DOTALL):
+            mechanisms.append(name)
+    functions = sorted({
+        m.group(1)
+        for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", norm)
+        if m.group(1) not in {"if", "require", "assert", "revert", "return"}
+    })[:12]
+    fields = sorted({
+        m.group(1)
+        for m in re.finditer(r"\b(?:params|decoded|message|payload|data)\.([A-Za-z_][A-Za-z0-9_]*)\b", norm)
+    })[:16]
+    branch_terms = sorted({
+        token
+        for token in (
+            "empty-input", "zero-value", "unauthenticated-source",
+            "mismatched-parameter", "skipped-execution", "native-branch",
+            "unbounded-decoding",
+        )
+        if (
+            (token == "empty-input" and re.search(r"\bempty|length\s*==\s*0|\.length\s*==\s*0\b", norm, re.IGNORECASE))
+            or (token == "zero-value" and re.search(r"\bzero|0\s*(?:amount|address|value)\b", norm, re.IGNORECASE))
+            or (token == "unauthenticated-source" and re.search(r"\bunauth|missing\s+(?:sender|source).*validat|source\s+sender\b", norm, re.IGNORECASE))
+            or (token == "mismatched-parameter" and re.search(r"\bmismatch|not\s+match|different\b", norm, re.IGNORECASE))
+            or (token == "skipped-execution" and re.search(r"\bskip|bypass|not\s+execute|without\b", norm, re.IGNORECASE))
+            or (token == "native-branch" and re.search(r"\bnative|wrapped|msg\.value|payable|sentinel\b", norm, re.IGNORECASE))
+            or (token == "unbounded-decoding" and re.search(r"\bdecode|bytes|length|cast|deserialize\b", norm, re.IGNORECASE))
+        )
+    })
+    return {
+        "mechanisms": mechanisms,
+        "entrypoints": functions,
+        "decoded_fields": fields,
+        "branch_conditions": branch_terms,
+    }
+
+
+def _write_candidate_semantic_facets(scratchpad: Path) -> int:
+    rows = parse_verification_queue_rows(scratchpad)
+    if not rows:
+        return 0
+    finding_record_maps = _load_finding_record_maps(scratchpad)
+    records: list[dict[str, object]] = []
+    for row in rows:
+        fid = (row.get("finding id") or "").strip()
+        if not fid:
+            continue
+        record = _finding_record_for_ids(scratchpad, [fid], finding_record_maps)
+        parts = [
+            fid,
+            row.get("severity", ""),
+            row.get("title", ""),
+            row.get("location", ""),
+        ]
+        if record:
+            for key in ("title", "root_cause", "description", "impact", "location"):
+                val = record.get(key)
+                if val:
+                    parts.append(str(val))
+        vp = _verify_file_for_id(scratchpad, fid)
+        if vp.exists():
+            try:
+                parts.append(vp.read_text(encoding="utf-8", errors="replace")[:80_000])
+            except Exception:
+                pass
+        facets = _extract_candidate_facets("\n".join(parts))
+        records.append({
+            "id": fid,
+            "severity": normalize_severity(row.get("severity", "")),
+            "title": row.get("title", ""),
+            "location": row.get("location", ""),
+            "facets": facets,
+        })
+    if not records:
+        return 0
+    payload = {
+        "schema_version": "plamen.candidate_semantic_facets.v1",
+        "candidate_count": len(records),
+        "candidates": records,
+    }
+    (scratchpad / "candidate_semantic_facets.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    lines = [
+        "# Candidate Semantic Facets",
+        "",
+        "Driver-extracted semantic hints for preservation checks. These facets "
+        "are not findings; they are compact reminders of mechanism, branch, "
+        "field, and entrypoint details that must survive merge/dedup/reporting.",
+        "",
+        "| Candidate ID | Severity | Mechanisms | Branch Conditions | Decoded Fields | Entrypoints |",
+        "|--------------|----------|------------|-------------------|----------------|-------------|",
+    ]
+    for rec in records:
+        facets = rec["facets"]
+        assert isinstance(facets, dict)
+        lines.append(
+            f"| {rec['id']} | {rec['severity']} | "
+            f"{', '.join(facets.get('mechanisms', [])) or '-'} | "
+            f"{', '.join(facets.get('branch_conditions', [])) or '-'} | "
+            f"{', '.join(facets.get('decoded_fields', [])) or '-'} | "
+            f"{', '.join(facets.get('entrypoints', [])) or '-'} |"
+        )
+    (scratchpad / "candidate_semantic_facets.md").write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
+    return len(records)
 
 
 def _path_security_weight(path: str) -> int:
@@ -2178,8 +3183,6 @@ def _extract_graph_attention_rows(scratchpad: Path, limit: int = 12) -> list[dic
 
 
 def _build_attention_repair_items(scratchpad: Path, mode: str) -> list[dict[str, str]]:
-    if mode != "thorough":
-        return []
     items: list[dict[str, str]] = []
     seen_targets: set[str] = set()
 
@@ -2194,6 +3197,61 @@ def _build_attention_repair_items(scratchpad: Path, mode: str) -> list[dict[str,
                 "evidence": evidence or target,
             })
             seen_targets.add(key)
+
+    # Generic discovery obligations are cheap to derive and intentionally
+    # protocol-agnostic. They become active repair rows only in Thorough mode;
+    # Light/Core still get the sidecar for downstream prompt context without
+    # adding a new LLM repair spend.
+    try:
+        _write_security_obligations(scratchpad, mode)
+    except Exception:
+        pass
+    if mode == "thorough":
+        for obligation in _parse_security_obligation_items(scratchpad)[:10]:
+            add(
+                "security-obligation",
+                obligation["id"],
+                f"{obligation['class']}: {obligation['question']}",
+                "security_obligations.md",
+                obligation.get("signals", ""),
+            )
+        try:
+            _write_asset_binding_matrix(scratchpad, mode)
+            for item in _build_asset_binding_repair_items(scratchpad)[:5]:
+                add(
+                    item["kind"],
+                    item["target"],
+                    item["reason"],
+                    item["source"],
+                    item.get("evidence", ""),
+                )
+        except Exception:
+            pass
+        try:
+            for item in _extract_skill_execution_repair_items(scratchpad)[:8]:
+                add(
+                    item["kind"],
+                    item["target"],
+                    item["reason"],
+                    item["source"],
+                    item.get("evidence", ""),
+                )
+        except Exception:
+            pass
+        try:
+            for issue in _check_perturbation_block_per_finding(scratchpad):
+                add(
+                    "missing-perturbation-block",
+                    issue[:240],
+                    "depth finding lacks required sibling/field/direction/actor perturbation table",
+                    "depth perturbation validator",
+                    issue,
+                )
+        except Exception:
+            pass
+
+    if mode != "thorough":
+        return items[:_ATTENTION_REPAIR_MAX_ITEMS]
 
     gap_file = scratchpad / "notread_priority_gaps.md"
     if gap_file.exists():
@@ -2736,6 +3794,10 @@ def _write_mechanical_report_index(scratchpad: Path) -> int:
     This removes the LLM index from the critical path: verifier status decides
     body vs Appendix A; Python assigns report IDs and writes a parseable index.
     """
+    try:
+        _write_candidate_semantic_facets(scratchpad)
+    except Exception as exc:
+        log.warning(f"[report_index] candidate semantic facets skipped: {exc!r}")
     rows = parse_verification_queue_rows(scratchpad)
     if not rows:
         return 0

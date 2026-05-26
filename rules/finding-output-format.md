@@ -14,7 +14,7 @@ Every finding MUST use this format:
 **Step Execution**: ✓1,2,3,5 | ✗4(N/A) | ?6,7(uncertain)
 **Rules Applied**: [R4:✓, R5:✓, R6:✗(no role), R8:✗(single-step), R10:✓]
 **Depth Evidence** (depth agents only): [BOUNDARY:tested X=0,MAX], [VARIATION:param changed from A→B], [TRACE:followed to revert at L120]
-**Preferred Tag** (verifier-friendly): [POC-PASS] / [POC-FAIL] / [CODE-TRACE] / [FUZZ-PASS] / [LSP-TRACE] etc. — the single dominant evidence tag for this finding. Aliases the parser also accepts: `Evidence Tag`, `Evidence Tags`, `Evidence` (any one of these labels is fine; pick ONE per finding).
+**Preferred Tag**: CODE-TRACE / POC-PASS / POC-FAIL / FUZZ-PASS / MEDUSA-PASS / CONTESTED
 **Severity**: Critical/High/Medium/Low/Informational
 **Location**: SourceFile:LineN
 **Description**: What's wrong

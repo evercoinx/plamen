@@ -31,8 +31,8 @@ first-pass findings as an exclusion set:
   first-pass breadth outputs.
 
 On retry, ignore this phase's own prior outputs when building the first-pass
-exclusion set; use them only to determine which additional outputs are already
-substantial and can be skipped.
+exclusion set; use them only to determine which declared additional outputs are
+already substantive and can be skipped.
 
 ---
 
@@ -95,9 +95,35 @@ prompt.
 
 ---
 
+## FIRST ACTION (MANDATORY): declare your output manifest
+
+Before spawning any rescan/per-contract worker, write
+`{SCRATCHPAD}/rescan_manifest.md` listing the EXACT output filenames you intend
+to produce this phase -- one concrete filename per planned worker. Example:
+
+```
+# Rescan Manifest
+- analysis_rescan_1.md
+- analysis_rescan_2.md
+- analysis_percontract_core.md
+- analysis_percontract_scope_review.md
+```
+
+Rules:
+- List concrete filenames (e.g. `analysis_rescan_1.md`), NOT the glob form
+  `analysis_rescan_*.md`.
+- Declare 2-3 `analysis_rescan_*.md` files and at least one
+  `analysis_percontract_*.md` (or `analysis_percontract_scope_review.md` if no
+  meaningful per-contract cluster exists).
+- The driver gate is EXACT against this manifest: every declared file must
+  exist and be substantive before the phase passes. Declare only files you
+  will actually produce, and produce every file you declare. Do NOT declare
+  files you cannot complete.
+
 ## Output Contract
 
-Write only this phase's additional analysis files:
+Write only this phase's additional analysis files (every file you declared in
+`rescan_manifest.md`):
 
 - `analysis_rescan_*.md`
 - at least one `analysis_percontract_*.md`
@@ -113,9 +139,9 @@ clustered per-contract analysis is not applicable and what files were checked.
 
 <!-- BUILD-STRIP: raw contract tokens for standalone contract tests only: findings_inventory.md depth_*.md -->
 
-As soon as the required `analysis_rescan_*.md` files (one per spawned
-rescan agent) AND at least one `analysis_percontract_*.md` are on disk
-with size >= 200 bytes, return immediately:
+As soon as every filename declared in `rescan_manifest.md` is on disk and
+substantive (not a reservation stub, not a placeholder, and large enough for
+the driver gate), return immediately:
 
 ```
 DONE: rescan {N} files, per-contract {M} files written
@@ -123,6 +149,4 @@ DONE: rescan {N} files, per-contract {M} files written
 
 Any output written by the orchestrator beyond this contract is
 discarded by the driver and wastes session tokens. Do not produce
-files outside the two artifact families above. Do not write inventory,
-verification, report, depth, or `semantic_invariants.md` artifacts from
-this phase; later subprocesses own those outputs.
+files outside the two artifact families above.

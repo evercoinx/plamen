@@ -213,6 +213,30 @@ def test_run_phase_launches_isolated_process_group():
     assert "killpg" in helper_src
 
 
+def test_halt_message_does_not_promise_fake_three_seconds(capsys):
+    display.print_halt_acknowledged()
+    out = capsys.readouterr()
+    combined = out.out + out.err
+    assert "within 3s" not in combined
+    assert "cleanup may take a few seconds" in combined
+
+
+def test_worker_pool_halt_cancels_pending_futures():
+    class _Executor:
+        def __init__(self):
+            self.shutdown_args = None
+
+        def shutdown(self, **kwargs):
+            self.shutdown_args = kwargs
+
+    fut = MagicMock()
+    executor = _Executor()
+    D._cancel_pending_worker_futures({fut}, executor)
+    fut.cancel.assert_called_once()
+    assert executor.shutdown_args["wait"] is False
+    assert executor.shutdown_args["cancel_futures"] is True
+
+
 # ─── detect_rate_limit ─────────────────────────────────────────────────
 
 

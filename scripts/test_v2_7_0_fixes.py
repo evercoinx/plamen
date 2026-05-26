@@ -1491,7 +1491,7 @@ class TestVerifyCoreEmptyFallback:
 
 
 class TestInventoryChunkContainment:
-    """Verify the containment retry hint and prompt FORBIDDEN FILE directive."""
+    """Verify the containment retry hint and prompt allowlist directive."""
 
     def test_retry_hint_inventory_chunk_c(self):
         from plamen_driver import _generate_containment_retry_hint
@@ -1500,8 +1500,8 @@ class TestInventoryChunkContainment:
         hint = _generate_containment_retry_hint("inventory_chunk_c", missing)
         assert "findings_inventory_chunk_c.md" in hint
         assert "findings_inventory.md" in hint
-        assert "inventory-merge phase" in hint
-        assert "MUST NOT write" in hint
+        assert "Do not create, update, or repair any other scratchpad artifact" in hint
+        assert "work outside this shard" in hint
 
     def test_retry_hint_inventory_chunk_a(self):
         from plamen_driver import _generate_containment_retry_hint
@@ -1526,16 +1526,16 @@ class TestInventoryChunkContainment:
         assert "rag_validation.md" in hint
         assert "Depth retry boundary" in hint
 
-    def test_prompt_forbidden_file_directive(self):
-        """The inventory chunk prompt must contain the FORBIDDEN FILE warning."""
+    def test_prompt_allowlist_file_directive(self):
+        """The inventory chunk prompt must contain the output allowlist warning."""
         from plamen_prompt import _render_expected_output_block
         from plamen_prompt import build_phase_prompt  # noqa: F401
         # Just verify the template text contains the forbidden directive
         import plamen_prompt as pp
         import inspect
         source = inspect.getsource(pp)
-        assert "FORBIDDEN FILE" in source
-        assert "findings_inventory.md" in source
+        assert "OUTPUT ALLOWLIST" in source
+        assert "Any non-allowlisted write triggers phase containment" in source
 
 
 # ═══════════════════════════════════════════════════════════════════════

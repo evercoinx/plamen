@@ -23,6 +23,7 @@ from plamen_types import (
     SC_VERIFY_CRITHIGH_PHASE_NAMES,
     _VALID_PIPELINES, _VALID_MODES,
     EVIDENCE_TAGS_PROOF, EVIDENCE_TAG_DEFAULT, EVIDENCE_TAG_NAMES_RE,
+    DEPTH_EVIDENCE_TAG_RE, FINDING_BLOCK_HEADING_RE,
     SEVERITY_ORDER, SEVERITY_LETTER, SEVERITY_FROM_LETTER,
     has_mechanical_proof, normalize_severity, severity_letter_from_name,
     severity_rank,
@@ -113,8 +114,12 @@ __all__ = [
     "_dedup_signature_for_finding",
     "_demote_severity_once",
     "_detect_dedup_clusters",
+    "_artifact_has_findings",
     "_enforce_severity_matrix",
     "_expected_depth_agent_roles",
+    "_extract_artifact_status",
+    "_findings_section_has_body",
+    "_strip_fenced_code_blocks",
     "_extract_finding_ids_from_text",
     "_extract_finding_signals",
     "_extract_first_tag",
@@ -188,6 +193,7 @@ __all__ = [
     "_severity_rank",
     "_split_source_id_tokens",
     "_strip_md",
+    "_structural_completeness_ok",
     "_validate_source_token",
     "_verifier_status_from_text",
     "_verify_file_for_id",
@@ -207,8 +213,11 @@ __all__ = [
     "ensure_sc_verify_shard_manifests",
     "ensure_verify_shard_manifests",
     "get_tier_assignments",
+    "is_artifact_complete",
+    "is_artifact_legacy_unmarked",
     "merge_report_medium_shards",  # backward compat wrapper
     "merge_report_tier_shards",
+    "parse_breadth_manifest_agents",
     "parse_breadth_manifest_count",
     "parse_breadth_manifest_outputs",
     "parse_depth_manifest_count",
@@ -333,6 +342,23 @@ def _is_separator_row(s: str) -> bool:
     return bool(_SEPARATOR_ROW_RE.match(s.strip()))
 
 
+def _breadth_roster_text(text: str) -> str:
+    """Ship B: bound breadth-manifest parsing to the `## Breadth Agents`
+    section so a later table (e.g. `## Required Template Coverage`, whose header
+    also matches the template+required heuristic) cannot bleed into the roster.
+    This was the DODO instantiate HALT (count=16/outputs=None on a VALID
+    manifest). Uses section-scoped Markdown AST (plamen_markdown.section_text);
+    falls back to the full text when no `## Breadth Agents` heading exists
+    (legacy manifests that put the roster table directly under `# Spawn
+    Manifest`)."""
+    try:
+        import plamen_markdown as _mdast
+        sect = _mdast.section_text(text, r"\bbreadth\s+agents?\b")
+        return sect if sect.strip() else text
+    except Exception:
+        return text
+
+
 def parse_breadth_manifest_count(scratchpad: Path) -> Optional[int]:
     """Return the number of breadth agents declared in spawn_manifest.md.
 
@@ -355,6 +381,7 @@ def parse_breadth_manifest_count(scratchpad: Path) -> Optional[int]:
         text = _llm_norm(p.read_text(encoding="utf-8", errors="replace"))
     except Exception:
         return None
+    text = _breadth_roster_text(text)  # Ship B: kill cross-section bleed
     count = 0
     in_table = False
     headers: list[str] = []
@@ -579,6 +606,7 @@ def parse_breadth_manifest_outputs(scratchpad: Path) -> Optional[list[str]]:
         text = _llm_norm(p.read_text(encoding="utf-8", errors="replace"))
     except Exception:
         return None
+    text = _breadth_roster_text(text)  # Ship B: kill cross-section bleed
 
     headers: list[str] = []
     outputs: list[str] = []
@@ -650,6 +678,91 @@ def parse_breadth_manifest_outputs(scratchpad: Path) -> Optional[list[str]]:
     if row_count <= 0 or not outputs:
         return None
     return outputs
+
+
+def parse_breadth_manifest_agents(scratchpad: Path) -> list[dict[str, str]]:
+    """Parse spawn_manifest.md and return spawned breadth agent rows
+    as ``[{"agent_id", "focus_area"}, ...]``. Empty when the manifest
+    is absent or has no spawned-agent rows.
+
+    Ship 7 of the artifact-complete PTY supervision plan. Consumed by
+    ``plamen_driver.shard_opengrep_obligations`` to derive per-agent
+    obligation shard filenames.
+
+    Walks the same manifest table that ``parse_breadth_manifest_outputs``
+    walks (template / skill / merged-into rows are excluded by
+    ``_manifest_row_is_spawned_breadth_agent``); extracts the
+    ``agent_id`` and ``focus_area`` columns rather than the output
+    filename. Deduplicates by case-insensitive agent_id so two manifest
+    rows with the same agent never produce a redundant shard.
+
+    Fills in defaults when only one column is present (agent_id only
+    -> focus_area = agent_id, or vice versa), so the sharder always
+    has both fields to slugify.
+    """
+    p = scratchpad / "spawn_manifest.md"
+    if not p.exists():
+        return []
+    try:
+        text = _llm_norm(p.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+
+    out: list[dict[str, str]] = []
+    headers: list[str] = []
+    in_table = False
+    seen_agent_ids: set[str] = set()
+
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not in_table:
+            s_lc = s.lower()
+            if s.startswith("|") and "template" in s_lc and "required" in s_lc:
+                headers = [
+                    _normalize_manifest_header(c)
+                    for c in _split_markdown_table_row(s)
+                ]
+                in_table = True
+            continue
+        if not s.startswith("|"):
+            in_table = False
+            headers = []
+            continue
+        if _is_separator_row(s):
+            continue
+        cells = _split_markdown_table_row(s)
+        if not cells:
+            continue
+        row = _manifest_row_from_cells(headers, cells)
+        req = (
+            row.get("required")
+            or row.get("required_")
+            or row.get("required?")
+        )
+        if req and re.match(
+            r"(?i)^(?:no|n|false|skip|optional|merged)\b", req.strip()
+        ):
+            continue
+        if not _manifest_row_is_spawned_breadth_agent(row, cells):
+            continue
+        agent_id = _strip_md(
+            row.get("agent_id", "") or row.get("agent", "")
+        ).strip()
+        focus_area = _strip_md(
+            row.get("focus_area", "") or row.get("focus", "")
+        ).strip()
+        if not agent_id and not focus_area:
+            continue
+        if not agent_id:
+            agent_id = focus_area
+        if not focus_area:
+            focus_area = agent_id
+        key = agent_id.lower()
+        if key in seen_agent_ids:
+            continue
+        seen_agent_ids.add(key)
+        out.append({"agent_id": agent_id, "focus_area": focus_area})
+    return out
 
 
 def _count_markdown_table_rows(text: str,
@@ -4073,12 +4186,8 @@ def _expected_depth_agent_roles(scratchpad: Path) -> list[str]:
     return roles
 
 
-_DEPTH_EVIDENCE_TAG_RE = re.compile(
-    r"\[(BOUNDARY|VARIATION|TRACE|REGRESS|PERTURBATION|"
-    r"NON-DET|PRE-AUTH-PANIC|ASYMMETRIC|SCORE-DRAIN|REORG-DIVERGE|"
-    r"DECODE-UNBOUNDED|CROSS-DOMAIN-DEP|MEDUSA-PASS)[: ]",
-    re.IGNORECASE,
-)
+# Ship A: single source of truth in plamen_types (was a divergent local copy).
+_DEPTH_EVIDENCE_TAG_RE = DEPTH_EVIDENCE_TAG_RE
 
 
 # --- v2.2.0 A.4: NOTREAD priority coverage gate ----------------------------
@@ -5790,3 +5899,301 @@ def _path_in_scope_file(rel_path: str, scope_names: set[str]) -> bool:
         if "/" in n and (rel.endswith("/" + n) or n.endswith("/" + rel)):
             return True
     return False
+
+
+# ===========================================================================
+# Artifact marker helpers (Ship 1 of artifact-complete PTY supervision)
+# ===========================================================================
+#
+# Spawned-worker artifacts (analysis_*.md, depth_*_findings.md, niche_*_findings.md,
+# verify_*.md, tier writer outputs) carry HTML-comment markers that record the
+# write-lifecycle of the file:
+#
+#   <!-- PLAMEN_ARTIFACT: analysis_access_control.md -->
+#   <!-- PLAMEN_OWNER: B3 -->
+#   <!-- PLAMEN_STATUS: IN_PROGRESS -->
+#   <!-- PLAMEN_PHASE: breadth -->
+#   <!-- PLAMEN_VERSION: 1 -->
+#   ... body ...
+#   <!-- PLAMEN_STATUS: COMPLETE -->
+#   <!-- PLAMEN_FINDINGS_COUNT: 7 -->
+#
+# Helpers in this section are pure (no driver state, no I/O beyond reading the
+# given path). Wiring into Phase / gate_passes happens in Ship 3.
+
+# T2-6 (SW15-1): no re.DOTALL. PLAMEN markers are single-line HTML comments;
+# with DOTALL a malformed/missing `-->` let the value `(.*?)` swallow the body
+# AND the next marker, misclassifying a COMPLETE file as IN_PROGRESS. Bounding
+# the value to one line confines the damage of a malformed marker to its line.
+_PLAMEN_MARKER_RE = re.compile(
+    r"<!--\s*PLAMEN_([A-Z][A-Z0-9_]*)\s*:\s*(.*?)\s*-->",
+)
+
+
+def _strip_fenced_code_blocks(text: str) -> str:
+    """Ship 8.18: remove fenced code blocks (``` or ~~~) before PLAMEN-marker
+    parsing.
+
+    Prompt/documentation EXAMPLES place marker comments like
+    ``<!-- PLAMEN_STATUS: COMPLETE -->`` inside code fences. If an agent echoes
+    such an example into its artifact, the marker parser (and legacy-unmarked
+    detection) would treat the EXAMPLE as a real status marker -- poisoning the
+    last-wins resolution (a fenced COMPLETE could mask a real IN_PROGRESS, or a
+    fenced marker could make a genuinely legacy file look fresh-format). Real
+    markers an agent writes live in the body, not inside fences, so dropping
+    fenced content before parsing is safe and matches intent.
+    """
+    out: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue  # drop the fence delimiter line itself
+        if not in_fence:
+            out.append(line)
+    return "\n".join(out)
+
+_NO_FINDINGS_HEADING_RE = re.compile(
+    r"^##\s+.*\b(No\s+Findings|Negative\s+Result)\b",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+_OBLIGATION_RECEIPTS_HEADING_RE = re.compile(
+    r"^##\s+.*\bObligation\s+Receipts\b",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+# Ship 8.2: an artifact "has findings" if it shows a `## Findings` section
+# OR at least one finding block. Finding blocks are `## Finding [ID]`
+# (breadth) or `### Finding [ID]` (depth) -- 2 or 3 hashes, then "Finding",
+# whitespace, "[". Case-insensitive (review note). The block regex does NOT
+# match the `## Findings` section heading ("Findings" has no whitespace+"["
+# after "Finding"), so the two regexes are disjoint.
+# Ship D: single source of truth in plamen_types (H2/H3, captures the ID).
+_FINDING_BLOCK_HEADING_RE = FINDING_BLOCK_HEADING_RE
+_FINDINGS_SECTION_RE = re.compile(
+    r"^##\s+Findings\b",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+_FINDINGS_BODY_MIN_CHARS = 15
+
+# Ship D (SW03-1): crash-safety / "to be filled" placeholder bodies that an LLM
+# leaves under a `## Findings` heading. Matched substrings are stripped before
+# the substance re-check, so they cannot masquerade as completed analysis.
+_FINDINGS_PLACEHOLDER_BODY_RE = re.compile(
+    r"\(?\s*(?:findings?\s+(?:will\s+be\s+)?appended\b[^)\n]*"
+    r"|(?:findings?\s+)?appended\s+below\b[^)\n]*"
+    r"|to\s+be\s+(?:filled|added|appended|determined|populated)\b[^)\n]*"
+    r"|no\s+findings?\s+(?:yet|recorded\s+yet)\b[^)\n]*"
+    r"|placeholder\b[^)\n]*"
+    r"|as\s+they\s+are\s+discovered\b[^)\n]*"
+    r"|TBD\b|TODO\b)\s*\)?",
+    re.IGNORECASE,
+)
+
+
+def _findings_section_has_body(text: str) -> bool:
+    """Ship 8.18: True iff a `## Findings` section exists AND has substantive
+    body content (>= _FINDINGS_BODY_MIN_CHARS non-whitespace chars between the
+    heading and the next `## ` heading / EOF). A BARE `## Findings` shell --
+    the heading with nothing under it -- returns False. This closes the hole
+    where an empty `## Findings` heading counted as completed work while
+    preserving the Ship 8.2 widening (a real `## Findings` section with prose
+    still counts, without requiring a `## Finding [` block)."""
+    m = _FINDINGS_SECTION_RE.search(text)
+    if not m:
+        return False
+    nl = text.find("\n", m.end())
+    if nl == -1:
+        return False  # heading is the last line -> no body
+    rest = text[nl + 1:]
+    nxt = re.search(r"^##\s+\S", rest, re.MULTILINE)
+    body = rest[: nxt.start()] if nxt else rest
+    if len("".join(body.split())) < _FINDINGS_BODY_MIN_CHARS:
+        return False
+    # Ship D (SW03-1): reject KNOWN placeholder bodies. The breadth crash-safety
+    # stub writes `## Findings\n\n(findings appended below as they are
+    # discovered)` (>15 chars), which Ship 8.18's length-only check accepted as
+    # real work -> an empty COMPLETE-marked breadth artifact silently passed.
+    # Strip placeholder phrases, then re-test substance: a REAL section that
+    # merely mentions such a phrase alongside real findings still passes.
+    substantive = _FINDINGS_PLACEHOLDER_BODY_RE.sub("", body)
+    return len("".join(substantive.split())) >= _FINDINGS_BODY_MIN_CHARS
+
+
+def _artifact_has_findings(text: str) -> bool:
+    """True iff the artifact body shows at least one `## Finding [` /
+    `### Finding [` block OR a `## Findings` section WITH substantive body.
+
+    Ship 8.2 findings-present signal (block OR section), tightened by Ship 8.18
+    to reject a BARE `## Findings` shell (heading, no body) -- which previously
+    counted as completed work."""
+    return bool(
+        _FINDING_BLOCK_HEADING_RE.search(text)
+        or _findings_section_has_body(text)
+    )
+
+
+def _extract_artifact_status(path: Path) -> dict[str, str]:
+    """Parse <!-- PLAMEN_* --> comments from `path`.
+
+    Multiple occurrences of the same key collapse to the LAST value
+    (final-write-wins semantics: e.g. an IN_PROGRESS line followed by a
+    COMPLETE line yields STATUS=COMPLETE).
+
+    Returns an empty dict when the file is missing, unreadable, or contains
+    no PLAMEN_* markers. Keys are uppercase without the PLAMEN_ prefix
+    (e.g. STATUS, OWNER, FINDINGS_COUNT).
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+    # Ship 8.18: ignore markers inside fenced code blocks (examples) so a
+    # fenced exemplar cannot poison last-wins status resolution.
+    text = _strip_fenced_code_blocks(text)
+    result: dict[str, str] = {}
+    for m in _PLAMEN_MARKER_RE.finditer(text):
+        key = m.group(1).strip()
+        val = m.group(2).strip()
+        # Last occurrence wins because dict overwrite preserves order.
+        result[key] = val
+    return result
+
+
+def is_artifact_complete(path: Path, min_bytes: int) -> bool:
+    """Return True iff PLAMEN_STATUS == "COMPLETE" AND the file is at
+    least `min_bytes` long.
+
+    False when the file is missing, unreadable, below `min_bytes`, lacks a
+    PLAMEN_STATUS marker, or has STATUS != COMPLETE. The size guard makes
+    COMPLETE necessary but not sufficient — Ship 3 layers structural
+    completeness checks on top for the breadth gate.
+    """
+    try:
+        if not path.exists():
+            return False
+        if path.stat().st_size < min_bytes:
+            return False
+    except Exception:
+        return False
+    markers = _extract_artifact_status(path)
+    return markers.get("STATUS") == "COMPLETE"
+
+
+def is_artifact_legacy_unmarked(path: Path) -> bool:
+    """Return True iff the file exists with substantive content but
+    contains NO ``PLAMEN_*`` comment marker of ANY kind.
+
+    Ship 8.2 (RC2 fix): the prior implementation keyed legacy detection
+    off the single ``PLAMEN_ARTIFACT`` marker. That misclassified
+    fresh-format files that carry OTHER markers (``PLAMEN_STATUS``,
+    ``PLAMEN_FINDINGS_COUNT``, agent-improvised ``PLAMEN_AGENT`` /
+    ``PLAMEN_FOCUS``) but happen to omit ``PLAMEN_ARTIFACT`` -- on a
+    fresh audit those were wrongly routed to IN_PROGRESS and halted the
+    breadth phase (DODO 2026-05-22). A file with any PLAMEN marker is a
+    fresh-format file; its completion is judged by status + structure,
+    not by legacy detection.
+
+    Uses the canonical ``_PLAMEN_MARKER_RE`` (the same comment-form regex
+    ``_extract_artifact_status`` uses) so "has a PLAMEN marker" means the
+    same thing across the codebase: a marker the parser cannot see is a
+    marker that does not exist. A prose mention of a marker name does NOT
+    match -- the regex requires the full ``<!-- PLAMEN_X: ... -->`` comment.
+
+    Legacy/pre-marker artifacts (genuinely no markers) are still detected
+    and tolerated on resumed scratchpads with a warning log.
+    """
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return False
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    # Ship 8.18: a marker that only appears inside a fenced example does not
+    # make a file "fresh-format" -- strip fences before deciding legacy status.
+    text = _strip_fenced_code_blocks(text)
+    return not bool(_PLAMEN_MARKER_RE.search(text))
+
+
+def _structural_completeness_ok(
+    path: Path,
+    *,
+    required_headings: tuple[str, ...] | list[str] = (),
+    require_findings_count_marker: bool = False,
+    placeholder_strings: tuple[str, ...] | list[str] = (),
+    require_obligation_receipts_if_shard_exists: Optional[Path] = None,
+) -> tuple[bool, list[str]]:
+    """Run structural completeness checks against `path` and return
+    `(ok, reasons)` where `ok` is True only when every applicable check
+    passes. ANY entry in `reasons` hard-fails the artifact -- there is no
+    such thing as a "soft warning reason" here.
+
+    Ship 8.2 reduces the contract to its semantic minimum so the gate
+    accepts genuinely-complete work without demanding ceremonial marker
+    schemas that real agents reproduce inconsistently:
+
+    - required_headings: each entry must appear as a `## ` heading.
+      Retained for callers that genuinely need a specific heading;
+      breadth/depth now pass `()` and rely on the findings rule below.
+    - FINDINGS RULE (replaces the old literal-`## Findings` requirement
+      AND the FINDINGS_COUNT==0 branch): the artifact must EITHER show
+      findings (`## Findings` section OR >=1 `## Finding [` / `### Finding [`
+      block) OR carry an explicit `## No Findings` / `## Negative Result`
+      rationale. An artifact with neither is empty/incomplete.
+    - placeholder_strings: none of these substrings may remain at COMPLETE
+      time (still rejects TODO:/FILL_ME/<placeholder>).
+
+    COMPATIBILITY NO-OPS (Ship 8.2): the following parameters are retained
+    ONLY for signature/test stability and have NO effect on the verdict.
+    They MUST NOT append any reason (reasons hard-fail):
+    - require_findings_count_marker: PLAMEN_FINDINGS_COUNT is now
+      informational metadata; the findings decision uses block detection,
+      not the count. Passing True changes nothing. (Removing the hard
+      requirement eliminates the attempt-1 wasted retry the canonical
+      DODO files hit when they omitted the count.)
+    - require_obligation_receipts_if_shard_exists: receipt coverage is
+      owned solely by `_check_opengrep_obligation_coverage` (warning-only,
+      non-blocking). A missing `## Obligation Receipts` section MUST NOT
+      hard-fail the artifact gate. Passing a shard path changes nothing.
+
+    The return shape `(ok, reasons)` lets the caller surface every failure
+    reason in the gate's detail string at once.
+    """
+    # require_findings_count_marker and require_obligation_receipts_if_shard_exists
+    # are intentionally unused (compatibility no-ops -- see docstring).
+    _ = (require_findings_count_marker, require_obligation_receipts_if_shard_exists)
+
+    reasons: list[str] = []
+
+    try:
+        if not path.exists():
+            return False, ["file missing"]
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:  # pragma: no cover - I/O failure path
+        return False, [f"file unreadable: {exc}"]
+
+    for heading in required_headings:
+        pattern = re.compile(
+            r"^##\s+" + re.escape(heading) + r"\b",
+            re.MULTILINE | re.IGNORECASE,
+        )
+        if not pattern.search(text):
+            reasons.append(f"missing required heading: ## {heading}")
+
+    for placeholder in placeholder_strings:
+        if placeholder and placeholder in text:
+            reasons.append(f"unresolved placeholder string present: {placeholder!r}")
+
+    # Findings rule: has findings OR an explicit no-findings rationale.
+    if not _artifact_has_findings(text) and not _NO_FINDINGS_HEADING_RE.search(text):
+        reasons.append(
+            "no '## Finding [' / '### Finding [' blocks (and no "
+            "'## Findings' section) and no '## No Findings' / "
+            "'## Negative Result' rationale -- artifact is empty/incomplete"
+        )
+
+    return (len(reasons) == 0, reasons)

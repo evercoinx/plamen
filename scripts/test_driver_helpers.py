@@ -810,7 +810,7 @@ def test_R10_depth_findings_promote_into_inventory_before_verify_queue():
     issues = D._validate_depth_promotion_receipt(sp)
     check("R10 high-confidence depth finding is appended to inventory",
           promoted == ["DCI-3"]
-          and "### Finding [INV-02]: VDF seed is deterministic" in text
+          and "### Finding [INV-002]: VDF seed is deterministic" in text
           and "**Source IDs**: [DCI-3]" in text
           and issues == [],
           f"promoted={promoted!r}; issues={issues!r}; text={text!r}")

@@ -1,6 +1,7 @@
 """PTY-backed Claude Code execution helpers."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,192 @@ from typing import Any, TextIO
 
 _DONE_RE = re.compile(r"\bDONE\s*:", re.IGNORECASE)
 _RATE_LIMIT_STATUSES = {429, 529}
+
+# Ship 8.10: the subprocess-isolation overlay payload. SINGLE source of
+# truth shared by plamen_driver (production) and preflight_pty_transports
+# (probe). Empty enabledPlugins/hooks/mcpServers disables those subsystems
+# (plugin / hook / MCP cold-start hangs) without touching the user's real
+# settings.json -- so OAuth keychain auth keeps working.
+SUBPROCESS_ISOLATION_PAYLOAD = '{"enabledPlugins":{},"hooks":{},"mcpServers":{}}'
+
+
+# Ship 8.13: auto-compaction fingerprint. When Claude Code auto-compacts a
+# long PTY coordinator turn, the transcript carries one of these phrases.
+# Paired (by the caller) with a DONE-then-gate-miss, this is the verified
+# DODO premature-DONE signature. Detection is DIAGNOSTIC ONLY -- it never
+# gates a phase.
+_COMPACTION_MARKERS = (
+    "conversation compacted",
+    "compacting conversation",
+    "until auto-compact",
+    "before compaction",
+    "continue the conversation from where it left off",
+)
+
+
+def transcript_shows_compaction(
+    transcript_path: str | Path | None, extra_text: str = "",
+) -> bool:
+    """Return True iff the transcript (and optional extra stdio text)
+    carries an auto-compaction fingerprint: an explicit compaction phrase,
+    or 'compact' appearing repeatedly (>=3x, the summary-block pattern).
+
+    Conservative: any read error returns False. Never raises.
+    """
+    blob = ""
+    try:
+        if transcript_path and Path(transcript_path).exists():
+            blob = Path(transcript_path).read_text(
+                encoding="utf-8", errors="replace"
+            )
+    except Exception:
+        blob = ""
+    blob = (blob + "\n" + (extra_text or "")).lower()
+    if any(marker in blob for marker in _COMPACTION_MARKERS):
+        return True
+    return blob.count("compact") >= 3
+
+
+def isolation_overlay_hash(payload: str | None) -> str:
+    """Short stable hash of the isolation overlay payload. Part of the
+    preflight cache key so a probe taken under a different overlay is not
+    reused."""
+    return hashlib.sha256(
+        (payload or "").encode("utf-8")
+    ).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Ship 8.10: canonical interactive (PTY) claude argv builder.
+#
+# SINGLE source of truth for the production PTY argv shape. Both
+# plamen_driver.run_phase and preflight_pty_transports' probes call this
+# so the probe exercises the SAME flag structure + isolation set as
+# production. The historical false-negative class -- the probe omitted the
+# subprocess-isolation flags and therefore hit the plugin/MCP cold-start
+# hang it was meant to avoid, producing "first file never written" -> a
+# bogus live_pty_continue=False -- is eliminated when both paths share this
+# builder.
+#
+# The byte sequence reproduces production's prior inline construction
+# EXACTLY (model, session-id, dangerously-skip, the add-dirs, then the
+# non-MCP isolation set), so wiring production to this builder is a
+# refactor with zero argv drift.
+# ---------------------------------------------------------------------------
+
+# Volatile argv tokens whose VALUE differs run-to-run (or probe-vs-prod) but
+# whose PRESENCE/ORDER is the "shape". Used by claude_pty_argv_shape to
+# normalize so probe(haiku, tmp dirs) and production(sonnet, project dirs)
+# hash identically when their flag STRUCTURE matches.
+_PTY_SHAPE_VALUE_FLAGS = {
+    "--model": "<MODEL>",
+    "--session-id": "<SID>",
+    "--add-dir": "<DIR>",
+    "--settings": "<ISO>",
+    "--mcp-config": "<ISO>",
+}
+
+
+def build_claude_pty_argv(
+    *,
+    claude_bin: str,
+    model: str,
+    session_id: str,
+    add_dirs: list[str] | tuple[str, ...],
+    disallow_mcp: bool = True,
+    isolation_path: str | Path | None = None,
+    dangerously_skip_permissions: bool = True,
+) -> list[str]:
+    """Build the canonical interactive (PTY) claude argv.
+
+    Order mirrors production exactly:
+      ``[bin, --model M, --session-id S, --dangerously-skip-permissions,
+         (--add-dir D)*, (--disallowedTools mcp__*
+         [, --settings ISO, --strict-mcp-config, --mcp-config ISO])?]``
+
+    - ``disallow_mcp`` gates the whole isolation block (production adds it
+      only for ``not phase.needs_mcp`` phases).
+    - ``isolation_path`` adds the settings/strict-mcp set; pass ``None`` to
+      replicate production's "isolation overlay write failed" fallback,
+      which keeps ``--disallowedTools mcp__*`` but drops the settings flags.
+    """
+    argv: list[str] = [
+        claude_bin,
+        "--model", model,
+        "--session-id", session_id,
+    ]
+    if dangerously_skip_permissions:
+        argv.append("--dangerously-skip-permissions")
+    for d in add_dirs:
+        argv.extend(["--add-dir", str(d)])
+    if disallow_mcp:
+        argv.extend(["--disallowedTools", "mcp__*"])
+        if isolation_path is not None:
+            iso = Path(isolation_path).as_posix()
+            argv.extend([
+                "--settings", iso,
+                "--strict-mcp-config", "--mcp-config", iso,
+            ])
+    return argv
+
+
+def append_claude_pty_prompt_arg(argv: list[str], prompt: str) -> list[str]:
+    """Return ``argv`` with ``prompt`` appended as Claude Code's normal
+    positional prompt argument.
+
+    Claude's help documents ``claude [options] [prompt]``. Do not put a bare
+    ``--`` before the prompt here: in interactive PTY mode that can leave the
+    text sitting in the prompt box instead of executing it. Also avoid placing
+    the prompt immediately after variadic options such as ``--mcp-config`` or
+    ``--disallowedTools``; append a harmless boolean flag first so option
+    parsing is closed before the positional prompt.
+    """
+    out = list(argv)
+    if "--no-chrome" not in out:
+        out.append("--no-chrome")
+    out.append(prompt)
+    return out
+
+
+def claude_pty_argv_shape(argv: list[str]) -> list[str]:
+    """Return the argv with volatile token VALUES normalized to stable
+    placeholders, so two argvs with the same flag STRUCTURE compare equal
+    regardless of bin path, model, session-id, add-dir, or isolation paths.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(argv)
+    while i < n:
+        tok = argv[i]
+        if i == 0:
+            out.append("<CLAUDE_BIN>")
+            i += 1
+            continue
+        placeholder = _PTY_SHAPE_VALUE_FLAGS.get(tok)
+        if placeholder is not None and i + 1 < n:
+            out.append(tok)
+            out.append(placeholder)
+            i += 2
+            continue
+        if tok.startswith(
+            "Read and fully execute every instruction in "
+        ):
+            out.append("<PROMPT>")
+        else:
+            out.append(tok)
+        i += 1
+    return out
+
+
+def claude_pty_shape_hash(argv: list[str]) -> str:
+    """Stable short hash of the normalized argv shape. Used as part of the
+    preflight cache key so a probe taken under a DIFFERENT argv/isolation
+    shape (e.g. an old false-negative cache from before Ship 8.10) is
+    ignored and re-probed."""
+    shape = claude_pty_argv_shape(argv)
+    return hashlib.sha256(
+        json.dumps(shape, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def encode_claude_project_dir(cwd: str | Path) -> str:
@@ -186,6 +373,155 @@ def parse_transcript_usage(path: Path) -> dict[str, Any]:
     return fields
 
 
+_AGENT_ROW_RE = re.compile(r"AGENT_ROW:\s*([^\s\-<>]+)")
+_EXPECTED_OUTPUT_RE = re.compile(r"EXPECTED_OUTPUT:\s*([^\s\-<>]+)")
+_AGENTID_HANDLE_RE = re.compile(
+    r"agentId:\s*([A-Za-z0-9_-]+)\s*\(use SendMessage",
+)
+
+
+def parse_transcript_agentids(transcript_path: Path) -> dict[str, dict[str, str]]:
+    """Parse a Claude Code session transcript and correlate each
+    Agent/Task subagent dispatch with the ``agentId`` handle that came
+    back in its tool_result.
+
+    Ship 5 of the artifact-complete PTY supervision plan. Consumed by
+    Ship 6 to build a continuation message that addresses paused
+    subagents by their manifest row (e.g. "B3 / analysis_access_control.md"),
+    not by the opaque handle string.
+
+    Args:
+        transcript_path: ``.jsonl`` transcript file written by Claude
+            Code under ``~/.claude/projects/<encoded_cwd>/<session_id>.jsonl``.
+
+    Returns:
+        ``{agent_row: {"agent_id": agent_row, "expected_output": str,
+        "handle": str, "description": str}}`` mapping ONE row per
+        subagent dispatch that carried an ``AGENT_ROW:`` marker in its
+        dispatch prompt. Dispatches without an AGENT_ROW marker are
+        skipped (we do not fabricate a row name from the handle alone).
+        Dispatches that have not yet returned a handle are still
+        included with ``handle == ""`` so the continuation message can
+        still name the row -- the caller decides whether to attempt
+        SendMessage or fall back to respawn based on handle emptiness.
+
+        Returns ``{}`` on every failure mode: missing file, unreadable
+        file, JSON parse errors line-by-line (the parser continues
+        past corrupt lines), empty transcript, transcript with no
+        Agent/Task dispatches, or transcript whose dispatches all
+        lacked the AGENT_ROW marker.
+
+    Marker format. The orchestrator's dispatch prompt MUST contain
+    a line of the form::
+
+        AGENT_ROW: B3
+        EXPECTED_OUTPUT: analysis_access_control.md
+
+    The Subagent Prompt Template in
+    ``~/.plamen/prompts/shared/v2/phase3-breadth.md`` injects these
+    lines verbatim in every Task/Agent dispatch prompt the breadth
+    orchestrator builds, exactly so this parser can correlate.
+    """
+    try:
+        if not transcript_path.exists():
+            return {}
+    except Exception:
+        return {}
+
+    # Per-tool_use_id state. We scan the transcript once, in order,
+    # because tool_use and its matching tool_result are typically on
+    # different lines. Correlate by ``id`` <-> ``tool_use_id``.
+    dispatches: dict[str, dict[str, str]] = {}
+    results: dict[str, str] = {}
+
+    try:
+        with transcript_path.open("r", encoding="utf-8", errors="replace") as fp:
+            for raw_line in fp:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    # Skip corrupt lines; do not fail the whole parse.
+                    continue
+                msg = obj.get("message") if isinstance(obj, dict) else None
+                if not isinstance(msg, dict):
+                    continue
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    continue
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    itype = item.get("type")
+                    if itype == "tool_use" and item.get("name") in ("Agent", "Task"):
+                        tu_id = item.get("id")
+                        if not isinstance(tu_id, str) or not tu_id:
+                            continue
+                        inp = item.get("input")
+                        if not isinstance(inp, dict):
+                            continue
+                        prompt_text = inp.get("prompt") or ""
+                        description = inp.get("description") or ""
+                        if not isinstance(prompt_text, str):
+                            prompt_text = ""
+                        if not isinstance(description, str):
+                            description = ""
+                        row_m = _AGENT_ROW_RE.search(prompt_text)
+                        exp_m = _EXPECTED_OUTPUT_RE.search(prompt_text)
+                        dispatches[tu_id] = {
+                            "agent_row": (row_m.group(1).strip() if row_m else ""),
+                            "expected_output": (
+                                exp_m.group(1).strip() if exp_m else ""
+                            ),
+                            "description": description.strip(),
+                        }
+                    elif itype == "tool_result":
+                        tu_id = item.get("tool_use_id")
+                        if not isinstance(tu_id, str) or not tu_id:
+                            continue
+                        result_content = item.get("content")
+                        text = ""
+                        if isinstance(result_content, list):
+                            for rc in result_content:
+                                if (
+                                    isinstance(rc, dict)
+                                    and rc.get("type") == "text"
+                                ):
+                                    t = rc.get("text")
+                                    if isinstance(t, str):
+                                        text += t
+                        elif isinstance(result_content, str):
+                            text = result_content
+                        handle_m = _AGENTID_HANDLE_RE.search(text)
+                        if handle_m:
+                            results[tu_id] = handle_m.group(1).strip()
+    except OSError:
+        return {}
+    except Exception:
+        # Any unforeseen parse failure -> empty mapping (conservative).
+        return {}
+
+    out: dict[str, dict[str, str]] = {}
+    for tu_id, d in dispatches.items():
+        agent_row = d.get("agent_row") or ""
+        if not agent_row:
+            # The plan's contract: do NOT fabricate a row mapping for
+            # dispatches that lacked the AGENT_ROW marker. Such dispatches
+            # cannot be correlated to a manifest row and so cannot be
+            # named precisely in a continuation message; the caller must
+            # respawn that row from scratch.
+            continue
+        out[agent_row] = {
+            "agent_id": agent_row,
+            "expected_output": d.get("expected_output") or "",
+            "handle": results.get(tu_id, ""),
+            "description": d.get("description") or "",
+        }
+    return out
+
+
 class ClaudePtySession:
     def __init__(
         self,
@@ -246,6 +582,35 @@ class ClaudePtySession:
                 self.write("\r\n")
         else:
             self.write(prompt + "\n")
+
+    def send_continuation(self, message: str) -> None:
+        """Send a continuation user-message into the live PTY.
+
+        Ship 5 of the artifact-complete PTY supervision plan. Mirrors
+        ``send_bootstrap``'s platform-conditional CR/CRLF handling
+        exactly: on Windows we write the prompt body, idle 0.75s for
+        the prompt box to settle, then send a Carriage Return via
+        ``sendcontrol("m")`` (with a ``\\r\\n`` fallback if the winpty
+        control method is unavailable); on POSIX we append ``\\n`` to
+        the body and write it in one shot.
+
+        Caller MUST verify ``self.is_alive()`` before invoking. Ship 6
+        wraps this call in the supervised PTY loop so a dead PTY
+        triggers the ``--resume`` fallback instead.
+
+        No new lifecycle, no new threads, no reader-stop handling --
+        the existing reader thread captures Claude's response on the
+        same channel it captured the bootstrap turn.
+        """
+        if sys.platform == "win32":
+            self.write(message)
+            time.sleep(0.75)
+            try:
+                self.proc.sendcontrol("m")
+            except Exception:
+                self.write("\r\n")
+        else:
+            self.write(message + "\n")
 
     def write(self, text: str) -> None:
         if sys.platform == "win32":

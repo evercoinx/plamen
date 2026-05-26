@@ -17,6 +17,8 @@ __all__ = [
     "plamen_home",
     "EVIDENCE_TAGS_PROOF", "EVIDENCE_TAGS_TRACE", "EVIDENCE_TAGS_FAIL",
     "EVIDENCE_TAGS_ALL", "EVIDENCE_TAG_DEFAULT", "EVIDENCE_TAG_NAMES_RE",
+    "DEPTH_EVIDENCE_TAG_NAMES", "DEPTH_EVIDENCE_TAG_RE",
+    "FINDING_BLOCK_HEADING_RE",
     "EXIT_CONFIG_MISSING", "EXIT_DEGRADED", "EXIT_ERROR",
     "EXIT_HIBERNATING", "EXIT_RATE_LIMITED", "EXIT_SUCCESS",
     "CODEX_MULTI_AGENT_PHASES",
@@ -173,6 +175,40 @@ def has_mechanical_proof(text: str) -> bool:
     return any(tag in text for tag in EVIDENCE_TAGS_PROOF)
 
 
+# ── Depth evidence tag vocabulary (Ship A — single source of truth) ────────
+# The depth-analysis evidence tags ([BOUNDARY:...], [TRACE:...], etc.). Before
+# Ship A this regex existed in THREE divergent copies (plamen_parsers.py,
+# plamen_driver.py, plamen_validators.py); the driver copy silently dropped
+# NON-DET / ASYMMETRIC / MEDUSA-PASS / etc. so L1 + network depth findings
+# scored lower than identical SC findings (swarm SW07-4). One name list now;
+# all consumers import it. SUPERSET of all three former copies (incl. DST).
+DEPTH_EVIDENCE_TAG_NAMES: tuple[str, ...] = (
+    "BOUNDARY", "VARIATION", "TRACE", "REGRESS", "PERTURBATION",
+    "NON-DET", "PRE-AUTH-PANIC", "ASYMMETRIC", "SCORE-DRAIN",
+    "REORG-DIVERGE", "DECODE-UNBOUNDED", "CROSS-DOMAIN-DEP",
+    "MEDUSA-PASS", "DST",
+)
+# Delimiter class is the UNION of the three former copies' delimiters
+# (colon / space / close-bracket / hyphen) so every real tag form matches:
+#   [BOUNDARY:val]  [TRACE path]  [MEDUSA-PASS]  [DST-token]
+# Capturing group 1 = the tag name (consumers read m.group(1) for histograms).
+DEPTH_EVIDENCE_TAG_RE = re.compile(
+    r"\[(" + "|".join(DEPTH_EVIDENCE_TAG_NAMES) + r")[:\]\- ]",
+    re.IGNORECASE,
+)
+
+# ── Finding-block heading (Ship D — single source of truth) ────────────────
+# Breadth uses `## Finding [ID]`, depth uses `### Finding [ID]` (the v2 depth
+# prompt mandates H3). Several consumers had H2-ONLY copies (driver confidence
+# synth, validators stub re-check) that silently saw ZERO depth findings on the
+# prompt-mandated H3 form (swarm SW07-1/3/5). One regex now; accepts H2 OR H3,
+# captures the bracketed ID. Disjoint from a `## Findings` SECTION heading
+# ("Findings" has no whitespace+"[" after "Finding").
+FINDING_BLOCK_HEADING_RE = re.compile(
+    r"(?im)^#{2,3}\s+Finding\s+\[([^\]\n]+)\]"
+)
+
+
 # ── Severity vocabulary (v2.6.0) ──────────────────────────────────────────
 SEVERITY_ORDER: tuple[str, ...] = (
     "Critical", "High", "Medium", "Low", "Informational",
@@ -212,6 +248,8 @@ def try_normalize_severity(raw: str) -> str | None:
     s = _clean_severity_text(raw)
     if not s:
         return None
+    if re.fullmatch(r"[-\u2010-\u2015]+", s):
+        return None
     sl = s.lower()
     exact = _SEVERITY_ALIASES.get(sl)
     if exact:
@@ -241,6 +279,8 @@ def normalize_severity(raw: str) -> str:
     s = str(raw or "").strip()
     if not s:
         log.warning("normalize_severity: empty input, defaulting to Medium")
+        return "Medium"
+    if re.fullmatch(r"[-\u2010-\u2015]+", s):
         return "Medium"
     parsed = try_normalize_severity(s)
     if parsed:
@@ -1011,16 +1051,16 @@ SC_PHASES = [
           base_timeout_s=4200, critical=True, model="sonnet"),
     Phase("sc_verify_medium_a", ["Phase 5: Verification"],
           [],
-          base_timeout_s=4200, critical=True, model="sonnet"),
+          base_timeout_s=4800, critical=True, model="sonnet"),
     Phase("sc_verify_medium_b", ["Phase 5: Verification"],
           [],
-          base_timeout_s=4200, critical=True, model="sonnet"),
+          base_timeout_s=4800, critical=True, model="sonnet"),
     Phase("sc_verify_medium_c", ["Phase 5: Verification"],
           [],
-          base_timeout_s=4200, critical=True, model="sonnet"),
+          base_timeout_s=4800, critical=True, model="sonnet"),
     Phase("sc_verify_medium_d", ["Phase 5: Verification"],
           [],
-          base_timeout_s=4200, critical=True, model="sonnet"),
+          base_timeout_s=4800, critical=True, model="sonnet"),
     Phase("sc_verify_low_a", ["Phase 5: Verification"],
           [],
           base_timeout_s=3600, critical=True, modes={"thorough"}, model="sonnet"),

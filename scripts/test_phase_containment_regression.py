@@ -122,7 +122,7 @@ def test_PROMPT_l1_verify_shard_does_not_see_future_step5_subphases(tmp_path: Pa
     hits = [token for token in forbidden if token in prompt]
     check(
         "PROMPT.verify_future_subphases_withheld",
-        not hits and "Downstream Step 5 sub-phases intentionally withheld" in prompt,
+        not hits,
         f"hits={hits}",
     )
     check(
@@ -245,8 +245,8 @@ def test_PROMPT_sc_depth_excludes_rag_sweep_subphase(tmp_path: Path):
     check(
         "PROMPT.sc_depth_rag_sweep_body_withheld",
         not hits
-        and "Do NOT execute Phase 4b.5 / RAG Validation Sweep" in prompt
-        and "Do NOT write `rag_validation.md`" in prompt,
+        and "Execute only this depth remediation contract" in prompt
+        and "Write only depth-owned artifacts" in prompt,
         f"hits={hits}",
     )
 
@@ -296,15 +296,16 @@ def test_PROMPT_sc_depth_rendered_prompt_has_no_executable_downstream_tokens(tmp
     check(
         "PROMPT.depth_no_transitive_downstream_leakage",
         not hits
-        and "## FORBIDDEN OUTPUT FILES (HARD PHASE BOUNDARY)" in prompt
-        and "MUST NOT write `chain_summaries_compact.md`" in prompt
-        and "MUST NOT write `verification_queue.md`" in prompt
+        and "## OUTPUT ALLOWLIST (HARD)" in prompt
+        and "chain_summaries_compact.md" not in prompt
+        and "verification_queue.md" not in prompt
         and not D._find_prompt_phase_boundary_violations(prompt, "depth"),
         f"hits={hits}",
     )
     assert not hits
-    assert "MUST NOT write `chain_summaries_compact.md`" in prompt
-    assert "MUST NOT write `verification_queue.md`" in prompt
+    assert "## OUTPUT ALLOWLIST (HARD)" in prompt
+    assert "chain_summaries_compact.md" not in prompt
+    assert "verification_queue.md" not in prompt
     assert not D._find_prompt_phase_boundary_violations(prompt, "depth")
 
 
@@ -422,14 +423,20 @@ def test_PROMPT_breadth_excludes_rescan_outputs(tmp_path: Path):
     # function here so the test stays in sync with the runtime gate.
     from plamen_prompt import _find_prompt_phase_boundary_violations
     hits = _find_prompt_phase_boundary_violations(prompt, "breadth")
+    # Ship-C breadth PTY hotfix: the default render is now the PTY transport,
+    # which spawns ALL open rows at once as BACKGROUND Task calls (no foreground
+    # "bounded batches of 6" — that serialized the live DODO breadth attempt).
+    # The headless foreground-batched wording is asserted in
+    # test_breadth_pty_background_hotfix.py::test_headless_breadth_keeps_foreground_batches.
     check(
         "PROMPT.breadth_later_phase_text_stripped",
         not hits
         and "manifest-derived breadth files named" in prompt
         and "`analysis_<focus_area>.md`" in prompt
-        and "OPEN_OUTPUTS is non-empty" in prompt
-        and "spawn ONLY those missing or stub breadth" in prompt
-        and "bounded batches of at most 6 parallel Task calls" in prompt,
+        and "OPEN_OUTPUTS" in prompt
+        and "run_in_background: true" in prompt
+        and "Spawn ALL of OPEN_OUTPUTS in ONE assistant message" in prompt
+        and "bounded batches of at most 6 parallel Task calls" not in prompt,
         f"hits={hits}",
     )
     loop_ok = (
@@ -1027,7 +1034,7 @@ print(json.dumps({"result": "x" * 700, "usage": {"input_tokens": 1, "output_toke
         phase, config, scratchpad, D.L1_PHASES, rc, before
     )
     ok = (
-        rc == 0
+        rc in (0, -4)
         and not passed
         and any("phase containment:" in str(item) for item in missing)
         and (scratchpad / "_overflow" / "inventory_prepare" / "semantic_invariants.md").exists()
@@ -1152,6 +1159,83 @@ def test_CONTAINMENT_live_abort_on_depth_downstream_artifact(tmp_path: Path):
         proc.wait(timeout=5)
     check(
         "CONTAINMENT.depth_live_abort_on_verification_queue",
+        rc == -4 and proc.poll() is not None,
+        f"rc={rc} poll={proc.poll()}",
+    )
+    assert rc == -4
+
+
+def test_CONTAINMENT_live_abort_on_chain_agent2_artifact(tmp_path: Path):
+    scratchpad = tmp_path / ".scratchpad"
+    scratchpad.mkdir()
+    script = (
+        "import pathlib, sys, time\n"
+        "sp = pathlib.Path(sys.argv[1])\n"
+        "time.sleep(0.3)\n"
+        "(sp / 'chain_hypotheses.md').write_text('x' * 300, encoding='utf-8')\n"
+        "time.sleep(20)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", script, str(scratchpad)])
+    start = time.time()
+    rc = D._wait_with_heartbeat(
+        proc,
+        timeout=10,
+        scratchpad=scratchpad,
+        phase_name="chain",
+        start_time=start,
+        protected_patterns=D._live_protected_phase_write_patterns(
+            scratchpad,
+            "sc",
+            "chain",
+            ["chain", "chain_agent2", "chain_iter2", "sc_verify_queue"],
+        ),
+    )
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        proc.kill()
+        proc.wait(timeout=5)
+    check(
+        "CONTAINMENT.chain_live_abort_on_chain_agent2_artifact",
+        rc == -4 and proc.poll() is not None,
+        f"rc={rc} poll={proc.poll()}",
+    )
+    assert rc == -4
+
+
+def test_CONTAINMENT_live_abort_on_downstream_artifact_update(tmp_path: Path):
+    scratchpad = tmp_path / ".scratchpad"
+    scratchpad.mkdir()
+    (scratchpad / "chain_hypotheses.md").write_text("old", encoding="utf-8")
+    script = (
+        "import pathlib, sys, time\n"
+        "sp = pathlib.Path(sys.argv[1])\n"
+        "time.sleep(0.3)\n"
+        "(sp / 'chain_hypotheses.md').write_text('new' * 200, encoding='utf-8')\n"
+        "time.sleep(20)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", script, str(scratchpad)])
+    start = time.time()
+    rc = D._wait_with_heartbeat(
+        proc,
+        timeout=10,
+        scratchpad=scratchpad,
+        phase_name="chain",
+        start_time=start,
+        protected_patterns=D._live_protected_phase_write_patterns(
+            scratchpad,
+            "sc",
+            "chain",
+            ["chain", "chain_agent2", "chain_iter2", "sc_verify_queue"],
+        ),
+    )
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        proc.kill()
+        proc.wait(timeout=5)
+    check(
+        "CONTAINMENT.chain_live_abort_on_chain_agent2_update",
         rc == -4 and proc.poll() is not None,
         f"rc={rc} poll={proc.poll()}",
     )

@@ -207,8 +207,15 @@ def test_recon_prompt_uses_language_split_clean_handoff_contract(tmp_path: Path)
     )
 
     assert "BEGIN STANDALONE V2 PHASE PROMPT" in prompt
-    assert "prompts\\evm\\phase1-recon-prompt.md" in prompt or "prompts/evm/phase1-recon-prompt.md" in prompt
-    assert "ORCHESTRATOR SPLIT DIRECTIVE" in prompt
+    # Ship 8.14: recon now resolves to the V2 single-agent direct-execution
+    # prompt (prompts/evm/v2/phase1-recon-prompt.md), not the legacy
+    # multi-agent orchestrator (prompts/evm/phase1-recon-prompt.md).
+    assert "prompts\\evm\\v2\\phase1-recon-prompt.md" in prompt or "prompts/evm/v2/phase1-recon-prompt.md" in prompt
+    # Ship 8.14: the V2 recon body is single-agent direct-execution -- it has
+    # no "ORCHESTRATOR SPLIT DIRECTIVE" (that was legacy multi-agent body) and
+    # carries the DRAFT-FIRST TURN BUDGET POLICY instead.
+    assert "ORCHESTRATOR SPLIT DIRECTIVE" not in prompt
+    assert "TURN BUDGET POLICY" in prompt
     assert "RECON CLEAN HANDOFF CONTRACT" in prompt
     assert "CONTEXT DELEGATION PROTOCOL" in prompt
     assert "Use the Task tool for parallel subagent work" in prompt

@@ -15,6 +15,10 @@
 - `{SCRATCHPAD}/spec_expectations.md` when present, for context only. It lists
   test/mock/harness files that are specification evidence, not production
   coverage debt.
+- `{SCRATCHPAD}/asset_binding_matrix.md` when a queue row has kind
+  `asset-binding-gap`.
+- `{SCRATCHPAD}/skill_execution_checklist.md` when a queue row has kind
+  `skill-execution-gap`.
 
 **Do NOT read** large bulk artifacts (analysis/depth/verify outputs, the full scratchpad). Only read the queue row's named target.
 
@@ -122,6 +126,22 @@ Inspect only the named file and direct callers/callees needed to determine reach
 Resolve the exact uncertain row and either:
 - Confirm it with evidence (file:line + explanation), or
 - Mark it SAFE with the missing edge explained
+
+### Asset-Binding Gap Rows
+
+Read only the matching row in `asset_binding_matrix.md`, then inspect the
+minimal source path needed to prove whether the field pair is bound before
+value moves. If unbound, write a normal `ATT-*` finding. If already covered,
+mark `NO_FINDING` and cite the existing finding ID. If the pair is intentionally
+irrelevant, mark `SAFE` with the concrete reason.
+
+### Skill-Execution Gap Rows
+
+Read the matching row in `skill_execution_checklist.md`, then inspect the
+specific target files listed in that row. Do not rerun the whole depth phase.
+Either produce a narrow `ATT-*` finding for a real missed issue, or mark the row
+`NO_FINDING`/`SAFE` with evidence that the missing methodology step is already
+covered elsewhere or not applicable.
 
 ---
 
