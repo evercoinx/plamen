@@ -221,6 +221,88 @@ contains enough prose to look like a real finding body for assembly tests.
     assert "INV-001" in trace
 
 
+def test_mechanical_assembler_excludes_appendix_ids_from_remediation_order(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    scratch = project / ".scratchpad"
+    scratch.mkdir()
+    (scratch / "report_index.md").write_text(
+        """# Report Index
+
+## Summary
+
+| Severity | Count |
+|----------|-------|
+| Critical | 0 |
+| High | 0 |
+| Medium | 1 |
+| Low | 0 |
+| Informational | 0 |
+| Total | 1 |
+
+## Master Finding Index
+
+| Report ID | Title | Severity | Location | Evidence Tag | Verdict | Trust Adj. | Internal Hypothesis ID |
+|-----------|-------|----------|----------|--------------|---------|------------|------------------------|
+| M-10 | Active client finding | Medium | src/F.sol:1 | CODE-TRACE | CONFIRMED | | INV-010 |
+
+## Excluded Findings
+
+| Internal ID | Severity | Title | Exclusion Reason |
+|-------------|----------|-------|------------------|
+| H-20 | Medium | Merged duplicate | Duplicate of M-10 |
+""",
+        encoding="utf-8",
+    )
+    (scratch / "report_records.json").write_text(
+        """{
+  "active": [
+    {
+      "report_id": "M-10",
+      "finding_id": "INV-010",
+      "absorbed_finding_ids": ["INV-010"],
+      "title": "Active client finding",
+      "severity": "Medium"
+    }
+  ],
+  "excluded": [
+    {
+      "finding_id": "H-20",
+      "title": "Merged duplicate",
+      "severity": "Medium",
+      "reason": "Duplicate of M-10"
+    }
+  ]
+}
+""",
+        encoding="utf-8",
+    )
+    (scratch / "report_medium.md").write_text(
+        """## Medium Findings
+
+### [M-10] Active client finding
+**Severity**: Medium
+**Location**: src/F.sol:1
+**Description**: This client-facing section contains enough detail to assemble
+the report and should be the only remediation-order row from the index.
+**Impact**: Funds can be affected.
+**PoC Result**: Code trace reviewed.
+**Recommendation**: Add the missing validation before state mutation.
+""",
+        encoding="utf-8",
+    )
+
+    assert D._assemble_report_python(scratch, str(project)) is True
+    report = (project / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+    remediation = report.split("## Priority Remediation Order", 1)[1].split(
+        "## Appendix A", 1
+    )[0]
+
+    assert "**M-10**" in remediation
+    assert "H-20" not in remediation
+    assert remediation.count("\n1. ") + remediation.startswith("1. ") == 1
+
+
 def test_report_coverage_gate_blocks_unaccounted_candidates(tmp_path: Path):
     scratch = tmp_path / ".scratchpad"
     scratch.mkdir()

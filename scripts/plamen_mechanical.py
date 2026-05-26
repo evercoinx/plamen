@@ -1638,9 +1638,16 @@ def _assemble_report_python(
     # or `- C-01: Title (severity)` (bullet form, fallback).
     finding_rows: list[dict[str, str]] = []
     seen_ids: set[str] = set()
+    index_scope = _extract_h2_section(idx_text, "Master Finding Index")
+    if not index_scope:
+        # Fallback for older/freeform index files: never let excluded rows feed
+        # client-facing remediation order.
+        index_scope = re.split(
+            r"(?im)^##\s+Excluded Findings\b", idx_text, maxsplit=1
+        )[0]
     for m in re.finditer(
         r"^\|\s*\[?\*?\*?([CHMLI]-\d+)\*?\*?\]?\s*\|\s*([^|]+?)\s*\|",
-        idx_text, re.MULTILINE,
+        index_scope, re.MULTILINE,
     ):
         rid = m.group(1)
         if rid in seen_ids:

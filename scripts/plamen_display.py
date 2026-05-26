@@ -644,8 +644,19 @@ def print_failure_diagnosis(phase_name: str, scratchpad: str,
                 "--strict-mcp-config", "--mcp-config", iso,
             ])
 
+    parent_claude_identity_env_keys = {
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
+        "AI_AGENT",
+    }
+    base_env = {
+        k: v for k, v in os.environ.items()
+        if k not in parent_claude_identity_env_keys
+    }
     subprocess_env = {
-        **os.environ,
+        **base_env,
         "ANTHROPIC_DISABLE_AUTOUPDATE": "1",
     }
     popen_kwargs: dict = {}

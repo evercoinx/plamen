@@ -48,9 +48,10 @@ def _make_env_like_run_phase(phase_name: str, mocked_os_environ: dict) -> dict:
         L1_VERIFY_PHASE_NAMES,
         SC_VERIFY_PHASE_NAMES,
     )
+    from plamen_driver import _filtered_child_subprocess_environ
 
     env = {
-        **mocked_os_environ,
+        **_filtered_child_subprocess_environ(mocked_os_environ),
         "ANTHROPIC_DISABLE_AUTOUPDATE": "1",
         "ANTHROPIC_DEFAULT_OPUS_MODEL": PLAMEN_OPUS_MODEL,
         "PLAMEN_SCRATCHPAD": "/fake/scratchpad",
@@ -158,3 +159,30 @@ def test_user_can_override_tool_caps_via_env():
     )
     assert env["BASH_MAX_OUTPUT_LENGTH"] == "50000", "User override ignored"
     assert env["MAX_MCP_OUTPUT_TOKENS"] == "16000", "User override ignored"
+
+
+def test_parent_claude_identity_env_is_stripped_for_child_sessions():
+    """Running `/plamen` inside Claude Code must not poison child claude
+    subprocesses with the parent's active-session identity."""
+    parent_identity = {
+        "CLAUDECODE": "1",
+        "CLAUDE_CODE_SESSION_ID": "94c2c6c1-test",
+        "CLAUDE_CODE_ENTRYPOINT": "cli",
+        "CLAUDE_CODE_EXECPATH": "/Users/example/.claude/local/claude",
+        "AI_AGENT": "claude-code_2-1-150_agent",
+        "PATH": "/usr/bin",
+        "ANTHROPIC_BETA": "user-beta",
+    }
+
+    env = _make_env_like_run_phase("depth", mocked_os_environ=parent_identity)
+
+    for key in (
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
+        "AI_AGENT",
+    ):
+        assert key not in env
+    assert env["PATH"] == "/usr/bin"
+    assert env["ANTHROPIC_BETA"] == "user-beta,context-management-2025-06-27"

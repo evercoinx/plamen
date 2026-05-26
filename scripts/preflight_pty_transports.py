@@ -56,7 +56,10 @@ log = logging.getLogger("plamen.preflight")
 # v2 (Ship 8.10): added argv_shape_hash + isolation_overlay_hash to the
 # cache. Bumping 1->2 also invalidates every pre-8.10 false-negative cache
 # whose probe ran without the production isolation flags.
-_SCHEMA_VERSION = 2
+# v3: child Claude probes strip parent Claude Code session identity vars.
+# Invalidates any false-negative cache written from inside `/plamen` before
+# the env isolation fix.
+_SCHEMA_VERSION = 3
 _CACHE_FILENAME_TMPL = "preflight_pty_{ver}.json"
 
 # Per-probe wall-clock timeouts. The PTY probes are intentionally
@@ -70,6 +73,23 @@ _PREFLIGHT_TURN_QUIESCENCE_S = 4.0
 # to depth/niche/verify/report. Ship 4 ships breadth only because that
 # is the failure class closed by the plan.
 _DEFAULT_SUPERVISED_PHASES = frozenset({"breadth"})
+
+_PARENT_CLAUDE_IDENTITY_ENV_KEYS = frozenset({
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "AI_AGENT",
+})
+
+
+def _filtered_child_subprocess_environ(
+    source_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    env = dict(os.environ if source_env is None else source_env)
+    for key in _PARENT_CLAUDE_IDENTITY_ENV_KEYS:
+        env.pop(key, None)
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +314,7 @@ def _test_live_pty_continue(
             prompt=bootstrap_prompt,
         )
         env = {
-            **os.environ,
+            **_filtered_child_subprocess_environ(),
             "PLAMEN_PREFLIGHT": "1",
             "PLAMEN_BOOTSTRAP_IN_ARGV": "1",
         }
@@ -427,7 +447,7 @@ def _test_agentid_resume(
             prompt=bootstrap1,
         )
         env = {
-            **os.environ,
+            **_filtered_child_subprocess_environ(),
             "PLAMEN_PREFLIGHT": "1",
             "PLAMEN_BOOTSTRAP_IN_ARGV": "1",
         }

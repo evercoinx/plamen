@@ -92,6 +92,31 @@ def _format_ai_model_summary(config: dict, active_phases: list[Phase], mode: str
     return f"{backend_label} / {model_text}"
 
 
+_PARENT_CLAUDE_IDENTITY_ENV_KEYS = frozenset({
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "AI_AGENT",
+})
+
+
+def _filtered_child_subprocess_environ(
+    source_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Return a subprocess env that cannot inherit a parent Claude session.
+
+    Launching Plamen from inside `/plamen` means the driver itself can run under
+    Claude Code. Child `claude` subprocesses must start as fresh sessions; if
+    they inherit Claude Code identity variables, Claude may detect a nested
+    active session and exit rc=0 without doing any phase work.
+    """
+    env = dict(os.environ if source_env is None else source_env)
+    for key in _PARENT_CLAUDE_IDENTITY_ENV_KEYS:
+        env.pop(key, None)
+    return env
+
+
 # Text-fallback regex: only triggers when an HTTP status or structured
 # error prefix is present. Claude's own prose like "quota exhausted until
 # Apr 23" won't match because no 429/status-code is adjacent.
@@ -2520,7 +2545,7 @@ def _run_verify_recovery_shard(
         else _our_beta_rec
     )
     subprocess_env = {
-        **os.environ,
+        **_filtered_child_subprocess_environ(),
         "ANTHROPIC_DISABLE_AUTOUPDATE": "1",
         "ANTHROPIC_DEFAULT_OPUS_MODEL": PLAMEN_OPUS_MODEL,
         "PLAMEN_SCRATCHPAD": str(scratchpad),
@@ -7392,7 +7417,7 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
     #   ~100-500ms per agent dispatch on Windows; on a 20-agent depth
     #   phase that is several seconds of measurable overhead removed.
     subprocess_env = {
-        **os.environ,
+        **_filtered_child_subprocess_environ(),
         "ANTHROPIC_DISABLE_AUTOUPDATE": "1",
         # Protect nested Claude Code alias resolution too: if a prompt or
         # Task uses bare `opus`, keep it on the pinned Opus version.

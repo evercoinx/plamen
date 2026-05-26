@@ -26,6 +26,27 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import preflight_pty_transports as pf  # noqa: E402
 
 
+def test_preflight_child_env_strips_parent_claude_identity():
+    env = pf._filtered_child_subprocess_environ({
+        "CLAUDECODE": "1",
+        "CLAUDE_CODE_SESSION_ID": "parent-session",
+        "CLAUDE_CODE_ENTRYPOINT": "cli",
+        "CLAUDE_CODE_EXECPATH": "/Users/example/.claude/local/claude",
+        "AI_AGENT": "claude-code_2-1-150_agent",
+        "PATH": "/usr/bin",
+    })
+
+    for key in (
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
+        "AI_AGENT",
+    ):
+        assert key not in env
+    assert env["PATH"] == "/usr/bin"
+
+
 def _stub_version(value: str):
     """Return a callable that ignores its arg and returns ``value``."""
     def _v(_claude_bin: str) -> str:

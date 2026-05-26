@@ -89,3 +89,4 @@ def test_normalize_severity_accepts_markdown_and_refuted_na_variants() -> None:
     assert D.try_normalize_severity("Already captured in H-01 (critical)") is None
     assert D.try_normalize_severity("-") is None
     assert D.normalize_severity("-") == "Medium"
+    assert D.normalize_severity("Various") == "Informational"

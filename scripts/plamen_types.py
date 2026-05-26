@@ -265,6 +265,8 @@ def _looks_like_nonseverity_prose(s: str) -> bool:
     sl = (s or "").lower()
     if not sl:
         return False
+    if sl in {"various", "mixed", "multiple", "mixed severity", "various severities"}:
+        return True
     if re.fullmatch(r"(?:n/?a|not\s+available|unknown)(?:\s*\([^)]*\))?", sl):
         return True
     if len(re.findall(r"[a-z0-9]+", sl)) > 1:

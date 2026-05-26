@@ -5543,6 +5543,27 @@ def _repair_chain_anti_absorption_splits(scratchpad: Path) -> int:
         (scratchpad / "anti_absorption_repair.md").write_text(
             "\n".join(receipt_lines), encoding="utf-8"
         )
+        try:
+            from plamen_parsers import id_ledger_register
+            titles_by_id = {
+                str(group["id"]): str(group.get("title") or group["id"])
+                for group in final_groups
+                if str(group.get("reason") or "") == "MECHANICAL_ANTI_ABSORPTION_SPLIT"
+            }
+            for row in repaired_rows:
+                new_id = str(row.get("new") or "").strip()
+                if not new_id:
+                    continue
+                id_ledger_register(
+                    scratchpad,
+                    finding_id=new_id,
+                    owner_phase="chain",
+                    owner_attempt=1,
+                    owning_artifact="hypotheses.md",
+                    title=titles_by_id.get(new_id, new_id),
+                )
+        except Exception:
+            pass
     except OSError:
         return 0
     return len(repaired_rows)

@@ -38,6 +38,7 @@ from plamen_validators import (  # noqa: E402
     _generate_id_ledger_collision_retry_hint,
     _parse_hypothesis_id_title_pairs,
     _promote_depth_findings_to_inventory,
+    _repair_chain_anti_absorption_splits,
     _validate_consumer_ids_in_ledger,
     _validate_id_ledger_collisions,
 )
@@ -246,6 +247,41 @@ def test_p24_collision_gate_registers_table_hypotheses(tmp_path):
     assert issues == []
     assert id_ledger_lookup(tmp_path, "HM-01") is not None
     assert id_ledger_lookup(tmp_path, "HH-01") is not None
+
+
+def test_chain_anti_absorption_repair_registers_split_ids(tmp_path):
+    (tmp_path / "_audit_started_with_markers.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "findings_inventory.md").write_text(
+        "# Findings Inventory\n\n"
+        "### Finding [INV-001]: Public withdraw drain\n"
+        "**Severity**: High\n"
+        "**Location**: A.sol:withdraw\n"
+        "**Root Cause**: public withdraw drains funds\n\n"
+        "### Finding [INV-002]: Unsafe transfer delivery failure\n"
+        "**Severity**: Low\n"
+        "**Location**: B.sol:onCall\n"
+        "**Root Cause**: transfer uses 2300 gas\n\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "hypotheses.md").write_text(
+        "| Hypothesis ID | Severity | Title | Source Findings |\n"
+        "|---------------|----------|-------|-----------------|\n"
+        "| H-01 | High | Over-merged group | INV-001, INV-002 |\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "finding_mapping.md").write_text(
+        "| Finding ID | Hypothesis ID | Mapping Status |\n"
+        "|------------|---------------|----------------|\n"
+        "| INV-001 | H-01 | GROUPED |\n"
+        "| INV-002 | H-01 | GROUPED |\n",
+        encoding="utf-8",
+    )
+
+    repaired = _repair_chain_anti_absorption_splits(tmp_path)
+
+    assert repaired == 2
+    assert id_ledger_lookup(tmp_path, "HH-01") is not None
+    assert id_ledger_lookup(tmp_path, "HL-01") is not None
 
 
 def test_p24_collision_gate_passes_on_first_attempt(tmp_path):
