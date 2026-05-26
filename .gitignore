@@ -72,6 +72,9 @@ scripts/*
 !scripts/chain_prep.py
 !scripts/mechanical_verify.py
 !scripts/pty_exec.py
+!scripts/preflight_pty_transports.py
+!scripts/plamen_contracts.py
+!scripts/plamen_markdown.py
 !scripts/report_index_machinery.py
 !scripts/spike_mechanical_poc.py
 sessions/
