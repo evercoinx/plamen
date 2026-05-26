@@ -140,6 +140,47 @@ def test_worker_containment_allows_allowed_output_temp_files():
     )
 
 
+def test_worker_duplicate_copy_artifact_is_benign_only_when_base_exists():
+    known = {"meta_buffer.md", "analysis_core_state.md"}
+
+    assert D._worker_duplicate_copy_base_name("meta_buffer 2.md") == "meta_buffer.md"
+    assert D._worker_artifact_is_benign_duplicate_copy("meta_buffer 2.md", known)
+    assert D._worker_artifact_is_benign_duplicate_copy(
+        "analysis_core_state 2.md",
+        known,
+    )
+    assert not D._worker_artifact_is_benign_duplicate_copy(
+        "analysis_external_deps 2.md",
+        known,
+    )
+    assert not D._worker_artifact_is_benign_duplicate_copy(
+        "report_index.md",
+        known,
+    )
+
+
+def test_worker_duplicate_copy_quarantine_moves_out_of_live_scratchpad(tmp_path: Path):
+    sp = tmp_path / ".scratchpad"
+    sp.mkdir()
+    stray = sp / "meta_buffer 2.md"
+    stray.write_text("duplicate copy", encoding="utf-8")
+
+    moved = D._quarantine_worker_duplicate_copy(
+        scratchpad=sp,
+        path=stray,
+        phase_name="breadth",
+        worker_output="analysis_core_state.md",
+    )
+
+    assert moved is not None
+    assert not stray.exists()
+    assert moved.exists()
+    assert moved.relative_to(sp).as_posix().startswith(
+        "_overflow/worker_strays/breadth_analysis_core_state_"
+    )
+    assert moved.name.endswith("_meta_buffer 2.md")
+
+
 def test_breadth_worker_pool_is_sc_manifest_backed(tmp_path: Path):
     sp = tmp_path / ".scratchpad"
     _manifest(sp)

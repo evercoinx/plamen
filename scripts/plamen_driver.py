@@ -4409,6 +4409,7 @@ def _run_single_breadth_worker_pty(
             for p in scratchpad.iterdir():
                 if p.name.startswith("_") or not p.is_file():
                     continue
+                known_names = set(known_stats)
                 try:
                     st = p.stat()
                     sig = (st.st_size, st.st_mtime_ns)
@@ -4419,6 +4420,22 @@ def _run_single_breadth_worker_pty(
                 if _worker_artifact_name_allowed(p.name, allowed_output_set):
                     continue
                 if old_sig == sig:
+                    continue
+                if _worker_artifact_is_benign_duplicate_copy(p.name, known_names):
+                    moved = _quarantine_worker_duplicate_copy(
+                        scratchpad=scratchpad,
+                        path=p,
+                        phase_name="breadth",
+                        worker_output=output,
+                    )
+                    if moved is not None:
+                        log.info(
+                            "[breadth] worker %s quarantined benign duplicate "
+                            "scratchpad copy: %s -> %s",
+                            output,
+                            p.name,
+                            moved.relative_to(scratchpad).as_posix(),
+                        )
                     continue
                 log.error(
                     "[breadth] worker %s wrote or modified out-of-scope "
@@ -4510,6 +4527,58 @@ def _worker_artifact_name_allowed(name: str, allowed_outputs: set[str]) -> bool:
         if name.startswith(output + ".part"):
             return True
     return False
+
+
+_WORKER_DUPLICATE_COPY_RE = re.compile(r"^(.+?)\s+\d+(\.[^./\\]+)$")
+
+
+def _worker_duplicate_copy_base_name(name: str) -> str | None:
+    """Return canonical sibling name for Claude-created ``foo 2.md`` copies."""
+    match = _WORKER_DUPLICATE_COPY_RE.match(name)
+    if not match:
+        return None
+    return f"{match.group(1)}{match.group(2)}"
+
+
+def _worker_artifact_is_benign_duplicate_copy(
+    name: str,
+    known_names: set[str],
+) -> bool:
+    """Detect duplicate-copy scratchpad artifacts produced beside inputs.
+
+    Claude occasionally creates files like ``meta_buffer 2.md`` when an input
+    artifact already exists and the model attempts a write/copy despite the
+    one-output worker contract. These are not consumed by gates and should not
+    fail every concurrent worker that happens to observe the same stray file.
+    """
+    base = _worker_duplicate_copy_base_name(name)
+    return bool(base and base in known_names)
+
+
+def _quarantine_worker_duplicate_copy(
+    *,
+    scratchpad: Path,
+    path: Path,
+    phase_name: str,
+    worker_output: str,
+) -> Path | None:
+    """Move a benign duplicate-copy artifact out of the live scratchpad."""
+    try:
+        if not path.exists() or not path.is_file():
+            return None
+        target_dir = scratchpad / "_overflow" / "worker_strays"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(worker_output).stem
+        stamp = int(time.time() * 1000)
+        target = target_dir / f"{phase_name}_{stem}_{stamp}_{path.name}"
+        n = 1
+        while target.exists():
+            target = target_dir / f"{phase_name}_{stem}_{stamp}_{n}_{path.name}"
+            n += 1
+        path.replace(target)
+        return target
+    except Exception:
+        return None
 
 
 _WORKER_POOL_HEARTBEAT_S = 300
@@ -4961,6 +5030,7 @@ def _run_single_rescan_worker_pty(
             for p in scratchpad.iterdir():
                 if p.name.startswith("_") or not p.is_file():
                     continue
+                known_names = set(known_stats)
                 try:
                     st = p.stat()
                     sig = (st.st_size, st.st_mtime_ns)
@@ -4971,6 +5041,22 @@ def _run_single_rescan_worker_pty(
                 if _worker_artifact_name_allowed(p.name, allowed_output_set):
                     continue
                 if old_sig == sig:
+                    continue
+                if _worker_artifact_is_benign_duplicate_copy(p.name, known_names):
+                    moved = _quarantine_worker_duplicate_copy(
+                        scratchpad=scratchpad,
+                        path=p,
+                        phase_name="rescan",
+                        worker_output=output,
+                    )
+                    if moved is not None:
+                        log.info(
+                            "[rescan] worker %s quarantined benign duplicate "
+                            "scratchpad copy: %s -> %s",
+                            output,
+                            p.name,
+                            moved.relative_to(scratchpad).as_posix(),
+                        )
                     continue
                 log.error(
                     "[rescan] worker %s wrote or modified out-of-scope artifact: %s",
@@ -5843,6 +5929,7 @@ def _run_single_depth_worker_pty(
             for p in scratchpad.iterdir():
                 if p.name.startswith("_") or not p.is_file():
                     continue
+                known_names = set(known_stats)
                 try:
                     st = p.stat()
                     sig = (st.st_size, st.st_mtime_ns)
@@ -5853,6 +5940,22 @@ def _run_single_depth_worker_pty(
                 if _worker_artifact_name_allowed(p.name, allowed_output_set):
                     continue
                 if old_sig == sig:
+                    continue
+                if _worker_artifact_is_benign_duplicate_copy(p.name, known_names):
+                    moved = _quarantine_worker_duplicate_copy(
+                        scratchpad=scratchpad,
+                        path=p,
+                        phase_name="depth",
+                        worker_output=output,
+                    )
+                    if moved is not None:
+                        log.info(
+                            "[depth] worker %s quarantined benign duplicate "
+                            "scratchpad copy: %s -> %s",
+                            output,
+                            p.name,
+                            moved.relative_to(scratchpad).as_posix(),
+                        )
                     continue
                 log.error(
                     "[depth] worker %s wrote or modified out-of-scope "
