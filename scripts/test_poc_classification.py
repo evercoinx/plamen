@@ -21,6 +21,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from plamen_driver import (  # noqa: E402
     classify_poc_testability,
     _find_verify_file,
+    _validate_verify_completion,
     _validate_poc_attempt_coverage,
     _apply_poc_fail_demotions,
     _validate_poc_pass_integrity,
@@ -81,6 +82,8 @@ def test_classify_structural_patterns():
     check("cross-client", classify_poc_testability("cross-client divergence", "", "EVM diff", "High") == "structural")
     check("byzantine", classify_poc_testability("byzantine tolerance", "", "2/3 threshold", "Critical") == "structural")
     check("network partition", classify_poc_testability("network partition", "", "Split brain", "High") == "structural")
+    check("missing setter beats approve keyword", classify_poc_testability("", "CODE-TRACE", "GatewaySend.DODOApprove Has No Admin Setter", "Low") == "structural")
+    check("missing event beats setter/withdraw keywords", classify_poc_testability("", "CODE-TRACE", "Event Emission Missing on setBot, superWithdraw, setGasLimit, and setSlippage", "Low") == "structural")
 
 
 def test_classify_integration_patterns():
@@ -161,7 +164,7 @@ def test_validate_poc_coverage_thorough_warns():
 
 
 def test_validate_poc_coverage_core_narrows():
-    """Core mode only checks Critical/High + unit."""
+    """Core mode checks Medium+ unit/property rows."""
     print("\n--- _validate_poc_attempt_coverage: core narrowing ---")
     sp = _mkscratch({
         "verification_queue.md": (
@@ -176,7 +179,7 @@ def test_validate_poc_coverage_core_narrows():
     })
     result = _validate_poc_attempt_coverage(sp, "core")
     check("warns on F-01 (high+unit)", any("F-01" in w for w in result))
-    check("no warn on F-02 (medium+unit in core)", not any("F-02" in w for w in result))
+    check("warns on F-02 (medium+unit in core)", any("F-02" in w for w in result))
 
 
 def test_validate_poc_coverage_pass_no_warn():
@@ -255,6 +258,229 @@ def test_validate_poc_coverage_allows_environmental_skip():
     })
     result = _validate_poc_attempt_coverage(sp, "thorough")
     check("no warn with allowed environmental blocker", result == [])
+
+
+def test_verify_completion_hard_fails_mandatory_poc_without_ledger():
+    """Core Medium+ unit/property verifier shards require PoC ledger."""
+    print("\n--- _validate_verify_completion: hard PoC ledger contract ---")
+    sp = _mkscratch({
+        "verification_queue.md": (
+            "# Verification Queue Manifest\n"
+            "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact | PoC Class |\n"
+            "|---------|-----------|----------|-------|-----------|--------------|----------|------------------|-----------|\n"
+            "| 1 | H-10 | Medium | Accounting drift | accounting | [POC-PASS] | Vault.sol:10 | hypotheses.md | unit |\n"
+        ),
+        "verify_H-10.md": (
+            "# Verify H-10\n"
+            "Severity: Medium\n"
+            "Evidence Tag: [CODE-TRACE]\n"
+            "Verdict: CONFIRMED\n"
+            "This verifier file is intentionally long enough to satisfy the "
+            "minimum byte gate while still omitting the mandatory PoC ledger "
+            "for a unit-class Medium finding in Core mode.\n"
+        ),
+    })
+    issues = _validate_verify_completion(sp, "sc_verify_medium_a", mode="core")
+    check("hard-fails ledgerless mandatory PoC row", any("PoC contract" in i for i in issues), repr(issues))
+
+
+def test_verify_completion_accepts_real_attempt_even_if_not_poc_pass():
+    """A compile/runtime failure counts as an attempt; proof strength is separate."""
+    print("\n--- _validate_verify_completion: attempted PoC satisfies coverage ---")
+    sp = _mkscratch({
+        "verification_queue.md": (
+            "# Verification Queue Manifest\n"
+            "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact | PoC Class |\n"
+            "|---------|-----------|----------|-------|-----------|--------------|----------|------------------|-----------|\n"
+            "| 1 | H-11 | Medium | Accounting drift | accounting | [POC-PASS] | Vault.sol:10 | hypotheses.md | unit |\n"
+        ),
+        "verify_H-11.md": (
+            "# Verify H-11\n"
+            "Severity: Medium\n"
+            "Evidence Tag: [CODE-TRACE]\n"
+            "Verdict: CONTESTED\n\n"
+            "### PoC Attempt\n"
+            "- PoC Required: YES\n"
+            "- PoC Class: unit\n"
+            "- Attempted: YES\n"
+            "- PoC Not Attempted Because: N/A\n"
+            "- Test File: test/VerifyH11.t.sol\n"
+            "- Command: forge test --match-test test_H11 -vvv\n\n"
+            "### Execution Result\n"
+            "- Compiled: NO (attempts: 1)\n"
+            "- Result: NOT_EXECUTED\n"
+            "- Output: compile error retained for verifier trace\n"
+        ),
+    })
+    issues = _validate_verify_completion(sp, "sc_verify_medium_a", mode="core")
+    check("attempted PoC does not fail completion", issues == [], repr(issues))
+
+
+def test_verify_completion_accepts_bold_skip_ledger_with_explanation():
+    """Markdown-bold ledger labels and inline blocker explanations parse correctly."""
+    print("\n--- _validate_verify_completion: bold skip ledger accepted ---")
+    sp = _mkscratch({
+        "verification_queue.md": (
+            "# Verification Queue Manifest\n"
+            "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact | PoC Class |\n"
+            "|---------|-----------|----------|-------|-----------|--------------|----------|------------------|-----------|\n"
+            "| 1 | H-12 | Medium | Cross env issue | integration | [CODE-TRACE] | Gateway.sol:10 | hypotheses.md | unit |\n"
+        ),
+        "verify_H-12.md": (
+            "# Verify H-12\n"
+            "**Severity**: Medium\n"
+            "**Evidence Tag**: [CODE-TRACE]\n"
+            "**Verdict**: CONTESTED\n\n"
+            "### PoC Attempt\n"
+            "- **PoC Required**: YES\n"
+            "- **PoC Class**: unit\n"
+            "- **Attempted**: NO\n"
+            "- **PoC Not Attempted Because**: EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS - live address unavailable\n"
+            "- **Test File**: N/A\n"
+            "- **Command**: N/A\n\n"
+            "### Execution Result\n"
+            "- **Compiled**: N/A\n"
+            "- **Result**: NOT_EXECUTED\n"
+            "- **Output**: no fork address for the external dependency\n"
+        ),
+    })
+    issues = _validate_verify_completion(sp, "sc_verify_medium_a", mode="core")
+    check("bold skip ledger is parsed", issues == [], repr(issues))
+
+
+def test_verify_completion_rejects_bold_structural_skip_for_unit():
+    """STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION remains invalid for unit rows."""
+    print("\n--- _validate_verify_completion: structural skip rejected for unit ---")
+    sp = _mkscratch({
+        "verification_queue.md": (
+            "# Verification Queue Manifest\n"
+            "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact | PoC Class |\n"
+            "|---------|-----------|----------|-------|-----------|--------------|----------|------------------|-----------|\n"
+            "| 1 | H-13 | Medium | Unit-testable design issue | access-control | [CODE-TRACE] | Gateway.sol:10 | hypotheses.md | unit |\n"
+        ),
+        "verify_H-13.md": (
+            "# Verify H-13\n"
+            "**Severity**: Medium\n"
+            "**Evidence Tag**: [CODE-TRACE]\n"
+            "**Verdict**: CONFIRMED\n\n"
+            "### PoC Attempt\n"
+            "- **PoC Required**: YES\n"
+            "- **PoC Class**: unit\n"
+            "- **Attempted**: NO\n"
+            "- **PoC Not Attempted Because**: STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION - design risk only\n"
+            "- **Test File**: N/A\n"
+            "- **Command**: N/A\n\n"
+            "### Execution Result\n"
+            "- **Compiled**: N/A\n"
+            "- **Result**: NOT_EXECUTED\n"
+            "- **Output**: not executed\n"
+        ),
+    })
+    issues = _validate_verify_completion(sp, "sc_verify_medium_a", mode="core")
+    check("unit structural skip fails hard", any("H-13 mandatory unit" in i for i in issues), repr(issues))
+
+
+def test_verify_completion_rejects_deployment_skip_for_unit():
+    """DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL is not valid for unit-class rows."""
+    print("\n--- _validate_verify_completion: deployment skip rejected for unit ---")
+    sp = _mkscratch({
+        "verification_queue.md": (
+            "# Verification Queue Manifest\n"
+            "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact | PoC Class |\n"
+            "|---------|-----------|----------|-------|-----------|--------------|----------|------------------|-----------|\n"
+            "| 1 | H-14 | Medium | Fee mutation | accounting | [CODE-TRACE] | Gateway.sol:10 | hypotheses.md | unit |\n"
+        ),
+        "verify_H-14.md": (
+            "# Verify H-14\n"
+            "**Severity**: Medium\n"
+            "**Evidence Tag**: [CODE-TRACE]\n"
+            "**Verdict**: CONFIRMED\n\n"
+            "### PoC Attempt\n"
+            "- **PoC Required**: YES\n"
+            "- **PoC Class**: unit\n"
+            "- **Attempted**: NO\n"
+            "- **PoC Not Attempted Because**: DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL - timing window\n"
+            "- **Test File**: N/A\n"
+            "- **Command**: N/A\n\n"
+            "### Execution Result\n"
+            "- **Compiled**: N/A\n"
+            "- **Result**: NOT_EXECUTED\n"
+            "- **Output**: not executed\n"
+        ),
+    })
+    issues = _validate_verify_completion(sp, "sc_verify_medium_a", mode="core")
+    check("unit deployment skip fails hard", any("H-14 mandatory unit" in i for i in issues), repr(issues))
+
+
+def test_verify_completion_rejects_missing_mock_external_skip():
+    """Missing-mock excuses must not satisfy mandatory unit PoC coverage."""
+    print("\n--- _validate_verify_completion: missing mock skip rejected ---")
+    sp = _mkscratch({
+        "verification_queue.md": (
+            "# Verification Queue Manifest\n"
+            "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact | PoC Class |\n"
+            "|---------|-----------|----------|-------|-----------|--------------|----------|------------------|-----------|\n"
+            "| 1 | H-15 | Medium | Token mismatch | validation | [CODE-TRACE] | Gateway.sol:10 | hypotheses.md | unit |\n"
+        ),
+        "verify_H-15.md": (
+            "# Verify H-15\n"
+            "**Severity**: Medium\n"
+            "**Evidence Tag**: [CODE-TRACE]\n"
+            "**Verdict**: CONFIRMED\n\n"
+            "### PoC Attempt\n"
+            "- **PoC Required**: YES\n"
+            "- **PoC Class**: unit\n"
+            "- **Attempted**: NO\n"
+            "- **PoC Not Attempted Because**: EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS - mock does not implement token routing\n"
+            "- **Test File**: N/A\n"
+            "- **Command**: N/A\n\n"
+            "### Execution Result\n"
+            "- **Compiled**: N/A\n"
+            "- **Result**: NOT_EXECUTED\n"
+            "- **Output**: not executed\n"
+        ),
+    })
+    issues = _validate_verify_completion(sp, "sc_verify_medium_a", mode="core")
+    check("missing mock skip fails hard", any("H-15 mandatory unit" in i for i in issues), repr(issues))
+
+
+def test_verify_completion_reports_all_poc_contract_failures():
+    """Retry hints must see every bad ledger in the shard, not just the first six."""
+    print("\n--- _validate_verify_completion: reports all PoC failures ---")
+    rows = []
+    files = {}
+    for idx in range(1, 9):
+        fid = f"H-{idx}"
+        rows.append(
+            f"| {idx} | {fid} | Medium | Unit issue {idx} | logic | [CODE-TRACE] | Gateway.sol:{idx} | hypotheses.md | unit |\n"
+        )
+        files[f"verify_{fid}.md"] = (
+            f"# Verify {fid}\n"
+            "**Severity**: Medium\n"
+            "**Evidence Tag**: [CODE-TRACE]\n"
+            "**Verdict**: CONFIRMED\n\n"
+            "### PoC Attempt\n"
+            "- **PoC Required**: YES\n"
+            "- **PoC Class**: unit\n"
+            "- **Attempted**: NO\n"
+            "- **PoC Not Attempted Because**: STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION\n"
+            "- **Test File**: N/A\n"
+            "- **Command**: N/A\n\n"
+            "### Execution Result\n"
+            "- **Compiled**: N/A\n"
+            "- **Result**: NOT_EXECUTED\n"
+            "- **Output**: not executed\n"
+        )
+    files["verification_queue.md"] = (
+        "# Verification Queue Manifest\n"
+        "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact | PoC Class |\n"
+        "|---------|-----------|----------|-------|-----------|--------------|----------|------------------|-----------|\n"
+        + "".join(rows)
+    )
+    sp = _mkscratch(files)
+    issues = _validate_verify_completion(sp, "sc_verify_medium_a", mode="core")
+    detail = "\n".join(issues)
+    check("all eight failures are surfaced", all(f"H-{i} mandatory unit" in detail for i in range(1, 9)), detail)
 
 
 # --------------------------------------------------------------------------
@@ -695,6 +921,13 @@ if __name__ == "__main__":
     test_validate_poc_coverage_pass_no_warn()
     test_validate_poc_coverage_rejects_na_execution_for_testable_rows()
     test_validate_poc_coverage_allows_environmental_skip()
+    test_verify_completion_hard_fails_mandatory_poc_without_ledger()
+    test_verify_completion_accepts_real_attempt_even_if_not_poc_pass()
+    test_verify_completion_accepts_bold_skip_ledger_with_explanation()
+    test_verify_completion_rejects_bold_structural_skip_for_unit()
+    test_verify_completion_rejects_deployment_skip_for_unit()
+    test_verify_completion_rejects_missing_mock_external_skip()
+    test_verify_completion_reports_all_poc_contract_failures()
     test_demotions_unit_poc_fail()
     test_demotions_property_poc_fail()
     test_demotions_code_trace_no_demotion()

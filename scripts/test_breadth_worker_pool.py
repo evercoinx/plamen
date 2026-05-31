@@ -123,6 +123,44 @@ def test_breadth_worker_pool_runs_only_open_rows(tmp_path: Path, monkeypatch):
     assert calls == ["analysis_token_flow.md"]
 
 
+def test_breadth_worker_pool_passes_pool_wide_allowed_outputs(
+    tmp_path: Path,
+    monkeypatch,
+):
+    sp = tmp_path / ".scratchpad"
+    _manifest(sp)
+    expected_outputs = {"analysis_token_flow.md", "analysis_access_control.md"}
+    seen: list[set[str]] = []
+
+    def _fake_worker(**kwargs):
+        job = kwargs["job"]
+        seen.append(set(kwargs["allowed_outputs"]))
+        assert set(kwargs["allowed_outputs"]) == expected_outputs
+        assert D._worker_artifact_name_allowed(
+            "analysis_access_control.md.tmp.2912.5cfc76acc7a4",
+            set(kwargs["allowed_outputs"]),
+        )
+        _complete(sp, job["output"], job["agent_id"])
+        return {"output": job["output"], "rc": 0, "status": "complete"}
+
+    monkeypatch.setattr(D, "_run_single_breadth_worker_pty", _fake_worker)
+
+    rc = D._run_breadth_worker_pool_pty(
+        scratchpad=sp,
+        project_root=str(tmp_path),
+        config={"mode": "thorough", "language": "evm", "pipeline": "sc"},
+        phase=_phase(),
+        base_cmd=["claude", "--session-id", "base"],
+        env={},
+        timeout=1.0,
+        quiescence_s=0.0,
+        attempt=1,
+    )
+
+    assert rc == 0
+    assert len(seen) == 2
+
+
 def test_worker_containment_allows_allowed_output_temp_files():
     allowed = {"analysis_access_control.md", "analysis_core_state.md"}
 

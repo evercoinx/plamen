@@ -84,6 +84,11 @@ this reverse trace is function-centric.
 | DIRECTIONAL_PAIRING_GAP | Wrap/unwrap, lock/unlock, deposit/withdraw missing inverse | Flag for downstream investigation |
 | CROSS_FIELD_DECODE_GAP | Decoded message field validated but paired field ignored | Flag for downstream investigation |
 
+Optionally include `Discovery Steer: ...` inside the Investigation Question
+cell when it gives a compact generic pairing hint (shared variable/function,
+branch condition, lifecycle state, terminal effect, or candidate ID). It is
+not proof, not required, and does not change output files or gates.
+
 ## Output
 
 Append a new section to `{SCRATCHPAD}/semantic_invariants.md`:

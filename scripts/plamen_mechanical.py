@@ -18,8 +18,13 @@ from typing import Any, Optional
 
 from plamen_types import *  # noqa: F403,F401
 from plamen_parsers import *  # noqa: F403,F401
+from plamen_parsers import (
+    _OPTIONAL_FINDING_METADATA_FIELDS,
+    _OPTIONAL_FINDING_METADATA_LABELS,
+)
 from plamen_validators import *  # noqa: F403,F401
 from plamen_validators import (  # explicit private helpers used by SC index repair
+    _collect_judge_unresolved_ids,
     _expected_report_index_severities,
     _report_index_adjustment_reason_present,
 )
@@ -41,6 +46,7 @@ __all__ = [
     "_inventory_source_files",
     "_location_recovery_needed",
     "_normalize_breadth_outputs",
+    "_merge_recon_worker_shards",
     "_patch_report_index_with_recovered",
     "_path_security_weight",
     "_prepare_attention_repair",
@@ -48,6 +54,7 @@ __all__ = [
     "_repair_report_body_from_assignments",
     "_repair_report_body_from_manifest",
     "_repair_sc_report_index_from_prior",
+    "_tag_report_index_unresolved_sections",
     "_shard_name_for_severity",
     "_synth_report_section_from_verify",
     "_synthesize_components_audited",
@@ -74,6 +81,273 @@ __all__ = [
     "write_inventory_chunk_placeholder",
     "write_report_tier_placeholder",
 ]
+
+
+_RECON_CANONICAL_OUTPUTS = (
+    "recon_summary.md",
+    "design_context.md",
+    "attack_surface.md",
+    "state_variables.md",
+    "function_list.md",
+    "contract_inventory.md",
+    "template_recommendations.md",
+    "detected_patterns.md",
+    "setter_list.md",
+    "emit_list.md",
+    "build_status.md",
+)
+
+_PREPASS_MARKER = "<!-- plamen-prepass v1: mechanical pre-pass output; safe to overwrite while marker is present -->"
+
+
+def _strip_recon_worker_markers(text: str) -> str:
+    """Remove worker lifecycle comments before embedding shard evidence."""
+    text = re.sub(
+        r"(?m)^\s*<!--\s*(?:PLAMEN_[A-Z_]+|RECON_ROLE|EXPECTED_OUTPUT):.*?-->\s*$",
+        "",
+        text,
+    )
+    return text.strip()
+
+
+def _strip_prepass_marker(text: str) -> str:
+    """Remove pre-pass overwrite provenance from merged canonical handoffs."""
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if lines and lines[0].strip() == _PREPASS_MARKER:
+        return "\n".join(lines[1:]).lstrip()
+    return text
+
+
+def _merge_recon_worker_shards(scratchpad: Path, config: dict) -> list[str]:
+    """Merge driver-owned recon worker shards into canonical recon artifacts.
+
+    The worker-pool architecture deliberately forbids recon workers from
+    writing canonical phase outputs or later-phase files. This merge is the
+    single deterministic bridge back to the existing pipeline contract: all
+    downstream phases still see the same recon file names and formats, while
+    recon itself gets the documented multi-role coverage without a coordinator
+    session that can leak into instantiate/breadth/depth.
+
+    Existing deterministic prepass artifacts are preserved and enriched rather
+    than replaced. That keeps Slither/OpenGrep/parser-derived inventories as the
+    authority when present and uses the LLM shards as contextual analysis.
+    """
+    shard_names = (
+        "recon_build_static.md",
+        "recon_design_context.md",
+        "recon_inventory_surface.md",
+        "recon_templates_patterns.md",
+    )
+    shards: dict[str, str] = {}
+    for name in shard_names:
+        path = scratchpad / name
+        if not path.exists():
+            continue
+        try:
+            shards[name] = _strip_recon_worker_markers(
+                path.read_text(encoding="utf-8", errors="replace")
+            )
+        except Exception:
+            shards[name] = ""
+
+    # Light mode has two merged roles. Map them into the four conceptual
+    # buckets so the canonical synthesis below is mode-independent.
+    build = shards.get("recon_build_static.md", "")
+    design = shards.get("recon_design_context.md", "") or build
+    inventory = shards.get("recon_inventory_surface.md", "")
+    templates = shards.get("recon_templates_patterns.md", "") or inventory
+
+    def _read_existing(name: str) -> str:
+        path = scratchpad / name
+        if not path.exists():
+            return ""
+        try:
+            return _strip_prepass_marker(
+                path.read_text(encoding="utf-8", errors="replace")
+            ).strip()
+        except Exception:
+            return ""
+
+    def _section(title: str, body: str) -> str:
+        body = (body or "").strip()
+        if not body:
+            body = "No additional worker evidence was produced for this section."
+        return f"## {title}\n\n{body}\n"
+
+    def _existing_or_fallback(name: str, fallback_title: str, fallback_body: str) -> str:
+        existing = _read_existing(name)
+        if existing and len(existing.encode("utf-8", errors="ignore")) >= 100:
+            return (
+                existing.rstrip()
+                + "\n\n"
+                + _section("Recon Worker Addendum", fallback_body)
+            ).strip()
+        return (
+            f"# {fallback_title}\n\n"
+            + _section("Recon Worker Evidence", fallback_body)
+        ).strip()
+
+    def _write(name: str, text: str) -> None:
+        text = text.strip() + "\n"
+        if len(text.encode("utf-8", errors="ignore")) < 120:
+            text += (
+                "\n## Merge Note\n\n"
+                "This file was generated by the deterministic recon worker "
+                "merge. Downstream phases should treat it as a scoped recon "
+                "handoff and inspect source files directly for confirmation.\n"
+            )
+        (scratchpad / name).write_text(text, encoding="utf-8")
+
+    mode = str(config.get("mode") or "core")
+    language = str(config.get("language") or "evm")
+    project_root = str(config.get("project_root") or "")
+
+    _write(
+        "build_status.md",
+        _existing_or_fallback(
+            "build_status.md",
+            "Build and Static Analysis Status",
+            build,
+        ),
+    )
+
+    design_text = _existing_or_fallback(
+        "design_context.md",
+        "Design Context",
+        design,
+    )
+    if not re.search(r"(?im)^#+\s+.*operational\s+implications", design_text):
+        design_text += (
+            "\n\n## Operational Implications\n\n"
+            "Recon workers did not isolate a separate operational implications "
+            "section. Downstream agents must derive operational impact from the "
+            "design, inventory, dependency, and attack-surface evidence above.\n"
+        )
+    if not re.search(r"(?im)^#+\s+.*invariant", design_text):
+        design_text += (
+            "\n\n## Key Invariants\n\n"
+            "Recon workers did not isolate a separate invariant list. Breadth "
+            "and depth agents must derive protocol invariants from entry points, "
+            "state transitions, accounting flows, permissions, and external "
+            "dependencies in the recon artifacts.\n"
+        )
+    _write("design_context.md", design_text)
+
+    _write(
+        "attack_surface.md",
+        _existing_or_fallback(
+            "attack_surface.md",
+            "Attack Surface",
+            inventory,
+        ),
+    )
+    _write(
+        "contract_inventory.md",
+        _existing_or_fallback(
+            "contract_inventory.md",
+            "Contract Inventory",
+            inventory,
+        ),
+    )
+    _write(
+        "function_list.md",
+        _existing_or_fallback(
+            "function_list.md",
+            "Function List",
+            inventory,
+        ),
+    )
+    _write(
+        "state_variables.md",
+        _existing_or_fallback(
+            "state_variables.md",
+            "State Variables",
+            inventory,
+        ),
+    )
+    _write(
+        "setter_list.md",
+        _existing_or_fallback(
+            "setter_list.md",
+            "Setter List",
+            inventory,
+        ),
+    )
+    _write(
+        "emit_list.md",
+        _existing_or_fallback(
+            "emit_list.md",
+            "Event Emission List",
+            inventory,
+        ),
+    )
+    _write(
+        "detected_patterns.md",
+        _existing_or_fallback(
+            "detected_patterns.md",
+            "Detected Patterns",
+            templates or inventory,
+        ),
+    )
+    _write(
+        "template_recommendations.md",
+        _existing_or_fallback(
+            "template_recommendations.md",
+            "Template Recommendations",
+            templates or inventory,
+        ),
+    )
+
+    summary_parts = [
+        "# Recon Summary",
+        "",
+        "## Run Context",
+        "",
+        f"- Pipeline: {config.get('pipeline', 'sc')}",
+        f"- Mode: {mode}",
+        f"- Language: {language}",
+        f"- Project root: `{project_root}`",
+        "",
+        "## Worker Coverage",
+        "",
+    ]
+    for name in shard_names:
+        path = scratchpad / name
+        if path.exists():
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            summary_parts.append(f"- `{name}`: present ({size} bytes)")
+        else:
+            summary_parts.append(f"- `{name}`: not present in this mode")
+    summary_parts.extend([
+        "",
+        "## Canonical Handoff",
+        "",
+        "The Python driver merged isolated recon worker shards into the canonical "
+        "recon artifacts consumed by instantiate, breadth, depth, verification, "
+        "and report phases. Recon workers did not write later-phase artifacts.",
+        "",
+        "## Key Evidence Pointers",
+        "",
+        "Breadth and depth agents should read `design_context.md`, "
+        "`attack_surface.md`, `contract_inventory.md`, `function_list.md`, "
+        "`state_variables.md`, `detected_patterns.md`, and "
+        "`template_recommendations.md` before deriving analysis scope.",
+        "",
+        _section("Build/Static Worker Summary", build)[:5000],
+        "",
+        _section("Design Worker Summary", design)[:5000],
+        "",
+        _section("Inventory Worker Summary", inventory)[:5000],
+        "",
+        _section("Template/Pattern Worker Summary", templates)[:5000],
+    ])
+    _write("recon_summary.md", "\n".join(summary_parts))
+    return list(_RECON_CANONICAL_OUTPUTS)
 
 
 def _synthesize_components_audited(scratchpad: Path) -> str:
@@ -1818,6 +2092,7 @@ def _assemble_report_python(
         parts.extend([appendix_block, ""])
 
     body = "\n".join(parts)
+    body = _tag_report_index_unresolved_sections(body, idx_text, scratchpad)
     # Do not synthesize client-facing body sections during assembly. Missing
     # assigned sections, promotion dropouts, or low-evidence verifier outputs
     # are quality failures that must be fixed upstream by the index/body-writer
@@ -1886,6 +2161,87 @@ def _assemble_report_python(
         f"no LLM round-trip)"
     )
     return True
+
+
+def _report_index_unresolved_report_ids(
+    index_text: str,
+    scratchpad: Path | None = None,
+) -> set[str]:
+    """Return report IDs whose report-index Trust Adj. requires UNRESOLVED.
+
+    Prefer the Skeptic-Judge decision files as the source of truth. The report
+    index is a routing table, and some rows can carry advisory `PARTIAL(...)`
+    trust text for reasons other than a Judge UNRESOLVED/PARTIAL ruling. When
+    judge artifacts are available, only tag rows whose internal IDs intersect a
+    real Judge UNRESOLVED/PARTIAL decision.
+    """
+    ids: set[str] = set()
+    judge_unresolved: set[str] = set()
+    if scratchpad is not None:
+        try:
+            judge_unresolved = {x.upper() for x in _collect_judge_unresolved_ids(scratchpad)}
+        except Exception:
+            judge_unresolved = set()
+    section = _extract_h2_section(index_text or "", "Master Finding Index")
+    if not section:
+        return ids
+    col_idx: dict[str, int] = {}
+    for line in section.splitlines():
+        s = line.strip()
+        if not s.startswith("|") or _is_separator_row(s):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        lower = [c.lower() for c in cells]
+        if "report id" in lower or "trust adj." in lower or "trust adj" in lower:
+            for i, name in enumerate(lower):
+                if "report" in name and "id" in name:
+                    col_idx["report_id"] = i
+                elif "trust" in name and "adj" in name:
+                    col_idx["trust_adj"] = i
+                elif "internal" in name and ("hypothesis" in name or "id" in name):
+                    col_idx["internal"] = i
+            continue
+        if not col_idx:
+            continue
+        rid_i = col_idx.get("report_id", 0)
+        trust_i = col_idx.get("trust_adj")
+        if trust_i is None or rid_i >= len(cells) or trust_i >= len(cells):
+            continue
+        rid_m = re.search(r"\b([CHMLI]-\d{1,3})\b", cells[rid_i], re.IGNORECASE)
+        if not rid_m:
+            continue
+        trust = cells[trust_i]
+        if re.search(r"\b(?:UNRESOLVED|PARTIAL)\s*\(", trust, re.IGNORECASE):
+            internal_i = col_idx.get("internal")
+            internal = cells[internal_i] if internal_i is not None and internal_i < len(cells) else ""
+            internal_ids = {m.group(1).upper() for m in _INTERNAL_FINDING_ID_RE.finditer(internal)}
+            if judge_unresolved and internal_ids and not (internal_ids & judge_unresolved):
+                continue
+            ids.add(rid_m.group(1).upper())
+    return ids
+
+
+def _tag_report_index_unresolved_sections(
+    body: str,
+    index_text: str,
+    scratchpad: Path | None = None,
+) -> str:
+    """Add `[UNRESOLVED]` to assigned body headings that require it."""
+    unresolved_ids = _report_index_unresolved_report_ids(index_text, scratchpad)
+    if not unresolved_ids:
+        return body
+
+    def repl(match: re.Match[str]) -> str:
+        line = match.group(0)
+        rid = match.group(1).upper()
+        if rid not in unresolved_ids or re.search(r"\[UNRESOLVED\b", line, re.IGNORECASE):
+            return line
+        return line.rstrip() + " [UNRESOLVED]"
+
+    pattern = re.compile(
+        r"(?im)^###\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[\s*([CHMLI]-\d{1,3})\s*\][^\n]*$"
+    )
+    return pattern.sub(repl, body or "")
 
 
 def _inventory_source_files(scratchpad: Path) -> list[Path]:
@@ -2092,6 +2448,13 @@ def _write_mechanical_inventory_from_chunks(scratchpad: Path) -> tuple[int, int]
         desc = _strip_md(str(item.get("description", ""))) or root
         impact = _strip_md(str(item.get("impact", ""))) or "Impact requires verifier confirmation."
         verdict = _strip_md(str(item.get("verdict", ""))) or "NEEDS_VERIFICATION"
+        optional_lines: list[str] = []
+        for field in _OPTIONAL_FINDING_METADATA_FIELDS:
+            val = _strip_md(str(item.get(field, ""))).strip()
+            if not val:
+                continue
+            label = _OPTIONAL_FINDING_METADATA_LABELS[field][0]
+            optional_lines.append(f"**{label}**: {val}")
         inv_id = _allocate_inventory_ledger_id(
             scratchpad,
             preferred_id=f"INV-{i:03d}",
@@ -2126,6 +2489,7 @@ def _write_mechanical_inventory_from_chunks(scratchpad: Path) -> tuple[int, int]
             f"**Root Cause**: {root}",
             f"**Description**: {desc}",
             f"**Impact**: {impact}",
+            *optional_lines,
             "",
         ])
 
@@ -2569,12 +2933,13 @@ _ASSET_BINDING_SIGNAL_FILES: tuple[str, ...] = (
     "depth_token_flow_findings.md", "depth_external_findings.md",
     "depth_state_trace_findings.md", "depth_edge_case_findings.md",
     "findings_inventory.md", "hypotheses.md", "chain_hypotheses.md",
-    "verification_queue.md", "report_index.md",
+    "verification_queue.md",
 )
 
 _ASSET_BINDING_COVERAGE_FILES: tuple[str, ...] = (
     "findings_inventory.md", "hypotheses.md", "chain_hypotheses.md",
-    "verification_queue.md", "report_index.md", "report_coverage.md",
+    "verification_queue.md", "attention_repair_summary.md",
+    "attention_repair_findings.md",
 )
 
 _BINDING_FIELD_CLASS: dict[str, str] = {
@@ -2744,51 +3109,76 @@ def _binding_domain_flags(text: str) -> list[str]:
     return sorted(set(flags))
 
 
-def _active_binding_pair_covered(coverage_text: str, a: str, b: str) -> bool:
-    """Return true when an active candidate/report already binds both fields."""
-    if not coverage_text:
-        return False
-    terms_a = {a, _canonical_binding_base(a)}
-    terms_b = {b, _canonical_binding_base(b)}
-    claim_re = re.compile(
-        r"\b(?:mismatch|not\s+match|does\s+not\s+match|not\s+validated|"
-        r"missing\s+validation|consistency|consistent|bound|binding|"
-        r"equals?|same\s+as|against|validated\s+against)\b",
-        re.IGNORECASE,
-    )
+_BINDING_PAIR_RELATION_RE = re.compile(
+    r"(?:"
+    r"==|!=|=|<->|->|"
+    r"\b(?:mismatch(?:es|ed)?|diverg(?:e|es|ed|ence)|"
+    r"not\s+match(?:es|ed)?|does\s+not\s+match|"
+    r"not\s+(?:validated|bound|checked|compared)|"
+    r"missing\s+(?:validation|binding|check)|"
+    r"validated\s+against|checked\s+against|compared\s+against|"
+    r"bound\s+to|binds?\s+to|matches?|equals?|same\s+as|"
+    r"consistent\s+with|consistency|must\s+equal|should\s+equal|"
+    r"source\s+of\s+truth|derived\s+from|unreachable|impossible|"
+    r"mutually\s+exclusive)\b"
+    r")",
+    re.IGNORECASE,
+)
 
-    def explicit_claim(blob: str) -> bool:
-        low = blob.lower()
-        for ta in terms_a:
-            if not ta:
-                continue
-            for tb in terms_b:
-                if not tb:
-                    continue
-                ta_l = ta.lower()
-                tb_l = tb.lower()
-                for m in re.finditer(re.escape(ta_l), low):
-                    idx = low.find(tb_l, max(0, m.start() - 500), m.end() + 500)
-                    if idx == -1:
-                        continue
-                    lo = max(0, min(m.start(), idx) - 300)
-                    hi = min(len(blob), max(m.end(), idx + len(tb_l)) + 300)
-                    if claim_re.search(blob[lo:hi]):
-                        return True
+
+def _binding_term_forms(raw: str) -> set[str]:
+    value = str(raw or "").strip().strip("`")
+    base = _canonical_binding_base(value)
+    return {term for term in (value, base) if term}
+
+
+def _binding_claim_units(blob: str) -> list[str]:
+    """Split text into local claim units so distant mentions do not bind."""
+    units: list[str] = []
+    for line in str(blob or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if "|" in s:
+            units.append(s[:1200])
+            continue
+        parts = re.split(r"(?<=[.;:!?])\s+", s)
+        for part in parts:
+            part = part.strip()
+            if part:
+                units.append(part[:1200])
+    return units
+
+
+def _binding_pair_claims_relationship(blob: str, a: str, b: str) -> bool:
+    """Require both exact fields/bases and a relation in the same local claim."""
+    terms_a = {t.lower() for t in _binding_term_forms(a)}
+    terms_b = {t.lower() for t in _binding_term_forms(b)}
+    if not terms_a or not terms_b:
+        return False
+    for unit in _binding_claim_units(blob):
+        low = unit.lower()
+        if not _BINDING_PAIR_RELATION_RE.search(unit):
+            continue
+        if any(t in low for t in terms_a) and any(t in low for t in terms_b):
+            return True
+    return False
+
+
+def _active_binding_pair_covered(coverage_text: str, a: str, b: str) -> bool:
+    """Return true when an active candidate/report explicitly binds both fields."""
+    if not coverage_text:
         return False
 
     # Split into finding-like chunks first so unrelated global mentions do not
     # count as coverage. Fall back to a short-window search for JSON/queue rows.
     chunks = re.split(r"(?im)^#{2,3}\s+Finding\s+\[[^\]\n]+\]", coverage_text)
     for chunk in chunks:
-        low = chunk.lower()
-        if any(t and t.lower() in low for t in terms_a) and any(
-            t and t.lower() in low for t in terms_b
-        ) and explicit_claim(chunk[:6000]):
+        if _binding_pair_claims_relationship(chunk[:6000], a, b):
             return True
     for line in coverage_text.splitlines():
         if "|" in line or line.lstrip().startswith(("-", "*")):
-            if explicit_claim(line):
+            if _binding_pair_claims_relationship(line, a, b):
                 return True
     return False
 
@@ -2891,10 +3281,148 @@ def _write_asset_binding_matrix(scratchpad: Path, mode: str = "core") -> tuple[i
         "\n".join(lines) + "\n",
         encoding="utf-8",
     )
+    _write_obligation_ledger(scratchpad, mode, rows, domains)
     return len(rows), int(payload["gap_count"])
 
 
-def _build_asset_binding_repair_items(scratchpad: Path, limit: int = 5) -> list[dict[str, str]]:
+def _composition_obligation_rows(scratchpad: Path) -> list[dict[str, object]]:
+    path = scratchpad / "composition_coverage.md"
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    rows: list[dict[str, object]] = []
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        if not re.search(r"\bCH-\d{1,4}\b", line, re.IGNORECASE):
+            continue
+        if not re.search(
+            r"\b(?:UPGRADE|COMPOSED|CHAIN[-_ ]?UPGRADE|cross[-_ ]?user|"
+            r"fund\s+loss|theft|drain|strand(?:s|ed|ing)?|freez(?:e|es|ing)|lock(?:s|ed|ing)?)\b",
+            line,
+            re.IGNORECASE,
+        ):
+            continue
+        ids = sorted(set(m.group(0).upper() for m in re.finditer(r"\bCH-\d{1,4}\b", line, re.I)))
+        rid = ids[0] if ids else f"CH-L{line_no}"
+        sev = "High" if re.search(r"\b(?:critical|high|theft|drain|fund\s+loss)\b", line, re.I) else "Medium"
+        # A composition row where the chain agent EXPLICITLY declined to promote a
+        # formal CH ID ("CH-13 would be ... noting but not assigning formal CH ID")
+        # must not mint an *active* retention obligation: there is no chain to
+        # preserve, and the report-index retention gate would otherwise demand
+        # coverage by an obligation token that names a hypothetical. Mint it as a
+        # pre-closed row so the ledger still records it without forcing a retry.
+        # Anchored decline detection (v2.8.8 hardening): the non-promotion
+        # phrase MUST be tied to a chain/CH referent, so a real fund-loss chain
+        # line that merely contains "declining"/"not assigning blame"/etc. is
+        # NOT silently marked covered. Bare `declin\w*` was dropped for this
+        # reason (re-audit flagged it as a recall-regression over-match).
+        declined = bool(re.search(
+            r"(?:noting\s+but\s+not\s+assign\w*|"
+            r"not\s+assign\w*\s+(?:a\s+)?(?:formal\s+)?(?:ch\b|chain\b|ch[-\s]?id\b)|"
+            r"no\s+formal\s+ch[-\s]?id\b|"
+            r"not\s+(?:a\s+)?(?:formal\s+|standalone\s+)?(?:formal\s+)?chain\b|"
+            r"not\s+promot\w*\s+(?:to\s+)?(?:a\s+)?(?:formal\s+)?(?:ch\b|chain\b))",
+            line,
+            re.IGNORECASE,
+        ))
+        rows.append({
+            "id": f"OBL-CHAIN-{rid}",
+            "class": "chain_upgrade_retention",
+            "source_id": rid,
+            "status": "covered" if declined else "active",
+            "severity_signal": sev,
+            "source": "composition_coverage.md",
+            "evidence": f"composition_coverage.md:L{line_no}",
+            "target": line.strip()[:800],
+            "closure_reason": (
+                "chain agent explicitly declined to promote a formal CH ID "
+                "(hypothetical/non-chain composition)" if declined else ""
+            ),
+            "absorbing_id": "",
+        })
+    return rows
+
+
+def _write_obligation_ledger(
+    scratchpad: Path,
+    mode: str,
+    asset_rows: list[dict[str, object]] | None = None,
+    domains: list[str] | None = None,
+) -> int:
+    """Write a typed, protocol-neutral obligation ledger.
+
+    The ledger is a deterministic retention contract, not a detector. Classes
+    appear only when the audit artifacts trigger them, so protocols without
+    routers, native assets, bridges, or chain compositions can legitimately
+    have zero rows for those classes.
+    """
+    obligations: list[dict[str, object]] = []
+    for row in asset_rows or []:
+        rid = str(row.get("id") or "")
+        if not rid:
+            continue
+        status = str(row.get("status") or "").lower()
+        cls = "exact_value_binding"
+        field_a = str(row.get("field_a") or "")
+        field_b = str(row.get("field_b") or "")
+        obligations.append({
+            "id": f"OBL-{rid}",
+            "class": cls,
+            "source_id": rid,
+            "status": "active" if status == "gap" else "covered",
+            "severity_signal": "Medium" if status == "gap" else "Informational",
+            "field_a": field_a,
+            "field_b": field_b,
+            "source": "asset_binding_matrix.md",
+            "evidence": f"{rid} in asset_binding_matrix.md",
+            "target": f"{field_a} <-> {field_b}",
+            "closure_reason": "",
+            "absorbing_id": "",
+            "domains": row.get("domains") or domains or [],
+        })
+    obligations.extend(_composition_obligation_rows(scratchpad))
+
+    payload = {
+        "schema_version": "plamen.obligation_ledger.v1",
+        "mode": mode,
+        "domains": sorted(set(domains or [])),
+        "row_count": len(obligations),
+        "active_count": sum(1 for r in obligations if r.get("status") == "active"),
+        "obligations": obligations,
+    }
+    (scratchpad / "obligation_ledger.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    lines = [
+        "# Obligation Ledger",
+        "",
+        "Driver-generated typed retention obligations. These rows are "
+        "questions/receipts, not expected findings. Empty class sets are valid "
+        "when the protocol shape does not trigger them.",
+        "",
+        "| ID | Class | Status | Severity Signal | Target | Source |",
+        "|----|-------|--------|-----------------|--------|--------|",
+    ]
+    if obligations:
+        for row in obligations:
+            target = str(row.get("target") or "").replace("|", "/")
+            lines.append(
+                f"| {row.get('id')} | {row.get('class')} | {row.get('status')} | "
+                f"{row.get('severity_signal')} | `{target}` | {row.get('evidence')} |"
+            )
+    else:
+        lines.append("| n/a | n/a | none | n/a | No obligations triggered. | n/a |")
+    (scratchpad / "obligation_ledger.md").write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
+    return len(obligations)
+
+
+def _build_asset_binding_repair_items(scratchpad: Path, limit: int = 8) -> list[dict[str, str]]:
     path = scratchpad / "asset_binding_matrix.json"
     if not path.exists():
         try:
@@ -3224,7 +3752,7 @@ def _build_attention_repair_items(scratchpad: Path, mode: str) -> list[dict[str,
             )
         try:
             _write_asset_binding_matrix(scratchpad, mode)
-            for item in _build_asset_binding_repair_items(scratchpad)[:5]:
+            for item in _build_asset_binding_repair_items(scratchpad)[:8]:
                 add(
                     item["kind"],
                     item["target"],
@@ -3311,6 +3839,15 @@ def _write_attention_repair_queue(scratchpad: Path, items: list[dict[str, str]])
         "instead of a basename or folder summary. The Evidence cell must cite",
         "the same target path again with file:line evidence, or mark the row",
         "NEEDS_HUMAN if the source file is unavailable.",
+        "",
+        "ASSET-BINDING CONTRACT: for `asset-binding-gap` rows, Evidence/Notes",
+        "must include one local `PAIR_CLAIM:` that names both queued fields",
+        "exactly and states equality, explicit binding check, mismatch,",
+        "unreachable path, or impossible pair. SAFE asset-binding rows also",
+        "need `SAFE_REASON:EXPLICIT_EQUALITY`,",
+        "`SAFE_REASON:EXPLICIT_BINDING_CHECK`, `SAFE_REASON:UNREACHABLE_PATH`,",
+        "or `SAFE_REASON:IMPOSSIBLE_PAIR`. Do not use standalone revert,",
+        "no-balance, residual-balance, or self-punishing reasoning as SAFE.",
         "",
         "| # | Kind | Target | Reason | Source | Evidence hint |",
         "|---|------|--------|--------|--------|---------------|",
@@ -4486,6 +5023,32 @@ def _clean_finding_id_list(values: list[str] | tuple[str, ...] | None) -> list[s
     return out
 
 
+def _body_writer_poc_result_field(verify_text: str) -> str:
+    """Extract verifier PoC/result text for report body manifests."""
+    return _field_or_section(
+        verify_text or "",
+        (
+            "PoC Result",
+            "Execution Result",
+            "Execution Output",
+            "Test Output",
+            "Proof",
+        ),
+        (
+            "PoC Result",
+            "Execution Result",
+            "Execution Output",
+            "Test Output",
+            "Proof",
+            "Reproduction",
+            "PoC Attempt",
+            "PoC Execution",
+        ),
+        fallback="",
+        max_chars=2500,
+    ).strip()
+
+
 def _build_body_writer_manifests(scratchpad: Path) -> dict[str, dict]:
     """Emit per-shard manifests anchored to verified evidence.
 
@@ -4537,6 +5100,7 @@ def _build_body_writer_manifests(scratchpad: Path) -> dict[str, dict]:
             except Exception:
                 verify_text = ""
         desc, rec = _body_writer_evidence_fields(verify_text)
+        poc_result = _body_writer_poc_result_field(verify_text)
         if (not desc or not _is_substantive_body_evidence(desc)) and record:
             desc = str(
                 record.get("description")
@@ -4595,6 +5159,7 @@ def _build_body_writer_manifests(scratchpad: Path) -> dict[str, dict]:
             "verify_files": verify_files,
             "verify_statuses": verify_statuses,
             "description": desc,
+            "poc_result": poc_result,
             "recommendation": rec,
             "report_blocked": bool(report_blocked),
         })
@@ -4731,6 +5296,16 @@ def _build_sc_body_writer_manifests(scratchpad: Path) -> dict[str, dict]:
     except Exception:
         hypothesis_constituents = {}
 
+    def _verification_cell_verify_ids(report_id: str) -> list[str]:
+        """Return concrete verifier IDs explicitly named by the index row."""
+        ids: list[str] = []
+        for fid in _extract_internal_ids(verification_map.get(report_id, "")):
+            if fid.startswith("CH-"):
+                continue
+            if _verify_file_for_id(scratchpad, fid).exists():
+                ids.append(fid)
+        return list(dict.fromkeys(ids))
+
     def _constituent_verify_ids(report_id: str, finding_ids: list[str]) -> list[str]:
         """Resolve report-level chain IDs to the verifier files that prove them.
 
@@ -4739,6 +5314,9 @@ def _build_sc_body_writer_manifests(scratchpad: Path) -> dict[str, dict]:
         the report-index Verification cell, e.g. `H-3+H-9`. Treat those as the
         body writer evidence source instead of marking the report blocked.
         """
+        explicit_verified = _verification_cell_verify_ids(report_id)
+        if explicit_verified:
+            return explicit_verified
         expanded = list(finding_ids)
         for fid in list(finding_ids):
             if not fid.startswith("CH-"):
@@ -4839,6 +5417,7 @@ def _build_sc_body_writer_manifests(scratchpad: Path) -> dict[str, dict]:
         if record and _is_placeholder_report_title(title):
             title = _record_title(record) or title
         desc, rec = _body_writer_evidence_fields(verify_text)
+        poc_result = _body_writer_poc_result_field(verify_text)
         if (not desc or not _is_substantive_body_evidence(desc)) and record:
             desc = str(
                 record.get("description")
@@ -4948,6 +5527,7 @@ def _build_sc_body_writer_manifests(scratchpad: Path) -> dict[str, dict]:
             "verify_files": verify_files,
             "verify_statuses": verify_statuses,
             "description": desc,
+            "poc_result": poc_result,
             "recommendation": rec,
             "report_blocked": bool(report_blocked),
         }

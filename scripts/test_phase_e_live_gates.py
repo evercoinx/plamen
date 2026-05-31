@@ -520,6 +520,8 @@ def test_E5_tier_validator_clean_passes(tmp_path: Path):
 **Severity**: High
 **Location**: src/F.sol:L1
 **Description**: A real description.
+**Impact**: An attacker can withdraw more than their share.
+**PoC Result**: Test confirms the excess withdrawal; assertion passed.
 **Recommendation**: fix it
 """, encoding="utf-8")
     issues = D._validate_tier_body_against_manifest(sp, "report_critical_high")

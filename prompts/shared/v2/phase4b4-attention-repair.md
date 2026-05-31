@@ -135,6 +135,31 @@ value moves. If unbound, write a normal `ATT-*` finding. If already covered,
 mark `NO_FINDING` and cite the existing finding ID. If the pair is intentionally
 irrelevant, mark `SAFE` with the concrete reason.
 
+Asset-binding rows are exact field-pair obligations. Similar topic coverage is
+not enough. A valid closure must discuss both queued fields in the same local
+claim and state the relationship:
+
+- `CONFIRMED`: both fields exist on a reachable value-moving path and can
+  diverge, are not checked against each other, or one can override the other.
+- `SAFE`: both fields are explicitly equal/bound, the path is unreachable, or
+  the pair is impossible in this protocol shape; cite the source evidence and
+  include one enum token:
+  `SAFE_REASON:EXPLICIT_EQUALITY`, `SAFE_REASON:EXPLICIT_BINDING_CHECK`,
+  `SAFE_REASON:UNREACHABLE_PATH`, or `SAFE_REASON:IMPOSSIBLE_PAIR`.
+- `NO_FINDING`: an existing finding already names both queued fields and the
+  relationship between them; cite that finding ID.
+- `NEEDS_HUMAN`: source or deployment data needed for exact closure is absent.
+
+Do not close a row because a nearby asset, recipient, amount, sender, or branch
+issue exists. If the queued pair is `A <-> B`, the row remains open unless your
+evidence explains `A` against `B` directly.
+
+For custody/value rows, do not mark SAFE solely because a mismatch would
+revert, appears self-punishing, requires a prior balance, or has no obvious
+normal accumulation path. Residual custody, failed/refund lifecycle state,
+donations, stale approvals, public recovery paths, and later user-controlled
+spend paths must be excluded before no-balance reasoning can support SAFE.
+
 ### Skill-Execution Gap Rows
 
 Read the matching row in `skill_execution_checklist.md`, then inspect the

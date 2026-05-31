@@ -52,6 +52,7 @@ For each new finding:
 **Description**: What is wrong (describe the NEW vulnerability, not the original)
 **Impact**: What can happen
 **Evidence**: Code snippets showing the mutated path
+**Discovery Steer**: Generic downstream pairing hint when useful; optional, not proof, and not a required field
 ```
 
 Write your output directly to `{SCRATCHPAD}/perturbation_findings.md` using the Write tool.

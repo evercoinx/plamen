@@ -31,6 +31,10 @@ For EACH unexplored cross-class Medium+ pair (limit to 15, prioritizing highest 
 3. If YES: create CHAIN HYPOTHESIS using the Chain Hypothesis Format (see Agent 2 prompt at `~/.claude/prompts/shared/v2/phase4c-chain-agent2.md` → Chain Hypothesis Format section)
 4. Validate via RAG (`assess_hypothesis_strength`, `get_similar_findings`, `search_solodit_live` with WebSearch fallback)
 
+Optional Discovery Steer or `discovery: ...` signals in the pair details are
+only hints for what to inspect first. They are not proof and do not expand the
+15-pair cap or create any new output requirement.
+
 **MCP Timeout Policy**: When an MCP tool call returns a timeout error or fails, do NOT retry the same call. Record `[MCP: TIMEOUT]` and skip ALL remaining calls to that provider — switch immediately to fallback. You cannot cancel a pending call — but you control what happens after the error returns.
 
 ---

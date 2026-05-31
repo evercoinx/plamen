@@ -7,6 +7,7 @@ import os
 import re
 import select
 import signal
+import struct
 import subprocess
 import sys
 import threading
@@ -18,6 +19,28 @@ from typing import Any, TextIO
 
 _DONE_RE = re.compile(r"\bDONE\s*:", re.IGNORECASE)
 _RATE_LIMIT_STATUSES = {429, 529}
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
+_USAGE_CAP_TEXT_RE = re.compile(
+    r"(?:"
+    r"you(?:'|')?ve\s+hit\s+your\s+(?:weekly|daily|monthly)\s+limit"
+    r"|hit\s+your\s+(?:weekly|daily|monthly)\s+limit"
+    r"|usage\s+cap\s+(?:hit|reached|exceeded)"
+    r"|switch\s+to\s+team\s+plan"
+    r"|upgrade\s+to\s+(?:the\s+)?team\s+plan"
+    r")",
+    re.IGNORECASE,
+)
+
+# Claude Code emits this hard error when a single turn's response exceeds the
+# model output-token cap (e.g. 'Claude's response exceeded the 32000 output
+# token maximum'). The turn cannot make further progress: it produces no new
+# transcript events yet the PTY UI keeps spinning. Number-agnostic so it
+# survives model cap changes. Detecting it lets the wait loop stop early and
+# run the disk gate immediately instead of blocking the full phase timeout.
+_OUTPUT_CAP_TEXT_RE = re.compile(
+    r"response\s+exceeded\s+the\s+\d[\d,]*\s+output\s+token\s+maximum",
+    re.IGNORECASE,
+)
 
 # Ship 8.10: the subprocess-isolation overlay payload. SINGLE source of
 # truth shared by plamen_driver (production) and preflight_pty_transports
@@ -62,6 +85,49 @@ def transcript_shows_compaction(
     if any(marker in blob for marker in _COMPACTION_MARKERS):
         return True
     return blob.count("compact") >= 3
+
+
+def _normalized_pty_text(text: str) -> str:
+    """Normalize PTY/control-sequence text for status phrase detection."""
+    text = _ANSI_RE.sub(" ", text or "")
+    text = text.replace("\x00", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip().lower()
+
+
+def _status_code(value: Any) -> int | None:
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def text_shows_rate_limit(text: str) -> bool:
+    """Detect Claude Code interactive usage-cap/rate-limit UI text.
+
+    This intentionally looks for Claude UI/account-cap phrases, not generic
+    audit prose about a protocol's rate limits. It covers PTY screens that do
+    not cleanly terminate with a structured JSON error, such as the "weekly
+    limit / Switch to Team plan" prompt.
+    """
+    normalized = _normalized_pty_text(text)
+    if not normalized:
+        return False
+    if _USAGE_CAP_TEXT_RE.search(normalized):
+        return True
+    if re.search(r"\b(?:apierrorstatus|api error status)\b[^\n\r]{0,80}\b(?:429|529)\b", normalized):
+        return True
+    if re.search(r"\b(?:429)\b[^\n\r]{0,80}\btoo many requests\b", normalized):
+        return True
+    if re.search(r"\b(?:529)\b[^\n\r]{0,80}\boverloaded\b", normalized):
+        return True
+    if re.search(r"\b(?:type|code|error)\s*[:=]\s*(?:rate_limit_error|overloaded_error)\b", normalized):
+        return True
+    return False
 
 
 def isolation_overlay_hash(payload: str | None) -> str:
@@ -257,16 +323,39 @@ def event_has_done(event: dict[str, Any]) -> bool:
 
 
 def event_is_rate_limited(event: dict[str, Any]) -> bool:
-    status = event.get("api_error_status")
-    if status in _RATE_LIMIT_STATUSES:
+    status = event.get("api_error_status") or event.get("apiErrorStatus")
+    if _status_code(status) in _RATE_LIMIT_STATUSES:
         return True
+    # Claude transcripts store tool results and prompt echoes as `type=user`.
+    # Those payloads often contain audited source/prose, line numbers, and
+    # vulnerability text. Never classify arbitrary user/tool-result content as
+    # a transport/account rate limit; only structured API/error envelopes and
+    # live PTY UI text are authoritative.
+    event_type = str(event.get("type") or "").lower()
+    if event_type == "user":
+        return False
     for source in (event, _event_message(event), event.get("error")):
+        if isinstance(source, str):
+            if source.lower() in ("rate_limit", "rate_limited", "overloaded"):
+                return True
+            if text_shows_rate_limit(source):
+                return True
+            continue
         if not isinstance(source, dict):
             continue
-        status = source.get("api_error_status") or source.get("status")
-        if status in _RATE_LIMIT_STATUSES:
+        status = (
+            source.get("api_error_status")
+            or source.get("apiErrorStatus")
+            or source.get("status")
+        )
+        if _status_code(status) in _RATE_LIMIT_STATUSES:
             return True
         err = source.get("error")
+        if isinstance(err, str):
+            if err.lower() in ("rate_limit", "rate_limited", "overloaded"):
+                return True
+            if text_shows_rate_limit(err):
+                return True
         if isinstance(err, dict):
             typ = str(err.get("type") or err.get("code") or "").lower()
             if "rate_limit" in typ or "overloaded" in typ:
@@ -277,8 +366,10 @@ def event_is_rate_limited(event: dict[str, Any]) -> bool:
         stop = str(source.get("stop_reason") or "").lower()
         if stop in ("rate_limited", "rate_limit", "overloaded"):
             return True
-    text = json.dumps(event, ensure_ascii=True).lower()
-    return "rate_limit_error" in text or "overloaded_error" in text
+        message = source.get("message") or source.get("content") or ""
+        if isinstance(message, str) and text_shows_rate_limit(message):
+            return True
+    return False
 
 
 @dataclass
@@ -286,6 +377,7 @@ class TurnCompleteState:
     complete: bool
     done_seen: bool = False
     rate_limited: bool = False
+    output_truncated: bool = False
     line_count: int = 0
     last_event_time: float | None = None
     last_assistant: dict[str, Any] | None = None
@@ -542,8 +634,13 @@ class ClaudePtySession:
         self.transcript_path = claude_transcript_path(session_id, cwd, claude_home)
         self.log_file = log_file
         self.proc: Any = None
+        self._child_pid: int | None = None
+        self._child_pgid: int | None = None
+        self._master_fd: int | None = None
         self._reader_stop = threading.Event()
         self._reader_thread: threading.Thread | None = None
+        self._recent_output = ""
+        self._recent_output_lock = threading.Lock()
 
     def spawn(self) -> None:
         if sys.platform == "win32":
@@ -572,6 +669,14 @@ class ClaudePtySession:
                 pass
 
             master_fd, slave_fd = pty.openpty()
+            try:
+                fcntl.ioctl(
+                    slave_fd,
+                    termios.TIOCSWINSZ,
+                    struct.pack("HHHH", 40, 120, 0, 0),
+                )
+            except Exception:
+                pass
 
             def _child_setup() -> None:
                 try:
@@ -598,12 +703,22 @@ class ClaudePtySession:
                     close_fds=True,
                     preexec_fn=_child_setup,
                 )
+            except Exception:
+                try:
+                    os.close(master_fd)
+                except Exception:
+                    pass
+                raise
             finally:
                 try:
                     os.close(slave_fd)
                 except Exception:
                     pass
             self._child_pid = self.proc.pid
+            try:
+                self._child_pgid = os.getpgid(self._child_pid)
+            except Exception:
+                self._child_pgid = self._child_pid
             self._master_fd = master_fd
         self._start_reader()
 
@@ -658,6 +773,8 @@ class ClaudePtySession:
         if sys.platform == "win32":
             self.proc.write(text)
         else:
+            if self._master_fd is None:
+                return
             os.write(self._master_fd, text.encode("utf-8", errors="replace"))
 
     def is_alive(self) -> bool:
@@ -685,12 +802,28 @@ class ClaudePtySession:
                         self.proc.kill()
                     except Exception:
                         pass
-            else:
                 try:
-                    os.killpg(os.getpgid(self._child_pid), signal.SIGTERM)
+                    pid = getattr(self.proc, "pid", None)
+                    if pid:
+                        subprocess.run(
+                            ["taskkill", "/PID", str(pid), "/T", "/F"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=max(1.0, grace_s + 0.5),
+                            check=False,
+                        )
+                except Exception:
+                    pass
+            else:
+                pgid = self._child_pgid
+                pid = self._child_pid
+                try:
+                    if pgid is not None:
+                        os.killpg(pgid, signal.SIGTERM)
                 except Exception:
                     try:
-                        os.kill(self._child_pid, signal.SIGTERM)
+                        if pid is not None:
+                            os.kill(pid, signal.SIGTERM)
                     except Exception:
                         pass
                 deadline = time.time() + grace_s
@@ -698,9 +831,14 @@ class ClaudePtySession:
                     time.sleep(0.1)
                 if self.is_alive():
                     try:
-                        os.killpg(os.getpgid(self._child_pid), signal.SIGKILL)
+                        if pgid is not None:
+                            os.killpg(pgid, signal.SIGKILL)
                     except Exception:
-                        pass
+                        try:
+                            if pid is not None:
+                                os.kill(pid, signal.SIGKILL)
+                        except Exception:
+                            pass
                 try:
                     self.proc.wait(timeout=1.0)
                 except Exception:
@@ -708,6 +846,12 @@ class ClaudePtySession:
         finally:
             if self._reader_thread and self._reader_thread.is_alive():
                 self._reader_thread.join(timeout=1.0)
+            if self._master_fd is not None:
+                try:
+                    os.close(self._master_fd)
+                except Exception:
+                    pass
+                self._master_fd = None
 
     def wait_for_turn_complete(
         self,
@@ -725,9 +869,26 @@ class ClaudePtySession:
             if now - last_transcript_poll >= transcript_poll_s:
                 state = inspect_transcript(self.transcript_path)
                 last_transcript_poll = now
+                with self._recent_output_lock:
+                    _recent_norm = _normalized_pty_text(self._recent_output)
+                    if _USAGE_CAP_TEXT_RE.search(_recent_norm):
+                        state.rate_limited = True
+                    elif _OUTPUT_CAP_TEXT_RE.search(_recent_norm):
+                        # The turn hit the model output-token cap and cannot
+                        # emit more. It will spin without new transcript
+                        # events. Only treat as terminal once the transcript
+                        # is quiescent, so a self-recovering turn is not cut
+                        # off prematurely.
+                        if (
+                            state.last_event_time is not None
+                            and now - state.last_event_time >= quiescence_s
+                        ):
+                            state.output_truncated = True
             if on_poll:
                 on_poll(now, state)
             if state.rate_limited:
+                return state
+            if state.output_truncated:
                 return state
             if state.complete and state.last_event_time is not None:
                 if now - state.last_event_time >= quiescence_s:
@@ -747,16 +908,24 @@ class ClaudePtySession:
                             break
                         chunk = self.proc.read(4096)
                     else:
+                        if self._master_fd is None:
+                            break
                         readable, _, _ = select.select([self._master_fd], [], [], 0.25)
                         if not readable:
                             if not self.is_alive():
                                 break
                             continue
+                        if self._master_fd is None:
+                            break
                         data = os.read(self._master_fd, 4096)
                         if not data:
                             break
                         chunk = data.decode("utf-8", errors="replace")
                     if chunk:
+                        with self._recent_output_lock:
+                            self._recent_output = (
+                                self._recent_output + chunk
+                            )[-65536:]
                         self.log_file.write(chunk)
                         self.log_file.flush()
                 except Exception:

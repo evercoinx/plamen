@@ -1671,6 +1671,31 @@ def test_A3_attention_repair_validation_requires_verdicts_and_paths():
           repr((hard, soft)))
 
 
+def test_A3_attention_repair_accepts_covered_verdict_for_receipts():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "# Attention Repair Queue\n\n"
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | security-obligation | `SO-001` | gap | `security_obligations.md` | `SO-001` |\n"
+            "| 2 | security-obligation | `SO-002` | gap | `security_obligations.md` | `SO-002` |\n"
+            "| 3 | security-obligation | `SO-003` | gap | `security_obligations.md` | `SO-003` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| Row 1 | security-obligation | `SO-001` | COVERED | Existing depth/scanner artifacts cover SO-001 | no new finding |\n"
+            "| #2 | security-obligation | `SO-002` | REVIEWED | Existing depth/scanner artifacts cover SO-002 | no new finding |\n"
+            "- Queue 3: CLOSED after reviewing SO-003; no new finding.\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    check("A3 attention repair accepts common verdict and row-number variants",
+          hard == [],
+          repr((hard, soft)))
+
+
 def test_A3_attention_repair_requires_full_queued_path_receipt():
     sp = _mkscratch({
         "attention_repair_queue.md": (
@@ -1711,6 +1736,150 @@ def test_A3_attention_repair_validation_accepts_row_shard_suffix_paths():
     })
     hard, soft = D._validate_attention_repair(sp, "thorough")
     check("A3 attention repair accepts row-shard basename/suffix citations",
+          hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_rejects_vague_asset_binding_closure():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-001: declaredAsset <-> executedAsset` | exact pair unresolved | `asset_binding_matrix.md` | `AB-001` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-001: declaredAsset <-> executedAsset` | NO_FINDING | Existing H-1 says executedAsset is not validated | adjacent asset issue |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    # FC2: asset-binding closure wording is a prose-quality judgment on an
+    # enrichment phase -> it WARNs (soft) and must NOT hard-fail/halt.
+    check("A3 attention repair warns (not halts) on adjacent-only asset binding closure",
+          any("asset-binding closure" in issue for issue in soft) and hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_accepts_exact_asset_binding_closure():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-001: declaredAsset <-> executedAsset` | exact pair unresolved | `asset_binding_matrix.md` | `AB-001` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-001: declaredAsset <-> executedAsset` | SAFE | Router.sol:L10 proves declaredAsset is validated against executedAsset before transfer | SAFE_REASON:EXPLICIT_BINDING_CHECK; exact pair closed |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    check("A3 attention repair accepts exact asset binding closure",
+          hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_accepts_impossible_pair_safe_reason():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-003: context.asset <-> decoded.targetZRC20` | exact pair unresolved | `asset_binding_matrix.md` | `AB-003` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-003: context.asset <-> decoded.targetZRC20` | SAFE | Gateway.sol:L10-L40 proves context.asset is read only in onRevert while decoded.targetZRC20 is decoded only in onCall. | SAFE_REASON:IMPOSSIBLE_PAIR - context.asset and decoded.targetZRC20 are on disjoint code paths; no reachable execution path touches both fields simultaneously. |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    check("A3 attention repair accepts impossible-pair asset binding closure",
+          hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_accepts_impossible_pair_revert_path_wording():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-003: context.asset <-> decoded.targetZRC20` | exact pair unresolved | `asset_binding_matrix.md` | `AB-003` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-003: context.asset <-> decoded.targetZRC20` | SAFE | Gateway.sol:L10-L40 proves context.asset is present only on the onRevert callback path while decoded.targetZRC20 is decoded only for onCall withdrawals. | SAFE_REASON:IMPOSSIBLE_PAIR - on every revert path context.asset and decoded.targetZRC20 are disjoint fields, so no reachable execution path can bind both fields in one local action. |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    check("A3 attention repair accepts impossible-pair closure with revert wording",
+          hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_accepts_binding_check_revert_wording():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-008: params.minReturnAmount <-> outputAmount` | exact pair unresolved | `asset_binding_matrix.md` | `AB-008` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-008: params.minReturnAmount <-> outputAmount` | SAFE | Swap.sol:L337-L361 passes params.minReturnAmount directly into mixSwap and assigns outputAmount from the same mixSwap return value. | SAFE_REASON:EXPLICIT_BINDING_CHECK - mixSwap enforces outputAmount >= params.minReturnAmount before returning; if the bound is not met, mixSwap reverts and outputAmount is never assigned. |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    check("A3 attention repair accepts explicit binding closure with revert wording",
+          hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_rejects_residual_balance_safe_reason():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-009: sourceToken <-> paidToken` | exact pair unresolved | `asset_binding_matrix.md` | `AB-009` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-009: sourceToken <-> paidToken` | SAFE | Router.sol:L10 mentions sourceToken and paidToken. | SAFE_REASON:EXPLICIT_BINDING_CHECK - any mismatch only consumes residual balance, so sourceToken and paidToken are economically self-punishing. |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    # FC2: residual-balance SAFE reasoning is still flagged, but as a soft
+    # warning -- it must not hard-fail/halt the enrichment phase.
+    check("A3 attention repair warns (not halts) on residual-balance SAFE reasoning",
+          any("asset-binding closure" in issue for issue in soft) and hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_accepts_existing_finding_asset_binding_closure():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-001: outputAmount <-> targetAmount` | exact pair unresolved | `asset_binding_matrix.md` | `AB-001` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-001: outputAmount <-> targetAmount` | COVERED | INV-014 covers outputAmount not validated against targetAmount: this is the exact binding failure described. | no new finding |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    check("A3 attention repair accepts existing-finding asset binding closure",
           hard == [],
           repr((hard, soft)))
 
@@ -2821,8 +2990,16 @@ def main():
         test_Q4_hibernation_can_be_opted_in,
         test_A3_attention_repair_queue_from_notread_and_uncited_security_files,
         test_A3_attention_repair_validation_requires_verdicts_and_paths,
+        test_A3_attention_repair_accepts_covered_verdict_for_receipts,
         test_A3_attention_repair_requires_full_queued_path_receipt,
         test_A3_attention_repair_validation_accepts_row_shard_suffix_paths,
+        test_A3_attention_repair_rejects_vague_asset_binding_closure,
+        test_A3_attention_repair_accepts_exact_asset_binding_closure,
+        test_A3_attention_repair_accepts_impossible_pair_safe_reason,
+        test_A3_attention_repair_accepts_impossible_pair_revert_path_wording,
+        test_A3_attention_repair_accepts_binding_check_revert_wording,
+        test_A3_attention_repair_rejects_residual_balance_safe_reason,
+        test_A3_attention_repair_accepts_existing_finding_asset_binding_closure,
         test_A3_attention_repair_graph_rows_do_not_require_exact_source_path,
         test_A3_attention_repair_findings_promote_into_inventory,
         test_A3_graph_schema_catches_weak_network_rows,

@@ -22,7 +22,10 @@ If `{SCRATCHPAD}/asset_binding_matrix.md` exists, treat it as a compact
 driver-generated value-binding checklist. It is not an expected-finding list.
 For each row relevant to your assigned role, either produce a normal finding
 with file:line evidence for an unbound asset/amount/recipient/provenance pair,
-or record why the pair is bound, unreachable, or irrelevant.
+or record why the pair is bound, unreachable, or irrelevant. Close rows exactly:
+if the row asks about `A <-> B`, do not treat a nearby issue involving only
+`A`, only `B`, or a sibling field as coverage. Your finding or dismissal must
+name both fields and the relationship between them.
 
 ## Light Mode Override
 
@@ -98,6 +101,12 @@ In your output file, include a section named exactly:
 
 Summarize the challenged invariant(s), read-site expectation(s), branch matrix
 entries, and intent evidence or evidence gap for each relevant candidate.
+
+For live findings, you MAY add the optional `**Discovery Steer**:` finding
+field when it preserves a bounded downstream pairing hint (shared
+variable/function, branch condition, postcondition/precondition link,
+terminal mechanism, or candidate ID). This is not proof, not a required
+section, and must stay inside your assigned output file.
 ```
 
 ### Finding Severity / Disposition Contract (MANDATORY)
@@ -236,6 +245,19 @@ preserves prior findings and the marker header; a second Write would
 overwrite them. Include the mandatory `## Semantic Proof Checks`,
 `## Graph Artifact Consumption`, and `## Obligation Receipts` sections per
 the other blocks in this prompt.
+
+OUTPUT-BUDGET DISCIPLINE (avoid a single oversized turn that hits the output-
+token cap mid-write and leaves the file IN_PROGRESS):
+- Write your findings FIRST, then the four required section headers, then APPEND
+  the `PLAMEN_STATUS: COMPLETE` marker AS SOON AS findings + the four section
+  headers exist. Add any remaining receipt detail AFTER the marker — a complete-
+  but-terse file is far better than an uncapped turn that never marks COMPLETE.
+- Keep every Obligation Receipt to ONE line.
+- If your `function_summary.md` partition exceeds ~40 rows, emit individual
+  receipts for all Reported (R) and Carried (C) rows, but BATCH Dismissed (D)
+  rows into grouped one-line receipts:
+  `[OBLIG:function_summary.md:<contract>.*] STATUS:D KEY:<shared reason> -> rows: f1,f2,...`
+  (the receipt gate is WARNING-only, so batching D-rows cannot fail a gate).
 
 Final Step -- Edit: mark COMPLETE.
 Once all findings and required sections are written, APPEND at the END of the

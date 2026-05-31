@@ -119,6 +119,15 @@ The Trust Adj. column in `report_index.md` Master Finding Index records `UNRESOL
 
 **Why body and not Appendix A**: in security audits, the cost of missing a real exploit (false negative) exceeds the cost of an extra body section flagged for human triage (false positive). Burying UNRESOLVED in Appendix A inverts that tradeoff and historically caused real findings to disappear from human attention.
 
+### SEVERITY_OVERRIDE token
+
+`SEVERITY_OVERRIDE(original_sev)` is a driver-only Trust Adj. token. It may be
+used only when `_severity_override_ledger.json` exists and names the affected
+finding, original severity, final severity, and reason. Report agents must not
+invent severity overrides from prose; without the ledger, use the normal
+severity matrix, verifier result, UNRESOLVED/PARTIAL, trusted-actor, chain, or
+PoC-fail rules.
+
 **Rules for descriptions**:
 - Write as if the reader has never seen the audit pipeline. No "as identified by the breadth agent" or "this chain combines H-1 with H-3."
 - For chain findings (multiple bugs combining): describe the full attack sequence from start to finish in the Description. The reader should understand the complete attack path without needing to read other findings.

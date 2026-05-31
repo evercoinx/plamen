@@ -13,15 +13,18 @@ symlink to the canonical `~/.plamen/` checkout — edits land in `~/.plamen/`.
   (`scripts/pty_exec.py`) is Claude-only. Codex invokes `codex exec` directly
   through the driver; there are no PTY worker pools, no compaction heartbeat,
   and no `PLAMEN_STATUS` marker envelope on Codex.
-- **MCP**: Codex loads MCP servers natively from `[mcp_servers.*]` TOML blocks
-  in `~/.codex/config.toml`, generated at install time by
-  `scripts/codex_adapter.py`. The MCP TIMEOUT POLICY (rule 10 below) applies
-  on Codex exactly as on Claude.
+- **MCP**: the V2 driver launches `codex exec` with `--ignore-user-config`, so
+  the `[mcp_servers.*]` blocks in `~/.codex/config.toml` are NOT loaded — the
+  bundled MCP tools (slither, unified-vuln-db, solana-fender) are unavailable on
+  Codex. Use the methodology's WebSearch / web-fetch fallbacks for RAG and
+  historical-precedent steps instead of MCP.
 - **Concurrency**: Codex supports up to 6 concurrent sub-agents via
   `spawn_agent`. Plan parallel work within that ceiling.
-- **Sandbox**: network access is NOT available inside the Codex sandbox —
-  agents must not call external HTTP endpoints. Local file I/O, shell, and
-  MCP server calls are fine.
+- **Sandbox / network**: the driver runs Codex under
+  `--dangerously-bypass-approvals-and-sandbox`, so network access IS available.
+  Because MCP is off (above), WebSearch / web-fetch are the primary external-
+  knowledge path and SHOULD be used where the methodology calls for RAG or
+  historical validation. Local file I/O and shell are fine.
 
 ## Audit Modes
 

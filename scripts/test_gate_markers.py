@@ -276,12 +276,15 @@ def test_gate_legacy_accepts_unmarked_with_log(tmp_path: Path, caplog):
     phase = _breadth_phase()
     import logging
 
-    with caplog.at_level(logging.WARNING):
+    # NOISE-1: on a legacy/resumed scratchpad (no fresh-audit sentinel) the
+    # tolerated unmarked artifact is logged at INFO, not WARNING -- toleration is
+    # the designed-correct outcome. Capture at INFO; message text is unchanged.
+    with caplog.at_level(logging.INFO):
         passed, missing = D.gate_passes(sp, str(project), phase)
 
     assert passed is True, f"unexpected missing: {missing!r}"
     assert missing == []
-    # Warning should mention legacy-unmarked-artifact for the file
+    # Log line should mention legacy-unmarked-artifact for the file
     assert any(
         "legacy-unmarked-artifact" in rec.getMessage()
         and "analysis_core_state.md" in rec.getMessage()

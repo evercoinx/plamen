@@ -222,6 +222,10 @@ file and lose earlier findings plus the marker header.
 Use the per-agent finding ID prefix from spawn_manifest.md (e.g.
 `[CS-1]`, `[AC-1]`, `[TF-1]`). Follow the finding-output format from
 ~/.claude/rules/finding-output-format.md.
+When a finding has a clear pairing hint, you MAY add the optional
+`**Discovery Steer**:` line using generic terms only (shared variable/function,
+branch condition, terminal effect, or candidate ID). This is not proof, not a
+required section, and must not create any additional artifact.
 
 Step 5 -- Edit obligation receipts.
 For every opengrep row in your assigned scope (per Step 2's source),

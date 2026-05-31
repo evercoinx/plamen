@@ -26,6 +26,17 @@ SKIP_DIR_NAMES = {
     "lib", "forge-cache", ".foundry", ".anchor", ".aptos", ".sui",
 }
 
+PRODUCTION_SOURCE_SKIP_PARTS = {
+    "test", "tests", "fuzz", "fuzzing", "script", "scripts", "fixture",
+    "fixtures", "mock", "mocks", "spec", "specs", "benchmark", "benchmarks",
+    "medusa", "echidna", "halmos", ".medusa-tests",
+}
+
+PRODUCTION_SOURCE_SKIP_NAME_RE = re.compile(
+    r"(^|[_\-.])(mock|stub|fake|fixture|test|spec|fuzz)([_\-.]|$)",
+    re.IGNORECASE,
+)
+
 def _iter_files(root: Path, suffixes: Tuple[str, ...]) -> List[Path]:
     out: List[Path] = []
     root = root.resolve()
@@ -35,6 +46,28 @@ def _iter_files(root: Path, suffixes: Tuple[str, ...]) -> List[Path]:
             if name.endswith(suffixes):
                 out.append(Path(dirpath) / name)
     return out
+
+def _is_production_source_path(path: Path, root: Path) -> bool:
+    """Return True for files worth scanning/compiling during bounded recon prepass."""
+    try:
+        rel = path.resolve().relative_to(root.resolve())
+    except Exception:
+        rel = path
+    parts = [p.lower() for p in rel.parts[:-1]]
+    if any(p in PRODUCTION_SOURCE_SKIP_PARTS for p in parts):
+        return False
+    stem = rel.stem.lower()
+    if stem.startswith(("mock", "stub", "fake")):
+        return False
+    if stem.endswith(("mock", "stub", "fake", "fixture", "test", "spec", "fuzz")):
+        return False
+    return PRODUCTION_SOURCE_SKIP_NAME_RE.search(rel.name) is None
+
+def _production_source_files(root: Path, suffixes: Tuple[str, ...]) -> List[Path]:
+    return [
+        p for p in _iter_files(root, suffixes)
+        if _is_production_source_path(p, root)
+    ]
 
 def _lines_and_bytes(p: Path) -> Tuple[int, int]:
     try:
@@ -275,6 +308,9 @@ def _select_build(proj: Path, lang: str) -> Optional[str]:
         return "sui"
     return None
 
+_MAX_RECON_FORGE_FILES = 120
+_MAX_OPENGREP_SOURCE_FILES = 300
+
 def _tail(text: str, n: int = 2048) -> str:
     if not text:
         return ""
@@ -293,8 +329,39 @@ def _write_build_status(scratch: Path, proj: Path, lang: str) -> str:
                         "No build tool / manifest detected. LLM recon may re-attempt.\n")
             return "STUB"
         spec = BUILD_SPECS[key]
-        cmd = spec["cmd"]
+        cmd = list(spec["cmd"])
         timeout = spec["timeout"]
+        if key == "evm_forge":
+            source_files = sorted(_production_source_files(proj, (".sol",)), key=lambda p: _rel(p, proj))
+            if not source_files:
+                _write_text(scratch / "build_status.md",
+                            "# Build Status\n\n"
+                            "**Tool**: evm_forge\n\n"
+                            "**Status**: SKIPPED\n\n"
+                            "No production Solidity source files found for bounded recon pre-pass.\n")
+                return "WRITTEN"
+            if len(source_files) > _MAX_RECON_FORGE_FILES:
+                _write_text(scratch / "build_status.md",
+                            "# Build Status\n\n"
+                            "**Tool**: evm_forge\n\n"
+                            "**Status**: SKIPPED\n\n"
+                            f"Found {len(source_files)} production Solidity files; "
+                            "skipping recon pre-pass compile to avoid an unbounded compiler fanout. "
+                            "Later repair/verification phases must compile explicit affected files.\n")
+                return "WRITTEN"
+            cmd = (
+                ["forge", "build"]
+                + [_rel(f, proj) for f in source_files]
+                + ["--threads", "1", "--no-auto-detect"]
+            )
+            # RECON-6: even within the file-count cap, the per-file argv can
+            # exceed the OS command-length limit (notably on Windows), which
+            # raises OSError/FileNotFoundError and gets recorded as a spurious
+            # build=FAILED. When the argv would be too long, fall back to a
+            # scoped whole-project `forge build` rather than mis-signal a broken
+            # build to recon/verification.
+            if sum(len(a) + 1 for a in cmd) > 7000:
+                cmd = ["forge", "build", "--threads", "1", "--no-auto-detect"]
         timed_out = False
         try:
             proc = subprocess.run(cmd, cwd=str(proj), timeout=timeout,
@@ -648,7 +715,9 @@ def _scip_to_graph_artifacts(scratch: Path, index_path: Path, proj: Path) -> str
         # Collect all definitions and their references
         for sym, defn_occ in reader._definitions.items():
             name = reader._extract_name_from_symbol(sym)
-            if not name or name.startswith("_") and len(name) < 3:
+            # RECON-8: explicit grouping -- skip empty names and short
+            # underscore-prefixed private symbols.
+            if not name or (name.startswith("_") and len(name) < 3):
                 continue
             info = reader._symbol_info.get(sym)
             kind = info.kind if info else ""
@@ -684,30 +753,41 @@ def _scip_to_graph_artifacts(scratch: Path, index_path: Path, proj: Path) -> str
                     if writer_locs:
                         state_writers[name] = writer_locs
 
-        # For callee_map: invert — for each function definition, find what it calls
-        # by scanning references that occur within its body range
-        for fn_name, fn_data in fn_info.items():
-            fn_path = fn_data["path"]
-            fn_line = fn_data["line"]
-            # Simple heuristic: callees are other functions whose references
-            # appear in the same file near this function's definition
-            called = []
-            for other_name, other_data in fn_info.items():
-                if other_name == fn_name:
-                    continue
-                other_sym = None
-                for s, d in reader._definitions.items():
-                    if reader._extract_name_from_symbol(s) == other_name:
-                        other_sym = s
-                        break
-                if not other_sym:
-                    continue
-                for ref in reader._references.get(other_sym, []):
-                    if ref.relative_path == fn_path:
-                        called.append(other_name)
-                        break
-            if called:
-                callees[fn_name] = called[:20]
+        # For callee_map: approximate callees by same-file reference
+        # co-occurrence. RECON-2b: this was O(F^2 * D) (nested fn_info scan with
+        # an inner O(D) symbol lookup) and could run effectively unbounded on a
+        # large program during the silent window. Two bounds:
+        #   1. Pre-build name -> set(files that reference it) ONCE (O(total refs))
+        #      so the inner per-pair work is an O(1) set lookup, not an O(D) scan.
+        #   2. A hard node cap: above it, emit a PARTIAL callee_map instead of
+        #      grinding (callers/state-writers/function-summary are still emitted).
+        _CALLEE_NODE_CAP = 1500
+        callee_map_status = "HEURISTIC"  # RECON-3: file co-occurrence, not verified call edges
+        name_to_ref_files: Dict[str, set] = {}
+        for sym, refs in reader._references.items():
+            nm = reader._extract_name_from_symbol(sym)
+            if nm in fn_info:
+                name_to_ref_files.setdefault(nm, set()).update(
+                    r.relative_path for r in refs
+                )
+        if len(fn_info) > _CALLEE_NODE_CAP:
+            callee_map_status = "PARTIAL"
+            log.warning(
+                "[scip_bake] %d functions exceed callee node cap %d; emitting "
+                "PARTIAL callee_map (skipping co-occurrence edges)",
+                len(fn_info), _CALLEE_NODE_CAP,
+            )
+        else:
+            for fn_name, fn_data in fn_info.items():
+                fn_path = fn_data["path"]
+                called = [
+                    other_name
+                    for other_name in fn_info
+                    if other_name != fn_name
+                    and fn_path in name_to_ref_files.get(other_name, ())
+                ]
+                if called:
+                    callees[fn_name] = called[:20]
 
         # Write caller_map.md
         lines = [
@@ -725,13 +805,18 @@ def _scip_to_graph_artifacts(scratch: Path, index_path: Path, proj: Path) -> str
         _write_text(scratch / "caller_map.md", "\n".join(lines))
 
         # Write callee_map.md
+        # RECON-3: these are file-level co-occurrence approximations, NOT
+        # verified call edges (a function appears as a "callee" if it is
+        # referenced anywhere in the same file). The status header says so, so
+        # depth agents weight it as a hint, not ground truth.
         lines = [
-            "> **Status**: POPULATED",
-            "> **Source**: rust-analyzer SCIP index (v2.5.0 P1)",
+            f"> **Status**: {callee_map_status}",
+            "> **Source**: rust-analyzer SCIP index (v2.5.0 P1) — file-level "
+            "co-occurrence heuristic, not verified call edges",
             "",
             "# Callee Map",
             "",
-            "| Function | Callees |",
+            "| Function | Callees (same-file references, heuristic) |",
             "|----------|---------|",
         ]
         for fn_name in sorted(callees.keys()):
@@ -878,24 +963,47 @@ def _run_opengrep_scan(scratch: Path, proj: Path, lang: str) -> str:
 
     # Check project has relevant source files
     exts = _OPENGREP_LANG_EXT.get(lang, ())
-    source_files = _iter_files(proj, exts)
+    source_files = sorted(_production_source_files(proj, exts), key=lambda p: _rel(p, proj))
     if not source_files:
-        return f"SKIPPED:no {'/'.join(exts)} files in project"
+        return f"SKIPPED:no production {'/'.join(exts)} files in project"
+    if len(source_files) > _MAX_OPENGREP_SOURCE_FILES:
+        return f"SKIPPED:{len(source_files)} production source files exceeds bounded OpenGrep prepass limit"
 
     sarif_path = scratch / "opengrep_results.sarif"
     cmd = ["opengrep", "scan"]
     for rp in resolved_rules:
         cmd.extend(["-f", rp])
-    cmd.extend(["--sarif-output", str(sarif_path), str(proj)])
+    cmd.extend(["--sarif-output", str(sarif_path)])
+    cmd.extend([_rel(p, proj) for p in source_files])
 
     try:
-        proc = subprocess.run(
-            cmd, cwd=str(proj), timeout=_OPENGREP_SCAN_TIMEOUT,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(proj),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
-    except subprocess.TimeoutExpired:
-        return f"FAILED:timeout after {_OPENGREP_SCAN_TIMEOUT}s"
+        try:
+            so, se = proc.communicate(timeout=_OPENGREP_SCAN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            else:
+                proc.kill()
+            try:
+                so, se = proc.communicate(timeout=5)
+            except Exception:
+                so, se = "", ""
+            return f"FAILED:timeout after {_OPENGREP_SCAN_TIMEOUT}s"
     except FileNotFoundError:
         return "SKIPPED:opengrep not found"
     except Exception as e:
@@ -1166,6 +1274,18 @@ def run_recon_prepass(config: dict) -> Dict[str, str]:
 
     skill_index = Path(os.path.expanduser("~/.claude/rules/skill-index.md"))
 
+    # RECON-1/RECON-2: slow external scanners (SCIP bake, Sec3 X-Ray, OpenGrep)
+    # must NOT run in the startup pre-pass by default. At startup the driver has
+    # not planted _v2_checkpoint.json or printed the first phase, so a multi-
+    # minute scan looks like a dead launch (the chronic 0-byte-stdio class).
+    # They run instead in the driver's pre-breadth hook where the TUI heartbeat
+    # and disk gate are active. Keep the old startup behavior behind an explicit
+    # escape hatch for local debugging.
+    run_startup_scanners = (
+        os.environ.get("PLAMEN_PREPASS_EXTERNAL_SCANNERS") == "1"
+        or bool(config.get("prepass_external_scanners"))
+    )
+
     if pipeline == "l1":
         _safe("subsystem_map.md",    lambda: _write_subsystem_map_l1(scratch, proj))
         _safe("trust_boundaries.md", lambda: _write_trust_boundaries_l1(scratch, proj))
@@ -1196,8 +1316,10 @@ def run_recon_prepass(config: dict) -> Dict[str, str]:
               "# Emit List\n\n[LLM TO ENRICH] Pre-pass stub.\n\n"
               "| Contract | Event | Parameters | Emitting Function |\n"
               "|----------|-------|------------|-------------------|\n"))
-        # v2.5.0 P1: SCIP bake for Rust-based chains (Solana/Soroban)
-        if lang in ("solana", "soroban"):
+        # v2.5.0 P1: SCIP bake for Rust-based chains (Solana/Soroban).
+        # RECON-2: deferred to the driver pre-breadth hook by default (it has an
+        # unbounded Python conversion that can stall the silent startup window).
+        if lang in ("solana", "soroban") and run_startup_scanners:
             _safe("scip_bake", lambda: _bake_rust_scip(scratch, proj))
 
     _safe("template_recommendations.md",
@@ -1207,22 +1329,15 @@ def run_recon_prepass(config: dict) -> Dict[str, str]:
     _safe("meta_buffer.md", lambda: _write_meta_buffer_stub(scratch))
 
     # v2.5.0 P2: OpenGrep cross-ecosystem scanner (SC pipelines only).
-    #
-    # Do not run external scanners in the startup pre-pass by default. The
-    # driver has not planted `_v2_checkpoint.json` or printed the first phase
-    # yet, so a slow scanner looks like a dead launch. The driver runs this as
-    # an optional pre-breadth step where the TUI and disk gate are already
-    # active. Keep the old behavior behind an explicit escape hatch for local
-    # debugging.
-    run_startup_scanners = (
-        os.environ.get("PLAMEN_PREPASS_EXTERNAL_SCANNERS") == "1"
-        or bool(config.get("prepass_external_scanners"))
-    )
+    # Deferred to the driver pre-breadth hook by default (see run_startup_scanners
+    # above); the escape hatch keeps the old startup behavior for local debugging.
     if pipeline != "l1" and run_startup_scanners:
         _safe("opengrep_scan", lambda: _run_opengrep_scan(scratch, proj, lang))
 
-    # v2.5.0 P4: Sec3 X-Ray for Solana (Docker-based, SC only)
-    if pipeline != "l1" and lang == "solana":
+    # v2.5.0 P4: Sec3 X-Ray for Solana (Docker-based, SC only).
+    # RECON-1: deferred to the driver pre-breadth hook by default (a Docker run
+    # can take ~10 min and would stall the silent startup window).
+    if pipeline != "l1" and lang == "solana" and run_startup_scanners:
         _safe("sec3_xray", lambda: _run_sec3_xray(scratch, proj))
 
     return results

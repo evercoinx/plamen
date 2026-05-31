@@ -668,13 +668,13 @@ def test_a1_execution_contract_claude_for_task_phases():
     assert "run_in_background" in _render_execution_contract(
         "depth", "sc", backend="claude"
     )
-    # breadth and recon are also Task-using on Claude.
+    # breadth is Task-using on Claude.
     assert "run_in_background" in _render_execution_contract(
         "breadth", "sc", backend="claude"
     )
-    assert "run_in_background" in _render_execution_contract(
-        "recon", "sc", backend="claude"
-    )
+    # Recon is driver-owned worker-pool/direct handoff now; do not reintroduce
+    # a coordinator Task contract.
+    assert _render_execution_contract("recon", "sc", backend="claude") == ""
 
 
 def test_a1_execution_contract_codex_for_multi_agent_phases():

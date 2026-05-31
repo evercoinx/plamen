@@ -49,6 +49,11 @@ Additional semantic precomputation, bounded to the variables processed above:
 11. **Track lifecycle semantics**: Classify processed variables by lifecycle role: initialized, accumulated, checkpointed, settled, reset, invalidated, migrated, or configuration-derived. Record functions that move the variable between lifecycle states, and flag `LIFECYCLE_GAP` where a lifecycle transition updates the underlying value but not the tracking variable.
 12. **List refutation hazards for downstream depth**: For each suspected gap, record the strongest bounded reason it might be a false positive, such as an inherited write, hook-mediated update, cached external accounting, mutually exclusive lifecycle path, dead branch, caller-enforced precondition, or intentionally stale snapshot. This is not a proof obligation; it is guidance for depth agents to falsify or confirm quickly.
 
+Where an existing table cell has room, you MAY include `Discovery Steer: ...`
+as a compact hint for downstream pairing (shared variable/function, branch,
+lifecycle state, terminal effect, or candidate ID). It is not proof, not a
+required section, and must not create any additional artifact.
+
 Do not broaden this phase into a full-project proof. Keep the additional semantic sections bounded by the same live-pass limit. For variables skipped due to the >80 variable bound, record `NOT_PRECOMPUTED_DEPTH_MUST_INSPECT` rather than chasing read sites or lifecycle traces.
 
 ## Semantic Clustering

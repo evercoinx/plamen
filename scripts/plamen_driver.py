@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -37,11 +38,27 @@ from pty_exec import (
     event_is_rate_limited,
     parse_transcript_agentids,
     parse_transcript_usage,
+    text_shows_rate_limit,
     transcript_shows_compaction,
 )
 from preflight_pty_transports import (
     should_run_preflight,
 )
+
+
+def _run_opengrep_scan(scratch: Path, proj: Path, lang: str) -> str:
+    """Lazy wrapper so driver helper introspection sees the opengrep runner."""
+    from recon_prepass import _run_opengrep_scan as _scan
+
+    return _scan(scratch, proj, lang)
+
+
+def _run_sec3_xray(scratch: Path, proj: Path) -> str:
+    """Lazy wrapper so driver helper introspection sees the Sec3 X-Ray runner
+    (RECON-1: invoked from the pre-breadth hook, not startup)."""
+    from recon_prepass import _run_sec3_xray as _scan
+
+    return _scan(scratch, proj)
 
 # Rate-limit detection: JSON-first (structured), text-fallback (unstructured).
 #
@@ -135,8 +152,6 @@ _STRUCTURED_RATE_LIMIT_RE = re.compile(
     r"|\"type\"\s*:\s*\"rate_limit_error\""
     r"|\"type\"\s*:\s*\"overloaded_error\""
     r"|\"error\"\s*:\s*\{\s*\"type\"\s*:\s*\"(?:rate_limit|overloaded)"
-    r"|rate[_ ]?limit[_ ]?error"
-    r"|overloaded[_ ]?error"
     r"|anthropic.*(?:429|529)"
     r")\b",
     re.IGNORECASE,
@@ -172,10 +187,13 @@ Execute the analysis described in the prompt text directly.
 
 ## Network & MCP
 
-Network access is NOT available in this sandbox. Do NOT attempt curl, wget,
-or any HTTP requests. MCP tools (slither, unified-vuln-db, solana-fender) are
-unavailable — when instructions reference MCP tool calls, skip them and use
-direct code analysis instead.
+Network access IS available (the driver runs under the bypass sandbox), so
+WebSearch / web-fetch ARE usable. The bundled MCP tools (slither,
+unified-vuln-db, solana-fender) are NOT loaded on Codex (the driver passes
+`--ignore-user-config`). When instructions reference an MCP tool, use the
+documented fallback: prefer WebSearch (e.g. `site:solodit.xyz <pattern>`) for
+RAG / historical-precedent steps, and direct code analysis otherwise. Do not
+silently skip RAG — use the web fallback so axis-4 scoring is not zeroed.
 """
 
 _CODEX_PREAMBLE_MULTI_AGENT = """\
@@ -235,10 +253,13 @@ instructs you to "spawn agents" or "use the Task tool":
 
 ## Network & MCP
 
-Network access is NOT available in this sandbox. Do NOT attempt curl, wget,
-or any HTTP requests. MCP tools (slither, unified-vuln-db, solana-fender) are
-unavailable — when instructions reference MCP tool calls, skip them and use
-direct code analysis instead.
+Network access IS available (the driver runs under the bypass sandbox), so
+WebSearch / web-fetch ARE usable. The bundled MCP tools (slither,
+unified-vuln-db, solana-fender) are NOT loaded on Codex (the driver passes
+`--ignore-user-config`). When instructions reference an MCP tool, use the
+documented fallback: prefer WebSearch (e.g. `site:solodit.xyz <pattern>`) for
+RAG / historical-precedent steps, and direct code analysis otherwise. Do not
+silently skip RAG — use the web fallback so axis-4 scoring is not zeroed.
 """
 
 # Re-export from plamen_types for local use. Phases where the LLM should
@@ -1448,8 +1469,6 @@ def _parse_codex_output(log_path: Path, model: str = "") -> dict:
 
 def _terminate_process_tree(proc: subprocess.Popen, grace_s: float = 5.0) -> None:
     """Terminate a phase subprocess and its children best-effort."""
-    if proc.poll() is not None:
-        return
     if sys.platform == "win32":
         try:
             subprocess.run(
@@ -1496,13 +1515,64 @@ def _terminate_process_tree(proc: subprocess.Popen, grace_s: float = 5.0) -> Non
 
 
 _HALT_TERMINATE_GRACE_S = 2.0
+_ACTIVE_WORKER_SESSIONS: set[Any] = set()
+_ACTIVE_WORKER_SESSIONS_LOCK = threading.Lock()
+
+
+class _NonBlockingWorkerPool(concurrent.futures.ThreadPoolExecutor):
+    """ThreadPoolExecutor whose context-manager exit never waits.
+
+    The stdlib ThreadPoolExecutor `with` block always calls
+    `shutdown(wait=True)` in `__exit__`. That defeats Plamen's Esc/rate-limit
+    fast path: even after active PTYs are terminated and queued futures are
+    cancelled, the context manager can sit on still-unwinding worker threads.
+    Worker pool loops already collect every required result before normal exit,
+    so non-blocking context exit is the correct behavior for abnormal exits.
+    """
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        try:
+            self.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            self.shutdown(wait=False)
+        return False
+
+
+def _register_active_worker_session(session: Any) -> None:
+    try:
+        with _ACTIVE_WORKER_SESSIONS_LOCK:
+            _ACTIVE_WORKER_SESSIONS.add(session)
+    except Exception:
+        pass
+
+
+def _unregister_active_worker_session(session: Any) -> None:
+    try:
+        with _ACTIVE_WORKER_SESSIONS_LOCK:
+            _ACTIVE_WORKER_SESSIONS.discard(session)
+    except Exception:
+        pass
+
+
+def _terminate_active_worker_sessions(grace_s: float = _HALT_TERMINATE_GRACE_S) -> None:
+    try:
+        with _ACTIVE_WORKER_SESSIONS_LOCK:
+            sessions = list(_ACTIVE_WORKER_SESSIONS)
+    except Exception:
+        sessions = []
+    for session in sessions:
+        try:
+            session.terminate(grace_s=grace_s)
+        except Exception:
+            pass
 
 
 def _cancel_pending_worker_futures(
     pending_futs: set[concurrent.futures.Future],
     executor: concurrent.futures.ThreadPoolExecutor,
 ) -> None:
-    """Fast Esc path: cancel queued workers and do not wait for pool drain."""
+    """Fast Esc path: cancel queued workers and terminate active PTYs."""
+    _terminate_active_worker_sessions()
     for fut in list(pending_futs):
         fut.cancel()
     try:
@@ -1511,6 +1581,105 @@ def _cancel_pending_worker_futures(
         executor.shutdown(wait=False)
     except Exception:
         pass
+
+
+def _hard_exit_after_user_stop(exit_code: int = 0) -> None:
+    """Exit after explicit user stop without waiting on worker threads.
+
+    Worker-pool cancellation is deliberately non-blocking, but Python will
+    still keep non-daemon executor threads alive during normal interpreter
+    shutdown. On Windows this can leave the driver resident after the UI says
+    "Stopped" while Claude children keep running. Once the user has chosen
+    stop and keep/purge, terminate registered child PTYs, release the run
+    lock, and bypass normal shutdown.
+    """
+    try:
+        display.graceful_stop.finalizing = True
+        display.pause_toggle._suspended = True
+        restore = getattr(display.pause_toggle, "restore_terminal", None)
+        if callable(restore):
+            restore()
+    except Exception:
+        pass
+    try:
+        _terminate_active_worker_sessions(grace_s=_HALT_TERMINATE_GRACE_S)
+    except Exception:
+        pass
+    try:
+        _release_run_lock()
+    except Exception:
+        pass
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(exit_code)
+
+
+def _backfill_legacy_unmarked_completed_phase(
+    scratchpad: Path, phase: Phase
+) -> list[str]:
+    """Backfill the COMPLETE marker for an ALREADY-CHECKPOINTED supervised
+    phase whose only gate failure is a content-valid artifact that lost its
+    status marker (e.g. a worker whose final marker write was dropped by
+    context compaction).
+
+    On a fresh-audit scratchpad a marker-less artifact is classified
+    IN_PROGRESS purely because the marker is absent, BEFORE its content is
+    judged. For a phase already in ``checkpoint.completed`` that is a false
+    rewind trigger: the phase finished, only the process signal is missing.
+
+    This backfills ``<!-- PLAMEN_STATUS: COMPLETE -->`` for each such file
+    ONLY when its CONTENT passes the same structural completeness gate the
+    fresh-audit path uses. Returns the list of files marked. It is a strict
+    no-op (returns ``[]``) when ANY expected row is genuinely incomplete
+    (missing / stub / marked-but-IN_PROGRESS / structural_fail) so a real
+    rewind still proceeds, and only acts on the supervised phases that carry
+    legacy-unmarked classification (breadth, depth).
+    """
+    if phase.name == "breadth":
+        rows = compute_breadth_row_statuses(scratchpad, phase)
+    elif phase.name == "depth":
+        rows = compute_depth_row_statuses(scratchpad, phase)
+    else:
+        return []
+    if not rows:
+        return []
+    legacy_candidates: list[str] = []
+    for row in rows:
+        status = row.get("status")
+        if status == "complete":
+            continue
+        reasons = row.get("reasons") or []
+        # Only marker-less-on-fresh-audit rows are eligible. Any other
+        # non-complete status (missing/stub/structural_fail, or a
+        # marked-but-IN_PROGRESS file) is a genuine hole -> abort backfill.
+        if status == "in_progress" and "legacy-unmarked on fresh audit" in reasons:
+            legacy_candidates.append(str(row.get("name", "")))
+        else:
+            return []
+    backfilled: list[str] = []
+    for name in legacy_candidates:
+        path = scratchpad / name
+        ok, _why = _structural_completeness_ok(
+            path,
+            required_headings=(),
+            placeholder_strings=("TODO", "FILL_ME", "<placeholder>"),
+        )
+        if not ok:
+            # Content does not actually pass -> do not mask a real hole.
+            return []
+        try:
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write("\n<!-- PLAMEN_STATUS: COMPLETE -->\n")
+            backfilled.append(name)
+        except Exception as exc:  # pragma: no cover - I/O failure path
+            log.warning(
+                "[resume] marker backfill failed for %s: %r", name, exc
+            )
+            return []
+    return backfilled
 
 
 def _reconcile_completed_checkpoint_artifacts(
@@ -1564,6 +1733,26 @@ def _reconcile_completed_checkpoint_artifacts(
         missing = _resume_phase_contract_issues(
             scratchpad, project_root, phase, mode
         )
+        if missing and scratchpad_is_fresh_audit(scratchpad):
+            # A completed-and-checkpointed phase must NOT be rewound merely
+            # because a content-valid artifact lost its COMPLETE marker.
+            # Backfill the marker for legacy-unmarked content-valid rows,
+            # then re-validate. Genuine holes leave `missing` non-empty.
+            backfilled = _backfill_legacy_unmarked_completed_phase(
+                scratchpad, phase
+            )
+            if backfilled:
+                missing = _resume_phase_contract_issues(
+                    scratchpad, project_root, phase, mode
+                )
+                if not missing:
+                    log.info(
+                        "[resume] completed phase %s: backfilled COMPLETE "
+                        "marker for content-valid artifact(s) instead of "
+                        "rewinding: %s",
+                        phase.name,
+                        ", ".join(backfilled),
+                    )
         if missing:
             first_invalid_idx = idx
             first_missing = list(missing)
@@ -1647,7 +1836,12 @@ def _resume_phase_contract_issues(
     elif phase.name == "skeptic":
         issues.extend(_validate_skeptic_full_ch_coverage(scratchpad))
     elif phase.name == "report_assemble":
-        issues.extend(_run_report_quality_gate(scratchpad, project_root))
+        # RESUME-2: the resume reconcile probe must be side-effect-free. The full
+        # _run_report_quality_gate writes AUDIT_REPORT.md + report_quality.md and
+        # applies prose checks -- it belongs only on the live post-assembly path.
+        # Here use a content-only presence/structure check plus the mechanical
+        # degraded-sentinel check (meaningful on a genuine resume).
+        issues.extend(_report_assemble_content_only_issues(project_root))
         issues.extend(_validate_assemble_not_degraded(scratchpad))
     elif (
         phase.name in (
@@ -1663,6 +1857,144 @@ def _resume_phase_contract_issues(
         issues.extend(_validate_tier_body_against_manifest(scratchpad, check_phase_name))
 
     return issues
+
+
+def _phase_content_gate_issues(
+    phase: Phase,
+    config: dict,
+    scratchpad: Path,
+    project_root: str,
+) -> list[str]:
+    """Side-effect-free CONTENT re-validation for a phase, mirroring the
+    resume-skip decision.
+
+    Returns the list of content/disk issues (empty == artifacts on disk are
+    content-valid). This is the same gate the resume loop uses to decide
+    whether a completed phase can be skipped, so the degrade/halt path can
+    re-check content before forcing a CRITICAL halt (FC4 safety net). It is
+    DELIBERATELY content-only: it does not re-run prose/quality retry-hint
+    generation, only the validators that prove the artifacts are usable.
+    """
+    mode = config.get("mode", "core")
+    if phase.name in L1_VERIFY_PHASE_NAMES or phase.name in SC_VERIFY_PHASE_NAMES:
+        return list(_validate_verify_completion(scratchpad, phase.name, mode=mode))
+    if phase.name == "attention_repair":
+        hard, _soft = _validate_attention_repair(scratchpad, mode)
+        return list(hard)
+    if phase.name == "report_assemble":
+        # RESUME-3: the FC4 content re-check must be SIDE-EFFECT-FREE and
+        # content-only. Do NOT run _run_report_quality_gate here (it writes
+        # AUDIT_REPORT.md + report_quality.md and applies prose checks), and do
+        # NOT consult the {phase}.degraded sentinel the driver just wrote one
+        # branch earlier (it is not independent evidence). Only verify the
+        # delivered report is present and structurally non-stub.
+        return _report_assemble_content_only_issues(project_root)
+    return list(_resume_phase_contract_issues(scratchpad, project_root, phase, mode))
+
+
+def _report_assemble_content_only_issues(project_root: str) -> list[str]:
+    """Mechanical, side-effect-free presence/structure check for the delivered
+    AUDIT_REPORT.md. Returns [] when the report exists and is non-stub.
+
+    Used by RESUME-2 (resume reconcile) and RESUME-3 (FC4 degrade re-check) so a
+    content-valid report is never rewound/halted by the side-effecting prose
+    quality gate. The full _run_report_quality_gate still runs on the live
+    post-assembly path where its self-heal writes belong.
+    """
+    issues: list[str] = []
+    report = Path(project_root) / "AUDIT_REPORT.md"
+    if not report.exists():
+        return ["AUDIT_REPORT.md missing"]
+    try:
+        text = report.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return [f"AUDIT_REPORT.md unreadable ({exc})"]
+    if len(text) < 500:
+        issues.append("AUDIT_REPORT.md is a stub (<500 bytes)")
+    # Structurally non-stub: at least one finding section OR an explicit
+    # Summary / severity section heading (a clean no-findings report is valid).
+    if not (
+        re.search(r"(?im)^###\s+\[?[CHMLI]-\d", text)
+        or re.search(r"(?im)^##\s+(?:Summary|Critical|High|Medium|Low|Informational)\b", text)
+    ):
+        issues.append("AUDIT_REPORT.md has no finding sections or severity/summary headings")
+    return issues
+
+
+def _fc4_autocomplete_if_content_valid(
+    phase: Phase, config: dict, scratchpad: Path, checkpoint: Checkpoint,
+) -> "list[str] | None":
+    """FC4 safety net (shared by every CRITICAL-degrade branch): before halting,
+    re-validate artifacts with the side-effect-free CONTENT gate the resume path
+    uses. If content-valid, auto-complete the phase (clear retry hint + degraded
+    sentinel, mark completed) and return None so the caller `continue`s instead
+    of halting. Returns the remaining content issues when content genuinely fails.
+    """
+    content_issues = _phase_content_gate_issues(
+        phase, config, scratchpad, config["project_root"]
+    )
+    if content_issues:
+        return list(content_issues)
+    log.warning(
+        f"[{phase.name}] degraded on retry-hint/quality gate but artifacts pass "
+        f"the content gate on re-check - auto-completing instead of halting (FC4)"
+    )
+    _clear_retry_hint(scratchpad, phase.name)
+    _cleanup_quarantine_backups(scratchpad, phase)
+    if phase.name in checkpoint.degraded:
+        checkpoint.degraded.remove(phase.name)
+    checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
+    checkpoint.mark_completed(phase.name)
+    if checkpoint.rate_limited_at == phase.name:
+        checkpoint.rate_limited_at = None
+    checkpoint.save(scratchpad)
+    return None
+
+
+_BODY_CONTENT_RETRY_CAP = 2
+
+
+def _body_content_retry_path(scratchpad: Path, phase_name: str) -> Path:
+    return scratchpad / f".{phase_name}.content_retry"
+
+
+def _body_content_retry_exhausted(scratchpad: Path, phase_name: str) -> bool:
+    """Bucket 3: True once the bounded productive content-retry budget for a
+    body-writer phase is spent, so content shortfall stops triggering retries
+    and the phase WARN-ships its current (best-effort) sections."""
+    try:
+        return int(_body_content_retry_path(scratchpad, phase_name).read_text()) >= _BODY_CONTENT_RETRY_CAP
+    except Exception:
+        return False
+
+
+def _bump_body_content_retry(scratchpad: Path, phase_name: str) -> None:
+    p = _body_content_retry_path(scratchpad, phase_name)
+    try:
+        n = int(p.read_text())
+    except Exception:
+        n = 0
+    try:
+        p.write_text(str(n + 1), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _body_content_retry_hint(phase_name: str, content_short: list) -> str:
+    """Delta-injected (convergent) retry hint: names the specific thin sections
+    so the body-writer enriches THEM, never an identical re-prompt (LLM-8)."""
+    return (
+        f"## Body content quality retry for {phase_name}\n\n"
+        "The previous attempt shipped section(s) with a thin or missing "
+        "**Impact** or **PoC Result**. Enrich ONLY the sections listed below with "
+        "concrete, specific detail tied to the verifier evidence (or, for a "
+        "genuinely minor Low/Info one-liner with no security nuance, move it to "
+        "the `## Quality Observations` megasection). Do NOT pad with boilerplate "
+        "and do NOT alter any other section.\n\n"
+        "Sections needing enrichment:\n"
+        + "\n".join(f"- {c}" for c in content_short[:20])
+        + "\n"
+    )
 
 
 def _record_phase_cost(scratchpad: Path, phase_name: str, model: str,
@@ -1877,6 +2209,9 @@ def detect_rate_limit(stdio_log: Path, tail_bytes: int = 65536) -> bool:
     except Exception:
         return False
 
+    if "PLAMEN_RATE_LIMIT_DETECTED=1" in tail:
+        return True
+
     envelope = _extract_json_envelope(tail)
     if envelope is not None:
         # Structured path: trust only fields, ignore prose.
@@ -1884,7 +2219,11 @@ def detect_rate_limit(stdio_log: Path, tail_bytes: int = 65536) -> bool:
             return True
         if envelope.get("is_error") is True:
             status = envelope.get("api_error_status")
-            if status in _API_RATE_LIMIT_STATUSES:
+            try:
+                status_code = int(status)
+            except Exception:
+                status_code = None
+            if status_code in _API_RATE_LIMIT_STATUSES:
                 return True
             err = envelope.get("error") or {}
             if isinstance(err, dict):
@@ -1908,7 +2247,35 @@ def detect_rate_limit(stdio_log: Path, tail_bytes: int = 65536) -> bool:
     # Use strict text regex: requires structured error prefix.
     if _detect_rate_limit_jsonl_tail(tail):
         return True
+    if text_shows_rate_limit(tail):
+        return True
     return bool(_STRUCTURED_RATE_LIMIT_RE.search(tail))
+
+
+def _append_rate_limit_sentinel(
+    stdio_log: Path,
+    *,
+    phase_name: str,
+    source: str,
+) -> None:
+    """Stamp a phase log with a structured rate-limit marker.
+
+    Worker-pool phases can detect rate limits inside child PTYs even when the
+    child transcript tail does not include a parseable Anthropic JSON envelope.
+    The outer retry loop only inspects the aggregate `_stdio_<phase>.log`, so
+    every internal rate-limit rc must be surfaced there in a structured form.
+    """
+    try:
+        with stdio_log.open("a", encoding="utf-8", errors="replace") as f:
+            f.write(
+                "\nPLAMEN_RATE_LIMIT_DETECTED=1 "
+                "api_error_status=429 "
+                "type=rate_limit_error "
+                f"phase={phase_name} "
+                f"source={source}\n"
+            )
+    except Exception:
+        pass
 
 
 # v2.0.3 (A2): orphaned-background-agent detection. The LLM uses Task with
@@ -3991,6 +4358,807 @@ def _run_supervised_pty_loop(
 
 
 # ===========================================================================
+# Python-scheduled recon worker PTYs
+# ===========================================================================
+
+_RECON_WORKER_CONCURRENCY = 4
+
+
+def _should_use_recon_worker_pool(config: dict, scratchpad: Path) -> bool:
+    """Return True when recon should run as driver-owned PTY workers."""
+    if os.environ.get("PLAMEN_DISABLE_RECON_WORKER_POOL") == "1":
+        return False
+    if config.get("pipeline") != "sc":
+        return False
+    # Keep Codex and headless Claude on their existing paths until they are
+    # separately validated; this pool solves the Claude PTY coordinator leak.
+    return True
+
+
+def _recon_worker_jobs(config: dict) -> list[dict[str, str]]:
+    """Return mode-scaled recon role shards.
+
+    Light keeps two broader Sonnet shards to control cost. Core/Thorough use
+    the documented four recon roles without a recon coordinator.
+    """
+    mode = str(config.get("mode") or "core").lower()
+    if mode == "light":
+        return [
+            {
+                "agent_id": "R1",
+                "role": "context_static",
+                "output": "recon_build_static.md",
+                "focus": (
+                    "Build/static compile status plus compact design/trust "
+                    "context needed for downstream analysis."
+                ),
+            },
+            {
+                "agent_id": "R2",
+                "role": "inventory_templates",
+                "output": "recon_inventory_surface.md",
+                "focus": (
+                    "Contract inventory, attack surface, event/setter maps, "
+                    "detected patterns, and template recommendations."
+                ),
+            },
+        ]
+    return [
+        {
+            "agent_id": "R1",
+            "role": "build_static",
+            "output": "recon_build_static.md",
+            "focus": "Build environment, compile health, static availability, tooling gaps.",
+        },
+        {
+            "agent_id": "R2",
+            "role": "design_context",
+            "output": "recon_design_context.md",
+            "focus": "Protocol purpose, trust boundaries, dependencies, operational implications, invariants.",
+        },
+        {
+            "agent_id": "R3",
+            "role": "inventory_surface",
+            "output": "recon_inventory_surface.md",
+            "focus": "Contracts, functions, state variables, external/public entry points, setters, events.",
+        },
+        {
+            "agent_id": "R4",
+            "role": "templates_patterns",
+            "output": "recon_templates_patterns.md",
+            "focus": "Detected risk patterns, required skills/templates, niche triggers, downstream recommendation matrix.",
+        },
+    ]
+
+
+def _build_recon_worker_prompt(
+    *,
+    job: dict[str, str],
+    scratchpad: Path,
+    project_root: str,
+    config: dict,
+    attempt: int,
+    retry_reasons: list[str] | None = None,
+) -> str:
+    output = job["output"]
+    role = job["role"]
+    agent_id = job["agent_id"]
+    focus = job["focus"]
+    methodology = (
+        plamen_home()
+        / "prompts"
+        / str(config.get("language") or "evm")
+        / "v2"
+        / "phase1-recon-prompt.md"
+    ).as_posix()
+    retry_block = ""
+    if retry_reasons:
+        retry_block = (
+            "\n## Previous Gate Failure\n\n"
+            + "\n".join(f"- {r}" for r in retry_reasons)
+            + "\n"
+        )
+    role_guidance = {
+        "build_static": (
+            "Establish whether the project can compile and record bounded "
+            "build-repair evidence. You may run build-environment and compile "
+            "commands only under the Command Boundary below. Do not run tests, "
+            "PoCs, fuzzers, Medusa, Echidna, Halmos, Slither detector passes, "
+            "or verification-specific commands. Do not write build_status.md "
+            "directly."
+        ),
+        "design_context": (
+            "Summarize protocol purpose, trust boundaries, external dependencies, "
+            "key invariants, and operational implications. Do not write "
+            "design_context.md directly."
+        ),
+        "inventory_surface": (
+            "Review source structure, contract/function/state inventory, entry "
+            "points, setters, events, external calls, and attack surface. Do not "
+            "write canonical inventory files directly."
+        ),
+        "templates_patterns": (
+            "Derive detected risk patterns and the template/skill/niche "
+            "recommendation matrix. This is recommendation data only; do not "
+            "create any roster or later-phase coordination artifact."
+        ),
+        "context_static": (
+            "Merged light-mode role: establish whether the project can compile "
+            "under the Command Boundary below, then summarize compact design "
+            "context, trust boundaries, key invariants, and operational "
+            "implications. Do not run tests, PoCs, fuzzers, Medusa, Echidna, "
+            "Halmos, Slither detector passes, or verification-specific commands."
+        ),
+        "inventory_templates": (
+            "Merged light-mode role: source inventory, attack surface, detected "
+            "patterns, event/setter maps, and template/skill recommendations."
+        ),
+    }.get(role, focus)
+    return f"""# RECON WORKER
+
+You are one recon worker launched directly by the Python Plamen driver.
+There is no recon coordinator. Your job is to produce exactly one recon shard
+and then stop.
+
+## Assignment
+
+- PROJECT_ROOT: `{project_root}`
+- SCRATCHPAD: `{scratchpad.as_posix()}`
+- LANGUAGE: `{config.get('language', 'unknown')}`
+- MODE: `{config.get('mode', 'unknown')}`
+- PIPELINE: `{config.get('pipeline', 'sc')}`
+- SUBSYSTEM_SCOPE: `{config.get('subsystem_scope') or '(none)'}`
+- SCOPE_FILE: `{config.get('scope_file') or '(none)'}`
+- SCOPE_NOTES: `{config.get('scope_notes') or '(none)'}`
+- Agent ID: `{agent_id}`
+- Recon role: `{role}`
+- Focus: {focus}
+- Output file: `{output}`
+- Attempt: `{attempt}`
+
+## Output Allowlist
+
+Write exactly this file and no other scratchpad artifact:
+
+`{scratchpad.as_posix()}/{output}`
+
+Do not infer, invent, pre-fill, or create any other scratchpad output. In
+particular, do not create manifests, rosters, breadth/depth/verification/report
+artifacts, or canonical recon files. The driver merges this shard into
+canonical recon artifacts after all recon workers finish.
+{retry_block}
+## Methodology
+
+This prompt is the authoritative worker contract. Do not open or execute the
+legacy monolithic recon methodology at `{methodology}`; it is named only for
+driver provenance. Execute only your assigned recon role.
+
+Ignore any coordinator, spawning, orchestration, later-phase, canonical-output
+write, test, PoC, fuzzing, Medusa, Echidna, Halmos, Slither detector, or
+verification instruction from inherited methodology or repository files.
+Build/dependency-repair commands are allowed only for `build_static` and
+`context_static`, and only under the Command Boundary below.
+
+Driver-provided recon inputs you may read when present:
+
+- `{scratchpad.as_posix()}/_recon_static_probe.md`
+- `{scratchpad.as_posix()}/build_status.md`
+- `{scratchpad.as_posix()}/slither/primitive_status.md`
+
+## Command Boundary
+
+For roles other than `build_static` and `context_static`: do not run shell
+commands.
+
+For `build_static` and `context_static`: shell use is limited to build setup and
+compile health only:
+
+- You may inspect files and environment (`pwd`, `ls`/`dir`, `rg`,
+  `forge --version`, `solc --version`, `npm --version`, `yarn --version`).
+- If `PROJECT_ROOT` is a source subdirectory, you may move one or two parents
+  up only to the nearest directory containing `foundry.toml`,
+  `hardhat.config.*`, `package.json`, or `remappings.txt`, and you must record
+  the chosen build root.
+- You may run at most one initial compile command:
+  a scoped production compile such as
+  `forge build contracts/Foo.sol contracts/Bar.sol --threads 1`, or
+  `npx hardhat compile`.
+- If the repository contains `test`, `tests`, `.medusa-tests`,
+  `contracts/.medusa-tests`, fuzz, invariant, or verification directories,
+  do not run a bare full-project `forge build`; compile explicit production
+  contract paths only.
+- Compile commands may run longer than the shell UI's short display timeout.
+  If a compile command times out or continues in the background, do not start
+  another compile. Check existing artifact/build-info timestamps if available,
+  then write the shard with `TIMED_OUT_OR_BACKGROUND` status and the evidence
+  you have.
+- If that compile fails, you may make at most two targeted build-repair
+  attempts for missing dependencies, remappings, compiler-version mismatch, or
+  Foundry/Hardhat config issues, and after each repair run one compile command.
+- You may run `git submodule update --init --recursive` at most once only when
+  the compile error shows missing repository dependencies.
+- You may run `forge install ... --no-git`, `npm install`, or `yarn install` at
+  most once only when the compile error shows a missing dependency required for
+  compilation.
+- You may run `slither --version` only as an availability probe. Do not run
+  `slither <target>`, detector groups, human-summary, call-graph generation, or
+  any command that invokes `crytic-compile` from recon.
+- You must not run any command matching: `forge test`, `npx hardhat test`,
+  `medusa`, `echidna`, `halmos`, `invariant`, `fuzz`, `Verify*.t.sol`,
+  `.medusa-tests`, `test/Verify`, or later-phase verification/PoC commands.
+- Do not inspect or execute test, fuzz, invariant, `.medusa-tests`, or
+  verification directories/configs during recon. Only record compile/build
+  readiness and static-tool availability.
+- If build setup is still failing after the bounded attempts, stop repairing,
+  write the shard with the exact failing command, error tail, attempted fixes,
+  and remaining blocker. Later verification can consume that status instead of
+  recon retrying indefinitely.
+
+Role-specific task:
+
+{role_guidance}
+
+## Required File Contract
+
+The output file must:
+
+1. Start with these markers:
+   `<!-- PLAMEN_ARTIFACT: {output} -->`
+   `<!-- PLAMEN_OWNER: {agent_id} -->`
+   `<!-- PLAMEN_STATUS: IN_PROGRESS -->`
+   `<!-- PLAMEN_PHASE: recon -->`
+   `<!-- PLAMEN_VERSION: 1 -->`
+   `<!-- RECON_ROLE: {role} -->`
+   `<!-- EXPECTED_OUTPUT: {output} -->`
+2. Contain substantive role-specific recon data with concrete file/path or
+   command evidence where applicable.
+3. Include a `## Canonical Merge Hints` section listing which canonical recon
+   artifacts your shard should inform.
+4. End with `<!-- PLAMEN_STATUS: COMPLETE -->` only after the shard is fully
+   written and verified on disk.
+
+When done, return exactly one line:
+
+`DONE: {output} complete`
+"""
+
+
+def _recon_worker_complete(
+    scratchpad: Path,
+    output: str,
+    job: dict[str, str] | None = None,
+) -> tuple[bool, list[str]]:
+    p = scratchpad / output
+    reasons: list[str] = []
+    if not p.exists():
+        return False, ["missing"]
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return False, [f"unreadable: {exc}"]
+    if p.stat().st_size < 400:
+        reasons.append("stub or too small")
+    if f"PLAMEN_ARTIFACT: {output}" not in text:
+        reasons.append(f"missing marker PLAMEN_ARTIFACT: {output}")
+    if "PLAMEN_PHASE: recon" not in text:
+        reasons.append("missing marker PLAMEN_PHASE: recon")
+    if "PLAMEN_STATUS: COMPLETE" not in text:
+        reasons.append("missing COMPLETE marker")
+    if job is not None:
+        expected_owner = str(job.get("agent_id") or "")
+        expected_role = str(job.get("role") or "")
+        if expected_owner and f"PLAMEN_OWNER: {expected_owner}" not in text:
+            reasons.append(f"missing marker PLAMEN_OWNER: {expected_owner}")
+        if expected_role and f"RECON_ROLE: {expected_role}" not in text:
+            reasons.append(f"missing marker RECON_ROLE: {expected_role}")
+        if f"EXPECTED_OUTPUT: {output}" not in text:
+            reasons.append(f"missing marker EXPECTED_OUTPUT: {output}")
+    return not reasons, reasons
+
+
+def _install_recon_command_guard(scratchpad: Path, env: dict[str, str]) -> dict[str, str]:
+    """Prepend recon-only command wrappers that block later-phase fanout.
+
+    Prompt boundaries are necessary but not sufficient when Claude runs with
+    Bash permissions. Recon build repair needs `forge build` / dependency setup,
+    while `forge test`, fuzzers, Medusa, and Slither target analysis belong to
+    later phases. These wrappers make that boundary deterministic for common
+    EVM tool commands without blocking normal file-inspection tools.
+    """
+    guarded = dict(env)
+    guard_dir = scratchpad / "_recon_command_guard"
+    try:
+        guard_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return guarded
+
+    def _real(name: str) -> str:
+        value = shutil.which(name, path=env.get("PATH") or os.environ.get("PATH"))
+        return Path(value).as_posix() if value else ""
+
+    reals = {
+        "forge": _real("forge"),
+        "npx": _real("npx"),
+        "npm": _real("npm"),
+        "yarn": _real("yarn"),
+        "git": _real("git"),
+        "slither": _real("slither"),
+    }
+    for key, value in reals.items():
+        if value:
+            guarded[f"PLAMEN_REAL_{key.upper()}"] = value
+
+    scripts: dict[str, str] = {
+        "forge": r'''#!/usr/bin/env bash
+set -euo pipefail
+real="${PLAMEN_REAL_FORGE:-}"
+if [[ -z "$real" ]]; then echo "PLAMEN_RECON_COMMAND_BLOCKED: real forge not found" >&2; exit 127; fi
+sub="${1:-}"
+case "$sub" in
+  build)
+    has_path=0
+    for arg in "${@:2}"; do
+      case "$arg" in
+        -*|[0-9]*) ;;
+        *.sol|contracts/*|src/*) has_path=1 ;;
+      esac
+    done
+    if [[ "$has_path" == "0" && ( -d "test" || -d "tests" || -d ".medusa-tests" || -d "contracts/.medusa-tests" ) ]]; then
+      echo "PLAMEN_RECON_COMMAND_BLOCKED: bare forge build would include test/fuzz surfaces; pass explicit production contract paths during recon" >&2
+      exit 126
+    fi
+    guard_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    lock_dir="${PLAMEN_RECON_BUILD_LOCK:-$guard_root/forge_build.lock}"
+    if ! mkdir "$lock_dir" 2>/dev/null; then
+      echo "PLAMEN_RECON_COMMAND_BLOCKED: concurrent forge build already running or previous recon build timed out; recon must not stack compiler processes" >&2
+      exit 126
+    fi
+    trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT INT TERM
+    "$real" "$@"
+    ;;
+  install|remappings|config|clean|--version|-V|--help|-h)
+    exec "$real" "$@"
+    ;;
+  test|coverage|snapshot|script|create|verify-contract)
+    echo "PLAMEN_RECON_COMMAND_BLOCKED: forge $sub is a later-phase verification/test command; recon may only repair compilation" >&2
+    exit 126
+    ;;
+  *)
+    echo "PLAMEN_RECON_COMMAND_BLOCKED: forge $sub is outside recon build-repair allowlist" >&2
+    exit 126
+    ;;
+esac
+''',
+        "npx": r'''#!/usr/bin/env bash
+set -euo pipefail
+real="${PLAMEN_REAL_NPX:-}"
+if [[ -z "$real" ]]; then echo "PLAMEN_RECON_COMMAND_BLOCKED: real npx not found" >&2; exit 127; fi
+args=" $* "
+if [[ "$args" == *" test"* || "$args" == *" forge test"* || "$args" == *" hardhat test"* ]]; then
+  echo "PLAMEN_RECON_COMMAND_BLOCKED: npx test/verification commands are not allowed during recon" >&2
+  exit 126
+fi
+if [[ "${1:-}" == "hardhat" && ( "${2:-}" == "compile" || "${2:-}" == "clean" || "${2:-}" == "--version" ) ]]; then
+  exec "$real" "$@"
+fi
+echo "PLAMEN_RECON_COMMAND_BLOCKED: npx is limited to hardhat compile/clean/version during recon" >&2
+exit 126
+''',
+        "npm": r'''#!/usr/bin/env bash
+set -euo pipefail
+real="${PLAMEN_REAL_NPM:-}"
+if [[ -z "$real" ]]; then echo "PLAMEN_RECON_COMMAND_BLOCKED: real npm not found" >&2; exit 127; fi
+case "${1:-}" in
+  install|ci|--version|-v) exec "$real" "$@" ;;
+  *) echo "PLAMEN_RECON_COMMAND_BLOCKED: npm is limited to install/ci/version during recon" >&2; exit 126 ;;
+esac
+''',
+        "yarn": r'''#!/usr/bin/env bash
+set -euo pipefail
+real="${PLAMEN_REAL_YARN:-}"
+if [[ -z "$real" ]]; then echo "PLAMEN_RECON_COMMAND_BLOCKED: real yarn not found" >&2; exit 127; fi
+case "${1:-}" in
+  install|--version|-v) exec "$real" "$@" ;;
+  *) echo "PLAMEN_RECON_COMMAND_BLOCKED: yarn is limited to install/version during recon" >&2; exit 126 ;;
+esac
+''',
+        "git": r'''#!/usr/bin/env bash
+set -euo pipefail
+real="${PLAMEN_REAL_GIT:-}"
+if [[ -z "$real" ]]; then echo "PLAMEN_RECON_COMMAND_BLOCKED: real git not found" >&2; exit 127; fi
+if [[ "${1:-}" == "submodule" && "${2:-}" == "update" ]]; then exec "$real" "$@"; fi
+if [[ "${1:-}" == "rev-list" || "${1:-}" == "status" ]]; then exec "$real" "$@"; fi
+echo "PLAMEN_RECON_COMMAND_BLOCKED: git is limited to submodule update/status/rev-list during recon" >&2
+exit 126
+''',
+        "slither": r'''#!/usr/bin/env bash
+set -euo pipefail
+real="${PLAMEN_REAL_SLITHER:-}"
+if [[ -z "$real" ]]; then echo "PLAMEN_RECON_COMMAND_BLOCKED: real slither not found" >&2; exit 127; fi
+case "${1:-}" in
+  --version|-V|version) exec "$real" "$@" ;;
+  *) echo "PLAMEN_RECON_COMMAND_BLOCKED: slither target/detector runs are not allowed during recon worker build repair" >&2; exit 126 ;;
+esac
+''',
+    }
+    deny_all = r'''#!/usr/bin/env bash
+echo "PLAMEN_RECON_COMMAND_BLOCKED: this fuzzer/verification command is not allowed during recon" >&2
+exit 126
+'''
+    for name in ("medusa", "echidna", "halmos"):
+        scripts[name] = deny_all
+
+    for name, body in scripts.items():
+        try:
+            path = guard_dir / name
+            path.write_text(body, encoding="utf-8", newline="\n")
+            try:
+                path.chmod(0o755)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    old_path = guarded.get("PATH") or os.environ.get("PATH") or ""
+    guarded["PATH"] = str(guard_dir) + os.pathsep + old_path
+    guarded["PLAMEN_RECON_COMMAND_GUARD"] = str(guard_dir)
+    return guarded
+
+
+def _run_single_recon_worker_pty(
+    *,
+    job: dict[str, str],
+    scratchpad: Path,
+    project_root: str,
+    config: dict,
+    base_cmd: list[str],
+    env: dict[str, str],
+    timeout: float,
+    quiescence_s: float,
+    attempt: int,
+    retry_reasons: list[str] | None = None,
+    allowed_outputs: list[str] | None = None,
+    protected_input_names: set[str] | None = None,
+) -> dict[str, Any]:
+    output = job["output"]
+    allowed_output_set = set(allowed_outputs or [output])
+    protected_input_set = set(protected_input_names or set())
+    session_id = str(uuid.uuid4())
+    prompt = _build_recon_worker_prompt(
+        job=job,
+        scratchpad=scratchpad,
+        project_root=project_root,
+        config=config,
+        attempt=attempt,
+        retry_reasons=retry_reasons,
+    )
+    snap = scratchpad / (
+        f"_prompt_recon_worker_{Path(output).stem}.attempt{attempt}.md"
+    )
+    snap.write_text(prompt, encoding="utf-8")
+    cmd = _build_fresh_session_cmd(base_cmd, session_id)
+    cmd = _rewrite_argv_positional_prompt(cmd, snap)
+    worker_env = _install_recon_command_guard(scratchpad, env)
+    log_path = scratchpad / (
+        f"_stdio_recon_worker_{Path(output).stem}.attempt{attempt}.log"
+    )
+    known_stats: dict[str, tuple[int, int]] = {}
+    try:
+        for p in scratchpad.iterdir():
+            if p.is_file() and not p.name.startswith("_"):
+                try:
+                    st = p.stat()
+                    known_stats[p.name] = (st.st_size, st.st_mtime_ns)
+                except OSError:
+                    known_stats[p.name] = (0, 0)
+    except Exception:
+        known_stats = {}
+
+    def _worker_poll(_now: float, _state: Any) -> None:
+        try:
+            for p in scratchpad.iterdir():
+                if p.name.startswith("_") or not p.is_file():
+                    continue
+                known_names = set(known_stats)
+                try:
+                    st = p.stat()
+                    sig = (st.st_size, st.st_mtime_ns)
+                except OSError:
+                    sig = (0, 0)
+                old_sig = known_stats.get(p.name)
+                known_stats[p.name] = sig
+                if _worker_artifact_name_allowed(p.name, allowed_output_set):
+                    continue
+                if old_sig == sig:
+                    continue
+                if p.name in protected_input_set:
+                    continue
+                if _worker_artifact_is_benign_duplicate_copy(p.name, known_names):
+                    moved = _quarantine_worker_duplicate_copy(
+                        scratchpad=scratchpad,
+                        path=p,
+                        phase_name="recon",
+                        worker_output=output,
+                    )
+                    if moved is not None:
+                        log.info(
+                            "[recon] worker %s quarantined benign duplicate "
+                            "scratchpad copy: %s -> %s",
+                            output,
+                            p.name,
+                            moved.relative_to(scratchpad).as_posix(),
+                        )
+                    continue
+                log.error(
+                    "[recon] worker %s wrote or modified out-of-scope artifact: %s",
+                    output,
+                    p.name,
+                )
+                raise _PtyStop(-4)
+        except _PtyStop:
+            raise
+        except Exception:
+            pass
+
+    with log_path.open("w", encoding="utf-8", errors="replace") as out:
+        session = ClaudePtySession(
+            cmd,
+            cwd=project_root,
+            env=worker_env,
+            session_id=session_id,
+            prompt_path=snap,
+            log_file=out,
+        )
+        _register_active_worker_session(session)
+        try:
+            out.write(f"CLAUDE_TRANSCRIPT={session.transcript_path}\n")
+            out.flush()
+            session.spawn()
+            session.send_bootstrap()
+            state = session.wait_for_turn_complete(
+                timeout,
+                quiescence_s=quiescence_s,
+                on_poll=_worker_poll,
+            )
+            if state.rate_limited:
+                return {"output": output, "rc": 1, "status": "rate_limited"}
+            ok, reasons = _recon_worker_complete(scratchpad, output, job)
+            return {
+                "output": output,
+                "rc": 0 if ok else -2,
+                "status": "complete" if ok else "incomplete",
+                "reasons": reasons,
+                "log": str(log_path),
+            }
+        except _PtyStop as stop:
+            return {
+                "output": output,
+                "rc": stop.rc,
+                "status": "containment",
+                "reasons": ["worker wrote protected out-of-scope artifact"],
+                "log": str(log_path),
+            }
+        except Exception as exc:
+            return {
+                "output": output,
+                "rc": EXIT_ERROR,
+                "status": "error",
+                "reasons": [str(exc)],
+                "log": str(log_path),
+            }
+        finally:
+            _unregister_active_worker_session(session)
+            try:
+                session.terminate(grace_s=_HALT_TERMINATE_GRACE_S)
+            except Exception:
+                pass
+            try:
+                if session.transcript_path.exists():
+                    out.write("\n\n# Claude session transcript tail\n")
+                    with session.transcript_path.open("rb") as tf:
+                        tf.seek(0, 2)
+                        size = tf.tell()
+                        tf.seek(max(0, size - 65536))
+                        out.write(tf.read().decode("utf-8", errors="replace"))
+                    out.flush()
+            except Exception:
+                pass
+
+
+def _run_recon_worker_pool_pty(
+    *,
+    scratchpad: Path,
+    project_root: str,
+    config: dict,
+    phase: Phase,
+    base_cmd: list[str],
+    env: dict[str, str],
+    timeout: float,
+    quiescence_s: float,
+    attempt: int,
+) -> int:
+    jobs = _recon_worker_jobs(config)
+    if not jobs:
+        log.warning("[recon] worker-pool unavailable: no jobs")
+        return -2
+    concurrency = min(_RECON_WORKER_CONCURRENCY, max(1, len(jobs)))
+    pool_started = time.time()
+    retry_reasons_by_output: dict[str, list[str]] = {}
+    try:
+        (scratchpad / "_recon_worker_pool_contract.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "phase": "recon",
+                    "pipeline": config.get("pipeline", "sc"),
+                    "mode": config.get("mode", "core"),
+                    "outputs": [str(job.get("output") or "") for job in jobs],
+                    "jobs": jobs,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        log.warning(f"[recon] could not write worker-pool contract marker: {exc}")
+
+    budget = 2
+    for pool_attempt in range(1, budget + 1):
+        open_jobs = []
+        for job in jobs:
+            ok, _reasons = _recon_worker_complete(scratchpad, job["output"], job)
+            if not ok:
+                open_jobs.append(job)
+        if not open_jobs:
+            try:
+                _merge_recon_worker_shards(scratchpad, config)
+            except Exception as exc:
+                log.warning(f"[recon] worker-shard merge failed: {exc!r}")
+                return -2
+            passed, missing = gate_passes(scratchpad, project_root, phase)
+            if passed:
+                return 0
+            log.warning(f"[recon] worker-pool canonical gate failed: {missing}")
+            return -2
+        log.info(
+            f"[recon] worker PTY pool attempt {pool_attempt}: "
+            f"{len(open_jobs)} open shard(s), concurrency={concurrency}"
+        )
+        pool_allowed_outputs = [str(job["output"]) for job in open_jobs]
+        input_snapshot = _snapshot_worker_input_artifacts(
+            scratchpad,
+            set(pool_allowed_outputs),
+        )
+        protected_input_names = set(input_snapshot)
+        display.print_phase_heartbeat(
+            "recon",
+            int(time.time() - pool_started),
+            status=_format_worker_pool_progress_status(
+                complete=len(jobs) - len(open_jobs),
+                total=len(jobs),
+                active_outputs=[j["output"] for j in open_jobs[:concurrency]],
+                queued=max(0, len(open_jobs) - concurrency),
+                phase_label="recon",
+            ),
+        )
+        results: list[dict[str, Any]] = []
+        try:
+            with _NonBlockingWorkerPool(
+                max_workers=concurrency,
+                thread_name_prefix="plamen-recon-worker",
+            ) as executor:
+                fut_to_job = {
+                    executor.submit(
+                        _run_single_recon_worker_pty,
+                        job=job,
+                        scratchpad=scratchpad,
+                        project_root=project_root,
+                        config=config,
+                        base_cmd=base_cmd,
+                        env=env,
+                        timeout=max(900, min(timeout, 2400)),
+                        quiescence_s=quiescence_s,
+                        attempt=pool_attempt,
+                        retry_reasons=retry_reasons_by_output.get(job["output"]),
+                        allowed_outputs=pool_allowed_outputs,
+                        protected_input_names=protected_input_names,
+                    ): job
+                    for job in open_jobs
+                }
+                pending_futs: set[concurrent.futures.Future] = set(fut_to_job)
+                last_progress = time.time()
+                while pending_futs:
+                    done, pending_futs = concurrent.futures.wait(
+                        pending_futs,
+                        timeout=_WORKER_POOL_UI_POLL_S,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
+                    now = time.time()
+                    elapsed = int(now - pool_started)
+                    display.spin(elapsed)
+                    if display.graceful_stop.requested:
+                        _cancel_pending_worker_futures(pending_futs, executor)
+                        raise _PtyStop(-3)
+                    for fut in done:
+                        result = fut.result()
+                        results.append(result)
+                        output = result.get("output", "(unknown)")
+                        status = result.get("status")
+                        log.info(f"[recon] worker {output}: {status}")
+                        display.print_phase_heartbeat(
+                            "recon",
+                            elapsed,
+                            status=f"worker {output}: {status}",
+                        )
+                        if result.get("status") == "rate_limited":
+                            log.warning(
+                                "[recon] worker %s hit rate limit; stopping "
+                                "remaining workers and surfacing phase-level "
+                                "rate-limit pause",
+                                output,
+                            )
+                            _cancel_pending_worker_futures(pending_futs, executor)
+                            return 1
+                        last_progress = now
+                    if pending_futs and now - last_progress >= _WORKER_POOL_HEARTBEAT_S:
+                        display.print_phase_heartbeat(
+                            "recon",
+                            elapsed,
+                            status=(
+                                f"recon worker pool active: {len(pending_futs)} "
+                                "worker(s) still running"
+                            ),
+                        )
+                        last_progress = now
+        finally:
+            restored_inputs = _restore_worker_input_artifacts(
+                scratchpad,
+                input_snapshot,
+            )
+            if restored_inputs:
+                log.info(
+                    "[recon] restored %d pre-existing scratchpad input "
+                    "artifact(s) modified during worker batch: %s",
+                    len(restored_inputs),
+                    restored_inputs[:10],
+                )
+        if any(r.get("status") == "rate_limited" for r in results):
+            return 1
+        if any(r.get("rc") == -4 for r in results):
+            log.error("[recon] worker-pool containment violation")
+            return -4
+        remaining_jobs = []
+        for job in jobs:
+            ok, _reasons = _recon_worker_complete(scratchpad, job["output"], job)
+            if not ok:
+                remaining_jobs.append(job)
+        if not remaining_jobs:
+            try:
+                _merge_recon_worker_shards(scratchpad, config)
+            except Exception as exc:
+                log.warning(f"[recon] worker-shard merge failed: {exc!r}")
+                return -2
+            passed, missing = gate_passes(scratchpad, project_root, phase)
+            if passed:
+                return 0
+            log.warning(f"[recon] worker-pool canonical gate failed: {missing}")
+            return -2
+        retry_reasons_by_output = {
+            str(r.get("output")): [
+                f"status={r.get('status')}",
+                *[str(x) for x in (r.get("reasons") or [])],
+            ]
+            for r in results
+            if r.get("status") != "complete"
+        }
+    log.warning("[recon] worker-pool retry budget exhausted")
+    return -2
+
+
+# ===========================================================================
 # Python-scheduled breadth worker PTYs
 # ===========================================================================
 
@@ -4291,6 +5459,18 @@ applicable, and write the mandatory Chain Summary table.
             + "\n".join(f"- {r}" for r in retry_reasons)
             + "\n"
         )
+    # P1: inject the recon-selected skills bound to this focus area (SC only;
+    # L1 already injects via l1_block above).
+    sc_skill_block = ""
+    if pipeline != "l1":
+        try:
+            breadth_map, _ = _parse_sc_skill_bindings(scratchpad)
+            sc_skill_block = _sc_skill_injection_block(
+                breadth_map.get(str(focus).lower(), []), agent_kind="breadth",
+                language=str(config.get("language", "")),
+            )
+        except Exception as exc:  # never block prompt assembly on this
+            log.debug(f"[breadth] skill-injection skipped for {focus}: {exc!r}")
     return f"""# BREADTH ROW WORKER
 
 You are a single breadth worker launched directly by the Python Plamen driver.
@@ -4332,7 +5512,7 @@ Task/Agent subagents and do not follow any coordinator instructions.
 
 Read `{finding_format}` for finding format. Use recon artifacts in the
 scratchpad as needed. Use the assigned opengrep shard when present.
-
+{sc_skill_block}
 ## Required File Contract
 
 The output file must:
@@ -4458,6 +5638,7 @@ def _run_single_breadth_worker_pty(
             prompt_path=snap,
             log_file=out,
         )
+        _register_active_worker_session(session)
         try:
             out.write(f"CLAUDE_TRANSCRIPT={session.transcript_path}\n")
             out.flush()
@@ -4500,6 +5681,7 @@ def _run_single_breadth_worker_pty(
                 "log": str(log_path),
             }
         finally:
+            _unregister_active_worker_session(session)
             try:
                 session.terminate(grace_s=_HALT_TERMINATE_GRACE_S)
             except Exception:
@@ -4581,7 +5763,68 @@ def _quarantine_worker_duplicate_copy(
         return None
 
 
+def _snapshot_worker_input_artifacts(
+    scratchpad: Path,
+    output_names: set[str],
+) -> dict[str, bytes]:
+    """Capture pre-existing scratchpad inputs before a worker batch.
+
+    Worker pools run multiple Claude PTYs against one scratchpad. A live poller
+    cannot reliably attribute a pre-existing input artifact's mtime/content
+    change to one worker, and killing the whole pool loses more audit signal
+    than it protects. Snapshot inputs instead: worker outputs stay strictly
+    gated, while accidental edits to prior-phase inputs are restored after the
+    batch.
+    """
+    snapshot: dict[str, bytes] = {}
+    try:
+        for p in scratchpad.iterdir():
+            if (
+                not p.is_file()
+                or p.name.startswith("_")
+                or p.name.startswith(".")
+                or p.name in output_names
+            ):
+                continue
+            try:
+                snapshot[p.name] = p.read_bytes()
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return snapshot
+
+
+def _restore_worker_input_artifacts(
+    scratchpad: Path,
+    snapshot: dict[str, bytes],
+) -> list[str]:
+    """Restore worker-pool input artifacts that changed during the batch."""
+    restored: list[str] = []
+    for name, before in snapshot.items():
+        p = scratchpad / name
+        try:
+            if not p.exists() or not p.is_file():
+                continue
+            try:
+                current = p.read_bytes()
+            except OSError:
+                continue
+            if current == before:
+                continue
+            tmp = p.with_name(
+                f"{p.name}.restore.{os.getpid()}.{uuid.uuid4().hex[:12]}"
+            )
+            tmp.write_bytes(before)
+            tmp.replace(p)
+            restored.append(name)
+        except Exception:
+            continue
+    return restored
+
+
 _WORKER_POOL_HEARTBEAT_S = 300
+_WORKER_POOL_UI_POLL_S = 0.10
 
 
 def _format_worker_pool_progress_status(
@@ -4594,8 +5837,7 @@ def _format_worker_pool_progress_status(
 ) -> str:
     active = max(0, len(active_outputs))
     parts = [
-        "worker pool:",
-        f"{active} running",
+        f"worker pool: {active} running",
         f"{max(0, queued)} queued/missing",
     ]
     if active_outputs:
@@ -4688,6 +5930,7 @@ def _run_breadth_worker_pool_pty(
             f"[breadth] worker PTY pool attempt {pool_attempt}: "
             f"{len(open_jobs)} open row(s), concurrency={concurrency}"
         )
+        pool_allowed_outputs = [str(job["output"]) for job in open_jobs]
         display.print_phase_heartbeat(
             "breadth",
             int(time.time() - pool_started),
@@ -4699,7 +5942,7 @@ def _run_breadth_worker_pool_pty(
             ),
         )
         results: list[dict[str, Any]] = []
-        with concurrent.futures.ThreadPoolExecutor(
+        with _NonBlockingWorkerPool(
             max_workers=concurrency,
             thread_name_prefix="plamen-breadth-worker",
         ) as executor:
@@ -4717,7 +5960,7 @@ def _run_breadth_worker_pool_pty(
                     quiescence_s=quiescence_s,
                     attempt=pool_attempt,
                     retry_reasons=retry_reasons_by_output.get(job["output"]),
-                    allowed_outputs=[j["output"] for j in open_jobs],
+                    allowed_outputs=pool_allowed_outputs,
                 ): job
                 for job in open_jobs
             }
@@ -4726,7 +5969,7 @@ def _run_breadth_worker_pool_pty(
             while pending_futs:
                 done, pending_futs = concurrent.futures.wait(
                     pending_futs,
-                    timeout=1,
+                    timeout=_WORKER_POOL_UI_POLL_S,
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
                 now = time.time()
@@ -4746,6 +5989,15 @@ def _run_breadth_worker_pool_pty(
                         elapsed,
                         status=f"worker {output}: {status}",
                     )
+                    if result.get("status") == "rate_limited":
+                        log.warning(
+                            "[breadth] worker %s hit rate limit; stopping "
+                            "remaining workers and surfacing phase-level "
+                            "rate-limit pause",
+                            output,
+                        )
+                        _cancel_pending_worker_futures(pending_futs, executor)
+                        return 1
                     last_progress = now
                 if pending_futs and now - last_progress >= _WORKER_POOL_HEARTBEAT_S:
                     active_outputs = [
@@ -4764,7 +6016,7 @@ def _run_breadth_worker_pool_pty(
                         ),
                     )
                     last_progress = now
-        if any(r.get("rc") == 1 for r in results):
+        if any(r.get("status") == "rate_limited" for r in results):
             return 1
         if any(r.get("rc") == -4 for r in results):
             log.error("[breadth] worker-pool containment violation")
@@ -5078,6 +6330,7 @@ def _run_single_rescan_worker_pty(
             prompt_path=snap,
             log_file=out,
         )
+        _register_active_worker_session(session)
         try:
             out.write(f"CLAUDE_TRANSCRIPT={session.transcript_path}\n")
             out.flush()
@@ -5115,6 +6368,7 @@ def _run_single_rescan_worker_pty(
                 "log": str(log_path),
             }
         finally:
+            _unregister_active_worker_session(session)
             try:
                 session.terminate(grace_s=_HALT_TERMINATE_GRACE_S)
             except Exception:
@@ -5203,6 +6457,7 @@ def _run_rescan_worker_pool_pty(
             f"[rescan] worker PTY pool attempt {pool_attempt}: "
             f"{len(open_jobs)} open row(s), concurrency={concurrency}"
         )
+        pool_allowed_outputs = [str(job["output"]) for job in open_jobs]
         display.print_phase_heartbeat(
             "rescan",
             int(time.time() - pool_started),
@@ -5214,7 +6469,7 @@ def _run_rescan_worker_pool_pty(
             ),
         )
         results: list[dict[str, Any]] = []
-        with concurrent.futures.ThreadPoolExecutor(
+        with _NonBlockingWorkerPool(
             max_workers=concurrency,
             thread_name_prefix="plamen-rescan-worker",
         ) as executor:
@@ -5232,7 +6487,7 @@ def _run_rescan_worker_pool_pty(
                     quiescence_s=quiescence_s,
                     attempt=pool_attempt,
                     retry_reasons=retry_reasons_by_output.get(job["output"]),
-                    allowed_outputs=[j["output"] for j in open_jobs],
+                    allowed_outputs=pool_allowed_outputs,
                 ): job
                 for job in open_jobs
             }
@@ -5241,7 +6496,7 @@ def _run_rescan_worker_pool_pty(
             while pending_futs:
                 done, pending_futs = concurrent.futures.wait(
                     pending_futs,
-                    timeout=1,
+                    timeout=_WORKER_POOL_UI_POLL_S,
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
                 now = time.time()
@@ -5261,6 +6516,15 @@ def _run_rescan_worker_pool_pty(
                         elapsed,
                         status=f"worker {output}: {status}",
                     )
+                    if result.get("status") == "rate_limited":
+                        log.warning(
+                            "[rescan] worker %s hit rate limit; stopping "
+                            "remaining workers and surfacing phase-level "
+                            "rate-limit pause",
+                            output,
+                        )
+                        _cancel_pending_worker_futures(pending_futs, executor)
+                        return 1
                     last_progress = now
                 if pending_futs and now - last_progress >= _WORKER_POOL_HEARTBEAT_S:
                     active_outputs = [
@@ -5279,7 +6543,7 @@ def _run_rescan_worker_pool_pty(
                         ),
                     )
                     last_progress = now
-        if any(r.get("rc") == 1 for r in results):
+        if any(r.get("status") == "rate_limited" for r in results):
             return 1
         if any(r.get("rc") == -4 for r in results):
             log.error("[rescan] worker-pool containment violation")
@@ -5456,6 +6720,282 @@ def _niche_slug_from_name(raw: str) -> str:
 def _niche_skill_path_for_role(role: str) -> Path:
     slug = _niche_slug_from_name(role)
     return plamen_home() / "agents" / "skills" / "niche" / slug / "SKILL.md"
+
+
+# ---------------------------------------------------------------------------
+# P1: SC breadth/depth worker skill injection.
+#
+# Root cause of the recall misapplication: recon correctly selected skills and
+# spawn_manifest.md binds them per breadth/depth agent, but the SC direct-worker
+# prompt builders never consumed those bindings (only L1 did, via v2.6.4). So a
+# breadth agent assigned CROSS_CHAIN_MESSAGE_INTEGRITY never saw its Step
+# Execution Checklist. These helpers port the L1 mechanical-injection pattern to
+# SC: parse the manifest bindings, resolve each skill's SKILL.md, and emit a
+# MANDATORY Read+execute-checklist block into the worker prompt.
+# ---------------------------------------------------------------------------
+
+# Skills that are not analysis methodology for breadth/depth workers.
+# FORK_ANCESTRY/VERIFICATION_PROTOCOL/MOVE_SAFETY_CORE_DIRECTIVES are real skills
+# bound to recon/verifier only. CORE_STATE/ACCESS_CONTROL are the always-required
+# BASELINE breadth-agent FOCUS AREAS (phase2-instantiate Step 2a "1 core state,
+# 1 access control") — they are NOT injectable skills and have NO SKILL.md by
+# design (EVM has zero always-required skills). The binding parser keys breadth
+# bindings off the AGENT row's Template column, so without this exclusion the
+# baseline agents' template names are mis-treated as skills, fail to resolve,
+# and emit a spurious "did not resolve to a SKILL.md ... silent recall loss"
+# warning (v2.8.16) — misleading, since there is no skill to lose.
+_SC_SKILL_INJECT_EXCLUDE = frozenset({
+    "FORK_ANCESTRY", "VERIFICATION_PROTOCOL", "MOVE_SAFETY_CORE_DIRECTIVES",
+    "CORE_STATE", "ACCESS_CONTROL",
+})
+
+
+def _sc_skill_path_for_name(name: str, language: str = "") -> "Path | None":
+    """Resolve an UPPER_SNAKE skill name to its SKILL.md across the per-language,
+    injectable and niche skill trees. Returns None when not found.
+
+    The current LANGUAGE tree is searched first so a non-EVM SC audit
+    (solana/aptos/sui/soroban) resolves its language-specific skills; the other
+    SC language trees are then searched so a shared skill name still resolves
+    regardless of which language dir it lives in (generality, not EVM-only)."""
+    slug = str(name or "").strip().strip("`").lower().replace("_", "-")
+    if not slug:
+        return None
+    base = plamen_home() / "agents" / "skills"
+    lang = str(language or "").strip().lower()
+    ordered: list[str] = []
+    if lang and lang not in ("evm", "l1"):
+        ordered.append(lang)
+    for sub in ("evm", "solana", "aptos", "sui", "soroban",
+                "injectable", "niche", "injectable/l1"):
+        if sub not in ordered:
+            ordered.append(sub)
+    for sub in ordered:
+        p = base / sub / slug / "SKILL.md"
+        if p.exists():
+            return p
+    return None
+
+
+def _parse_sc_skill_bindings(scratchpad: Path) -> "tuple[dict, dict]":
+    """Parse spawn_manifest.md -> (breadth_focus -> [skills], depth_role -> [skills]).
+
+    Header-aware: walks every markdown table, maps columns by header name, and
+    collects skill->agent bindings from the 'Breadth Agents' table (Template +
+    Focus Area) and any 'Skill ... Assigned To' table (primary/secondary/
+    injectable). Breadth bindings are keyed by focus_area; depth injectable
+    bindings by depth role (e.g. 'depth-external' -> 'external'). Fails soft to
+    empty dicts so resume/legacy runs are unaffected.
+    """
+    breadth: dict[str, list[str]] = {}
+    depth: dict[str, list[str]] = {}
+    manifest = scratchpad / "spawn_manifest.md"
+    if not manifest.exists():
+        return breadth, depth
+    try:
+        text = manifest.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return breadth, depth
+
+    def _add(d: dict, key: str, skill: str) -> None:
+        key = (key or "").strip().strip("`").lower()
+        raw_skill = (skill or "").strip().strip("`")
+        # Instantiate often writes combined cells such as
+        # "CROSS_CHAIN_MESSAGE_INTEGRITY + CROSS_CHAIN_TIMING". Split these
+        # mechanically so every methodology reaches the worker prompt.
+        parts = [
+            p.strip()
+            for p in re.split(r"\s*(?:\+|,|;|\band\b)\s*", raw_skill, flags=re.IGNORECASE)
+            if p.strip()
+        ] or [raw_skill]
+        if len(parts) > 1:
+            for part in parts:
+                _add(d, key, part)
+            return
+        skill = re.sub(r"\s*\([^)]*\)\s*$", "", raw_skill)
+        skill = skill.strip().strip("`").upper().replace(" ", "_")
+        if not key or not skill or skill in _SC_SKILL_INJECT_EXCLUDE:
+            return
+        if not re.match(r"^[A-Z][A-Z0-9_]+$", skill):
+            return
+        d.setdefault(key, [])
+        if skill not in d[key]:
+            d[key].append(skill)
+
+    def _focus_in_parens(s: str) -> str:
+        m = re.search(r"\(([a-z0-9_]+)\)", (s or "").lower())
+        return m.group(1) if m else ""
+
+    def _depth_role(s: str) -> str:
+        m = re.search(r"depth-([a-z][a-z-]+)", (s or "").lower())
+        return m.group(1).replace("-", "_") if m else ""
+
+    def _best_non_evm_breadth_focus() -> str:
+        """Choose the breadth worker most likely to own outbound foreign-VM
+        encoding when instantiate omitted the explicit cross-VM binding."""
+        preferred = (
+            "cross_chain_message_integrity",
+            "cross_chain_integrity",
+            "cross_chain",
+            "encoding",
+            "storage_upgrade_safety",
+            "token_flow_dex",
+        )
+        focus_values = list(agent_focus.values())
+        for needle in preferred:
+            for focus in focus_values:
+                if needle in focus:
+                    return focus
+        for focus in focus_values:
+            if "cross" in focus or "chain" in focus or "encode" in focus:
+                return focus
+        return focus_values[0] if focus_values else ""
+
+    def _has_non_evm_target_evidence() -> bool:
+        """Detect the recon condition for CROSS_VM_SERIALIZATION_CONFORMANCE
+        without trusting the LLM to have emitted a perfect manifest row."""
+        hay_parts: list[str] = []
+        for name in (
+            "recon_summary.md",
+            "design_context.md",
+            "attack_surface.md",
+            "detected_patterns.md",
+            "template_recommendations.md",
+            "contract_inventory.md",
+            "function_list.md",
+        ):
+            p = scratchpad / name
+            try:
+                if p.exists():
+                    hay_parts.append(p.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                continue
+        hay = "\n".join(hay_parts)
+        if not hay:
+            return False
+        positive = re.search(
+            r"\b(AccountEncoder|Solana|SOLANA_|Bitcoin|BITCOIN_|BTC|"
+            r"Pubkey|programId|ed25519|bech32|base58|Borsh)\b",
+            hay,
+            re.IGNORECASE,
+        )
+        cross_chain = re.search(
+            r"\b(cross-chain|cross chain|destination chain|withdrawAndCall|"
+            r"GatewayZEVM|GatewayEVM|revertMessage|onRevert|onAbort)\b",
+            hay,
+            re.IGNORECASE,
+        )
+        return bool(positive and cross_chain)
+
+    # Pass 1: agent_id -> focus_area (from the Breadth Agents table).
+    agent_focus: dict[str, str] = {}
+    header: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("|"):
+            header = []
+            continue
+        cells = [c.strip().strip("`") for c in line.strip("|").split("|")]
+        low = [c.lower() for c in cells]
+        if _is_separator_row(line):
+            continue
+        if any(h in low for h in ("focus area", "assigned to", "template", "skill")):
+            header = low
+            continue
+        if not header:
+            continue
+        col = {name: cells[i] for i, name in enumerate(header) if i < len(cells)}
+        skill = col.get("template") or col.get("skill") or ""
+        focus = col.get("focus area") or ""
+        agent_id = col.get("agent id") or ""
+        assigned = (
+            col.get("assigned to")
+            or col.get("inject into")
+            or col.get("agent")
+            or ""
+        )
+        if agent_id and focus:
+            agent_focus[agent_id.lower()] = focus.lower()
+        # Breadth primary (Breadth Agents table row).
+        if skill and focus:
+            _add(breadth, focus, skill)
+        # Skill -> Assigned-To rows (primary/secondary/injectable assignment).
+        if skill and assigned:
+            a = assigned.lower()
+            drole = _depth_role(a)
+            if drole:
+                _add(depth, drole, skill)
+            else:
+                f = _focus_in_parens(a)
+                if not f:
+                    # bare agent id like "B3" -> look up its focus
+                    aid = re.match(r"^(b\d+)", a)
+                    if aid:
+                        f = agent_focus.get(aid.group(1), "")
+                if f:
+                    _add(breadth, f, skill)
+    if _has_non_evm_target_evidence():
+        # This injectable is load-bearing for EVM -> Solana/BTC/foreign-VM
+        # serialization bugs. If recon saw the evidence but instantiate omitted
+        # the row, recover mechanically instead of silently losing recall.
+        cross_vm = "CROSS_VM_SERIALIZATION_CONFORMANCE"
+        if not any(cross_vm in skills for skills in breadth.values()):
+            f = _best_non_evm_breadth_focus()
+            if f:
+                _add(breadth, f, cross_vm)
+                log.warning(
+                    "[skill-injection] recovered %s breadth binding for focus %s "
+                    "from non-EVM target evidence",
+                    cross_vm, f,
+                )
+        if not any(cross_vm in skills for skills in depth.values()):
+            _add(depth, "external", cross_vm)
+            log.warning(
+                "[skill-injection] recovered %s depth binding for depth-external "
+                "from non-EVM target evidence",
+                cross_vm,
+            )
+    return breadth, depth
+
+
+def _sc_skill_injection_block(
+    skill_names: list[str], *, agent_kind: str, language: str = "",
+) -> str:
+    """Build a MANDATORY skill-injection block for an SC worker prompt: a Read
+    directive per resolved skill + a directive to execute every Step Execution
+    Checklist row and return the filled checklist in the artifact. Empty when no
+    skill resolves (so the prompt is unchanged for unbound agents)."""
+    resolved: list[tuple[str, str]] = []
+    for name in skill_names or []:
+        p = _sc_skill_path_for_name(name, language)
+        if p is not None:
+            resolved.append((name, p.as_posix()))
+        else:
+            # Binding-loss telemetry: a manifest-bound skill that does not
+            # resolve to a SKILL.md is a silent recall loss -- surface it.
+            log.warning(
+                "[skill-injection] %s agent: bound skill %r did not resolve to a "
+                "SKILL.md (language=%s) -- not injected",
+                agent_kind, name, language or "?",
+            )
+    if not resolved:
+        return ""
+    lines = [
+        "",
+        "## ASSIGNED SKILL METHODOLOGY (MANDATORY — recon-selected, mechanically injected)",
+        "",
+        "Recon selected these skills for your focus and the driver bound them to "
+        "you. You MUST read each and EXECUTE it — do not rely on generic phase "
+        "methodology alone. For each skill, run every row of its "
+        "`Step Execution Checklist` (or equivalent checklist) against the code "
+        "and include the filled checklist + any findings it surfaces in your "
+        "output artifact. A skill bound here but not executed is a recall failure.",
+        "",
+    ]
+    for name, posix in resolved:
+        lines.append(f"- Read and EXECUTE `{posix}` (skill `{name}`).")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _required_niche_worker_jobs(scratchpad: Path) -> list[dict[str, str]]:
@@ -5738,8 +7278,26 @@ def _build_depth_worker_prompt(
             + "\n".join(f"- {r}" for r in retry_reasons)
             + "\n"
         )
+        if role in {"token_flow", "state_trace"} and any(
+            "perturbation block" in str(reason).lower()
+            for reason in retry_reasons
+        ):
+            retry_block += """
+## Perturbation Repair Is Mandatory
+
+Your prior output failed the structural gate because one or more Medium+
+CONFIRMED findings did not have an inline `### Perturbation Block - <finding_id>`
+section. Repair ALL Medium/Critical/High CONFIRMED findings in the file, not
+only the IDs named above. If you rename, split, merge, or add any Medium+
+CONFIRMED finding during this retry, the new finding must receive its own
+inline perturbation block before the next finding starts.
+
+Do not mark the file COMPLETE until a final self-scan confirms every Medium+
+CONFIRMED finding has a matching `### Perturbation Block - <finding_id>` H3.
+"""
 
     perturbation_block = ""
+    perturbation_contract_item = ""
     if role in {"token_flow", "state_trace"}:
         perturbation_block = """
 Mandatory perturbation-retention contract for this role:
@@ -5756,6 +7314,33 @@ Mandatory perturbation-retention contract for this role:
 - Do not move this work to a later phase unless you emit an explicit carried
   obligation receipt naming that phase.
 """
+        perturbation_contract_item = """
+5. Because this is a token-flow/state-trace role, every Critical/High/Medium
+   `**Verdict**: CONFIRMED` finding MUST include an inline H3 section named
+   exactly `### Perturbation Block - <finding_id>` before the next finding.
+   This is a hard structural gate. A separate `perturbation_findings.md`,
+   bold `**Perturbation Block**` label, checklist, or later-phase promise does
+   not satisfy this worker file contract.
+6. Immediately before writing `<!-- PLAMEN_STATUS: COMPLETE -->`, perform this
+   self-check: list each Medium+ CONFIRMED finding ID in memory and verify that
+   the same finding block contains its matching H3 perturbation block. If any
+   are missing, repair them before marking COMPLETE.
+"""
+
+    # P1: inject the recon-selected INJECTABLE_DEPTH skills bound to this depth
+    # role (SC only) — e.g. DEX_INTEGRATION_SECURITY / INTEGRATION_HAZARD_RESEARCH
+    # to depth-external. The manifest binds them but the prompt never consumed
+    # them.
+    depth_skill_block = ""
+    if pipeline != "l1":
+        try:
+            _, depth_map = _parse_sc_skill_bindings(scratchpad)
+            depth_skill_block = _sc_skill_injection_block(
+                depth_map.get(str(role).lower(), []), agent_kind="depth",
+                language=language,
+            )
+        except Exception as exc:
+            log.debug(f"[depth] skill-injection skipped for {role}: {exc!r}")
 
     standard_block = ""
     if category == "standard":
@@ -5770,6 +7355,7 @@ Mandatory standard-depth sections:
 - `## Graph Artifact Consumption` for SC when graph artifacts exist or are unavailable
 - `## Chain Summary`
 {perturbation_block}
+{depth_skill_block}
 """
     elif category == "niche":
         niche_skill = _niche_skill_path_for_role(role)
@@ -5866,6 +7452,7 @@ The output file must:
    `## No Findings` / `## Not Applicable` rationale.
 4. End with a final `<!-- PLAMEN_STATUS: COMPLETE -->` marker only after the
    file is fully written and verified on disk.
+{perturbation_contract_item}
 
 SCOPE: Write ONLY to your assigned output file. Do NOT read or write other
 agents' output files. Do NOT continue after the assigned file is complete.
@@ -5891,9 +7478,11 @@ def _run_single_depth_worker_pty(
     attempt: int,
     retry_reasons: list[str] | None = None,
     allowed_outputs: list[str] | None = None,
+    protected_input_names: set[str] | None = None,
 ) -> dict[str, Any]:
     output = job["output"]
     allowed_output_set = set(allowed_outputs or [output])
+    protected_input_set = set(protected_input_names or set())
     session_id = str(uuid.uuid4())
     prompt = _build_depth_worker_prompt(
         job=job,
@@ -5941,6 +7530,8 @@ def _run_single_depth_worker_pty(
                     continue
                 if old_sig == sig:
                     continue
+                if p.name in protected_input_set:
+                    continue
                 if _worker_artifact_is_benign_duplicate_copy(p.name, known_names):
                     moved = _quarantine_worker_duplicate_copy(
                         scratchpad=scratchpad,
@@ -5978,6 +7569,7 @@ def _run_single_depth_worker_pty(
             prompt_path=snap,
             log_file=out,
         )
+        _register_active_worker_session(session)
         try:
             out.write(f"CLAUDE_TRANSCRIPT={session.transcript_path}\n")
             out.flush()
@@ -6028,6 +7620,7 @@ def _run_single_depth_worker_pty(
                 "log": str(log_path),
             }
         finally:
+            _unregister_active_worker_session(session)
             try:
                 session.terminate(grace_s=_HALT_TERMINATE_GRACE_S)
             except Exception:
@@ -6065,6 +7658,23 @@ def _depth_worker_pool_progress_status(
     )
 
 
+# v2.8.8: the perturbation depth worker mutates EVERY depth finding, so it is
+# legitimately the slowest worker (observed ~80% of the depth timeout ceiling on
+# DODO). On a larger codebase it could hit the uniform ceiling and be killed —
+# silently losing perturbation coverage (it is a sidecar, not a core artifact,
+# so the pool degrades cleanly without a halt). Grant it extra ceiling headroom;
+# this only prevents a premature kill — the worker still finishes via quiescence
+# the moment it stops writing, so other workers are unaffected.
+_PERTURBATION_TIMEOUT_MULT = 1.5
+
+
+def _depth_job_timeout(job: dict, base: float) -> float:
+    out = str(job.get("output") or "")
+    if "perturbation_findings" in out:
+        return base * _PERTURBATION_TIMEOUT_MULT
+    return base
+
+
 def _run_depth_worker_batch(
     *,
     scratchpad: Path,
@@ -6081,6 +7691,10 @@ def _run_depth_worker_batch(
     retry_reasons_by_output: dict[str, list[str]],
 ) -> tuple[int, list[dict[str, Any]]]:
     concurrency = min(_DEPTH_WORKER_CONCURRENCY, max(1, len(jobs)))
+    output_names = {str(job["output"]) for job in jobs}
+    pool_allowed_outputs = sorted(output_names)
+    input_snapshot = _snapshot_worker_input_artifacts(scratchpad, output_names)
+    protected_input_names = set(input_snapshot)
     results: list[dict[str, Any]] = []
     display.print_phase_heartbeat(
         "depth",
@@ -6089,69 +7703,91 @@ def _run_depth_worker_batch(
             scratchpad, phase, jobs, [j["output"] for j in jobs[:concurrency]]
         ),
     )
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=concurrency,
-        thread_name_prefix="plamen-depth-worker",
-    ) as executor:
-        fut_to_job = {
-            executor.submit(
-                _run_single_depth_worker_pty,
-                job=job,
-                scratchpad=scratchpad,
-                project_root=project_root,
-                config=config,
-                phase=phase,
-                base_cmd=base_cmd,
-                env=env,
-                timeout=timeout,
-                quiescence_s=quiescence_s,
-                attempt=attempt,
-                retry_reasons=retry_reasons_by_output.get(job["output"]),
-                allowed_outputs=[j["output"] for j in jobs],
-            ): job
-            for job in jobs
-        }
-        pending_futs: set[concurrent.futures.Future] = set(fut_to_job)
-        last_progress = time.time()
-        while pending_futs:
-            done, pending_futs = concurrent.futures.wait(
-                pending_futs,
-                timeout=1,
-                return_when=concurrent.futures.FIRST_COMPLETED,
+    try:
+        with _NonBlockingWorkerPool(
+            max_workers=concurrency,
+            thread_name_prefix="plamen-depth-worker",
+        ) as executor:
+            fut_to_job = {
+                executor.submit(
+                    _run_single_depth_worker_pty,
+                    job=job,
+                    scratchpad=scratchpad,
+                    project_root=project_root,
+                    config=config,
+                    phase=phase,
+                    base_cmd=base_cmd,
+                    env=env,
+                    timeout=_depth_job_timeout(job, timeout),
+                    quiescence_s=quiescence_s,
+                    attempt=attempt,
+                    retry_reasons=retry_reasons_by_output.get(job["output"]),
+                    allowed_outputs=pool_allowed_outputs,
+                    protected_input_names=protected_input_names,
+                ): job
+                for job in jobs
+            }
+            pending_futs: set[concurrent.futures.Future] = set(fut_to_job)
+            last_progress = time.time()
+            while pending_futs:
+                done, pending_futs = concurrent.futures.wait(
+                    pending_futs,
+                    timeout=_WORKER_POOL_UI_POLL_S,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                now = time.time()
+                elapsed = int(now - pool_started)
+                display.spin(elapsed)
+                if display.graceful_stop.requested:
+                    _cancel_pending_worker_futures(pending_futs, executor)
+                    raise _PtyStop(-3)
+                for fut in done:
+                    result = fut.result()
+                    results.append(result)
+                    output = result.get("output", "(unknown)")
+                    status = result.get("status")
+                    log.info(f"[depth] worker {output}: {status}")
+                    display.print_phase_heartbeat(
+                        "depth",
+                        elapsed,
+                        status=f"worker {output}: {status}",
+                    )
+                    if result.get("status") == "rate_limited":
+                        log.warning(
+                            "[depth] worker %s hit rate limit; stopping "
+                            "remaining workers and surfacing phase-level "
+                            "rate-limit pause",
+                            output,
+                        )
+                        _cancel_pending_worker_futures(pending_futs, executor)
+                        return 1, results
+                    last_progress = now
+                if pending_futs and now - last_progress >= _WORKER_POOL_HEARTBEAT_S:
+                    active_outputs = [
+                        fut_to_job[fut]["output"]
+                        for fut in pending_futs
+                        if fut in fut_to_job
+                    ][:concurrency]
+                    display.print_phase_heartbeat(
+                        "depth",
+                        elapsed,
+                        status=_depth_worker_pool_progress_status(
+                            scratchpad, phase, jobs, active_outputs
+                        ),
+                    )
+                    last_progress = now
+    finally:
+        restored_inputs = _restore_worker_input_artifacts(
+            scratchpad, input_snapshot
+        )
+        if restored_inputs:
+            log.info(
+                "[depth] restored %d prior-phase input artifact(s) modified "
+                "during worker batch: %s",
+                len(restored_inputs),
+                restored_inputs[:10],
             )
-            now = time.time()
-            elapsed = int(now - pool_started)
-            display.spin(elapsed)
-            if display.graceful_stop.requested:
-                _cancel_pending_worker_futures(pending_futs, executor)
-                raise _PtyStop(-3)
-            for fut in done:
-                result = fut.result()
-                results.append(result)
-                output = result.get("output", "(unknown)")
-                status = result.get("status")
-                log.info(f"[depth] worker {output}: {status}")
-                display.print_phase_heartbeat(
-                    "depth",
-                    elapsed,
-                    status=f"worker {output}: {status}",
-                )
-                last_progress = now
-            if pending_futs and now - last_progress >= _WORKER_POOL_HEARTBEAT_S:
-                active_outputs = [
-                    fut_to_job[fut]["output"]
-                    for fut in pending_futs
-                    if fut in fut_to_job
-                ][:concurrency]
-                display.print_phase_heartbeat(
-                    "depth",
-                    elapsed,
-                    status=_depth_worker_pool_progress_status(
-                        scratchpad, phase, jobs, active_outputs
-                    ),
-                )
-                last_progress = now
-    if any(r.get("rc") == 1 for r in results):
+    if any(r.get("status") == "rate_limited" for r in results):
         return 1, results
     if any(r.get("rc") == -4 for r in results):
         return -4, results
@@ -6178,6 +7814,65 @@ def _depth_da_job_if_required(scratchpad: Path, config: dict) -> list[dict[str, 
             "analysis and explore at least one untested path per finding"
         ),
     }]
+
+
+def _finalize_depth_worker_pool_if_complete(
+    *,
+    scratchpad: Path,
+    project_root: str,
+    config: dict,
+    phase: Phase,
+    jobs: list[dict[str, str]],
+    base_cmd: list[str],
+    env: dict[str, str],
+    timeout: float,
+    quiescence_s: float,
+    attempt: int,
+    pool_started: float,
+    retry_reasons_by_output: dict[str, list[str]],
+) -> int | None:
+    """Return depth completion rc when no canonical depth jobs remain.
+
+    Depth needs one extra finalization step beyond breadth/rescan: lifecycle
+    artifacts and optional DA iteration may be required after the standard
+    worker rows are complete. This helper makes both the top-of-loop and
+    post-attempt completion paths identical, including the final retry.
+    """
+    if _depth_open_jobs(scratchpad, phase, jobs):
+        return None
+    _synthesize_depth_lifecycle_artifacts(
+        scratchpad,
+        str(config.get("pipeline", "sc")),
+        force=False,
+        mode=str(config.get("mode", "core")),
+    )
+    da_jobs = _depth_da_job_if_required(scratchpad, config)
+    if da_jobs:
+        rc, results = _run_depth_worker_batch(
+            scratchpad=scratchpad,
+            project_root=project_root,
+            config=config,
+            phase=phase,
+            base_cmd=base_cmd,
+            env=env,
+            timeout=timeout,
+            quiescence_s=quiescence_s,
+            jobs=da_jobs,
+            attempt=attempt,
+            pool_started=pool_started,
+            retry_reasons_by_output=retry_reasons_by_output,
+        )
+        if rc != 0:
+            return rc
+        if any(r.get("status") != "complete" for r in results):
+            log.warning("[depth] DA worker did not complete")
+            return -2
+        _canonicalize_depth_iter_filenames(scratchpad)
+    passed, missing = gate_passes(scratchpad, project_root, phase)
+    if passed:
+        return 0
+    log.warning(f"[depth] worker-pool gate failed: {missing}")
+    return -2
 
 
 def _run_depth_worker_pool_pty(
@@ -6225,47 +7920,22 @@ def _run_depth_worker_pool_pty(
     for pool_attempt in range(1, budget + 2):
         open_jobs = _depth_open_jobs(scratchpad, phase, jobs)
         if not open_jobs:
-            _synthesize_depth_lifecycle_artifacts(
-                scratchpad,
-                str(config.get("pipeline", "sc")),
-                force=False,
-                mode=str(config.get("mode", "core")),
+            rc = _finalize_depth_worker_pool_if_complete(
+                scratchpad=scratchpad,
+                project_root=project_root,
+                config=config,
+                phase=phase,
+                jobs=jobs,
+                base_cmd=base_cmd,
+                env=env,
+                timeout=timeout,
+                quiescence_s=quiescence_s,
+                attempt=pool_attempt,
+                pool_started=pool_started,
+                retry_reasons_by_output=retry_reasons_by_output,
             )
-            da_jobs = _depth_da_job_if_required(scratchpad, config)
-            if da_jobs:
-                rc, results = _run_depth_worker_batch(
-                    scratchpad=scratchpad,
-                    project_root=project_root,
-                    config=config,
-                    phase=phase,
-                    base_cmd=base_cmd,
-                    env=env,
-                    timeout=timeout,
-                    quiescence_s=quiescence_s,
-                    jobs=da_jobs,
-                    attempt=pool_attempt,
-                    pool_started=pool_started,
-                    retry_reasons_by_output=retry_reasons_by_output,
-                )
-                if rc != 0:
-                    return rc
-                if any(r.get("status") != "complete" for r in results):
-                    log.warning("[depth] DA worker did not complete")
-                    return -2
-                retry_reasons_by_output.update({
-                    str(r.get("output")): [
-                        f"status={r.get('status')}",
-                        *[str(x) for x in (r.get("reasons") or [])],
-                    ]
-                    for r in results
-                    if r.get("status") != "complete"
-                })
-                _canonicalize_depth_iter_filenames(scratchpad)
-            passed, missing = gate_passes(scratchpad, project_root, phase)
-            if passed:
-                return 0
-            log.warning(f"[depth] worker-pool gate failed: {missing}")
-            return -2
+            if rc is not None:
+                return rc
         if pool_attempt > budget + 1:
             break
         log.info(
@@ -6307,7 +7977,22 @@ def _run_depth_worker_pool_pty(
             )
         passed, missing = gate_passes(scratchpad, project_root, phase)
         if passed and not _depth_open_jobs(scratchpad, phase, jobs):
-            continue
+            rc = _finalize_depth_worker_pool_if_complete(
+                scratchpad=scratchpad,
+                project_root=project_root,
+                config=config,
+                phase=phase,
+                jobs=jobs,
+                base_cmd=base_cmd,
+                env=env,
+                timeout=timeout,
+                quiescence_s=quiescence_s,
+                attempt=pool_attempt,
+                pool_started=pool_started,
+                retry_reasons_by_output=retry_reasons_by_output,
+            )
+            if rc is not None:
+                return rc
         log.info(
             f"[depth] worker-pool attempt {pool_attempt} incomplete: {missing}"
         )
@@ -7085,6 +8770,42 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
                 f"[{phase.name}] OpenGrep pre-breadth scan skipped: {exc!r}; "
                 "continuing without static detector obligations"
             )
+        # RECON-1/RECON-2: run the slow Rust SCIP bake and Sec3 X-Ray here
+        # (pre-breadth) instead of at startup, so the heartbeat is live and a
+        # multi-minute scan is not mistaken for a dead launch. Idempotent: each
+        # skips when its artifact already exists.
+        try:
+            _lang = str(config.get("language") or "evm").lower()
+            _proj = Path(config["project_root"])
+            if (
+                config.get("pipeline") != "l1"
+                and _lang in ("solana", "soroban")
+                and not (scratchpad / "caller_map.md").exists()
+                and os.environ.get("PLAMEN_DISABLE_SCIP") != "1"
+            ):
+                display.print_phase_heartbeat(
+                    phase.name, 0, status="optional graph bake: SCIP",
+                )
+                sys.path.insert(0, str(Path(__file__).parent))
+                from recon_prepass import _bake_rust_scip
+                status = _bake_rust_scip(scratchpad, _proj)
+                log.info(f"[{phase.name}] SCIP pre-breadth bake: {status}")
+            if (
+                config.get("pipeline") != "l1"
+                and _lang == "solana"
+                and not (scratchpad / "sec3_findings.md").exists()
+                and os.environ.get("PLAMEN_DISABLE_SEC3") != "1"
+            ):
+                display.print_phase_heartbeat(
+                    phase.name, 0, status="optional detector scan: Sec3 X-Ray",
+                )
+                status = _run_sec3_xray(scratchpad, _proj)
+                log.info(f"[{phase.name}] Sec3 X-Ray pre-breadth scan: {status}")
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] SCIP/Sec3 pre-breadth scan skipped: {exc!r}; "
+                "continuing without graph/detector enrichment"
+            )
         try:
             sharded = shard_opengrep_obligations(scratchpad)
             if sharded:
@@ -7415,6 +9136,30 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
                 "--strict-mcp-config", "--mcp-config", iso,
             ])
 
+    # v2.8.16 Phase 1 (#1c): a PoC-writing verify shard must be able to READ
+    # existing tests and WRITE the harm test into the real build root, which is
+    # frequently a PARENT or SIBLING of the audit scope dir (project_root).
+    # Without granting the build root, the verifier literally cannot create
+    # `test/<x>` and skips with NO_BUILD_ENVIRONMENT → mechanical NO_TEST_FILE →
+    # degrade. Ecosystem-agnostic: _find_build_root keys on config language.
+    if backend != "codex" and (
+        phase.name.startswith(("sc_verify_", "verify_"))
+        and not phase.name.endswith(("_queue", "_aggregate"))
+    ):
+        try:
+            import importlib as _il_br
+            import sys as _sys_br
+            _sys_br.path.insert(0, str(Path(__file__).parent))
+            _mv_br = _il_br.import_module("mechanical_verify")
+            _build_root = _mv_br._find_build_root(
+                Path(config["project_root"]), config.get("language", "")
+            )
+            _br_posix = Path(_build_root).as_posix()
+            if _br_posix not in cmd and _br_posix != Path(config["project_root"]).as_posix():
+                cmd.extend(["--add-dir", _br_posix])
+        except Exception as _br_exc:
+            log.debug(f"[{phase.name}] build-root --add-dir skipped: {_br_exc!r}")
+
     # Neutralize the V1 phase_gate watchdog — but ONLY if its breadcrumb
     # belongs to THIS run. The V1 L1 prompt initializes it via
     # `phase_gate.py --init`, which plants a breadcrumb at
@@ -7601,20 +9346,84 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
 
     if (
         is_claude_pty
+        and phase.name == "recon"
+        and _should_use_recon_worker_pool(config, scratchpad)
+    ):
+        try:
+            rc = _run_recon_worker_pool_pty(
+                scratchpad=scratchpad,
+                project_root=config["project_root"],
+                config=config,
+                phase=phase,
+                base_cmd=cmd,
+                env=subprocess_env,
+                timeout=timeout,
+                quiescence_s=float(config.get("claude_pty_quiescence_s", 8)),
+                attempt=attempt,
+            )
+        except _PtyStop as stop:
+            rc = stop.rc
+        duration = time.time() - start
+        try:
+            with log_path.open("w", encoding="utf-8", errors="replace") as out:
+                out.write(
+                    f"recon worker-pool completed rc={rc} "
+                    f"after {duration:.0f}s\n\n"
+                )
+                for worker_log in sorted(
+                    scratchpad.glob("_stdio_recon_worker_*.log")
+                ):
+                    out.write(f"\n\n# {worker_log.name}\n")
+                    try:
+                        out.write(
+                            worker_log.read_text(
+                                encoding="utf-8", errors="replace"
+                            )
+                        )
+                    except Exception as exc:
+                        out.write(f"[could not read worker log: {exc}]\n")
+                if rc == 1:
+                    out.write(
+                        "\nPLAMEN_RATE_LIMIT_DETECTED=1 "
+                        "api_error_status=429 "
+                        "type=rate_limit_error "
+                        "phase=recon source=recon_worker_pool\n"
+                    )
+            canonical.write_bytes(log_path.read_bytes())
+        except Exception:
+            pass
+        log.info(
+            f"[{phase.name}] PTY worker pool completed rc={rc} "
+            f"after {duration:.0f}s"
+        )
+        if rc == -2:
+            log.warning(
+                "[recon] worker-pool did not satisfy the canonical gate; "
+                "falling back to the direct isolated recon prompt for this "
+                "attempt"
+            )
+        else:
+            return rc
+
+    if (
+        is_claude_pty
         and phase.name == "breadth"
         and _should_use_breadth_worker_pool(config, scratchpad)
     ):
-        rc = _run_breadth_worker_pool_pty(
-            scratchpad=scratchpad,
-            project_root=config["project_root"],
-            config=config,
-            phase=phase,
-            base_cmd=cmd,
-            env=subprocess_env,
-            timeout=timeout,
-            quiescence_s=float(config.get("claude_pty_quiescence_s", 8)),
-            attempt=attempt,
-        )
+        try:
+            rc = _run_breadth_worker_pool_pty(
+                scratchpad=scratchpad,
+                project_root=config["project_root"],
+                config=config,
+                phase=phase,
+                base_cmd=cmd,
+                env=subprocess_env,
+                timeout=timeout,
+                quiescence_s=float(config.get("claude_pty_quiescence_s", 8)),
+                attempt=attempt,
+            )
+        except _PtyStop as stop:
+            rc = stop.rc
         duration = time.time() - start
         try:
             with log_path.open("w", encoding="utf-8", errors="replace") as out:
@@ -7634,6 +9443,13 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
                         )
                     except Exception as exc:
                         out.write(f"[could not read worker log: {exc}]\n")
+                if rc == 1:
+                    out.write(
+                        "\nPLAMEN_RATE_LIMIT_DETECTED=1 "
+                        "api_error_status=429 "
+                        "type=rate_limit_error "
+                        "phase=breadth source=breadth_worker_pool\n"
+                    )
             canonical.write_bytes(log_path.read_bytes())
         except Exception:
             pass
@@ -7648,17 +9464,20 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
         and phase.name == "rescan"
         and _should_use_rescan_worker_pool(config, scratchpad)
     ):
-        rc = _run_rescan_worker_pool_pty(
-            scratchpad=scratchpad,
-            project_root=config["project_root"],
-            config=config,
-            phase=phase,
-            base_cmd=cmd,
-            env=subprocess_env,
-            timeout=timeout,
-            quiescence_s=float(config.get("claude_pty_quiescence_s", 8)),
-            attempt=attempt,
-        )
+        try:
+            rc = _run_rescan_worker_pool_pty(
+                scratchpad=scratchpad,
+                project_root=config["project_root"],
+                config=config,
+                phase=phase,
+                base_cmd=cmd,
+                env=subprocess_env,
+                timeout=timeout,
+                quiescence_s=float(config.get("claude_pty_quiescence_s", 8)),
+                attempt=attempt,
+            )
+        except _PtyStop as stop:
+            rc = stop.rc
         duration = time.time() - start
         try:
             with log_path.open("w", encoding="utf-8", errors="replace") as out:
@@ -7678,6 +9497,13 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
                         )
                     except Exception as exc:
                         out.write(f"[could not read worker log: {exc}]\n")
+                if rc == 1:
+                    out.write(
+                        "\nPLAMEN_RATE_LIMIT_DETECTED=1 "
+                        "api_error_status=429 "
+                        "type=rate_limit_error "
+                        "phase=rescan source=rescan_worker_pool\n"
+                    )
             canonical.write_bytes(log_path.read_bytes())
         except Exception:
             pass
@@ -7692,17 +9518,20 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
         and phase.name == "depth"
         and _should_use_depth_worker_pool(config, scratchpad)
     ):
-        rc = _run_depth_worker_pool_pty(
-            scratchpad=scratchpad,
-            project_root=config["project_root"],
-            config=config,
-            phase=phase,
-            base_cmd=cmd,
-            env=subprocess_env,
-            timeout=timeout,
-            quiescence_s=float(config.get("claude_pty_quiescence_s", 8)),
-            attempt=attempt,
-        )
+        try:
+            rc = _run_depth_worker_pool_pty(
+                scratchpad=scratchpad,
+                project_root=config["project_root"],
+                config=config,
+                phase=phase,
+                base_cmd=cmd,
+                env=subprocess_env,
+                timeout=timeout,
+                quiescence_s=float(config.get("claude_pty_quiescence_s", 8)),
+                attempt=attempt,
+            )
+        except _PtyStop as stop:
+            rc = stop.rc
         duration = time.time() - start
         try:
             with log_path.open("w", encoding="utf-8", errors="replace") as out:
@@ -7722,6 +9551,13 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
                         )
                     except Exception as exc:
                         out.write(f"[could not read worker log: {exc}]\n")
+                if rc == 1:
+                    out.write(
+                        "\nPLAMEN_RATE_LIMIT_DETECTED=1 "
+                        "api_error_status=429 "
+                        "type=rate_limit_error "
+                        "phase=depth source=depth_worker_pool\n"
+                    )
             canonical.write_bytes(log_path.read_bytes())
         except Exception:
             pass
@@ -7940,6 +9776,14 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
                         rc = 0
                     elif process_exited:
                         rc = 0
+                    elif getattr(state, "output_truncated", False):
+                        log.warning(
+                            f"[{phase.name}] turn hit the output-token cap and "
+                            f"went quiescent; accepting current artifacts and "
+                            f"letting the disk gate decide instead of waiting "
+                            f"the full {timeout}s"
+                        )
+                        rc = 0
                     else:
                         log.warning(
                             f"[{phase.name}] timed out after {timeout}s"
@@ -7973,6 +9817,12 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
                     pass
 
         try:
+            if rc == 1:
+                _append_rate_limit_sentinel(
+                    log_path,
+                    phase_name=phase.name,
+                    source="claude_pty",
+                )
             canonical.write_bytes(log_path.read_bytes())
         except Exception:
             pass
@@ -8226,6 +10076,24 @@ def _has_containment_failure(missing: list[Any]) -> bool:
     return any(str(item).startswith("phase containment:") for item in missing)
 
 
+def _is_poc_verify_shard(phase_name: str) -> bool:
+    """A PoC-writing verify shard (SC `sc_verify_*` OR L1 `verify_*`), excluding
+    the queue/aggregate phases that write no PoC.
+
+    v2.8.16: extends the v2.8.15 SC-only never-halt net to L1. After bounded
+    retries such a shard may still not produce a PoC / valid blocker (the
+    verifier-execution gap); its verify_<ID>.md files exist as [CODE-TRACE], so
+    they ship UNPROVEN and the audit continues — the verify_aggregate
+    recovery+stub net (present for both SC and L1) covers any genuinely-missing
+    file. `post_verify_extract` is unaffected (it does not start with
+    `verify_`).
+    """
+    return (
+        (phase_name.startswith("sc_verify_") or phase_name.startswith("verify_"))
+        and not phase_name.endswith(("_queue", "_aggregate"))
+    )
+
+
 def _generate_containment_retry_hint(phase_name: str, missing: list[Any]) -> str:
     lines = [
         "## RETRY HINT - phase containment violation",
@@ -8329,6 +10197,13 @@ def _ensure_retry_hint(
             return
     except Exception:
         pass
+    if phase.name == "attention_repair":
+        _write_retry_hint(
+            scratchpad,
+            phase.name,
+            _generate_attention_repair_retry_hint([str(item) for item in (missing or [])]),
+        )
+        return
     _write_retry_hint(
         scratchpad,
         phase.name,
@@ -8346,6 +10221,8 @@ def _run_phase_validators(
     rc: int,
     file_state_before: dict,
     violations_before: int = 0,
+    *,
+    recovery_preflight: bool = False,
 ) -> tuple[bool, list[str]]:
     """Run ALL phase-specific validators and side-effects after gate_passes().
 
@@ -8728,21 +10605,6 @@ def _run_phase_validators(
                 f"[{phase.name}] verifier skip-vocabulary: {len(skip_warnings)} "
                 f"invalid PoC skip(s) — see verifier_skip_audit.md"
             )
-        integrity_issues = _validate_poc_pass_integrity(scratchpad)
-        if integrity_issues:
-            log.info(f"[{phase.name}] PoC integrity: {len(integrity_issues)} finding(s) downgraded from [POC-PASS] to [CODE-TRACE]")
-            for issue in integrity_issues:
-                vf = _find_verify_file(scratchpad, issue["finding_id"])
-                if vf:
-                    try:
-                        vf_content = vf.read_text(encoding="utf-8", errors="replace")
-                        reason = issue["reason"]
-                        for tag in EVIDENCE_TAGS_PROOF:
-                            if tag in vf_content:
-                                vf_content = vf_content.replace(tag, f"[CODE-TRACE] (was {tag}, integrity downgrade: {reason})")
-                        vf.write_text(vf_content, encoding="utf-8")
-                    except Exception:
-                        pass
         demotions = _apply_poc_fail_demotions(scratchpad, mode)
         if demotions:
             log.info(f"[{phase.name}] PoC demotions: {len(demotions)} finding(s) capped via poc_demotions.md")
@@ -8838,12 +10700,12 @@ def _run_phase_validators(
     # --- invariants_p2 (Phase 4a.5 Pass 2) ---
     # SOFT validator only — Pass 2 is an enrichment phase. Returns [] on
     # all failure modes (logs warning, writes sentinel). NEVER halts.
-    if phase.name == "invariants_p2" and passed:
+    if phase.name == "invariants_p2" and passed and not recovery_preflight:
         _validate_invariants_pass2(scratchpad, config.get("mode", "core"))
 
     # --- chain_iter2 (Phase 4c iteration 2) ---
     # Same soft-only model as invariants_p2.
-    if phase.name == "chain_iter2" and passed:
+    if phase.name == "chain_iter2" and passed and not recovery_preflight:
         _validate_chain_iter2(scratchpad, config.get("mode", "core"))
 
     # --- chain (Phase 4c Agent 1) anti-absorption hard gate -------------
@@ -9173,7 +11035,9 @@ def _run_phase_validators(
 
     # --- L1/SC verify shards: completion + cited paths ---
     if phase.name in L1_VERIFY_PHASE_NAMES or phase.name in SC_VERIFY_PHASE_NAMES:
-        verify_issues = _validate_verify_completion(scratchpad, phase.name)
+        verify_issues = _validate_verify_completion(
+            scratchpad, phase.name, mode=config.get("mode", "core")
+        )
         if verify_issues:
             passed = False
             missing = list(missing) + verify_issues
@@ -9208,8 +11072,9 @@ def _run_phase_validators(
                 if hint:
                     _write_retry_hint(scratchpad, phase.name, hint)
         check_phase_name = phase.name.replace("report_body_writer_", "report_")
+        _content_short: list[str] = []
         body_issues = _validate_tier_body_against_manifest(
-            scratchpad, check_phase_name
+            scratchpad, check_phase_name, collect_content=_content_short
         )
         if body_issues and phase.name.startswith("report_body_writer_"):
             repaired = _repair_report_body_from_manifest(scratchpad, phase.name)
@@ -9218,8 +11083,9 @@ def _run_phase_validators(
                     f"[{phase.name}] mechanically repaired {repaired} "
                     "stale REPORT-BLOCKED body section(s) from manifest evidence"
                 )
+                _content_short = []
                 body_issues = _validate_tier_body_against_manifest(
-                    scratchpad, check_phase_name
+                    scratchpad, check_phase_name, collect_content=_content_short
                 )
         if body_issues and phase.name.startswith("report_body_writer_"):
             hint = _generate_body_writer_retry_hint(scratchpad, phase.name)
@@ -9228,6 +11094,28 @@ def _run_phase_validators(
         if body_issues:
             passed = False
             missing = list(missing) + body_issues
+        # Bucket 3: substantive Impact/PoC content shortfall is a PRODUCTIVE
+        # retry trigger for the body-writer (an LLM phase that CAN enrich a thin
+        # section), not a hard halt. Add it to `missing` with a delta hint so the
+        # driver retries; when attempts are exhausted the FC4 safety net runs the
+        # content gate (_validate_tier_body_against_manifest hard-only, which
+        # EXCLUDES content), finds it clean, and auto-completes -> WARN-ship. So
+        # this enriches thin write-ups across a bounded retry yet never halts.
+        elif (
+            _content_short
+            and phase.name.startswith("report_body_writer_")
+            and not _body_content_retry_exhausted(scratchpad, phase.name)
+        ):
+            passed = False
+            missing = list(missing) + [
+                "body content quality (bounded retry, then ship): "
+                + "; ".join(_content_short[:5])
+            ]
+            _bump_body_content_retry(scratchpad, phase.name)
+            _write_retry_hint(
+                scratchpad, phase.name,
+                _body_content_retry_hint(phase.name, _content_short),
+            )
 
     # --- depth (L1): full validator suite ---
     if phase.name == "depth" and config["pipeline"] == "l1":
@@ -9716,6 +11604,23 @@ def _purge_scratchpad(scratchpad: Path, config: dict) -> None:
             pass
 
 
+def _prompt_halt_resume_choice(
+    checkpoint: Checkpoint,
+    scratchpad: Path,
+    phase_name: str,
+    config_path: Path,
+) -> bool:
+    """Return True to resume after Esc, False to stop and preserve checkpoint."""
+    checkpoint.save(scratchpad)
+    display.print_halt_prompt(phase_name, str(config_path))
+    if display.wait_halt_choice():
+        display.print_halt_resume()
+        display.graceful_stop.requested = False
+        return True
+    display.graceful_stop.requested = False
+    return False
+
+
 class _SpinnerSafeStreamHandler(logging.StreamHandler):
     """stderr logger that does not write into an active spinner line."""
 
@@ -9785,7 +11690,12 @@ def _release_run_lock() -> None:
             pass
 
 
-def _acquire_run_lock(scratchpad: Path, config_path: Path) -> tuple[bool, str]:
+def _acquire_run_lock(
+    scratchpad: Path,
+    config_path: Path,
+    *,
+    force: bool = False,
+) -> tuple[bool, str]:
     """Atomically prevent multiple drivers from writing one scratchpad."""
     global _RUN_LOCK_FD, _RUN_LOCK_PATH
     lock = scratchpad / _RUN_LOCK_NAME
@@ -9819,6 +11729,12 @@ def _acquire_run_lock(scratchpad: Path, config_path: Path) -> tuple[bool, str]:
                     )
             started = existing.get("started_at", "unknown")
             old_cfg = existing.get("config_path", "unknown")
+            if force:
+                return False, (
+                    f"--force refused: another Plamen driver is still using "
+                    f"this scratchpad (pid={pid}, started_at={started}, "
+                    f"config={old_cfg}). Stop that run first, then retry."
+                )
             return False, (
                 f"another Plamen driver is already using this scratchpad "
                 f"(pid={pid}, started_at={started}, config={old_cfg}). "
@@ -9881,7 +11797,9 @@ def main():
     scratchpad = Path(config["scratchpad"])
     scratchpad.mkdir(parents=True, exist_ok=True)
 
-    lock_ok, lock_issue = _acquire_run_lock(scratchpad, config_path)
+    lock_ok, lock_issue = _acquire_run_lock(
+        scratchpad, config_path, force=force_resume,
+    )
     if not lock_ok:
         print(f"[startup] {lock_issue}", file=sys.stderr)
         sys.exit(EXIT_ERROR)
@@ -9933,21 +11851,62 @@ def main():
             + ", ".join(repaired_rules)
         )
 
-    # Mechanical pre-pass (writes inventory/variables/functions/build_status/subsystems)
-    try:
-        sys.path.insert(0, str(Path(__file__).parent))
-        from recon_prepass import run_recon_prepass
-        status = run_recon_prepass(config)
-        log.info(f"[pre-pass] {status}")
-    except Exception as e:
-        log.warning(f"[pre-pass] failed: {e} -- LLM recon will write all artifacts")
-
     try:
         checkpoint = Checkpoint.load(scratchpad)
     except RuntimeError as exc:
         log.error(f"[checkpoint] failed to load checkpoint: {exc}")
         sys.exit(EXIT_DEGRADED)
     checkpoint.config = config
+
+    # Mechanical pre-pass (writes inventory/variables/functions/build_status/subsystems).
+    #
+    # This must run after checkpoint load. On resume, completed recon artifacts
+    # are authoritative handoffs; re-running pre-pass would clobber them with
+    # marker-stamped stubs because recon merge intentionally preserves shard
+    # evidence and can leave the original pre-pass marker at the top.
+    if "recon" in set(checkpoint.completed or []):
+        log.info(
+            "[pre-pass] skipped because recon is already completed; "
+            "preserving canonical recon handoff artifacts"
+        )
+        try:
+            recon_hard, _recon_soft = _validate_recon_content_structure(
+                scratchpad, backend=config.get("cli_backend", "claude")
+            )
+        except Exception:
+            recon_hard = []
+        if recon_hard and any("pre-pass overwrite marker" in str(x) for x in recon_hard):
+            log.warning(
+                "[startup] completed recon artifacts still carry pre-pass "
+                "overwrite markers; re-merging recon worker shards"
+            )
+            try:
+                _merge_recon_worker_shards(scratchpad, config)
+                recon_hard_after, _ = _validate_recon_content_structure(
+                    scratchpad, backend=config.get("cli_backend", "claude")
+                )
+                if recon_hard_after:
+                    log.error(
+                        "[startup] recon shard re-merge did not repair "
+                        "canonical handoffs: %s",
+                        "; ".join(recon_hard_after),
+                    )
+                else:
+                    log.info(
+                        "[startup] recon canonical handoffs repaired from "
+                        "isolated worker shards"
+                    )
+            except Exception as exc:
+                log.error(f"[startup] recon shard re-merge failed: {exc!r}")
+    else:
+        try:
+            sys.path.insert(0, str(Path(__file__).parent))
+            from recon_prepass import run_recon_prepass
+            status = run_recon_prepass(config)
+            log.info(f"[pre-pass] {status}")
+        except Exception as e:
+            log.warning(f"[pre-pass] failed: {e} -- LLM recon will write all artifacts")
+
     if checkpoint.completed:
         log.info(f"[resume] skipping completed phases: {checkpoint.completed}")
     quarantined_report = _quarantine_report_without_completed_assemble(
@@ -10434,6 +12393,14 @@ def main():
             _write_finding_records_from_inventory(scratchpad)
             routed = _write_mechanical_verification_queue_from_inventory(scratchpad)
             removed = _filter_verification_queue_by_evidence(scratchpad)
+            mode_filtered = _filter_verification_queue_by_mode(
+                scratchpad, config.get("mode", "core"), pipeline_label="L1",
+            )
+            if mode_filtered:
+                log.info(
+                    f"[verify_queue] moved {mode_filtered} Low/Info "
+                    f"finding(s) to evidence-excluded for {config.get('mode')} mode"
+                )
             shards = ensure_verify_shard_manifests(scratchpad)
             queue_issues = _validate_verification_queue_inventory_parity(scratchpad)
             if queue_issues:
@@ -10456,7 +12423,8 @@ def main():
             checkpoint.mark_completed(phase.name)
             checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
             checkpoint.save(scratchpad)
-            extra = f"; evidence-excluded {len(removed)}" if removed else ""
+            excluded_total = len(removed) + int(mode_filtered or 0)
+            extra = f"; evidence-excluded {excluded_total}" if excluded_total else ""
             log.info(
                 f"[verify_queue] mechanically routed {routed} inventory "
                 f"finding(s) into {active} active queue row(s) across "
@@ -11155,6 +13123,85 @@ def main():
                     f"annotated={summary.get('files_annotated')} "
                     f"elapsed={summary.get('elapsed_s', 0):.1f}s"
                 )
+                integrity_issues = _validate_poc_pass_integrity(scratchpad)
+                if integrity_issues:
+                    log.info(
+                        f"[{phase.name}] PoC integrity: "
+                        f"{len(integrity_issues)} finding(s) downgraded "
+                        "from [POC-PASS] to [CODE-TRACE]"
+                    )
+                    for issue in integrity_issues:
+                        vf = _find_verify_file(scratchpad, issue["finding_id"])
+                        if vf:
+                            try:
+                                vf_content = vf.read_text(
+                                    encoding="utf-8", errors="replace"
+                                )
+                                reason = issue["reason"]
+                                for tag in EVIDENCE_TAGS_PROOF:
+                                    if tag in vf_content:
+                                        vf_content = vf_content.replace(
+                                            tag,
+                                            f"[CODE-TRACE] (was {tag}, "
+                                            f"integrity downgrade: {reason})",
+                                        )
+                                vf.write_text(vf_content, encoding="utf-8")
+                            except Exception:
+                                pass
+                # VERIF-1: enforce the verdict-manifest integrity layer in the
+                # DEFAULT path (independent of PROVEN_ONLY). For every entry the
+                # mechanical layer classified INFLATED_PROSE (prose claimed
+                # proof-grade evidence but the run was FAIL/NO_TEST_FILE/
+                # COMPILE_FAIL/...), rewrite the verify file's residual proof
+                # tags to the effective tag so EVERY downstream consumer
+                # (skeptic, severity matrix, poc_demotions, report_index) sees
+                # the demoted tag -- a mechanically-disproven exploit can no
+                # longer ship as a verified-Critical. AMBIGUOUS (VERIF-5) is
+                # classified MECHANICAL_UNAVAILABLE, so it is skipped here.
+                try:
+                    _vm = _mv.read_verdict_manifest(scratchpad)
+                    _vinflated = 0
+                    for _entry in _vm:
+                        if _entry.get("integrity_state") != "INFLATED_PROSE":
+                            continue
+                        _vf = _find_verify_file(scratchpad, _entry.get("finding_id", ""))
+                        if not _vf:
+                            continue
+                        try:
+                            _c = _vf.read_text(encoding="utf-8", errors="replace")
+                            _orig = _c
+                            _eff = _entry.get("effective_tag", "[CODE-TRACE]")
+                            _ms = _entry.get("mechanical_status", "")
+                            for _t in EVIDENCE_TAGS_PROOF:
+                                if _t in _c:
+                                    _c = _c.replace(
+                                        _t,
+                                        f"{_eff} (was {_t}, mechanical "
+                                        f"integrity={_ms})",
+                                    )
+                            # v2.8.16 Phase 1 (#3a): demoting the tag alone does
+                            # NOT reach the report — the Index Agent sets the
+                            # VERIFIED column from the verifier's **Verdict**:
+                            # line. Flip CONFIRMED→CONTESTED on the Verdict FIELD
+                            # line only (tested helper) so a mechanically-
+                            # disproven exploit can never ship as verified-Critical.
+                            _c, _flipped = _mv.flip_verdict_on_integrity_downgrade(_c)
+                            if _c != _orig:
+                                _vf.write_text(_c, encoding="utf-8")
+                                _vinflated += 1
+                        except Exception:
+                            pass
+                    if _vinflated:
+                        log.info(
+                            f"[{phase.name}] verdict-manifest integrity: "
+                            f"{_vinflated} INFLATED_PROSE finding(s) demoted to "
+                            "effective tag (default-path enforcement)"
+                        )
+                except Exception as _vexc:
+                    log.warning(
+                        f"[{phase.name}] verdict-manifest integrity enforcement "
+                        f"skipped: {_vexc!r}"
+                    )
             except Exception as _exc:
                 ok = False
                 log.error(f"[{phase.name}] phase raised: {_exc}")
@@ -11299,7 +13346,9 @@ def main():
                         "N/A (0 assigned findings)",
                     )
                     continue
-                verify_issues = _validate_verify_completion(scratchpad, phase.name)
+                verify_issues = _validate_verify_completion(
+                    scratchpad, phase.name, mode=config.get("mode", "core")
+                )
                 if not verify_issues:
                     checkpoint.mark_completed(phase.name)
                     checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
@@ -11327,7 +13376,9 @@ def main():
                         "N/A (0 assigned findings)",
                     )
                     continue
-                verify_issues = _validate_verify_completion(scratchpad, phase.name)
+                verify_issues = _validate_verify_completion(
+                    scratchpad, phase.name, mode=config.get("mode", "core")
+                )
                 if not verify_issues:
                     checkpoint.mark_completed(phase.name)
                     checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
@@ -11462,7 +13513,19 @@ def main():
                         and all("semantic_invariants.md" in issue for issue in _owner_issues)
                         and any("owner=invariants" in issue for issue in _owner_issues)
                     )
-                    if expected_shared_handoff:
+                    # Driver-mechanical aggregates carry no owner record by
+                    # design (rebuilt deterministically at phase start, not
+                    # written by an owning LLM phase). A missing owner record
+                    # for such an artifact is expected and must not force a
+                    # rerun. verify_core.md is always rebuilt by
+                    # _generate_verify_core_if_missing for the verify
+                    # aggregate phases.
+                    _mechanical_aggregate_only = (
+                        phase.name in ("verify_aggregate", "sc_verify_aggregate")
+                        and bool(_owner_issues)
+                        and all("verify_core.md" in issue for issue in _owner_issues)
+                    )
+                    if expected_shared_handoff or _mechanical_aggregate_only:
                         _recov_missing = []
                     else:
                         _recov_missing = [
@@ -11518,6 +13581,7 @@ def main():
                     _recov_valid, _recov_validator_missing = _run_phase_validators(
                         phase, config, scratchpad, phases, EXIT_SUCCESS,
                         _recov_state_before, 0,
+                        recovery_preflight=True,
                     )
                     if not _recov_valid:
                         log.info(
@@ -11554,15 +13618,11 @@ def main():
 
         # Halt: user pressed Esc during prior phase
         if display.graceful_stop.requested:
-            checkpoint.save(scratchpad)
-            display.print_halt_prompt(
-                prev_phase or "(startup)", str(config_path),
-            )
-            if display.wait_halt_choice():
-                display.print_halt_resume()
-                display.graceful_stop.requested = False
+            if _prompt_halt_resume_choice(
+                checkpoint, scratchpad, prev_phase or "(startup)", config_path
+            ):
+                pass
             else:
-                display.graceful_stop.requested = False
                 _halted = True
                 break
 
@@ -11728,20 +13788,21 @@ def main():
 
         # Esc halt: subprocess killed, offer interactive resume or exit
         if rc == -3:
-            checkpoint.save(scratchpad)
-            display.print_halt_prompt(phase.name, str(config_path))
-            if display.wait_halt_choice():
-                display.print_halt_resume()
-                display.graceful_stop.requested = False
+            if _prompt_halt_resume_choice(
+                checkpoint, scratchpad, phase.name, config_path
+            ):
                 rc = run_phase(phase, config, attempt=2)
                 current_attempt = 2
                 if rc == -3:
-                    checkpoint.save(scratchpad)
-                    display.graceful_stop.requested = False
-                    _halted = True
-                    break
+                    if _prompt_halt_resume_choice(
+                        checkpoint, scratchpad, phase.name, config_path
+                    ):
+                        rc = run_phase(phase, config, attempt=3)
+                        current_attempt = 3
+                    else:
+                        _halted = True
+                        break
             else:
-                display.graceful_stop.requested = False
                 _halted = True
                 break
 
@@ -11755,12 +13816,16 @@ def main():
         if rc == 0:
             stdio_log = scratchpad / f"_stdio_{phase.name}.attempt{current_attempt}.log"
             try:
+                _gate_ok_on_disk, _ = gate_passes(
+                    scratchpad, config["project_root"], phase
+                )
                 if (
                     stdio_log.exists()
                     and stdio_log.stat().st_size < 500
                     and not _phase_has_fresh_expected_artifact(
                         phase, scratchpad, config["project_root"], file_state_before
                     )
+                    and not _gate_ok_on_disk
                 ):
                     log.warning(
                         f"[{phase.name}] rc=0 but stdio log < 500 bytes "
@@ -11872,10 +13937,13 @@ def main():
                         )
                     rc = run_phase(phase, config, attempt=2)
                 if rc == -3:
-                    checkpoint.save(scratchpad)
-                    display.graceful_stop.requested = False
-                    _halted = True
-                    break
+                    if _prompt_halt_resume_choice(
+                        checkpoint, scratchpad, phase.name, config_path
+                    ):
+                        rc = run_phase(phase, config, attempt=2)
+                    else:
+                        _halted = True
+                        break
                 retry_log = scratchpad / f"_stdio_{phase.name}.attempt2.log"
                 _is_retry_rate_limited = (
                     _detect_codex_rate_limit(retry_log, rc)
@@ -12008,6 +14076,18 @@ def main():
             )
 
         if not passed and rate_limit_consumed_retry:
+            # A rate-limit retry is transport recovery, not the phase's
+            # normal LLM-format/gate retry. If the first non-rate-limited
+            # attempt produces malformed or incomplete artifacts, fall
+            # through to the standard retry-hint path below instead of
+            # degrading immediately after only one useful attempt.
+            log.warning(
+                f"[{phase.name}] gate failed after rate-limit recovery; "
+                "preserving normal retry budget"
+            )
+            rate_limit_consumed_retry = False
+
+        if not passed and rate_limit_consumed_retry:
             log.warning(
                 f"[{phase.name}] gate failed after rate-limit retry (attempt 2 "
                 f"already consumed): missing {missing} — degrading"
@@ -12024,6 +14104,13 @@ def main():
             checkpoint.save(scratchpad)
             _rl_retry_recovered = False
             if phase.critical:
+                # GATE-1: a rate-limit-consumed degrade is still a degrade; apply
+                # the same FC4 content re-validation as the main critical branch
+                # so a content-valid phase auto-completes instead of false-halting.
+                if _fc4_autocomplete_if_content_valid(
+                    phase, config, scratchpad, checkpoint
+                ) is None:
+                    continue
                 log.error(f"[{phase.name}] CRITICAL phase degraded after rate-limit retry")
                 display.print_halt_diagnostics(phase.name, str(scratchpad), str(config_path))
                 display.print_critical_halt_prompt(phase.name, str(config_path))
@@ -12035,10 +14122,13 @@ def main():
                     )
                     rc = run_phase(phase, config, attempt=3)
                     if rc == -3:
-                        checkpoint.save(scratchpad)
-                        display.graceful_stop.requested = False
-                        _halted = True
-                        break
+                        if _prompt_halt_resume_choice(
+                            checkpoint, scratchpad, phase.name, config_path
+                        ):
+                            rc = run_phase(phase, config, attempt=3)
+                        else:
+                            _halted = True
+                            break
                     if rc == 0:
                         stdio_log = scratchpad / f"_stdio_{phase.name}.attempt3.log"
                         try:
@@ -12135,10 +14225,13 @@ def main():
             )
             rc = run_phase(phase, config, attempt=2)
             if rc == -3:
-                checkpoint.save(scratchpad)
-                display.graceful_stop.requested = False
-                _halted = True
-                break
+                if _prompt_halt_resume_choice(
+                    checkpoint, scratchpad, phase.name, config_path
+                ):
+                    rc = run_phase(phase, config, attempt=2)
+                else:
+                    _halted = True
+                    break
 
             # v2.3.6 E1: same rc=0-empty sentinel on retry. If attempt 2
             # also returns rc=0 with no output, do NOT silently accept
@@ -12179,10 +14272,13 @@ def main():
                     )
                     rc = run_phase(phase, config, attempt=3)
                     if rc == -3:
-                        checkpoint.save(scratchpad)
-                        display.graceful_stop.requested = False
-                        _halted = True
-                        break
+                        if _prompt_halt_resume_choice(
+                            checkpoint, scratchpad, phase.name, config_path
+                        ):
+                            rc = run_phase(phase, config, attempt=3)
+                        else:
+                            _halted = True
+                            break
 
             # v2.4.3: check attempt2 log, not canonical (which may contain stale attempt1 data on timeout)
             retry_log = scratchpad / f"_stdio_{phase.name}.attempt2.log"
@@ -12210,9 +14306,10 @@ def main():
                     _rate_limit_halt = True
                     break
                 display.print_rate_limit_retry(phase.name)
-                file_state_before = _snapshot_file_state(
-                    scratchpad, config["project_root"]
-                )
+                # Preserve the pre-attempt containment baseline. The
+                # rate-limited attempt may have died before its containment
+                # audit ran; re-snapshotting here would fold any foreign
+                # writes into the baseline and hide them from attempt 3.
                 # Same savings guard as the attempt-2 rate-limit path.
                 # By attempt 3 the artifacts may have accumulated across
                 # earlier tries; if the gate is now satisfied we don't
@@ -12234,10 +14331,13 @@ def main():
                     rc = run_phase(phase, config, attempt=3)
                 retry_rate_limit_consumed = True
                 if rc == -3:
-                    checkpoint.save(scratchpad)
-                    display.graceful_stop.requested = False
-                    _halted = True
-                    break
+                    if _prompt_halt_resume_choice(
+                        checkpoint, scratchpad, phase.name, config_path
+                    ):
+                        rc = run_phase(phase, config, attempt=3)
+                    else:
+                        _halted = True
+                        break
                 attempt3_log = scratchpad / f"_stdio_{phase.name}.attempt3.log"
                 _is_attempt3_rl = (
                     _detect_codex_rate_limit(attempt3_log, rc)
@@ -12324,16 +14424,25 @@ def main():
                 # still print the panel via their own call sites below.
                 _is_depth_recoverable = (
                     phase.name == "depth"
-                    and config.get("pipeline") != "l1"
+                    # v2.8.16: L1 depth is recoverable on the same terms as SC
+                    # (core present). The former `!= "l1"` exclusion forced the
+                    # red HALT panel for L1 even when S1.6 would degrade-continue.
                     and _depth_core_artifacts_present(
                         scratchpad,
                         config.get("pipeline", "sc"),
                         config.get("mode", "core"),
                     )
                 )
+                # v2.8.15/v2.8.16: verify shards degrade-and-continue (never
+                # halt) — suppress the red critical-HALT panel for them, same as
+                # depth. v2.8.16 extends this to L1 (`verify_*`) so L1 verify
+                # halts the same way SC does (i.e. it doesn't).
+                _is_verify_shard_recoverable = _is_poc_verify_shard(phase.name)
                 display.print_phase_degraded(
                     phase.name, list(missing),
-                    critical=phase.critical and not _is_depth_recoverable,
+                    critical=phase.critical
+                    and not _is_depth_recoverable
+                    and not _is_verify_shard_recoverable,
                 )
                 # v2.3.14: restore quarantined artifacts — stale content
                 # is better than nothing for downstream phases.
@@ -12399,21 +14508,29 @@ def main():
                     # a tail-artifact gap. Core findings absent -> genuine
                     # catastrophic depth failure -> halt. Core present -> one
                     # targeted repair attempt (S1.5); if gaps still remain,
-                    # degrade-and-continue (S1.6) -- chain analysis works on
+                    # degrade-and-continue (S1.6) -- downstream phases work on
                     # the core findings.
-                    if (
-                        config.get("pipeline") == "l1"
-                        or not _depth_core_artifacts_present(
+                    #
+                    # v2.8.16: L1 now mirrors SC exactly. The former
+                    # `config.get("pipeline") == "l1" or ...` force-halt disjunct
+                    # made L1 depth ALWAYS halt on any tail gap, even when its 5
+                    # core role findings were complete. _depth_core_artifacts_present
+                    # is already L1-aware (l1_never_cut_groups(mode)[:5] = the 5 L1
+                    # depth role files, mode-invariant), so it alone decides for
+                    # both pipelines. (NOTE: the pipeline-neutral containment halt
+                    # at ~14478 runs BEFORE this branch and still halts a critical
+                    # foreign-write violation for BOTH pipelines — intentional
+                    # SC-parity, not affected here.)
+                    if not _depth_core_artifacts_present(
                         scratchpad,
                         config.get("pipeline", "sc"),
                         config.get("mode", "core"),
-                        )
                     ):
                         log.error(
                             "[depth] core findings absent after 2 attempts "
-                            "(4 depth_*_findings.md + 3 blind_spot_* not all "
-                            "substantive) - halting; depth produced no usable "
-                            "input for downstream phases"
+                            "(depth role findings not all substantive) - "
+                            "halting; depth produced no usable input for "
+                            "downstream phases"
                         )
                         display.print_phase_degraded(
                             phase.name, list(missing), critical=True
@@ -12429,17 +14546,24 @@ def main():
                     )
                     _write_retry_hint(
                         scratchpad, phase.name,
-                        _generate_depth_repair_hint(list(missing)),
+                        _generate_depth_repair_hint(
+                            list(missing),
+                            config.get("pipeline", "sc"),
+                            config.get("mode", "core"),
+                        ),
                     )
                     repair_state_before = _snapshot_file_state(
                         scratchpad, config["project_root"]
                     )
                     rc = run_phase(phase, config, attempt=3)
                     if rc == -3:
-                        checkpoint.save(scratchpad)
-                        display.graceful_stop.requested = False
-                        _halted = True
-                        break
+                        if _prompt_halt_resume_choice(
+                            checkpoint, scratchpad, phase.name, config_path
+                        ):
+                            rc = run_phase(phase, config, attempt=3)
+                        else:
+                            _halted = True
+                            break
                     passed_r, missing_r = _run_phase_validators(
                         phase, config, scratchpad, phases, rc,
                         repair_state_before, 0,
@@ -12474,14 +14598,55 @@ def main():
                             checkpoint.degraded.append(phase.name)
                         checkpoint.save(scratchpad)
                         continue
+                elif _is_poc_verify_shard(phase.name):
+                    # v2.8.15/v2.8.16: verify shards NEVER halt the audit — SC
+                    # (`sc_verify_*`) AND L1 (`verify_*`). After bounded retries
+                    # the verifier may still not produce a PoC / valid blocker
+                    # (the verifier-execution gap — forensic showed 0 real PoCs).
+                    # The shard's verify_*.md files exist (CODE-TRACE); ship them
+                    # as UNPROVEN per the recall-safe routing design and continue.
+                    # The {sc_,}verify_aggregate recovery+stub net (present for
+                    # both pipelines) covers any genuinely-missing verify files.
+                    # This kills the whack-a-mole verify halt (sc_verify_high_c /
+                    # H-5 etc.) on SC and the same class on L1. Real fix = the
+                    # verify author/executor split (Phase 1, v2.8.16).
+                    log.warning(
+                        f"[{phase.name}] degraded after retries (PoC contract "
+                        f"unmet); shipping shard findings as UNPROVEN and "
+                        f"continuing (verify shards never halt). Gaps: {missing}"
+                    )
+                    try:
+                        with (scratchpad / "violations.md").open(
+                            "a", encoding="utf-8"
+                        ) as _vf:
+                            _vf.write(
+                                f"\n## {phase.name} degrade-not-halt "
+                                f"(verify-shard net, v2.8.15)\n"
+                                f"- findings shipped UNPROVEN; unmet PoC "
+                                f"contract: {missing}\n"
+                            )
+                    except Exception:
+                        pass
+                    if phase.name not in checkpoint.degraded:
+                        checkpoint.degraded.append(phase.name)
+                    checkpoint.save(scratchpad)
+                    continue
                 elif phase.critical:
+                    # FC4 safety net (shared helper): re-validate artifacts with
+                    # the content gate before halting; auto-complete + continue
+                    # if content-valid. Only halt when content genuinely fails.
+                    _content_issues = _fc4_autocomplete_if_content_valid(
+                        phase, config, scratchpad, checkpoint
+                    )
+                    if _content_issues is None:
+                        continue
                     log.error(
                         f"[{phase.name}] is "
                         f"{'phase-containment-failed' if containment_failure else 'CRITICAL'}. "
                         f"Downstream phases cannot produce meaningful output "
                         f"without this phase boundary."
                     )
-                    display.print_phase_degraded(phase.name, list(missing), critical=True)
+                    display.print_phase_degraded(phase.name, list(_content_issues), critical=True)
                     display.print_halt_diagnostics(
                         phase.name, str(scratchpad), str(config_path),
                     )
@@ -12508,10 +14673,16 @@ def main():
                         )
                         rc = run_phase(phase, config, attempt=critical_retry_attempt)
                         if rc == -3:
-                            checkpoint.save(scratchpad)
-                            display.graceful_stop.requested = False
-                            _halted = True
-                            break
+                            if _prompt_halt_resume_choice(
+                                checkpoint, scratchpad, phase.name, config_path
+                            ):
+                                rc = run_phase(
+                                    phase, config,
+                                    attempt=critical_retry_attempt,
+                                )
+                            else:
+                                _halted = True
+                                break
                         if rc == 0:
                             stdio_log = scratchpad / f"_stdio_{phase.name}.attempt{critical_retry_attempt}.log"
                             try:
@@ -12626,7 +14797,7 @@ def main():
             _purge_scratchpad(scratchpad, config)
             display.print_purge_done(str(scratchpad))
         display.print_exit_clean()
-        sys.exit(0)
+        _hard_exit_after_user_stop(0)
 
     # v2.1.6: reconcile on-disk `.degraded` sentinels into the checkpoint
     # JSON. Fixes the Irys L1 observation where `_v2_checkpoint.json.degraded

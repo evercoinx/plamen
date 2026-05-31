@@ -198,6 +198,7 @@ __all__ = [
     "_verifier_status_from_text",
     "_verify_file_for_id",
     "_write_mechanical_verification_queue_from_inventory",
+    "_filter_verification_queue_by_mode",
     "_filter_sc_verification_queue_by_mode",
     "_write_queue_json_sidecar",
     "_write_queue_excluded_manifest",
@@ -1312,8 +1313,13 @@ def _parse_skeptic_judge_table(text: str) -> list[dict]:
         s = line.strip()
         if not s.startswith("|"):
             continue
-        cells = [c.strip() for c in s.split("|")]
-        cells = [c for c in cells if c]
+        # PARSE-1: preserve empty interior cells so positional reads stay
+        # aligned to the documented 5-column contract. The prior empty-filter
+        # collapsed a blank cell and shifted every later index, silently
+        # dropping DOWNGRADE/UNRESOLVED rulings whose Final-Severity (or any
+        # interior) cell was blank. Matches the empties-preserving split used by
+        # every sibling manifest/table parser.
+        cells = [c.strip() for c in s.strip().strip("|").split("|")]
         if len(cells) < 4:
             continue
         first = cells[0]
@@ -1874,28 +1880,58 @@ def classify_poc_testability(bug_class: str, preferred_tag: str, title: str, sev
         "toctou", "crash-recovery", "crash recovery", "timing", "race condition",
         "cross-client", "non-determinism", "nondeterminism", "eclipse",
         "network partition", "byzantine",
+        "missing setter", "no admin setter", "has no admin setter",
+        "no setter", "missing function", "absent function",
+        "event emission missing", "missing event", "no event",
+        "event missing", "without emitting events", "without event",
+        "emit no event", "emits no event", "no events",
+        "no admin setter", "missing admin setter", "without a setter",
     ]
     if any(p in bc or p in title_lc for p in structural_patterns):
         if "map" in title_lc and ("iter" in title_lc or "order" in title_lc):
             return "property"
         return "structural"
 
-    unit_patterns = [
+    # VERIF-3: property/accounting/invariant bugs are multi-step and must be
+    # property-class, not unit -- mislabeling them 'unit' forces an impossible
+    # single-call harness and a false mandatory-PoC demand. Property is defined
+    # BEFORE unit so a unit match via a BROAD noun (fee/share/deposit/...) that
+    # CO-OCCURS with a strong property signal routes to property. NARROW,
+    # unambiguous unit signals (overflow, access control, onlyOwner, ...) always
+    # win regardless.
+    property_patterns = [
+        "state corruption", "invariant", "accumulator", "counter",
+        "monotonic", "idempotent", "commutativ",
+        "reentrancy", "accounting", "liquidation", "oracle", "price",
+        "collateral", "debt", "ltv", "solvency", "interest", "reward",
+        "custody", "escrow", "residual", "dust", "share price",
+    ]
+    narrow_unit_patterns = [
         "panic", "unwrap", "overflow", "underflow", "arithmetic",
         "validation", "bounds check", "off-by-one", "division by zero",
         "index out of", "assertion", "type cast", "truncat",
+        "access control", "permission", "onlyowner", "only owner",
+        "onlycreator", "unauthorized", "public withdraw", "missing guard",
+        "slippage", "minout", "min out", "minreturn", "min return",
     ]
-    if any(p in bc or p in title_lc for p in unit_patterns):
+    broad_unit_nouns = [
+        "fee", "rounding", "share", "deposit", "withdraw", "approve",
+        "allowance", "transferfrom", "transfer from",
+    ]
+    narrow_unit_hit = any(p in bc or p in title_lc for p in narrow_unit_patterns)
+    broad_unit_hit = any(p in bc or p in title_lc for p in broad_unit_nouns)
+    property_hit = any(p in bc or p in title_lc for p in property_patterns)
+    if narrow_unit_hit:
         return "unit"
+    if broad_unit_hit:
+        # A broad financial noun alone is unit; combined with a property signal
+        # (accounting/invariant/reward/...) it is a property-class invariant bug.
+        return "property" if property_hit else "unit"
 
     if "poc-pass" in tag or "poc" in tag:
         return "unit"
 
-    property_patterns = [
-        "state corruption", "invariant", "accumulator", "counter",
-        "monotonic", "idempotent", "commutativ",
-    ]
-    if any(p in bc or p in title_lc for p in property_patterns):
+    if property_hit:
         return "property"
 
     if "fuzz" in tag or "non-det" in tag:
@@ -1997,12 +2033,18 @@ def _write_mechanical_verification_queue_from_inventory(scratchpad: Path) -> int
     return len(rows)
 
 
-def _filter_sc_verification_queue_by_mode(scratchpad: Path, mode: str) -> int:
-    """Remove SC Low/Info rows from active verification outside Thorough mode.
+def _filter_verification_queue_by_mode(
+    scratchpad: Path,
+    mode: str,
+    *,
+    pipeline_label: str,
+) -> int:
+    """Remove Low/Info rows from active verification outside Thorough mode.
 
-    SC low verifier shards only exist in Thorough mode. Keeping Low/Info rows
-    in the active queue for Light/Core creates an impossible contract: no phase
-    owns their `verify_<ID>.md` files, but aggregate parity still expects them.
+    Low verifier shards only exist in Thorough mode for both SC and L1. Keeping
+    Low/Info rows in the active queue for Light/Core creates an impossible
+    contract: no phase owns their `verify_<ID>.md` files, but aggregate parity
+    still expects them.
     Preserve traceability by moving them to the explicit evidence-excluded
     sidecar/markdown artifact instead of silently dropping them.
     """
@@ -2018,7 +2060,7 @@ def _filter_sc_verification_queue_by_mode(scratchpad: Path, mode: str) -> int:
         if bucket in {"low", "info"}:
             item = dict(row)
             item["exclusion reason"] = (
-                f"Excluded from active SC verification in {mode} mode "
+                f"Excluded from active {pipeline_label} verification in {mode} mode "
                 "(Low/Info verify shards run only in Thorough mode)"
             )
             excluded.append(item)
@@ -2042,6 +2084,15 @@ def _filter_sc_verification_queue_by_mode(scratchpad: Path, mode: str) -> int:
         combined,
     )
     return len(excluded)
+
+
+def _filter_sc_verification_queue_by_mode(scratchpad: Path, mode: str) -> int:
+    """Backward-compatible SC wrapper used by existing tests/imports."""
+    return _filter_verification_queue_by_mode(
+        scratchpad,
+        mode,
+        pipeline_label="SC",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2976,12 +3027,55 @@ def _field_from_markdown(text: str, labels: tuple[str, ...]) -> str:
     for label in labels:
         m = re.search(
             rf"(?im)^\s*(?:[-*]\s*|#{{1,6}}\s+)?(?:\*\*)?{re.escape(label)}(?:\*\*)?"
-            rf"\s*(?::|-|=)\s*(.+)$",
+            rf"(?:\s*\([^)]*\))?\s*(?::|-|=)\s*(.+)$",
             text,
         )
         if m:
             return m.group(1).strip().strip("`")
     return ""
+
+
+_OPTIONAL_FINDING_METADATA_LABELS: dict[str, tuple[str, ...]] = {
+    "discovery_steer": ("Discovery Steer", "Discovery Steering"),
+    "missing_precondition": ("Missing Precondition", "Missing Preconditions"),
+    "precondition_type": ("Precondition Type", "Precondition Types"),
+    "postconditions_created": (
+        "Postconditions Created",
+        "Postcondition Created",
+        "Postconditions",
+        "Postcondition",
+    ),
+    "postcondition_types": ("Postcondition Types", "Postcondition Type"),
+    "semantic_invariant": ("Semantic Invariant", "Semantic Invariants"),
+    "branch_preconditions": ("Branch Preconditions", "Branch Precondition"),
+    "terminal_mechanism": ("Terminal Mechanism", "Terminal Mechanisms"),
+    "composition_candidates": ("Composition Candidates", "Composition Candidate"),
+}
+
+_OPTIONAL_FINDING_METADATA_FIELDS: tuple[str, ...] = tuple(
+    _OPTIONAL_FINDING_METADATA_LABELS.keys()
+)
+
+
+def _optional_finding_metadata_defaults() -> dict[str, str]:
+    return {field: "" for field in _OPTIONAL_FINDING_METADATA_FIELDS}
+
+
+def _optional_finding_metadata_field_for_label(label: str) -> str:
+    key = _norm_key(label)
+    for field, labels in _OPTIONAL_FINDING_METADATA_LABELS.items():
+        if any(key == _norm_key(alias) for alias in labels):
+            return field
+    return ""
+
+
+def _extract_optional_finding_metadata(text: str) -> dict[str, str]:
+    out = _optional_finding_metadata_defaults()
+    for field, labels in _OPTIONAL_FINDING_METADATA_LABELS.items():
+        val = _field_from_markdown(text, labels)
+        if val:
+            out[field] = _strip_md(val)
+    return out
 
 
 def _first_heading_title(text: str) -> str:
@@ -3277,6 +3371,7 @@ def _parse_chunk_heading_inventory(text: str) -> list[dict[str, object]]:
             "root_cause": "",
             "description": "",
             "impact": "",
+            **_optional_finding_metadata_defaults(),
         }
         m = re.match(r"^#{2,4}\s+Finding\s+\[([^\]]+)\]:?", heading)
         if m:
@@ -3289,7 +3384,9 @@ def _parse_chunk_heading_inventory(text: str) -> list[dict[str, object]]:
             # Format-tolerant field extraction: handles bullets (- / *),
             # bold wrapping (**Label**: / **Label:**), and absence of bold.
             fm = re.match(
-                r"^\s*[-*]?\s*\*{0,2}([^:*]+?)\*{0,2}\s*:\s*(.*)", row
+                r"^\s*[-*]?\s*(?:\*\*)?([^:*]+?)(?:\*\*)?"
+                r"\s*(?:\([^)]*\))?\s*:\s*(.*)",
+                row,
             )
             if not fm:
                 continue
@@ -3324,6 +3421,10 @@ def _parse_chunk_heading_inventory(text: str) -> list[dict[str, object]]:
                 entry["description"] = _strip_md(val_raw)
             elif label_lc in ("source ids", "source id"):
                 entry["source_ids"] = _extract_ids_from_text(val_raw)
+            else:
+                opt_field = _optional_finding_metadata_field_for_label(label_lc)
+                if opt_field:
+                    entry[opt_field] = _strip_md(val_raw)
         if _non_reportable_marker(str(entry.get("severity", ""))) or _non_reportable_marker(str(entry.get("verdict", ""))):
             entry["severity"] = "Informational"
             if not entry.get("verdict"):
@@ -3351,6 +3452,7 @@ def _parse_chunk_table_inventory(text: str) -> list[dict[str, object]]:
                 "root_cause": "",
                 "description": "",
                 "impact": "",
+                **_optional_finding_metadata_defaults(),
             }
             for idx, cell in enumerate(row):
                 key = key_map.get(idx, "")
@@ -3386,6 +3488,10 @@ def _parse_chunk_table_inventory(text: str) -> list[dict[str, object]]:
                     entry["impact"] = val
                 elif "vulnerability class" in key and not entry["root_cause"]:
                     entry["root_cause"] = val
+                else:
+                    opt_field = _optional_finding_metadata_field_for_label(key)
+                    if opt_field:
+                        entry[opt_field] = val
             if _non_reportable_marker(str(entry.get("severity", ""))) or _non_reportable_marker(str(entry.get("verdict", ""))):
                 entry["severity"] = "Informational"
                 if not entry.get("verdict"):
@@ -3423,10 +3529,14 @@ def _parse_inventory_chunk(path: Path) -> list[dict[str, object]]:
             order.append(key)
             continue
         cur = merged[key]
-        for field in ("title", "severity", "location", "preferred_tag", "verdict", "root_cause", "description", "impact", "local_id"):
+        for field in (
+            "title", "severity", "location", "preferred_tag", "verdict",
+            "root_cause", "description", "impact", "local_id",
+            *_OPTIONAL_FINDING_METADATA_FIELDS,
+        ):
             if not cur.get(field) and entry.get(field):
                 cur[field] = entry.get(field)
-            elif len(str(entry.get(field, ""))) > len(str(cur.get(field, ""))) and field in {"root_cause", "description", "impact"}:
+            elif len(str(entry.get(field, ""))) > len(str(cur.get(field, ""))) and field in {"root_cause", "description", "impact", *_OPTIONAL_FINDING_METADATA_FIELDS}:
                 cur[field] = entry.get(field)
         cur_ids = list(cur.get("source_ids", []) or [])
         for sid in list(entry.get("source_ids", []) or []):
@@ -3470,6 +3580,10 @@ def _merge_inventory_entries(entries: list[dict[str, object]]) -> list[dict[str,
                 "root_cause": entry.get("root_cause", ""),
                 "description": entry.get("description", ""),
                 "impact": entry.get("impact", ""),
+                **{
+                    field: entry.get(field, "")
+                    for field in _OPTIONAL_FINDING_METADATA_FIELDS
+                },
             }
             order.append(key)
             continue
@@ -3480,7 +3594,10 @@ def _merge_inventory_entries(entries: list[dict[str, object]]) -> list[dict[str,
             cur["preferred_tag"] = entry.get("preferred_tag", "")
         if not cur.get("verdict") and entry.get("verdict"):
             cur["verdict"] = entry.get("verdict", "")
-        for field in ("root_cause", "description", "impact", "title"):
+        for field in (
+            "root_cause", "description", "impact", "title",
+            *_OPTIONAL_FINDING_METADATA_FIELDS,
+        ):
             if len(str(entry.get(field, ""))) > len(str(cur.get(field, ""))):
                 cur[field] = entry.get(field, "")
         local_id = entry.get("local_id")
@@ -3775,6 +3892,11 @@ _DEPTH_PROMOTION_FILES = (
     "depth_state_trace_findings.md",
     "depth_edge_case_findings.md",
     "depth_external_findings.md",
+    # v2.8.9: depth_token_flow is a CORE SC depth channel (DT-* ids) but was
+    # absent from this list (the list was authored L1-first, where token-flow
+    # does not load), so DT-* depth-only findings were never read by the
+    # promotion bridge and silently dropped. Added for SC parity.
+    "depth_token_flow_findings.md",
     "depth_network_surface_findings.md",
     "depth_iter2_*_findings.md",
     "depth_iter3_*_findings.md",
@@ -3805,6 +3927,13 @@ _PROMOTABLE_FEEDER_ID_PATTERN = (
     r"DCI-\d+|DEC-\d+|DST-\d+|DX-\d+|DN-\d+|"
     r"DNS-\d+|DA-[A-Z0-9_-]+-\d+|DA\d+-[A-Z0-9_-]+-\d+|"
     r"PERT-\d+|ATT-\d+|"
+    # SC depth/scanner channels that actually emit DS-/DE-/DT-/BLIND- ids
+    # (v2.8.9: these prefixes were ABSENT, so the depth-promotion bridge and its
+    # receipt gate parsed 0 findings from depth_state_trace / depth_edge_case /
+    # depth_token_flow / blind_spot_* and silently dropped depth-only findings —
+    # incl. a CONFIRMED High on the DODO run. DST-=design_stress and DEC-/DX- are
+    # distinct; DS-/DE-/DT- require a digit so they cannot match inside DST-/DEC-/DX-N.)
+    r"DS-\d+|DE-\d+|DT-\d+|BLIND-[A-Z]?-?\d+|"
     # SC scanner/fuzz/tool outputs
     r"SLITHER-\d+|FUZZ-\d+|MEDUSA-\d+|RSW-\d+|SP-\d+|"
     # SC niche/injectable skill prefixes. Deliberately excludes public report
@@ -3956,6 +4085,7 @@ def _parse_depth_finding_blocks(path: Path) -> list[dict[str, str]]:
             "description": _strip_md(desc),
             "source_file": path.name,
             "_referenced_ids": sorted(_ref_ids),
+            **_extract_optional_finding_metadata(block),
         })
     return out
 
@@ -4905,7 +5035,19 @@ def _enforce_severity_matrix(verify_text: str, queue_row: dict[str, str]) -> str
         normalize_severity(verifier_sev_resolved) if verifier_sev_resolved else ""
     )
     if base is not None:
-        matrix_final = _apply_severity_modifiers(base, inputs.get("modifiers", {}))
+        mods = dict(inputs.get("modifiers", {}))
+        # CALIBRATION (recover the good-coverage-class Critical): the on-chain-only
+        # -1 modifier applies ONLY when impact is CONFINED to on-chain state
+        # (report-template.md). Impact:High is defined as "direct fund loss /
+        # permanent lock" -- that is NOT confined, so the modifier must not pull a
+        # High-impact finding down (later DODO runs lost their Critical to exactly
+        # this spurious on-chain demotion of a verified High x High theft). This
+        # only PREVENTS a demotion of an already-High-impact finding; it never
+        # promotes, so it cannot re-inflate the verifier-over-rating class the
+        # asymmetric matrix is designed to correct.
+        if _normalize_matrix_label(inputs.get("impact"), _MATRIX_IMPACT_LABELS) == "High":
+            mods.pop("onchain_only", None)
+        matrix_final = _apply_severity_modifiers(base, mods)
         if verifier_sev and verifier_sev != matrix_final:
             v_rank = severity_rank(verifier_sev)
             m_rank = severity_rank(matrix_final)
@@ -5298,10 +5440,18 @@ def _section_for_report_id(body: str, report_id: str) -> str:
         row = row_pat.search(qo_text)
         return row.group(0) if row else ""
     start = m.start()
-    # Stop at the next report finding header as well as tier/report headings.
-    # Otherwise X-01 can pass location-integrity checks using X-02's section.
+    # RPT-3: Stop at the next report finding header OR a known STRUCTURAL tier/
+    # report heading -- never at an arbitrary `##`. In-finding subheadings like
+    # `## Impact` / `## PoC Result` are legitimate (the field extractor supports
+    # section-style fields), so terminating on any H2 truncated the finding and
+    # produced false "missing substantive Impact/PoC" errors. Cross-finding
+    # isolation (X-01 must not borrow X-02's section) is preserved by the
+    # next-finding-header branch and the closed structural-heading set.
     end_m = re.search(
-        r"(?im)^#{1,2}\s+|^#{3}\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[\s*[CHMLI]-\d{1,3}\s*\]",
+        r"(?im)^#{1,2}\s+(?:Critical|High|Medium|Low|Informational|"
+        r"Quality\s+Observations|Appendix|Priority\s+Remediation|"
+        r"Excluded|Summary)\b"
+        r"|^#{3}\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[\s*[CHMLI]-\d{1,3}\s*\]",
         (body or "")[m.end():],
     )
     end = m.end() + end_m.start() if end_m else len(body or "")

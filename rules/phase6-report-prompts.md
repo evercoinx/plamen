@@ -69,6 +69,8 @@ For every Master Finding Index row:
    contain one canonical reason with the original severity:
    - `TRUSTED-ACTOR(original_sev)`
    - `UNRESOLVED(original_sev)` or `PARTIAL(original_sev)`
+   - `SEVERITY_OVERRIDE(original_sev)` only when supplied by the
+     driver-only `_severity_override_ledger.json`
    - `POC-FAIL(original_sev)`
    - `PROVEN(original_sev)` only when `PROVEN_ONLY: true`
    - `CHAIN-UPGRADE(original_sev)` / `CHAIN-DOWNGRADE(original_sev)` with the
@@ -90,6 +92,10 @@ For each hypothesis, apply this priority order:
 6. **UNRESOLVED/PARTIAL**: Treat both tokens from `skeptic_*.md` or `judge_*.md` as unresolved verifier disagreement. Apply -1 tier downgrade (floor: Low), record `UNRESOLVED(original_sev)`, keep the finding in the body, and have the writer tag it `[UNRESOLVED - needs human review]`. Placing it in Excluded Findings is a workflow violation.
 7. **Skeptic-judge DOWNGRADE**: If `skeptic_judge_decisions.md` exists, for each row where Decision is `DOWNGRADE`, cap the finding's severity at the Final Severity column value. Record `SKEPTIC-DOWNGRADE(original_sev)` in Trust Adj. Do NOT apply to rows with Decision KEEP, UNRESOLVED, or PARTIAL (those are handled by rule 6). DOWNGRADE is deliberate severity calibration by the skeptic-judge — it takes priority over matrix defaults but yields to PoC mechanical evidence (rule 8).
 8. **PoC-fail caps**: If `poc_demotions.md` exists, apply each listed cap, record `POC-FAIL(original_sev)`, and keep the finding in the body. The driver computes this file from `[POC-FAIL]` evidence; the Index Agent must not override or skip entries.
+9. **Driver-only severity overrides**: If `_severity_override_ledger.json`
+   exists, apply only the listed override rows and record
+   `SEVERITY_OVERRIDE(original_sev)` in Trust Adj. Agents must not invent this
+   token without the driver-only ledger.
 
 ### STEP 1.25: Client-Worthiness Triage (CONSERVATIVE)
 

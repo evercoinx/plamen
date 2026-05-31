@@ -422,21 +422,25 @@ def _is_direct_execution_phase(phase_name: str, pipeline: str,
         return True
     direct = {
         "bake",
+        "recon",
         "instantiate",
         "inventory_prepare",
         "inventory",
         "location_recovery",
         "invariants",
+        "invariants_p2",
         "attention_repair",
         "rag_sweep",
         "sc_semantic_dedup",
         "semantic_dedup",
         "chain",
         "chain_agent2",
+        "chain_iter2",
         "sc_verify_queue",
         "verify_queue",
         "sc_verify_aggregate",
         "verify_aggregate",
+        "post_verify_extract",
         "skeptic",
         "crossbatch",
         "report_index",
@@ -531,8 +535,11 @@ Hard rules:
 2. **Before you emit DONE, verify completion against DISK -- not memory.**
    Use this phase's required output list / canonical role list from the prompt
    and confirm EACH required file exists with a final `PLAMEN_STATUS: COMPLETE`
-   marker AND either a `## Finding [` / `### Finding [` block or a
-   `## No Findings` rationale. Use targeted `grep` / file existence checks --
+   marker AND contains at least one `Finding [` block (depth findings use the
+   `### Finding [DT-1]:` form; breadth uses `## Finding [`) OR a
+   `## No Findings` / `## Negative Result` rationale. Grep for the substring
+   `Finding [` rather than a specific heading level. The driver's mechanical
+   disk gate is authoritative -- if unsure, emit DONE and let the gate decide;
    do NOT read full analysis bodies.
 
 3. **NEVER trust prior chat memory, a status summary, or a compaction summary
@@ -1321,6 +1328,14 @@ def _sanitize_breadth_forward_refs(text: str) -> str:
 def _render_forbidden_output_block(phase_name: str) -> str:
     """Render model-facing output scope without leaking other phase names."""
     allowlist_blocks = {
+        "recon": """## OUTPUT ALLOWLIST (HARD)
+
+Your allowed output files are exactly the recon files listed in this phase's
+Expected Output Contract. Do not infer, invent, pre-fill, or create any other
+scratchpad artifact. Template recommendations are written only inside
+`template_recommendations.md`; do not create a separate roster, manifest, or
+coordination artifact.
+""",
         "breadth": """## OUTPUT ALLOWLIST (HARD)
 
 Your allowed output files are exactly the breadth files named in
@@ -1351,7 +1366,20 @@ def _render_phase_isolation_block(phase: Phase) -> str:
     """Universal one-phase execution contract for every subprocess."""
     expected = list(getattr(phase, "expected_artifacts", None) or [])
     any_of = list(getattr(phase, "any_of", None) or [])
-    if expected or any_of:
+    if phase.name == "recon":
+        output_scope = (
+            "Your writable scratchpad outputs are ONLY the recon files/patterns "
+            "in the EXPECTED OUTPUT FILES contract above. There are no dynamic "
+            "or later-phase output files in recon."
+        )
+    elif phase.name == "attention_repair":
+        output_scope = (
+            "Your writable scratchpad outputs are ONLY "
+            "`attention_repair_summary.md` and, when CONFIRMED repair findings "
+            "exist, `attention_repair_findings.md`. Do not create any other "
+            "scratchpad artifact."
+        )
+    elif expected or any_of:
         output_scope = (
             "Your writable scratchpad outputs are ONLY the files/patterns in "
             "the EXPECTED OUTPUT FILES contract above, plus any explicit "
@@ -2062,8 +2090,11 @@ def _parse_l1_required_skills(scratchpad: Path) -> tuple[list[str], set[str]]:
             continue
         if not stripped.startswith("|"):
             continue
-        cols = [c.strip() for c in stripped.split("|")]
-        cols = [c for c in cols if c]
+        # PARSE-2: preserve empty interior cells so the Required? column stays at
+        # its true index. The prior empty-filter shifted indices when a cell was
+        # blank, silently failing to inject a mechanically-Required L1 skill (the
+        # exact recall loss v2.6.4 was built to prevent).
+        cols = [c.strip() for c in stripped.strip("|").split("|")]
         if len(cols) < 3:
             continue
         name_raw = cols[0].strip("`").strip("*").strip()
@@ -2544,9 +2575,10 @@ which findings to write.
 1. `{manifest_rel}` -- the authoritative list of findings you must write up.
    Every entry has: `report_id`, `finding_id`, `severity`, `title`,
    `location`, `evidence_tag`, `verify_file`, `verify_files`, `description`,
-   `recommendation`, `report_blocked`. The `description` and
-   `recommendation` fields contain the verifier's own narrative -- use them
-   as substance and rephrase for clarity, do not invent new claims.
+   `poc_result`, `recommendation`, `report_blocked`. The `description`,
+   `poc_result`, and `recommendation` fields contain the verifier's own
+   narrative -- use them as substance and rephrase for clarity, do not invent
+   new claims.
 2. The `verify_files` referenced for each manifest entry -- only when the
    manifest's `description`/`recommendation` need additional context. For
    consolidated findings, read every file in `verify_files` and preserve each
@@ -2572,6 +2604,13 @@ manifest already contains every field you need.
   Impact line and the cited postcondition), Evidence Tag (verbatim from
   the manifest), and Recommendation (rephrased substance from
   `recommendation`).
+- For Critical, High, and Medium findings, each section MUST also include
+  `**PoC Result**:` with substantive verifier-backed text. Use manifest
+  `poc_result` first; if it is empty, read the referenced `verify_files` and
+  summarize the `PoC Attempt`, `Execution Result`, `PoC Result`, or
+  `Execution Output` section. If no executable PoC was run, state the
+  verifier's explicit not-executed/blocker reason and evidence tag; do NOT
+  claim a passing PoC.
 - For any manifest entry whose `report_blocked` is `true`, prefix the
   section heading with `[REPORT-BLOCKED: insufficient evidence]` and use
   conservative prose -- do NOT speculate to fill the gap.
@@ -2843,6 +2882,23 @@ Cost discipline:
   2. `verify_core.md`
   3. `findings_inventory.md`
 
+## CONTESTED vs UNRESOLVED (MANDATORY DISTINCTION)
+
+These two states are NOT interchangeable. Stamp Trust Adj. only as defined here:
+
+- A **verifier CONTESTED** verdict (from a `verify_*.md` file / `verify_core.md`)
+  means the verifier could not mechanically prove or disprove the finding. It is
+  NOT UNRESOLVED. Keep the finding at its upstream severity and do NOT write an
+  `UNRESOLVED(...)` Trust Adj. stamp for it. A bare `-` Trust Adj. is correct
+  when the tier already matches upstream severity.
+- **UNRESOLVED(original_sev)** is valid ONLY when a Skeptic-Judge ruling marks
+  the finding `UNRESOLVED` or `PARTIAL` (in `skeptic_judge_decisions.md`,
+  `judge_*.md`, or `skeptic_*.md`). If no such ruling exists for a finding, you
+  MUST NOT stamp it `UNRESOLVED(...)` -- doing so fails the report_index
+  unresolved-authenticity gate.
+- If a finding is contested but has no Skeptic-Judge UNRESOLVED/PARTIAL ruling,
+  treat it as a normal finding at its verifier-stated severity.
+
 ## SEVERITY BINDING (MANDATORY)
 
 Read `severity_binding.md` BEFORE building the Master Finding Index. This file
@@ -2955,6 +3011,10 @@ Mandatory rules:
 6. Each manifest `finding_id` must appear literally in both output files.
 7. If there are zero manifest findings, write the standard N/A placeholder
    and stop.
+8. Use ONLY manifest `finding_id` values as section headings and judge-table
+   `Finding ID` cells. Do not invent alternate IDs such as `CC-*`, `EX-*`,
+   `OR-*`, or shorthand `INV-*` labels. If you mention upstream/local concern
+   labels in prose, phrase them as contextual labels, not reviewed finding IDs.
 
 Output contract for `skeptic_findings.md`:
 - One section per manifest ID: `## <finding_id> - <title>`
@@ -3136,7 +3196,20 @@ Mandatory rules:
    file:line evidence, or cite the exact path and mark `NEEDS_HUMAN` if the
    source is unavailable.
 6. SAFE rows are valid and expected. Do not invent findings to satisfy a quota.
-7. Stop after writing the two attention-repair files; do not proceed outside
+   For `asset-binding-gap` rows, SAFE is valid ONLY with one of:
+   `SAFE_REASON:EXPLICIT_EQUALITY`, `SAFE_REASON:EXPLICIT_BINDING_CHECK`,
+   `SAFE_REASON:UNREACHABLE_PATH`, or `SAFE_REASON:IMPOSSIBLE_PAIR`.
+   A revert, no-balance assumption, no-normal-accumulation assumption, or
+   "self-punishing" path is not a SAFE proof for custody/value rows unless the
+   row also proves explicit binding, unreachable path, or impossible pair.
+7. Asset-binding rows are exact field-pair obligations. If the target is
+   `A <-> B`, the Evidence/Notes claim must discuss A against B directly.
+   Include one local `PAIR_CLAIM:` that names both queued fields exactly and
+   states equality, explicit binding check, mismatch, unreachable path, or
+   impossible pair.
+   Similar topic coverage or an existing finding ID only closes the row when
+   the cited finding names both fields and their relationship.
+8. Stop after writing the two attention-repair files; do not proceed outside
    this phase.
 """
     elif config.get("pipeline") != "l1" and phase.name in SC_VERIFY_PHASE_NAMES:
@@ -3877,7 +3950,39 @@ narrower scope.
             _language = config.get("language", "unknown")
             _mode = config.get("mode", "unknown")
             _pipeline = config.get("pipeline", "sc")
-            if is_accumulate:
+            is_verify_shard = (
+                phase.name in SC_VERIFY_PHASE_NAMES
+                or phase.name in L1_VERIFY_PHASE_NAMES
+            )
+            verify_checklist = ""
+            if is_verify_shard:
+                try:
+                    verify_checklist = (
+                        "## Assigned Verify Rows (re-check every row before returning)\n\n"
+                        f"{_render_verify_shard_checklist(config, phase.name)}\n\n"
+                    )
+                except Exception:
+                    verify_checklist = ""
+            if is_verify_shard:
+                artifact_policy = (
+                    f"This is a verify-shard repair retry. Dynamic "
+                    f"`verify_<ID>.md` outputs may still be present in "
+                    f"`{_scratchpad_str}`. Inspect every assigned row, repair "
+                    f"missing or gate-failing verifier files in place, and do "
+                    f"not treat the previous error list as exhaustive."
+                )
+                retry_scope = (
+                    "Start with EACH error above, then perform a final pass "
+                    "over ALL assigned verify rows and ensure every mandatory "
+                    "unit/property PoC ledger satisfies the contract."
+                )
+                original_prompt_hint = (
+                    f"**Full original prompt (for reference if needed)**: "
+                    f"`{prior_snapshot}` -- read it ONLY if the errors above "
+                    f"or assigned-row checklist reference something you don't "
+                    f"recognize.\n\n"
+                )
+            elif is_accumulate:
                 artifact_policy = (
                     f"This is an accumulate/repair phase. Prior COMPLETE or "
                     f"substantive artifacts for this phase remain in "
@@ -3886,6 +3991,13 @@ narrower scope.
                     f"or gate-failing artifacts named in the error section. "
                     f"Do NOT overwrite completed rows/files."
                 )
+                retry_scope = "Address EACH error above."
+                original_prompt_hint = (
+                    f"**Full original prompt (for reference if needed)**: "
+                    f"`{prior_snapshot}` -- read it ONLY if the errors above "
+                    f"reference something you don't recognize. Satisfy the "
+                    f"phase gate before returning.\n\n"
+                )
             else:
                 artifact_policy = (
                     f"Your previous artifact(s) for this phase have been "
@@ -3893,6 +4005,13 @@ narrower scope.
                     f"{phase.name}/` so the RESUMPTION PROTOCOL cannot "
                     f"accidentally reuse incorrect output. Re-emit the "
                     f"affected file(s) from scratch."
+                )
+                retry_scope = "Address EACH error above."
+                original_prompt_hint = (
+                    f"**Full original prompt (for reference if needed)**: "
+                    f"`{prior_snapshot}` -- read it ONLY if the errors above "
+                    f"reference something you don't recognize. Satisfy the "
+                    f"phase gate before returning.\n\n"
                 )
             compact = (
                 f"# RETRY ATTEMPT (driver-detected gate failure on previous attempt)\n\n"
@@ -3907,11 +4026,9 @@ narrower scope.
                 f"## What the previous attempt got wrong\n\n"
                 f"{hint}\n\n"
                 f"## Your task on this retry\n\n"
-                f"Address EACH error above. {artifact_policy}\n\n"
-                f"**Full original prompt (for reference if needed)**: "
-                f"`{prior_snapshot}` -- read it ONLY if the errors above reference "
-                f"something you don't recognize. The items above are the ONLY "
-                f"things you need to fix.\n\n"
+                f"{retry_scope} {artifact_policy}\n\n"
+                f"{verify_checklist}"
+                f"{original_prompt_hint}"
                 f"{expected_block}\n\n"
                 f"## Critical phase scope (HARD)\n\n"
                 f"You are running INSIDE a single phase subprocess dispatched by "

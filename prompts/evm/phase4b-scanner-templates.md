@@ -12,6 +12,11 @@ Every agent spawned from this file MUST follow this protocol for each CHECK/step
 2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
 3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
 
+Agents MAY add optional `Discovery Steer: ...` text inside live finding blocks
+or Chain Summary notes when it gives a compact generic pairing hint (shared
+variable/function, branch, terminal effect, or candidate ID). It is not proof,
+not required, and must not create additional output files.
+
 ---
 
 ## Blind Spot Scanner A: Tokens & Parameters
@@ -134,6 +139,7 @@ Write to {SCRATCHPAD}/blind_spot_a_findings.md
 Return: 'DONE: {N} blind spots - Check1: {A} token gaps, Check2: {B} parameter gaps'
 ")
 ```
+
 
 ---
 
@@ -633,4 +639,3 @@ Write to {SCRATCHPAD}/design_stress_findings.md:
 Return: 'DONE: {N} design stress findings'
 ")
 ```
-

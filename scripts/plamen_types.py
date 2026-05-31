@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -105,6 +106,15 @@ def plamen_home() -> Path:
 # alias tracks latest, which moved to 4.7 and materially increased usage with
 # weak marginal audit lift. Override only when explicitly benchmarking.
 PLAMEN_OPUS_MODEL = os.environ.get("PLAMEN_OPUS_MODEL", "claude-opus-4-6").strip()
+
+# v2.8.11: Thorough-mode promotion target. Reasoning-critical roles (discovery
+# = breadth+depth, verification shards, skeptic-judge) run on Opus 4.8 in
+# THOROUGH ONLY (Core keeps the 4.6 pin, Light stays Sonnet) to bound plan
+# usage. Rationale: <70% strict recall traces to reasoning-hard miss-classes
+# (cross-VM encoding, swap mechanics), and verification quality is model-bound.
+PLAMEN_THOROUGH_OPUS_MODEL = os.environ.get(
+    "PLAMEN_THOROUGH_OPUS_MODEL", "claude-opus-4-8"
+).strip()
 
 
 def _resolve_model_alias(model: str) -> str:
@@ -276,11 +286,15 @@ def _looks_like_nonseverity_prose(s: str) -> bool:
     return False
 
 
+# NOISE-2: distinct unrecognized severity tokens already debug-logged, so the
+# fallback message fires at most once per token per process.
+_NORMALIZE_SEVERITY_SEEN: set[str] = set()
+
+
 def normalize_severity(raw: str) -> str:
     """Canonicalize a severity string to one of SEVERITY_ORDER values."""
     s = str(raw or "").strip()
     if not s:
-        log.warning("normalize_severity: empty input, defaulting to Medium")
         return "Medium"
     if re.fullmatch(r"[-\u2010-\u2015]+", s):
         return "Medium"
@@ -321,7 +335,15 @@ def normalize_severity(raw: str) -> str:
     for canonical in SEVERITY_ORDER:
         if sl.startswith(canonical[:3].lower()):
             return canonical
-    log.warning(f"normalize_severity: unrecognized severity {raw!r}, defaulting to Medium")
+    # NOISE-2: this is a fully-recoverable default (-> Medium), not a fault. A
+    # WARNING per malformed cell floods logs on messy LLM-authored severity
+    # columns (60-row table = 60 lines). Emit at DEBUG, once per distinct
+    # unrecognized token, preserving the diagnostic value without the noise.
+    if raw not in _NORMALIZE_SEVERITY_SEEN:
+        _NORMALIZE_SEVERITY_SEEN.add(raw)
+        log.debug(
+            f"normalize_severity: unrecognized severity {raw!r}, defaulting to Medium"
+        )
     return "Medium"
 
 
@@ -581,14 +603,47 @@ def phase_model(phase: Phase, mode: str, config: Optional[dict] = None) -> str:
         return resolved
     if mode == "light":
         return "sonnet"
-    if config and phase.name == "breadth":
-        override = (
-            config.get("breadth_model_override")
-            or os.environ.get("PLAMEN_BREADTH_MODEL_OVERRIDE")
-            or ""
-        ).strip()
+
+    def _breadth_override() -> str:
+        if config and phase.name == "breadth":
+            return (
+                config.get("breadth_model_override")
+                or os.environ.get("PLAMEN_BREADTH_MODEL_OVERRIDE")
+                or ""
+            ).strip()
+        return ""
+
+    # v2.8.11: THOROUGH + SC-only model promotion to Opus 4.8 for the
+    # reasoning-critical roles — discovery (breadth + depth) + SC verification
+    # shards (sc_verify_*) + skeptic-judge. Depth/critical-writer are already
+    # `opus` and ride the 4.8 resolution below; breadth (normally Sonnet), the
+    # sc_verify shards, and skeptic are force-promoted to the opus tier here.
+    # Queue/aggregate verify phases (routing/summary, not reasoning) are NOT
+    # promoted. SCOPED to SC pipeline: L1 keeps its own deliberate cost caps
+    # (L1 verify shards stay Sonnet, queue/aggregate Haiku) and Core/Light are
+    # untouched. Rescan/per-contract stay Sonnet (model-diversity + cost).
+    # Env override: PLAMEN_THOROUGH_OPUS_MODEL.
+    if mode == "thorough" and config and config.get("pipeline") == "sc":
+        name = phase.name
+        override = _breadth_override()
         if override:
             return _resolve_model_alias(override)
+        is_sc_verify_shard = (
+            name.startswith("sc_verify_")
+            and not name.endswith("_queue")
+            and not name.endswith("_aggregate")
+        )
+        promote = name in ("breadth", "skeptic") or is_sc_verify_shard
+        tier = "opus" if promote else (phase.model or "sonnet").strip()
+        if tier == "opus":
+            return PLAMEN_THOROUGH_OPUS_MODEL or _resolve_model_alias("opus")
+        return _resolve_model_alias(tier)
+
+    # Core, L1, and config-less calls: honor phase model; opus resolves to the
+    # 4.6 pin via _resolve_model_alias.
+    override = _breadth_override()
+    if override:
+        return _resolve_model_alias(override)
     return _resolve_model_alias(phase.model)
 
 
@@ -605,7 +660,7 @@ class Checkpoint:
         if not p.exists():
             return cls()
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
+            data = json.loads(p.read_text(encoding="utf-8-sig"))
         except Exception as exc:
             # A corrupt checkpoint is not equivalent to a fresh run. Treating
             # it as empty causes resume to replay phases against stale
@@ -614,12 +669,22 @@ class Checkpoint:
             # repair it explicitly.
             backup = p.with_suffix(f".corrupt-{int(time.time())}.json")
             try:
-                p.replace(backup)
+                shutil.copy2(p, backup)
             except Exception:
                 backup = p
+            try:
+                (scratchpad / "_v2_checkpoint.corrupt").write_text(
+                    f"Corrupt checkpoint preserved at {p}\n"
+                    f"Forensic copy: {backup}\n",
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
             raise RuntimeError(
-                f"Corrupt checkpoint {p}; moved to {backup}. "
-                "Restart with a clean scratchpad or restore a valid checkpoint."
+                f"Corrupt checkpoint {p}; forensic copy written to {backup}. "
+                "The corrupt checkpoint was left in place to block unsafe "
+                "resume. Restart with --fresh/clean scratchpad or restore a "
+                "valid checkpoint."
             ) from exc
         if not isinstance(data, dict):
             raise RuntimeError(f"Invalid checkpoint {p}: root must be an object")
@@ -697,6 +762,8 @@ class Checkpoint:
             self.completed.append(phase_name)
         if phase_name in self.degraded:
             self.degraded = [d for d in self.degraded if d != phase_name]
+        if self.rate_limited_at == phase_name:
+            self.rate_limited_at = None
 
     def clear_degraded_sentinel(self, scratchpad: Path, phase_name: str):
         """Delete stale on-disk degrade markers after a successful retry.
@@ -998,13 +1065,13 @@ SC_PHASES = [
           modes={"core", "thorough"}, critical=True),
     Phase("sc_semantic_dedup", ["Phase 4e: Semantic Dedup"],
           ["dedup_decisions.md", "findings_inventory_deduped.md"],
-          base_timeout_s=3000, model="sonnet", critical=True),
+          base_timeout_s=1200, model="sonnet", critical=True),
     Phase("chain", ["Phase 4: Synthesis, Adaptive Depth, Chain Analysis"],
           ["hypotheses.md", "finding_mapping.md", "enabler_results.md"],
           base_timeout_s=3000, critical=True),
     Phase("chain_agent2", ["Phase 4: Synthesis, Adaptive Depth, Chain Analysis"],
           ["chain_hypotheses.md", "composition_coverage.md", "synthesis_full.md"],
-          base_timeout_s=2400, critical=True),
+          base_timeout_s=3600, critical=True),
     # v2.8.8: Iteration 2 chain composition. Thorough only. Skipped via
     # driver pre-check when composition_coverage.md has zero unexplored
     # cross-class Medium+ pairs. Soft phase — failure → log, proceed.
@@ -1094,10 +1161,17 @@ SC_PHASES = [
           ["post_verify_extract.md"],
           base_timeout_s=1200, modes={"thorough"}, critical=False,
           model="sonnet"),
+    # LIFECYCLE-1: skeptic and crossbatch are severity-calibration / consistency
+    # ENRICHMENT on top of an already-complete verify_core.md; report_index/tier
+    # writers consume their output conditionally. Per the Phase.critical contract
+    # (critical = a hard prerequisite without which downstream cannot run), they
+    # are NOT critical -- a timeout must degrade-and-continue on the verifier's
+    # own severities, not halt the whole audit. (No recall risk: they adjust
+    # severity/consistency, they do not discover or drop findings.)
     Phase("skeptic", ["Phase 5.1: Skeptic-Judge"],
           ["skeptic_findings.md", "skeptic_judge_decisions.md"],
           base_timeout_s=3600, modes={"thorough"},
-          critical=True,
+          critical=False,
           example_tokens=["H-01", "C-01", "CH-01"]),
     Phase("crossbatch", ["Phase 5.2: Cross-Batch Consistency"],
           ["cross_batch_consistency.md"],
@@ -1105,7 +1179,7 @@ SC_PHASES = [
           # enumerate all verify IDs on large audits (7/124 on Irys L1).
           base_timeout_s=900, model="sonnet",
           modes={"core", "thorough"},
-          critical=True),
+          critical=False),
     Phase("report_index", ["Step 6a: Index Agent", "Step 6a.1: Index Completeness"],
           ["report_index.md", "report_coverage.md"],
           base_timeout_s=3000, model="sonnet", critical=True),
@@ -1172,7 +1246,12 @@ L1_PHASES = [
           base_timeout_s=3600, critical=True, model="sonnet"),
     Phase("inventory", ["Step 4a: Finding Inventory"],
           ["findings_inventory.md"],
-          base_timeout_s=6000, critical=True, model="sonnet"),
+          # LIFECYCLE-3: the merge consumes inventory_chunk_a/b/c (3600s each)
+          # and must be bounded BELOW a single chunk -- an over-large ceiling
+          # turns a stuck consolidation into a tens-of-minutes silent stall. If a
+          # huge audit needs more, raise inventory_max_shards (more, smaller
+          # chunks), not this merge ceiling.
+          base_timeout_s=3000, critical=True, model="sonnet"),
     Phase("location_recovery", ["Step 4a: Finding Inventory"],
           ["location_recovery.md"],
           base_timeout_s=900, critical=True, model="sonnet",
@@ -1284,12 +1363,14 @@ L1_PHASES = [
           ["post_verify_extract.md"],
           base_timeout_s=1200, modes={"thorough"}, critical=False,
           model="sonnet"),
+    # LIFECYCLE-1: enrichment phases, not hard prerequisites -> degrade-and-
+    # continue on timeout instead of halting the audit (see SC note above).
     Phase("skeptic", ["Step 5.5: Skeptic-Judge"],
           ["skeptic_findings.md", "skeptic_judge_decisions.md"],
-          base_timeout_s=3600, modes={"thorough"}, critical=True),
+          base_timeout_s=3600, modes={"thorough"}, critical=False),
     Phase("crossbatch", ["Step 5.4: Cross-batch Consistency"],
           ["cross_batch_consistency.md"],
-          base_timeout_s=900, model="sonnet", critical=True,
+          base_timeout_s=900, model="sonnet", critical=False,
           modes={"core", "thorough"}),
     Phase("report_index", ["6a. Index Agent", "6a.1: Index Completeness Gate"],
           ["report_index.md", "report_coverage.md"],

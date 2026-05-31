@@ -157,8 +157,25 @@ def _spike_module():
 # ---------------------------------------------------------------------------
 
 
+def _inject_cargo_exact(argv: list[str]) -> list[str]:
+    """Add libtest `--exact` so a cargo test-name filter matches ONE test.
+
+    Without it `cargo test test_x` is a substring filter that also runs
+    `test_x_helper`; a sibling FAIL would mis-attribute to this finding (the
+    non-EVM analogue of the EVM VERIF-5 AMBIGUOUS isolation guard).
+    `--exact` is a libtest harness flag, so it must follow the `--` separator.
+    """
+    if "--exact" in argv:
+        return argv
+    if "--" in argv:
+        i = argv.index("--")
+        return argv[: i + 1] + ["--exact"] + argv[i + 1:]
+    return argv + ["--", "--exact"]
+
+
 def _format_test_command(template: str, test_function: str,
-                        test_file: Optional[str]) -> list[str]:
+                        test_file: Optional[str],
+                        language: Optional[str] = None) -> list[str]:
     """Render the registry's test_command into an argv list.
 
     Substitution tokens:
@@ -167,18 +184,35 @@ def _format_test_command(template: str, test_function: str,
       {test_function} — extracted from verify file's `Test File` or `Command`
       {test_name}     — alias for test_function (sui uses {test_name})
       {test_path}     — relative path to the test file under project root
+
+    v2.8.16 Phase 1 (must-fix #1): apply per-ecosystem EXACT-name isolation so
+    a `[POC-PASS]` can only be attributed to the finding's own test:
+      - cargo (solana/soroban/l1_rust): append libtest `--exact`
+      - go (l1_go): anchor the `-run` regex as `^fn$`
+      - aptos `--filter` / sui positional have no exact flag (substring; the
+        driver-dictated unique function name is the isolation in practice).
     """
-    cmd = template.replace("{test_function}", test_function)
-    cmd = cmd.replace("{test_name}", test_function)
+    lang = (language or "").lower().strip()
+    # l1_go: anchor the -run regex to the exact function name.
+    fn_sub = test_function
+    if lang == "l1_go" and test_function and not (
+        test_function.startswith("^") and test_function.endswith("$")
+    ):
+        fn_sub = f"^{test_function}$"
+    cmd = template.replace("{test_function}", fn_sub)
+    cmd = cmd.replace("{test_name}", fn_sub)
     # Legacy {ID} / {id}: extract suffix after last 'test_' if present
-    fn_lower = test_function.lower()
+    fn_lower = (test_function or "").lower()
     id_suffix = fn_lower.replace("test_", "") if fn_lower.startswith("test_") else fn_lower
     cmd = cmd.replace("{ID}", id_suffix.upper())
     cmd = cmd.replace("{id}", id_suffix)
     if test_file:
         cmd = cmd.replace("{test_path}", test_file.replace("\\", "/"))
     # Tokenize on whitespace (registry commands don't contain quoted args)
-    return cmd.split()
+    argv = cmd.split()
+    if lang in ("solana", "soroban", "l1_rust") and test_function:
+        argv = _inject_cargo_exact(argv)
+    return argv
 
 
 # ---------------------------------------------------------------------------
@@ -205,22 +239,87 @@ _BUILD_MANIFESTS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _find_build_root(project_root: Path, language: str) -> Path:
-    """Walk up from project_root to the directory that owns the build manifest.
+_BUILD_SCAN_SKIP_DIRS = {
+    "node_modules", "target", ".git", "out", "cache", "artifacts",
+    "dist", "build", ".venv", "venv", "__pycache__", "lib", ".cargo",
+}
 
-    Falls back to project_root itself if no manifest is found within 5 levels
-    (degradation, not failure — the original behavior).
+
+def _find_build_root(project_root: Path, language: str) -> Path:
+    """Resolve the directory that owns the build manifest.
+
+    Order (v2.8.16 Phase 1, must-fix #6):
+      1. Walk UP from project_root (project_root + 5 ancestors).
+      2. Bounded sibling/descendant scan (≤2 levels under each ancestor),
+         short-circuiting on the first manifest match — the audit scope dir is
+         frequently a SIBLING of the build root (e.g. an `interfaces/` scope
+         beside a `contracts/` Foundry project), which an upward-only walk can
+         never reach.
+    Falls back to project_root itself if no manifest is found (degradation,
+    not failure — the original behavior).
     """
-    manifests = _BUILD_MANIFESTS.get((language or "").lower(), ("foundry.toml",))
-    cur = Path(project_root).resolve()
-    for _ in range(6):  # project_root + 5 ancestors
-        for man in manifests:
-            if (cur / man).exists():
-                return cur
+    _lang = (language or "").lower().strip()
+    if _lang == "go":
+        _lang = "l1_go"
+    elif _lang == "rust":
+        _lang = "l1_rust"
+    manifests = _BUILD_MANIFESTS.get(_lang, ("foundry.toml",))
+    root = Path(project_root).resolve()
+
+    def _has_manifest(d: Path) -> bool:
+        return any((d / man).exists() for man in manifests)
+
+    # 1. Upward walk (project_root + 5 ancestors).
+    cur = root
+    for _ in range(6):
+        if _has_manifest(cur):
+            return cur
         if cur.parent == cur:
             break
         cur = cur.parent
-    return Path(project_root).resolve()
+
+    # 2. Conservative neighbourhood scan. A *wrong* build root yields a false
+    #    verdict (worse than no root → safe degrade), so the scan is deliberately
+    #    tight: only project_root's own subtree (scope ABOVE the build root) and
+    #    its IMMEDIATE siblings (scope and build root share one parent). Deeper
+    #    ancestor scanning is NOT done here — that is the job of the authoritative
+    #    recon-emitted build_root, not an unbounded heuristic that could match an
+    #    unrelated project. Short-circuits on the first manifest match.
+    def _scan(base: Path, depth: int) -> Optional[Path]:
+        try:
+            children = [c for c in base.iterdir() if c.is_dir()]
+        except OSError:
+            return None
+        for c in children:
+            if c.name in _BUILD_SCAN_SKIP_DIRS or c.name.startswith("."):
+                continue
+            if _has_manifest(c):
+                return c
+            if depth > 1:
+                found = _scan(c, depth - 1)
+                if found is not None:
+                    return found
+        return None
+
+    # 2a. project_root's own subtree (≤2 levels): scope dir sits above build root.
+    found = _scan(root, 2)
+    if found is not None:
+        return found
+    # 2b. immediate siblings only (≤1 level): scope and build root share a parent.
+    parent = root.parent
+    if parent != root:
+        try:
+            for sib in parent.iterdir():
+                if sib == root or not sib.is_dir():
+                    continue
+                if sib.name in _BUILD_SCAN_SKIP_DIRS or sib.name.startswith("."):
+                    continue
+                if _has_manifest(sib):
+                    return sib
+        except OSError:
+            pass
+
+    return root
 
 
 # ---------------------------------------------------------------------------
@@ -282,13 +381,23 @@ def _evm_forge_filter(probe, rel_path: str) -> list[str]:
     return ["--match-path", rel_path]
 
 
-def _classify_evm_outcome(rc: int, stdout: str) -> str:
-    """Classify `forge test` output."""
+def _classify_evm_outcome(rc: int, stdout: str, isolated: bool = True) -> str:
+    """Classify `forge test` output.
+
+    VERIF-5: when the run was NOT isolated to the finding's own test (i.e. a
+    whole-file `--match-path` fallback because the verify file named no test/
+    contract), a result containing BOTH `[PASS]` and `[FAIL]` cannot be
+    attributed to this finding -- an unrelated test in the same file may have
+    failed. Return AMBIGUOUS so the integrity/demotion layer does NOT treat it
+    as a real mechanical FAIL (which could wrongly demote a true positive).
+    """
     s = stdout
     if "Compiler run failed" in s or re.search(r"^Error \(", s, re.MULTILINE):
         return "COMPILE_FAIL"
     if "No tests match" in s or "no tests to run" in s.lower():
         return "NO_TEST_MATCH"
+    if not isolated and "[PASS]" in s and ("[FAIL" in s or re.search(r"Suite result:\s*FAILED", s)):
+        return "AMBIGUOUS"
     if rc == 0 and "[PASS]" in s:
         return "PASS"
     if "[FAIL" in s or re.search(r"Suite result:\s*FAILED", s):
@@ -305,7 +414,7 @@ def _run_test_for_finding(verify_path: Path, build_root: Path, language: str,
                           project_root: Optional[Path] = None) -> ExecResult:
     """Execute one verify file's PoC and classify the outcome."""
     spike = _spike_module()
-    probe = spike.parse_verify_file(verify_path)
+    probe = spike.parse_verify_file(verify_path, language=language)
     result = ExecResult(
         verify_file=verify_path.name,
         finding_id=probe.finding_id,
@@ -353,7 +462,12 @@ def _run_test_for_finding(verify_path: Path, build_root: Path, language: str,
     # file). cwd MUST be the build root (where foundry.toml lives).
     if language == "evm":
         forge_bin = shutil.which("forge") or "forge"
-        cmd = [forge_bin, "test", *_evm_forge_filter(probe, rel_path), "-vv"]
+        _filter = _evm_forge_filter(probe, rel_path)
+        cmd = [forge_bin, "test", *_filter, "-vv"]
+        # VERIF-5: a --match-path run is NOT isolated to the finding's own test;
+        # a FAIL could be an unrelated test in the same file. Track isolation so
+        # the classifier can return AMBIGUOUS instead of mis-attributing FAIL.
+        _isolated = _filter[:1] == ["--match-test"]
         t0 = time.time()
         try:
             proc = subprocess.run(
@@ -364,7 +478,7 @@ def _run_test_for_finding(verify_path: Path, build_root: Path, language: str,
             result.test_command_used = " ".join(cmd)
             stdout = (proc.stdout or "") + "\n" + (proc.stderr or "")
             result.stdout_tail = stdout[-3000:]
-            result.status = _classify_evm_outcome(proc.returncode, stdout)
+            result.status = _classify_evm_outcome(proc.returncode, stdout, isolated=_isolated)
         except subprocess.TimeoutExpired:
             result.duration_s = float(per_test_timeout_s)
             result.status = "TIMEOUT"
@@ -377,7 +491,8 @@ def _run_test_for_finding(verify_path: Path, build_root: Path, language: str,
 
     # Non-EVM ecosystems — build argv from registry template
     cmd = _format_test_command(
-        lang_cfg["test_command"], probe.test_function, rel_path
+        lang_cfg["test_command"], probe.test_function, rel_path,
+        language=language,
     )
     if not cmd:
         result.status = "EXEC_ERROR"
@@ -646,10 +761,37 @@ _PROSE_TAG_RE = re.compile(
 )
 
 
+# v2.8.16 Phase 1: the leading-marker class MUST include `-` and `\t`. Real
+# verifier files write the canonical field as a Markdown bullet
+# (`- **Evidence Tag**: [POC-PASS]`); the old `[*_`> ]*` prefix did not match a
+# `-`, so the verifier's actual claim line was silently skipped. After the
+# mechanical phase appends a NON-bullet `**Mechanical-Tag**: [CODE-TRACE]` line,
+# that line WAS matched instead — so a fabricated bullet-form `[POC-PASS]` +
+# NO_TEST_FILE was misclassified CONSISTENT rather than INFLATED_PROSE, defeating
+# the integrity downgrade (and the #3a verdict flip that keys on it). The
+# verifier's own claim (Evidence/Preferred Tag) is now read with PRIORITY over
+# the driver-stamped Mechanical-Tag, so re-runs cannot shadow the claim either.
+_CLAIM_FIELD_RE = re.compile(
+    r"(?im)^[-*_`> \t]*(?:Evidence\s+Tags?|Preferred\s+Tag)"
+    r"[*_`> \t]*\s*:\s*(.+)$"
+)
+_MECH_TAG_FIELD_RE = re.compile(
+    r"(?im)^[-*_`> \t]*Mechanical-?Tag[*_`> \t]*\s*:\s*(.+)$"
+)
+_FENCED_CODE_RE = re.compile(r"(?s)```.*?```")
+
+
 def _extract_verifier_prose_tag(verify_path: Path) -> str:
     """Read the verifier's prose Evidence Tag from a verify_<ID>.md file.
 
-    Returns the first evidence-tag token found (e.g. '[POC-PASS]') or "".
+    VERIF-2: anchor to the canonical `Evidence Tag:` / `Preferred Tag:` FIELD
+    value (the contract every verifier file must carry), NOT a whole-file
+    first-match -- a pasted reference table or an example tag in a fenced code
+    block could otherwise poison the result. The verifier's OWN claim is read
+    with priority; the driver-stamped `Mechanical-Tag:` line is only a fallback
+    so a prior annotation cannot shadow the claim being integrity-checked.
+    Falls back to a whole-file search (with fenced code stripped) only when no
+    field is present. Returns the evidence-tag token (e.g. '[POC-PASS]') or "".
     """
     if not verify_path.exists():
         return ""
@@ -657,7 +799,19 @@ def _extract_verifier_prose_tag(verify_path: Path) -> str:
         text = verify_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    m = _PROSE_TAG_RE.search(text)
+    # 1. Verifier's own claim (Evidence/Preferred Tag) — highest priority.
+    for fm in _CLAIM_FIELD_RE.finditer(text):
+        tm = _PROSE_TAG_RE.search(fm.group(1))
+        if tm:
+            return tm.group(0).upper()
+    # 2. Driver-stamped Mechanical-Tag field (only if no verifier claim found).
+    for fm in _MECH_TAG_FIELD_RE.finditer(text):
+        tm = _PROSE_TAG_RE.search(fm.group(1))
+        if tm:
+            return tm.group(0).upper()
+    # 3. Fallback: whole-file, but ignore tags inside fenced code blocks.
+    stripped = _FENCED_CODE_RE.sub(" ", text)
+    m = _PROSE_TAG_RE.search(stripped)
     return m.group(0).upper() if m else ""
 
 
@@ -679,8 +833,11 @@ def _classify_integrity(prose_tag: str, mechanical_status: str) -> tuple[str, st
     status = (mechanical_status or "").upper()
     prose_is_proof = prose_upper in {t.upper() for t in _PROOF_EVIDENCE_TAGS}
 
-    if status in ("TOOLCHAIN_UNAVAILABLE", "SKIPPED"):
-        # Mechanical layer was unavailable — preserve prose with a flag.
+    if status in ("TOOLCHAIN_UNAVAILABLE", "SKIPPED", "AMBIGUOUS"):
+        # Mechanical layer was unavailable, or (VERIF-5) AMBIGUOUS = a whole-file
+        # run with mixed pass/fail that cannot be attributed to THIS finding.
+        # Preserve prose with a flag -- do NOT treat as INFLATED_PROSE, which
+        # would wrongly demote a true positive on an unrelated test's failure.
         effective = prose_tag or "[CODE-TRACE]"
         return ("MECHANICAL_UNAVAILABLE",
                 f"{effective} [MECHANICAL-UNAVAILABLE]")
@@ -706,6 +863,32 @@ def _classify_integrity(prose_tag: str, mechanical_status: str) -> tuple[str, st
                 "[CODE-TRACE] [INTEGRITY-DOWNGRADE]")
     # Prose was honest about not having proof; preserve it.
     return ("CONSISTENT", prose_tag or "[CODE-TRACE]")
+
+
+_VERDICT_CONFIRMED_FIELD_RE = re.compile(
+    r"(?im)^([-*>\s`_]*Verdict[*>\s`_]*:\s*)CONFIRMED\b"
+    r"(?!\s*\[INTEGRITY-DOWNGRADE\])"
+)
+
+
+def flip_verdict_on_integrity_downgrade(text: str) -> tuple[str, bool]:
+    """v2.8.16 Phase 1 (#3a): flip a verifier's `**Verdict**: CONFIRMED` line to
+    `CONTESTED [INTEGRITY-DOWNGRADE]`.
+
+    Demoting the Evidence Tag alone does not reach the report — the report Index
+    Agent sets the VERIFIED column from the verifier's `Verdict:` line. When the
+    mechanical layer classifies a finding INFLATED_PROSE (prose claimed
+    proof-grade evidence the run did not confirm), the driver calls this so a
+    mechanically-disproven exploit can never ship as a verified-Critical.
+
+    Only the Verdict FIELD line is rewritten (anchored, multiline) — prose
+    mentions of the word "CONFIRMED" elsewhere are left untouched. Idempotent:
+    an already-downgraded line is not matched again. Returns (new_text, changed).
+    """
+    new_text, n = _VERDICT_CONFIRMED_FIELD_RE.subn(
+        r"\1CONTESTED [INTEGRITY-DOWNGRADE]", text
+    )
+    return new_text, (n > 0)
 
 
 def _write_verdict_manifest(results: list, scratchpad: Path) -> None:
@@ -806,6 +989,14 @@ def run_phase5b_mechanical_verify(scratchpad: Path, project_root: Path,
     lang = (language or "").lower().strip()
     if not lang:
         lang = "evm"  # back-compat default
+    elif lang in ("go", "rust"):
+        # v2.8.16 Phase 1 (#0a): L1 config stores the raw language `go`/`rust`,
+        # but the toolchain registry + manifest tables key on `l1_go`/`l1_rust`.
+        # Without this remap _toolchain_binary_for("rust")="" and the registry
+        # lookup misses → every L1 finding returns TOOLCHAIN_UNAVAILABLE and
+        # L1 mechanical verify is silently dead. Normalize at the single
+        # dispatch surface so every caller benefits.
+        lang = "l1_go" if lang == "go" else "l1_rust"
 
     skip_names = {
         "verify_core.md", "verify_core_full.md", "verify_aggregate.md",
@@ -882,4 +1073,6 @@ __all__ = [
     "_classify_non_evm_outcome",
     "_classify_evm_outcome",
     "_recommended_tag",
+    "flip_verdict_on_integrity_downgrade",
+    "read_verdict_manifest",
 ]

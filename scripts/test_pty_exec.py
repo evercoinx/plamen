@@ -3,6 +3,8 @@ import inspect
 import json
 import sys
 import time
+import concurrent.futures
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -10,8 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pty_exec import (  # noqa: E402
     ClaudePtySession,
     encode_claude_project_dir,
+    event_is_rate_limited,
     inspect_transcript,
     parse_transcript_usage,
+    text_shows_rate_limit,
     transcript_shows_compaction,
 )
 import plamen_driver as D  # noqa: E402
@@ -157,6 +161,188 @@ def test_driver_rate_limit_detection_accepts_claude_session_jsonl(tmp_path):
     )
 
     assert D.detect_rate_limit(log) is True
+
+
+def test_claude_pty_usage_cap_json_shape_is_rate_limited():
+    event = {
+        "type": "assistant",
+        "apiErrorStatus": 429,
+        "error": "rate_limit",
+        "message": {
+            "content": [
+                {
+                    "type": "text",
+                    "text": "You've hit your weekly limit · resets May 30, 6am",
+                }
+            ],
+        },
+    }
+
+    assert event_is_rate_limited(event) is True
+
+
+def test_claude_pty_rate_limit_accepts_string_status_codes():
+    for key in ("api_error_status", "apiErrorStatus", "status"):
+        event = {
+            "type": "assistant",
+            key: "429",
+            "message": {"content": []},
+        }
+        assert event_is_rate_limited(event) is True
+
+
+def test_claude_pty_usage_cap_screen_text_is_rate_limited(tmp_path):
+    log = tmp_path / "stdio.log"
+    log.write_text(
+        "\x1b[5GYou've hit your weekly limit · resets May 30, 6am\n"
+        "\x1b[5G3. Switch to Team plan\n",
+        encoding="utf-8",
+    )
+
+    assert text_shows_rate_limit(log.read_text(encoding="utf-8")) is True
+    assert D.detect_rate_limit(log) is True
+
+
+def test_protocol_rate_limiter_prose_with_line_429_is_not_rate_limited():
+    """Audit content can contain "rate limiter" prose and markdown line 429."""
+    event = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "content": (
+                    "416 **Description**: If a V2 upgrade introduces a rate "
+                    "limiter address, there is an exploit window.\n"
+                    "429 ### Finding [INV-042]: Single-Step Ownership Transfer"
+                ),
+            }],
+        },
+    }
+
+    assert text_shows_rate_limit(
+        "rate limiter address\n429 ### Finding [INV-042]"
+    ) is False
+    assert event_is_rate_limited(event) is False
+
+
+def test_assistant_audit_text_with_rate_limit_error_is_not_rate_limited():
+    event = _assistant(
+        "end_turn",
+        "The audited protocol emits rate_limit_error and handles HTTP status 429.",
+    )
+
+    assert event_is_rate_limited(event) is False
+    assert text_shows_rate_limit(
+        "The audited protocol handles HTTP status 429 rate limit behavior."
+    ) is False
+
+
+def test_wait_for_turn_complete_ignores_live_protocol_rate_limit_output(tmp_path):
+    session = ClaudePtySession(
+        ["claude"],
+        cwd=tmp_path,
+        env={},
+        session_id="live-protocol-rate-limit",
+        prompt_path=tmp_path / "prompt.md",
+        log_file=io.StringIO(),
+        claude_home=tmp_path,
+    )
+    session.is_alive = lambda: True  # type: ignore[method-assign]
+    with session._recent_output_lock:
+        session._recent_output = "Protocol test: HTTP status 429 rate limit handling"
+
+    state = session.wait_for_turn_complete(
+        timeout_s=0.05,
+        quiescence_s=0.01,
+        poll_s=0.01,
+        transcript_poll_s=0.01,
+    )
+
+    assert state.rate_limited is False
+
+
+def test_wait_for_turn_complete_detects_live_usage_cap_output(tmp_path):
+    session = ClaudePtySession(
+        ["claude"],
+        cwd=tmp_path,
+        env={},
+        session_id="live-cap",
+        prompt_path=tmp_path / "prompt.md",
+        log_file=io.StringIO(),
+        claude_home=tmp_path,
+    )
+    session.is_alive = lambda: True  # type: ignore[method-assign]
+    with session._recent_output_lock:
+        session._recent_output = "You've hit your weekly limit · resets May 30, 6am"
+
+    state = session.wait_for_turn_complete(
+        timeout_s=2,
+        quiescence_s=0.01,
+        poll_s=0.01,
+        transcript_poll_s=0.01,
+    )
+
+    assert state.rate_limited is True
+
+
+def test_checkpoint_mark_completed_clears_matching_rate_limit_marker():
+    cp = D.Checkpoint(completed=[], degraded=[], rate_limited_at="depth")
+
+    cp.mark_completed("depth")
+
+    assert cp.rate_limited_at is None
+
+
+def test_worker_pool_halt_terminates_registered_active_sessions():
+    class DummySession:
+        def __init__(self):
+            self.terminated = False
+            self.grace_s = None
+
+        def terminate(self, grace_s=5.0):
+            self.terminated = True
+            self.grace_s = grace_s
+
+    class DummyExecutor:
+        def __init__(self):
+            self.shutdown_args = None
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            self.shutdown_args = (wait, cancel_futures)
+
+    session = DummySession()
+    future = concurrent.futures.Future()
+    executor = DummyExecutor()
+
+    D._register_active_worker_session(session)
+    try:
+        D._cancel_pending_worker_futures({future}, executor)  # type: ignore[arg-type]
+    finally:
+        D._unregister_active_worker_session(session)
+
+    assert session.terminated is True
+    assert future.cancelled() is True
+    assert executor.shutdown_args == (False, True)
+
+
+def test_worker_pool_context_exit_does_not_wait_for_running_future():
+    release = threading.Event()
+
+    def _blocked():
+        release.wait(timeout=5)
+
+    start = time.time()
+    try:
+        try:
+            with D._NonBlockingWorkerPool(max_workers=1) as executor:
+                executor.submit(_blocked)
+                raise RuntimeError("abort pool")
+        except RuntimeError:
+            pass
+        assert time.time() - start < 1.0
+    finally:
+        release.set()
 
 
 def test_posix_pty_spawn_uses_popen_not_raw_fork_waitpid():

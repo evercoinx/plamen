@@ -246,9 +246,13 @@ def test_rc_parity_logs_on_internal_error(tmp_path, caplog):
 def test_severity_name_warns_on_garbage(caplog):
     """Unrecognized severity text should log a warning."""
     from plamen_parsers import _severity_name_from_text
+    from plamen_types import _NORMALIZE_SEVERITY_SEEN
 
     import logging
-    with caplog.at_level(logging.WARNING):
+    # NOISE-2: the fully-recoverable fallback now logs at DEBUG, once per distinct
+    # token. Clear the dedup set so this token logs, and capture at DEBUG.
+    _NORMALIZE_SEVERITY_SEEN.discard("XYZZY")
+    with caplog.at_level(logging.DEBUG):
         result = _severity_name_from_text("", {"severity": "XYZZY"})
 
     assert result == "Medium"

@@ -438,6 +438,51 @@ def test_p25_backstop_flags_unregistered_refs(tmp_path):
     assert "consumer-backstop" in issues[0]
 
 
+def test_p25_skeptic_backstop_ignores_prose_local_ids(tmp_path):
+    """Skeptic prose may mention local concern IDs; structural keys matter."""
+    id_ledger_register(
+        tmp_path, finding_id="HH-09", owner_phase="chain",
+        owner_attempt=1, owning_artifact="hypotheses.md", title="real high",
+    )
+    (tmp_path / "skeptic_findings.md").write_text(
+        "# Skeptic Findings\n\n"
+        "## HH-09 - real high\n\n"
+        "The verifier also cited CC-09, EX-1, INV-4, and OR-2 as local "
+        "context labels, but those are not the reviewed finding IDs.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "skeptic_judge_decisions.md").write_text(
+        "| Finding ID | Original Severity | Final Severity | Decision | Rationale |\n"
+        "|---|---|---|---|---|\n"
+        "| HH-09 | High | High | KEEP | Prose references are contextual only. |\n",
+        encoding="utf-8",
+    )
+
+    assert _validate_consumer_ids_in_ledger(tmp_path, "skeptic") == []
+
+
+def test_p25_skeptic_backstop_flags_unregistered_structural_id(tmp_path):
+    id_ledger_register(
+        tmp_path, finding_id="HH-09", owner_phase="chain",
+        owner_attempt=1, owning_artifact="hypotheses.md", title="real high",
+    )
+    (tmp_path / "skeptic_findings.md").write_text(
+        "# Skeptic Findings\n\n## CC-09 - hallucinated structural key\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "skeptic_judge_decisions.md").write_text(
+        "| Finding ID | Original Severity | Final Severity | Decision | Rationale |\n"
+        "|---|---|---|---|---|\n"
+        "| CC-09 | High | High | KEEP | Bad key. |\n",
+        encoding="utf-8",
+    )
+
+    issues = _validate_consumer_ids_in_ledger(tmp_path, "skeptic")
+
+    assert len(issues) == 1
+    assert "CC-09" in issues[0]
+
+
 def test_p25_backstop_silent_when_ledger_empty(tmp_path):
     """No ledger (legacy audit) → backstop skips silently (no false halt)."""
     (tmp_path / "report_index.md").write_text(
@@ -460,6 +505,22 @@ def test_p25_backstop_ignores_report_tier_ids(tmp_path):
     # M-01 and L-05 are report-tier IDs; they're not validated here.
     # GRP-01 is in ledger → no issues.
     issues = _validate_consumer_ids_in_ledger(tmp_path, "report_index")
+    assert issues == []
+
+
+def test_p25_backstop_ignores_asset_binding_matrix_ids(tmp_path):
+    """AB-* IDs are scope/asset-binding rows, not finding ledger IDs."""
+    id_ledger_register(
+        tmp_path, finding_id="HH-01", owner_phase="chain",
+        owner_attempt=1, owning_artifact="hypotheses.md", title="real high",
+    )
+    (tmp_path / "cross_batch_consistency.md").write_text(
+        "| Finding ID | Status | Notes |\n"
+        "|---|---|---|\n"
+        "| HH-01 | CONSISTENT | Related asset-binding row AB-001 was checked. |\n",
+        encoding="utf-8",
+    )
+    issues = _validate_consumer_ids_in_ledger(tmp_path, "crossbatch")
     assert issues == []
 
 
@@ -556,6 +617,36 @@ def test_p25_backstop_accepts_traceable_depth_local_ids(tmp_path):
     )
     assert synthetic_map["traces"][0]["id"] == "DCI-3"
     assert synthetic_map["traces"][0]["source_artifact"] == "depth_state_trace_findings.md"
+
+
+def test_p25_backstop_accepts_traceable_report_local_ids(tmp_path):
+    """Report index may reference local EN/ST/VS methodology IDs with trace."""
+    id_ledger_register(
+        tmp_path, finding_id="INV-001", owner_phase="inventory",
+        owner_attempt=1, owning_artifact="findings_inventory.md", title="seed",
+    )
+    (tmp_path / "enabler_results.md").write_text(
+        "### EN-01\nEnabler evidence.\n", encoding="utf-8"
+    )
+    (tmp_path / "design_stress_findings.md").write_text(
+        "### ST-2\nStress finding.\n", encoding="utf-8"
+    )
+    (tmp_path / "validation_sweep_findings.md").write_text(
+        "### VS-1\nValidation sweep finding.\n", encoding="utf-8"
+    )
+    (tmp_path / "report_index.md").write_text(
+        "| H-01 | Title | High | ... | EN-01, ST-2, VS-1 |\n",
+        encoding="utf-8",
+    )
+
+    issues = _validate_consumer_ids_in_ledger(tmp_path, "report_index")
+
+    assert issues == []
+    synthetic_map = json.loads(
+        (tmp_path / "_id_ledger_synthetic_map.json").read_text(encoding="utf-8")
+    )
+    trace_ids = {t["id"] for t in synthetic_map["traces"]}
+    assert {"EN-01", "ST-2", "VS-1"} <= trace_ids
 
 
 def test_p25_backstop_still_flags_untraceable_synthetic_ids(tmp_path):

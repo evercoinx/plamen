@@ -121,10 +121,15 @@ _SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇"
 _spinner_idx: int = 0
 _spinner_active: bool = False
 _last_spinner_draw: float = 0.0
-# Keep the live terminal visibly alive without adding log lines. The spinner
-# is a carriage-return redraw, so a sub-second cadence is safe for interactive
-# terminals and avoids the timer appearing to skip by two seconds.
-_SPINNER_REDRAW_INTERVAL_S = 0.20
+# Keep the live terminal visibly alive without adding log lines. Default brisk;
+# override with PLAMEN_SPINNER_INTERVAL_S if a terminal renders too aggressively.
+try:
+    _SPINNER_REDRAW_INTERVAL_S = max(
+        0.05,
+        float(os.environ.get("PLAMEN_SPINNER_INTERVAL_S", "0.10")),
+    )
+except Exception:
+    _SPINNER_REDRAW_INTERVAL_S = 0.10
 
 
 def spin(elapsed_s: int):
@@ -586,6 +591,50 @@ def print_failure_diagnosis(phase_name: str, scratchpad: str,
         f"developer fixing the pipeline code."
     )
 
+    def _local_diagnosis(reason: str) -> str:
+        missing_preview = "\n".join(f"- {m}" for m in missing[:12])
+        classification = "GATE_MISMATCH"
+        low = (reason + "\n" + missing_str + "\n" + log_tail[-4000:]).lower()
+        if "rate limit" in low or "429" in low:
+            classification = "RATE_LIMIT"
+        elif "timeout" in low or "timed out" in low:
+            classification = "TIMEOUT"
+        elif "containment" in low or "out-of-scope" in low:
+            classification = "LLM_NONCOMPLIANCE"
+        elif "queue receipt" in low or "marker" in low or "structural" in low:
+            classification = "GATE_MISMATCH"
+        fix = (
+            "Inspect the named phase gate in plamen_validators.py and the latest "
+            "phase artifact/log. If the artifact is substantively complete but "
+            "uses a reasonable alternate format, normalize the parser or retry "
+            "hint without weakening artifact existence, path citation, or "
+            "phase-containment checks."
+        )
+        if phase_name == "attention_repair" or "attention repair" in low:
+            fix = (
+                "For attention_repair, verify attention_repair_summary.md has one "
+                "receipt per attention_repair_queue.md row. If rows are present "
+                "but marked with a synonym such as COVERED/REVIEWED/CLOSED, this "
+                "is a validator vocabulary mismatch rather than lost audit work. "
+                "Patch _validate_attention_repair in plamen_validators.py to "
+                "accept the synonym while keeping path and asset-binding closure "
+                "checks intact."
+            )
+        return (
+            "### What Happened\n"
+            f"The {phase_name} phase failed its artifact gate after retry exhaustion. "
+            f"The advisory LLM diagnosis did not complete cleanly ({reason}), so "
+            "the driver generated this deterministic local diagnosis from the "
+            "gate error and latest log.\n\n"
+            "### Root Cause\n"
+            "The gate reported these blocking issue(s):\n"
+            f"{missing_preview}\n\n"
+            "### Classification\n"
+            f"{classification}\n\n"
+            "### Fix Guidance\n"
+            f"{fix}"
+        )
+
     backend = config.get("cli_backend", "claude")
 
     if backend == "codex":
@@ -665,40 +714,99 @@ def print_failure_diagnosis(phase_name: str, scratchpad: str,
             subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
         )
 
+    def _terminate_diagnosis_process(proc: subprocess.Popen):
+        try:
+            if proc.poll() is not None:
+                return
+            if sys.platform == "win32":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=2,
+                    )
+                    return
+                except Exception:
+                    pass
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+        except Exception:
+            pass
+
     try:
-        with diagnosis_prompt_path.open("rb") as stdin_file:
-            result = subprocess.run(
-                cmd,
-                stdin=stdin_file,
-                capture_output=True,
-                timeout=180 if backend == "codex" else 120,
-                env=subprocess_env,
-                **popen_kwargs,
+        if graceful_stop.requested:
+            diagnosis = _local_diagnosis(
+                "diagnosis skipped because user requested stop"
             )
-        stdout = result.stdout or b""
-        stderr = result.stderr or b""
-        if isinstance(stdout, bytes):
-            raw_out = stdout.decode("utf-8", errors="replace").strip()
         else:
-            raw_out = str(stdout).strip()
+            timeout_s = 60 if backend == "codex" else 30
+            deadline = time.time() + timeout_s
+            proc = None
+            with diagnosis_prompt_path.open("rb") as stdin_file:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=stdin_file,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=subprocess_env,
+                    **popen_kwargs,
+                )
+                while proc.poll() is None:
+                    if graceful_stop.requested:
+                        _terminate_diagnosis_process(proc)
+                        diagnosis = _local_diagnosis(
+                            "diagnosis cancelled because user requested stop"
+                        )
+                        break
+                    if time.time() >= deadline:
+                        _terminate_diagnosis_process(proc)
+                        diagnosis = _local_diagnosis(
+                            f"diagnosis subprocess timed out after {timeout_s}s"
+                        )
+                        break
+                    time.sleep(0.1)
+                else:
+                    diagnosis = ""
 
-        diagnosis = _extract_agent_text_from_event_stream(raw_out)
+                if not diagnosis:
+                    stdout, stderr = proc.communicate(timeout=2)
+                    stdout = stdout or b""
+                    stderr = stderr or b""
+                    if isinstance(stdout, bytes):
+                        raw_out = stdout.decode("utf-8", errors="replace").strip()
+                    else:
+                        raw_out = str(stdout).strip()
 
-        if not diagnosis and stderr:
-            if isinstance(stderr, bytes):
-                err_text = stderr.decode("utf-8", errors="replace").strip()
-            else:
-                err_text = str(stderr).strip()
-            err_text = _extract_agent_text_from_event_stream(err_text)
-            diagnosis = f"[Diagnosis subprocess produced no stdout]\n\n{err_text}"
+                    diagnosis = _extract_agent_text_from_event_stream(raw_out)
+
+                    if not diagnosis and stderr:
+                        if isinstance(stderr, bytes):
+                            err_text = stderr.decode("utf-8", errors="replace").strip()
+                        else:
+                            err_text = str(stderr).strip()
+                        err_text = _extract_agent_text_from_event_stream(err_text)
+                        diagnosis = f"[Diagnosis subprocess produced no stdout]\n\n{err_text}"
     except subprocess.TimeoutExpired:
-        diagnosis = f"[Diagnosis subprocess timed out after {'180' if backend == 'codex' else '120'}s]"
+        if 'proc' in locals() and proc is not None:
+            _terminate_diagnosis_process(proc)
+        diagnosis = _local_diagnosis("diagnosis subprocess cleanup timed out")
+    except KeyboardInterrupt:
+        if 'proc' in locals() and proc is not None:
+            _terminate_diagnosis_process(proc)
+        diagnosis = _local_diagnosis("diagnosis cancelled by keyboard interrupt")
     except (FileNotFoundError, Exception) as e:
-        diagnosis = f"[Diagnosis failed: {e}]"
+        if 'proc' in locals() and proc is not None:
+            _terminate_diagnosis_process(proc)
+        diagnosis = _local_diagnosis(f"diagnosis failed: {e}")
 
     diagnosis = _extract_agent_text_from_event_stream(diagnosis)
     if not diagnosis or len(diagnosis) < 20:
-        return
+        diagnosis = _local_diagnosis("diagnosis subprocess produced no usable output")
 
     # Write diagnosis to disk for persistence
     diagnosis_path = sp / f"_diagnosis_{phase_name}.md"
@@ -855,13 +963,13 @@ def print_halt_acknowledged():
     _clear_spinner()
     if not RICH_AVAILABLE:
         print(
-            "\n  Halting... terminating subprocesses now; cleanup may take a few seconds.\n",
+            "\n  Esc received. Cleaning up the active subprocess; options will follow.\n",
             file=sys.stderr, flush=True,
         )
         return
     console.print()
     console.print(
-        "  [bold red]Halting...[/] terminating subprocesses now; cleanup may take a few seconds."
+        "  [bold yellow]Esc received.[/] Cleaning up the active subprocess; options will follow."
     )
 
 
@@ -870,7 +978,7 @@ def print_halt_prompt(phase_name: str, config_path: str):
     if not RICH_AVAILABLE:
         print(
             f"\n  Halted during: {phase_name}\n"
-            f"  Press ENTER to resume  |  Esc to stop\n",
+            f"  Press ENTER to resume  |  Esc to stop and choose keep/purge\n",
             file=sys.stderr, flush=True,
         )
         return
@@ -878,7 +986,7 @@ def print_halt_prompt(phase_name: str, config_path: str):
     content = (
         f"Halted during [bold]{phase_name}[/]. Subprocess terminated.\n\n"
         f"  [bold #22C72E]ENTER[/]  resume (retry this phase)\n"
-        f"  [bold red]Esc[/]    stop pipeline"
+        f"  [bold red]Esc[/]    stop pipeline, then choose keep/purge"
     )
     console.print(Panel(content, title="[bold red]|| HALTED[/]",
                         border_style="red", width=min(console.width, 72)))
@@ -940,7 +1048,21 @@ def wait_critical_halt_choice() -> str:
 
     Returns "retry", "skip", or "exit".
     Suspends the background key listener so it doesn't steal keypresses.
+
+    v2.8.13 non-interactive safety net: an UNATTENDED run must never block
+    forever here. An explicit env choice wins (set PLAMEN_AUTO_HALT_CHOICE to
+    skip/exit/retry for headless/unattended runs); otherwise a non-TTY stdin
+    (CI/headless) auto-exits cleanly (degraded) rather than hanging on the
+    `while True` keypress loop. Interactive TTY behavior is unchanged.
     """
+    _auto = os.environ.get("PLAMEN_AUTO_HALT_CHOICE", "").strip().lower()
+    if _auto in ("skip", "exit", "retry"):
+        return _auto
+    try:
+        if not sys.stdin.isatty():
+            return "exit"
+    except Exception:
+        return "exit"
     pause_toggle._suspended = True
     try:
         if sys.platform == "win32":
@@ -1232,11 +1354,14 @@ class GracefulStop:
 
     def __init__(self):
         self.requested = False
+        self.finalizing = False
 
     def install(self):
         """No-op — we no longer override SIGINT."""
 
     def request_halt(self):
+        if self.finalizing:
+            return
         if not self.requested:
             self.requested = True
             print_halt_acknowledged()
@@ -1257,6 +1382,8 @@ class PauseToggle:
         self.paused = False
         self._thread = None
         self._suspended = False
+        self._term_fd = None
+        self._term_old_settings = None
 
     @property
     def halt_requested(self) -> bool:
@@ -1293,6 +1420,8 @@ class PauseToggle:
                 import tty, termios, select as _sel
                 fd = sys.stdin.fileno()
                 old_settings = termios.tcgetattr(fd)
+                self._term_fd = fd
+                self._term_old_settings = old_settings
                 try:
                     tty.setcbreak(fd)
                     while True:
@@ -1305,6 +1434,22 @@ class PauseToggle:
                             self._handle_key(ch.encode("latin-1"))
                 finally:
                     termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    self._term_fd = None
+                    self._term_old_settings = None
+        except Exception:
+            pass
+
+    def restore_terminal(self):
+        """Best-effort POSIX terminal restore before hard os._exit paths."""
+        if sys.platform == "win32":
+            return
+        fd = self._term_fd
+        settings = self._term_old_settings
+        if fd is None or settings is None:
+            return
+        try:
+            import termios
+            termios.tcsetattr(fd, termios.TCSADRAIN, settings)
         except Exception:
             pass
 

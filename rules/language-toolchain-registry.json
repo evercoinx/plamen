@@ -1,6 +1,58 @@
 {
   "version": 1,
   "languages": {
+    "evm": {
+      "build_command": "forge build",
+      "test_command": "forge test --match-test test_{id} -vvv",
+      "test_filter_mode": "foundry_match_test",
+      "fuzz_engines": [
+        {
+          "name": "forge_fuzz",
+          "command": "forge test --match-test testFuzz_{id} -vvv",
+          "template": "Foundry fuzz test using bound() inputs"
+        }
+      ],
+      "fallback_strategy": "parameterized Foundry unit tests or Hardhat grep tests when Foundry is unavailable",
+      "evidence_tags": ["POC-PASS", "POC-FAIL", "FUZZ-PASS", "CODE-TRACE"],
+      "docs_sources": [
+        "https://book.getfoundry.sh/forge/tests",
+        "https://book.getfoundry.sh/forge/fuzz-testing"
+      ]
+    },
+    "solana": {
+      "build_command": "cargo build-sbf",
+      "test_command": "cargo test test_{id} -- --nocapture",
+      "test_filter_mode": "cargo_name_filter",
+      "fuzz_engines": [
+        {
+          "name": "trident",
+          "command": "cd trident-tests && trident fuzz run fuzz_0",
+          "template": "Trident fuzz target when available"
+        },
+        {
+          "name": "proptest",
+          "command": "cargo test proptest_{id} -- --nocapture",
+          "template": "bounded Rust proptest fallback"
+        }
+      ],
+      "fallback_strategy": "native cargo tests with bounded account/message fixtures when Anchor or Trident is unavailable",
+      "evidence_tags": ["POC-PASS", "POC-FAIL", "FUZZ-PASS", "CODE-TRACE"],
+      "docs_sources": [
+        "https://solana.com/docs/programs",
+        "https://www.anchor-lang.com/docs/testing"
+      ]
+    },
+    "aptos": {
+      "build_command": "aptos move compile",
+      "test_command": "aptos move test --filter test_{id}",
+      "test_filter_mode": "aptos_filter",
+      "fuzz_engines": [],
+      "fallback_strategy": "boundary-value Move unit tests with multiple concrete input sets",
+      "evidence_tags": ["POC-PASS", "POC-FAIL", "CODE-TRACE"],
+      "docs_sources": [
+        "https://aptos.dev/en/build/smart-contracts/book/unit-testing"
+      ]
+    },
     "sui": {
       "build_command": "sui move build",
       "test_command": "sui move test {test_name}",

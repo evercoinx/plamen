@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest import mock
@@ -17,6 +18,7 @@ from recon_prepass import (
     _run_opengrep_scan,
     _parse_opengrep_sarif,
     _ensure_opengrep_rules,
+    _write_build_status,
     run_recon_prepass,
     _write_text,
 )
@@ -72,7 +74,59 @@ _SAMPLE_SARIF = {
 }
 
 
+def _fake_popen_factory(*, sarif=None, returncode=0, timeout=False, seen=None):
+    def _factory(cmd, **kwargs):
+        if seen is not None:
+            seen.append(cmd)
+        if sarif is not None:
+            for i, arg in enumerate(cmd):
+                if arg == "--sarif-output" and i + 1 < len(cmd):
+                    Path(cmd[i + 1]).write_text(json.dumps(sarif), encoding="utf-8")
+                    break
+        proc = mock.Mock()
+        proc.pid = 12345
+        proc.returncode = returncode
+        if timeout:
+            proc.communicate.side_effect = [
+                subprocess.TimeoutExpired("opengrep", 300),
+                ("", ""),
+            ]
+        else:
+            proc.communicate.return_value = ("", "")
+        return proc
+    return _factory
+
+
 # ── _run_opengrep_scan: skip/fail paths ─────────────────────────────────
+
+def test_build_status_forge_uses_bounded_production_compile(tmp_path):
+    """Recon forge prepass compiles explicit production sources with one worker."""
+    scratch = _mkscratch(tmp_path)
+    proj = _mkproj(tmp_path)
+    (proj / "foundry.toml").write_text("[profile.default]\n", encoding="utf-8")
+    for rel in ("test/Vault.t.sol", "fuzz/VaultFuzz.sol", "src/MockToken.sol"):
+        path = proj / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// excluded", encoding="utf-8")
+
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        return mock.Mock(returncode=0, stdout="", stderr="")
+
+    with mock.patch("shutil.which", side_effect=lambda name: "/usr/bin/forge" if name == "forge" else None), \
+         mock.patch("subprocess.run", side_effect=fake_run):
+        result = _write_build_status(scratch, proj, "evm")
+
+    assert result == "WRITTEN"
+    cmd = seen[0]
+    assert cmd[:2] == ["forge", "build"]
+    assert "src/Contract.sol" in cmd
+    assert "--threads" in cmd
+    assert "1" in cmd
+    assert all("test/" not in arg and "fuzz/" not in arg and "MockToken.sol" not in arg for arg in cmd)
+
 
 def test_scan_skip_no_opengrep(tmp_path):
     """No opengrep binary -> SKIPPED."""
@@ -114,9 +168,41 @@ def test_scan_skip_no_source_files(tmp_path):
     assert ".sol" in result
 
 
+def test_scan_targets_only_production_source_files(tmp_path):
+    """OpenGrep receives explicit production files, not the whole project tree."""
+    scratch = _mkscratch(tmp_path)
+    proj = _mkproj(tmp_path)
+    for rel in ("test/Vault.t.sol", "fuzz/VaultFuzz.sol", ".medusa-tests/Medusa.sol"):
+        path = proj / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// excluded", encoding="utf-8")
+
+    rules_dir = tmp_path / "rules"
+    rules_dir.mkdir()
+    sol_dir = rules_dir / "solidity"
+    sol_dir.mkdir()
+    (sol_dir / "test.yaml").write_text("rules: []", encoding="utf-8")
+    sec_dir = rules_dir / "solidity" / "security"
+    sec_dir.mkdir()
+    (sec_dir / "test.yaml").write_text("rules: []", encoding="utf-8")
+
+    seen = []
+    with mock.patch("shutil.which", return_value="/usr/bin/opengrep"), \
+         mock.patch("recon_prepass._ensure_opengrep_rules",
+                    return_value={"opengrep-rules": rules_dir, "decurity-rules": rules_dir}), \
+         mock.patch("subprocess.Popen",
+                    side_effect=_fake_popen_factory(sarif=_SAMPLE_SARIF, seen=seen)):
+        result = _run_opengrep_scan(scratch, proj, "evm")
+
+    assert result == "WRITTEN:2 findings"
+    cmd = seen[0]
+    assert str(proj) not in cmd
+    assert "src/Contract.sol" in cmd
+    assert all("test/" not in arg and "fuzz/" not in arg and ".medusa-tests" not in arg for arg in cmd)
+
+
 def test_scan_fail_timeout(tmp_path):
     """Scan times out -> FAILED."""
-    import subprocess as sp
     scratch = _mkscratch(tmp_path)
     proj = _mkproj(tmp_path)
 
@@ -132,7 +218,8 @@ def test_scan_fail_timeout(tmp_path):
     with mock.patch("shutil.which", return_value="/usr/bin/opengrep"), \
          mock.patch("recon_prepass._ensure_opengrep_rules",
                     return_value={"opengrep-rules": rules_dir, "decurity-rules": rules_dir}), \
-         mock.patch("subprocess.run", side_effect=sp.TimeoutExpired("opengrep", 300)):
+         mock.patch("subprocess.Popen", side_effect=_fake_popen_factory(timeout=True)), \
+         mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)):
         result = _run_opengrep_scan(scratch, proj, "evm")
     assert result.startswith("FAILED:")
     assert "timeout" in result
@@ -152,12 +239,11 @@ def test_scan_fail_nonzero_no_sarif(tmp_path):
     sec_dir.mkdir()
     (sec_dir / "test.yaml").write_text("rules: []", encoding="utf-8")
 
-    fake_proc = mock.Mock(returncode=2, stdout="", stderr="rule error")
-
     with mock.patch("shutil.which", return_value="/usr/bin/opengrep"), \
          mock.patch("recon_prepass._ensure_opengrep_rules",
                     return_value={"opengrep-rules": rules_dir, "decurity-rules": rules_dir}), \
-         mock.patch("subprocess.run", return_value=fake_proc):
+         mock.patch("subprocess.Popen",
+                    side_effect=_fake_popen_factory(returncode=2)):
         result = _run_opengrep_scan(scratch, proj, "evm")
     assert "FAILED:" in result or "WRITTEN:0" in result
 
@@ -372,17 +458,11 @@ def test_scan_success_writes_sarif_and_summary(tmp_path):
     sec_dir.mkdir()
     (sec_dir / "test.yaml").write_text("rules: []", encoding="utf-8")
 
-    def fake_run(cmd, **kwargs):
-        # Write SARIF to the --sarif-output path
-        for i, arg in enumerate(cmd):
-            if arg == "--sarif-output" and i + 1 < len(cmd):
-                Path(cmd[i + 1]).write_text(json.dumps(_SAMPLE_SARIF), encoding="utf-8")
-        return mock.Mock(returncode=0, stdout="", stderr="")
-
     with mock.patch("shutil.which", return_value="/usr/bin/opengrep"), \
          mock.patch("recon_prepass._ensure_opengrep_rules",
                     return_value={"opengrep-rules": rules_dir, "decurity-rules": rules_dir}), \
-         mock.patch("subprocess.run", side_effect=fake_run):
+         mock.patch("subprocess.Popen",
+                    side_effect=_fake_popen_factory(sarif=_SAMPLE_SARIF)):
         result = _run_opengrep_scan(scratch, proj, "evm")
 
     assert result == "WRITTEN:2 findings"
@@ -424,16 +504,11 @@ def test_aptos_resolves_move_rules(tmp_path):
         }]}],
     }
 
-    def fake_run(cmd, **kwargs):
-        for i, arg in enumerate(cmd):
-            if arg == "--sarif-output" and i + 1 < len(cmd):
-                Path(cmd[i + 1]).write_text(json.dumps(_MOVE_SARIF), encoding="utf-8")
-        return mock.Mock(returncode=0, stdout="", stderr="")
-
     with mock.patch("shutil.which", return_value="/usr/bin/opengrep"), \
          mock.patch("recon_prepass._ensure_opengrep_rules",
                     return_value={"aptos-move-rules": rules_base}), \
-         mock.patch("subprocess.run", side_effect=fake_run):
+         mock.patch("subprocess.Popen",
+                    side_effect=_fake_popen_factory(sarif=_MOVE_SARIF)):
         result = _run_opengrep_scan(scratch, proj, "aptos")
 
     assert result == "WRITTEN:1 findings"

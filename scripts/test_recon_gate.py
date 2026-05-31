@@ -294,6 +294,27 @@ def test_PREPASS_does_not_clobber_llm_content():
         )
 
 
+def test_RECON_GATE_rejects_prepass_marked_canonical_handoff():
+    """Completed recon must not pass with disposable pre-pass artifacts."""
+    import recon_prepass as RP
+
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td) / "scratch"
+        scratch.mkdir()
+        (scratch / "design_context.md").write_text(
+            RP._PREPASS_MARKER
+            + "\n# Design Context\n\n## Operational Implications\nx\n\n"
+            + "## Key Invariants\nx\n",
+            encoding="utf-8",
+        )
+        hard, _soft = D._validate_recon_content_structure(scratch)
+        check(
+            "RECON_GATE.prepass-marker-hard-fail",
+            any("pre-pass overwrite marker" in h for h in hard),
+            f"expected pre-pass marker hard fail, got {hard}",
+        )
+
+
 def test_RETRY_HINT_stub_only_class():
     """v2.8.6: retry hint for stub-only artifacts is targeted, not coverage-style."""
     missing = [

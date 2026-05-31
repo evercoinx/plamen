@@ -285,6 +285,9 @@ def test_sc_manifests_recover_shifted_index_location_and_multi_id_chain():
 **Location**: contracts/Oracle.sol:L88
 
 The body uses the recovered code location and does not need a blocked tag.
+
+**Impact**: A stale oracle price lets an attacker borrow against inflated collateral.
+**PoC Result**: Test confirms the inflated borrow; assertion passed.
 """
         validation = V._validate_report_body(body, result["report_critical_high"])
         assert validation["ok"] is True

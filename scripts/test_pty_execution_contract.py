@@ -166,6 +166,7 @@ def _render_prompt(tmp_root: Path, phase_name: str, exec_mode: str,
     scratch.mkdir(parents=True, exist_ok=True)
     project.mkdir(parents=True, exist_ok=True)
     section = {
+        "recon": (Path(__file__).resolve().parents[1] / "prompts" / "evm" / "v2" / "phase1-recon-prompt.md").read_text(encoding="utf-8"),
         "breadth": "## Phase 3: Parallel Breadth Analysis\n\nSpawn agents.\n",
         "depth": "## Phase 4b: Depth Analysis Loop\n\nSpawn depth agents.\n",
     }[phase_name]
@@ -199,6 +200,17 @@ def test_rendered_pty_breadth_prompt_has_no_single_turn_contradiction(tmp_path):
     assert "Spawn every missing breadth row immediately" in rendered
     assert "at most 6 parallel Task calls per batch" not in rendered
     assert "All Task calls MUST be foreground" not in rendered
+
+
+def test_rendered_pty_recon_prompt_has_no_spawn_manifest_leakage(tmp_path):
+    rendered = _render_prompt(tmp_path, "recon", exec_mode="pty")
+    assert "spawn_manifest.md" not in rendered
+    assert "Use the Task tool" not in rendered
+    assert "MUST spawn an agent" not in rendered
+    assert "Orchestrator MUST spawn" not in rendered
+    assert "dynamic shard outputs named by this phase" not in rendered
+    assert "Do NOT use the Task tool" in rendered
+    assert "Recommendation Summary" in rendered
 
 
 def test_rendered_pty_depth_prompt_has_no_single_turn_contradiction(tmp_path):

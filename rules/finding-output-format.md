@@ -46,6 +46,7 @@ gate requirements unless validators are updated later.
 **Terminal Mechanism** (OPTIONAL): The final mechanism that creates, blocks, or resolves the candidate issue.
 **Refutation Basis** (OPTIONAL): The concrete reason a candidate is REFUTED or downgraded, when that reasoning should be preserved.
 **Composition Candidates** (OPTIONAL): Related conditions, findings, or mechanisms that may compose with this issue in later analysis.
+**Discovery Steer** (OPTIONAL): Compact hint for later pairing, such as shared variable/function/branch/effect or candidate ID; not proof and not a required field.
 ```
 
 Use these fields sparingly for semantic invariant, branch feasibility,

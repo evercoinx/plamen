@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sys
+import time
+import threading
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -84,6 +86,65 @@ def test_depth_worker_jobs_are_mode_and_pipeline_aware(tmp_path: Path):
     assert "skill_execution_checklist.md" in l1_outputs
 
 
+def test_depth_worker_batch_rate_limit_fails_fast(tmp_path: Path, monkeypatch):
+    sp = tmp_path / ".scratchpad"
+    _fresh(sp)
+    stop_event = threading.Event()
+    cancel_called = {"value": False}
+
+    jobs = [
+        {
+            "agent_id": "depth-token-flow",
+            "role": "token_flow",
+            "output": "depth_token_flow_findings.md",
+            "category": "core",
+            "focus": "token flow",
+        },
+        {
+            "agent_id": "depth-state-trace",
+            "role": "state_trace",
+            "output": "depth_state_trace_findings.md",
+            "category": "core",
+            "focus": "state trace",
+        },
+    ]
+
+    def _fake_worker(**kwargs):
+        output = kwargs["job"]["output"]
+        if output == "depth_token_flow_findings.md":
+            return {"output": output, "rc": 1, "status": "rate_limited"}
+        stop_event.wait(timeout=10)
+        return {"output": output, "rc": -2, "status": "incomplete"}
+
+    def _fake_cancel(pending_futs, executor):
+        cancel_called["value"] = True
+        stop_event.set()
+
+    monkeypatch.setattr(D, "_run_single_depth_worker_pty", _fake_worker)
+    monkeypatch.setattr(D, "_cancel_pending_worker_futures", _fake_cancel)
+
+    started = time.time()
+    rc, results = D._run_depth_worker_batch(
+        scratchpad=sp,
+        project_root=str(tmp_path),
+        config={"mode": "light", "language": "evm", "pipeline": "sc"},
+        phase=_phase(),
+        base_cmd=["claude", "--session-id", "base"],
+        env={},
+        timeout=1.0,
+        quiescence_s=0.0,
+        jobs=jobs,
+        attempt=1,
+        pool_started=time.time(),
+        retry_reasons_by_output={},
+    )
+
+    assert rc == 1
+    assert cancel_called["value"]
+    assert any(r.get("status") == "rate_limited" for r in results)
+    assert time.time() - started < 2.0
+
+
 def test_depth_worker_prompt_is_single_artifact_allowlist(tmp_path: Path):
     sp = tmp_path / ".scratchpad"
     _fresh(sp)
@@ -112,6 +173,48 @@ def test_depth_worker_prompt_is_single_artifact_allowlist(tmp_path: Path):
     ]
     hits = [token for token in forbidden if token.lower() in prompt.lower()]
     assert not hits
+
+
+def test_depth_worker_prompt_makes_perturbation_gate_top_level_contract(tmp_path: Path):
+    sp = tmp_path / ".scratchpad"
+    _fresh(sp)
+    job = D._depth_worker_jobs(sp, {"pipeline": "sc", "mode": "thorough"})[0]
+
+    prompt = D._build_depth_worker_prompt(
+        job=job,
+        scratchpad=sp,
+        project_root=str(tmp_path),
+        config={"language": "evm", "mode": "thorough", "pipeline": "sc"},
+        attempt=1,
+    )
+
+    assert "hard structural gate" in prompt
+    assert "### Perturbation Block - <finding_id>" in prompt
+    assert "A separate `perturbation_findings.md`" in prompt
+    assert "self-check" in prompt
+
+
+def test_depth_worker_retry_prompt_repairs_all_perturbation_blocks(tmp_path: Path):
+    sp = tmp_path / ".scratchpad"
+    _fresh(sp)
+    job = D._depth_worker_jobs(sp, {"pipeline": "sc", "mode": "thorough"})[0]
+
+    prompt = D._build_depth_worker_prompt(
+        job=job,
+        scratchpad=sp,
+        project_root=str(tmp_path),
+        config={"language": "evm", "mode": "thorough", "pipeline": "sc"},
+        attempt=2,
+        retry_reasons=[
+            "status=structural_fail",
+            "missing perturbation block(s) for Medium+ CONFIRMED finding(s): DT-3",
+        ],
+    )
+
+    assert "Perturbation Repair Is Mandatory" in prompt
+    assert "Repair ALL Medium/Critical/High CONFIRMED findings" in prompt
+    assert "If you rename, split, merge, or add" in prompt
+    assert "Do not mark the file COMPLETE" in prompt
 
 
 def test_depth_worker_contract_rejects_cross_row_owner(tmp_path: Path):
@@ -238,3 +341,19 @@ def test_depth_worker_pool_runs_only_open_standard_rows(tmp_path: Path, monkeypa
 
     assert rc == 0
     assert calls == ["depth_token_flow_findings.md"]
+
+
+def test_depth_worker_input_snapshot_restores_prior_phase_artifact(tmp_path: Path):
+    sp = tmp_path / ".scratchpad"
+    _fresh(sp)
+    prior = sp / "analysis_percontract_3.md"
+    prior.write_text("original prior-phase analysis\n", encoding="utf-8")
+    output_names = {"depth_token_flow_findings.md"}
+
+    snapshot = D._snapshot_worker_input_artifacts(sp, output_names)
+    prior.write_text("worker-corrupted prior-phase analysis\n", encoding="utf-8")
+
+    restored = D._restore_worker_input_artifacts(sp, snapshot)
+
+    assert restored == ["analysis_percontract_3.md"]
+    assert prior.read_text(encoding="utf-8") == "original prior-phase analysis\n"

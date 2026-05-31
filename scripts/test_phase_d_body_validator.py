@@ -97,7 +97,7 @@ def test_MAN_shape_and_required_fields(tmp_path: Path):
     any_shard = next(iter(manifests.values()))
     f0 = any_shard["findings"][0]
     required = {"report_id", "finding_id", "severity", "title", "location", "evidence_tag",
-                "verify_file", "description", "recommendation", "report_blocked"}
+                "verify_file", "description", "poc_result", "recommendation", "report_blocked"}
     check(
         "MAN.required_finding_fields",
         required.issubset(f0.keys()),
@@ -233,6 +233,43 @@ allocation rollover.
         and "regression test" in f["recommendation"]
     )
     check("MAN.section_headed_evidence_not_report_blocked", ok, repr(f))
+
+
+def test_MAN_poc_result_seed_from_execution_result(tmp_path: Path):
+    """Manifest carries verifier execution result so body writers do not omit it."""
+    sp = tmp_path
+    (sp / "verification_queue.md").write_text("""# Verification Queue
+
+| Finding ID | Severity | Title | Location | Preferred Tag |
+|------------|----------|-------|----------|---------------|
+| INV-001 | High | Structural bug | src/F.sol:L1 | CODE-TRACE |
+""", encoding="utf-8")
+    (sp / "verify_INV-001.md").write_text("""# INV-001
+**Verdict**: CONFIRMED
+**Severity**: High
+
+## Finding Summary
+
+The setter updates privileged state immediately.
+
+## Execution Result
+
+- **Result:** NOT_EXECUTED
+- **Output:** Code trace confirms there is no delay or second confirmation step.
+
+## Recommendation
+
+Use a two-step delayed update.
+""", encoding="utf-8")
+    D._write_mechanical_report_index(sp)
+    manifests = D._build_body_writer_manifests(sp)
+    f = next(iter(manifests.values()))["findings"][0]
+    ok = (
+        "poc_result" in f
+        and "NOT_EXECUTED" in f["poc_result"]
+        and "no delay" in f["poc_result"]
+    )
+    check("MAN.poc_result_seed_from_execution_result", ok, repr(f))
 
 
 def test_MAN_na_section_headings_remain_report_blocked(tmp_path: Path):
@@ -882,6 +919,40 @@ Fix the constituent issue.
     )
 
 
+def test_MAN_sc_manifest_prefers_index_verification_files_over_all_constituents(tmp_path: Path):
+    """Merged rows should not be report-blocked by duplicate constituents absent from Verification cell."""
+    sp = tmp_path
+    (sp / "report_index.md").write_text("""# Report Index
+
+## Master Finding Index
+| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |
+|-----------|-------|----------|----------|--------------|------------|---------------------|
+| M-29 | Merged duplicate report | Medium | Gateway.sol:admin | verify_HM-05.md, verify_HM-06.md | - | HM-05+HM-06+HM-07+HM-08 |
+""", encoding="utf-8")
+    for fid in ("HM-05", "HM-06"):
+        (sp / f"verify_{fid}.md").write_text(f"""# Verification: {fid}
+
+**Final Verdict**: CONFIRMED
+**Evidence Tag**: [CODE-TRACE]
+
+## Description
+Verified duplicate constituent at `Gateway.sol:L42`.
+
+## Execution Result
+Code trace verified; no executable PoC was required.
+
+## Recommendation
+Fix the merged issue.
+""", encoding="utf-8")
+    manifests = D._build_sc_body_writer_manifests(sp)
+    row = manifests["report_medium"]["findings"][0]
+    ok = (
+        row["verify_files"] == ["verify_HM-05.md", "verify_HM-06.md"]
+        and row["report_blocked"] is False
+    )
+    check("MAN.sc_prefers_index_verification_files", ok, repr(row))
+
+
 # =============================================================================
 # Body validator: coverage, no-extras, evidence integrity.
 # =============================================================================
@@ -898,6 +969,8 @@ def _good_body(findings: list[dict]) -> str:
         out.append(f"**Location**: {f['location']}")
         out.append(f"**Evidence Tag**: {f['evidence_tag']}")
         out.append(f"**Description**: {f['description']}")
+        out.append(f"**Impact**: {f.get('impact', 'A material impact.')}")
+        out.append(f"**PoC Result**: {f.get('poc_result', 'Code trace confirms the condition.')}")
         out.append(f"**Recommendation**: {f['recommendation']}")
         out.append("")
     return "\n".join(out)
@@ -912,6 +985,7 @@ _BASE_FINDING = {
     "evidence_tag": "CODE-TRACE",
     "verify_file": "verify_INV-001.md",
     "description": "A description.",
+    "poc_result": "Code trace confirms the condition.",
     "recommendation": "A recommendation.",
     "report_blocked": False,
 }
@@ -922,6 +996,27 @@ def test_VAL_clean_body_passes():
     body = _good_body(manifest["findings"])
     res = D._validate_report_body(body, manifest)
     check("VAL.clean_body_passes", res["ok"] is True, repr(res))
+
+
+def test_VAL_chm_missing_poc_result_fails_body_gate():
+    """Catch C/H/M body omissions before report_assemble degrades late."""
+    manifest = _make_manifest([dict(_BASE_FINDING, report_id="H-01", severity="High")])
+    # No PoC Result AND no Evidence Tag/Evidence (RPT-2 accepts those as PoC
+    # evidence), so the substantive-PoC check genuinely fires.
+    body = """# Test
+## [H-01] Test bug
+**Severity**: High
+**Location**: src/F.sol:L42
+**Description**: A description.
+**Impact**: A material impact.
+**Recommendation**: A recommendation.
+"""
+    res = D._validate_report_body(body, manifest)
+    # GATE-2: substantive-PoC adequacy is prose quality -> reported in `content`
+    # (telemetry/WARN) but it must NOT flip `ok` (which hard-halts the critical
+    # report_body_writer phase). Mechanical checks still gate `ok`.
+    ok = res["ok"] is True and any("PoC Result" in s for s in res.get("content", []))
+    check("VAL.chm_missing_poc_result_is_soft_warn", ok, repr(res))
 
 
 def test_VAL_missing_finding_fails():
@@ -978,6 +1073,8 @@ def test_VAL_composite_manifest_location_allows_source_token_rewrite():
 **Location**: `AwesomeXBuyAndBurn.sol:L35`
 **Evidence Tag**: CODE-TRACE
 **Description**: The contract inherits Ownable2Step and does not override renounceOwnership.
+**Impact**: Ownership can be renounced and leave privileged flows unmanaged.
+**PoC Result**: Code trace confirms the missing override.
 **Recommendation**: Override renounceOwnership.
 """
     res = D._validate_report_body(body, manifest)
@@ -1046,6 +1143,8 @@ def test_VAL_id_case_insensitive_and_whitespace():
 **Location**: src/F.sol:L42
 **Evidence Tag**: CODE-TRACE
 **Description**: ok
+**Impact**: ok
+**PoC Result**: ok
 **Recommendation**: ok
 """
     res = D._validate_report_body(body, manifest)
@@ -1090,6 +1189,7 @@ def test_E2E_manifest_then_validate_passes(tmp_path: Path):
 
 TESTS_BASIC = [
     test_VAL_clean_body_passes,
+    test_VAL_chm_missing_poc_result_fails_body_gate,
     test_VAL_missing_finding_fails,
     test_VAL_extra_finding_fails,
     test_VAL_wrong_location_fails,
@@ -1106,6 +1206,7 @@ TESTS_INTEG = [
     test_MAN_total_findings_equal_active,
     test_MAN_marks_report_blocked_when_evidence_missing,
     test_MAN_section_headed_evidence_not_report_blocked,
+    test_MAN_poc_result_seed_from_execution_result,
     test_MAN_na_section_headings_remain_report_blocked,
     test_SYNTH_generic_fallback_is_not_shippable_body,
     test_MAN_sc_manifest_section_headed_evidence_seeded,
@@ -1123,6 +1224,7 @@ TESTS_INTEG = [
     test_MAN_sc_missing_verify_preserves_report_index_location,
     test_MAN_sc_manifest_ignores_poc_test_file_as_primary_location,
     test_MAN_sc_chain_manifest_inherits_constituent_verifiers,
+    test_MAN_sc_manifest_prefers_index_verification_files_over_all_constituents,
     test_E2E_manifest_then_validate_passes,
 ]
 

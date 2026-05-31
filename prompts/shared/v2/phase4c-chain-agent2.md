@@ -22,6 +22,10 @@ Read:
 - `{SCRATCHPAD}/chain_candidate_pairs.md` (pre-filtered pairs with shared state/identifier — driver-produced by the chain-prep pre-pass; this is the bounded, finite candidate set — evaluate ONLY these pairs. The complete set is in `chain_candidate_pairs_full.md`; the `chain_iter2` phase covers any tail. If `chain_candidate_pairs.md` is missing, fall back to the original algorithm.)
 - `{SCRATCHPAD}/findings_inventory.md` (for full finding details when needed)
 
+The pre-filter may include optional `discovery: ...` Shared Signal values
+derived from finding metadata. Treat them as prioritization hints only; they
+are not proof and must be confirmed from finding details or source.
+
 For specific chain candidates, read the relevant source files directly.
 
 ---
@@ -33,6 +37,7 @@ For specific chain candidates, read the relevant source files directly.
 Read `{SCRATCHPAD}/chain_candidate_pairs.md`. If present:
 - Evaluate ONLY the pairs listed in the STATE Pairs and TYPE Pairs tables
 - For each pair: read both findings' full details, verify the mechanical match is semantically valid, and apply the semantic composition checks in Step 2.0a within this same allowed pair set
+- If a pair's Shared Signal mentions discovery metadata, use it only to focus the review; source behavior still decides whether composition exists.
 - Create CHAIN HYPOTHESIS for valid matches
 - Mark each evaluated pair in `composition_coverage.md` as EXPLORED, COMPOSED, REJECTED, or DEFERRED with the reason
 - All pairs NOT in `chain_candidate_pairs.md` are EXCLUDED (no shared state or type) — mark them as a single summary row `EXCLUDED: {N} pairs with no shared state/type` in `composition_coverage.md`. Do NOT spend time evaluating them.

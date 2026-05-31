@@ -17,6 +17,8 @@
 
 **Minimum always**: 1 core state, 1 access control, 1 per major external dep (overrides Simple tier if needed)
 
+**Tier floor (HARD)**: the Merge Hierarchy (Step 2a.1) reduces toward the tier's agent count but **NEVER below its lower bound** — **Complex never below 7**, Medium never below 5. If merges would drop the AGENT-row count below the floor, keep skills in **separate** AGENT rows instead (the 300-line cap is an upper bound on per-agent payload, NOT a license to collapse below the tier floor). Merging away whole lenses on a large codebase is a recall loss. The driver **mechanically enforces the Complex floor (>=7)** and will reject a sub-floor manifest, so produce >=7 AGENT rows up front for any Complex codebase.
+
 **Breadth-to-depth redirect**: When actual breadth agent count is below the Medium baseline (5), the saved slots increase the depth budget floor: `depth_floor = 12 + (5 - actual_breadth_count)`.
 
 ---
@@ -166,6 +168,15 @@ Rules:
 - Record skill/injectable bindings in a separate section titled
   `## Skill Bindings`; those rows are not spawned agents and must not be
   mixed into the machine-read AGENT table.
+- The `## Skill Bindings` table MUST use these exact columns:
+  `Skill | Type | Inject Into | Delivery Mode`.
+  `Inject Into` MUST be a parseable breadth agent id such as `B2` or a depth
+  role such as `depth-external`; do not use prose-only targets.
+- If recon evidence includes `NON_EVM_TARGET`, Solana, Bitcoin, `AccountEncoder`,
+  pubkey/base58/bech32/Borsh, or any EVM-to-foreign-VM outbound encoding,
+  `CROSS_VM_SERIALIZATION_CONFORMANCE` is REQUIRED and MUST appear in
+  `## Skill Bindings` twice: once injected into the cross-chain/encoding
+  breadth agent by `B#`, and once injected into `depth-external`.
 - Before returning, re-read the manifest and confirm the number of AGENT
   rows equals the number of first-pass breadth output files the breadth phase
   must produce.

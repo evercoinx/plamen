@@ -156,6 +156,7 @@
 | LENDING_PROTOCOL_SECURITY | `lending` (liquidate/borrow/repay/collateral/lend/loan/LTV/healthFactor/interestRate/debtToken) | Breadth agents, depth-token-flow, depth-edge-case, depth-state-trace |
 | DEX_INTEGRATION_SECURITY | `dex_integration` (swap/addLiquidity/removeLiquidity/IUniswapV2Router/ISwapRouter/amountOutMin - AND protocol is NOT itself a DEX) | Breadth agents, depth-external, depth-edge-case |
 | INTEGRATION_HAZARD_RESEARCH | `NAMED_EXTERNAL_PROTOCOL` (import/interface for identifiable external protocol — not standard libraries, not the protocol itself) | depth-external |
+| CROSS_VM_SERIALIZATION_CONFORMANCE | `NON_EVM_TARGET` (EVM serializes for a non-EVM VM — Solana/Bitcoin/Move/Cosmos: pubkey/Borsh/base58/custom account-byte encoders). Outbound encoding conformance (CROSS_CHAIN_MESSAGE_INTEGRITY = inbound only). | Breadth cross-chain/encoding agent, depth-external |
 
 ### How Injectable Skills Work
 1. Recon Agent classifies protocol type in TASK 0 Step 1

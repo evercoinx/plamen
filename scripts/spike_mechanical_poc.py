@@ -75,28 +75,28 @@ _ID_HEADER_RE = re.compile(
     re.MULTILINE,
 )
 _FINDING_ID_FIELD_RE = re.compile(
-    r"^\*\*Finding\s*ID\*\*\s*:\s*([A-Z]{1,8}-\d+\S*)",
+    r"^[-*]?\s*(?:\*\*)?Finding\s*ID(?:\*\*)?\s*:\s*([A-Z]{1,8}-\d+\S*)",
     re.MULTILINE,
 )
 _VERDICT_RE = re.compile(
-    r"^\*\*Verdict\*\*\s*:\s*([A-Z_]+)",
+    r"^[-*]?\s*(?:\*\*)?Verdict(?:\*\*)?\s*:\s*([A-Z_]+)",
     re.MULTILINE,
 )
 _EVIDENCE_TAG_RE = re.compile(
-    r"^\*\*(?:Evidence|Preferred)\s+Tag\*\*\s*:\s*\**\s*(\[[A-Z\-]+\])",
+    r"^[-*]?\s*(?:\*\*)?(?:Evidence|Preferred)\s+Tag(?:\*\*)?\s*:\s*\**\s*(\[[A-Z\-]+\])",
     re.MULTILINE,
 )
 # Two layouts: bullet form or bold form
 _TEST_FILE_RE = re.compile(
-    r"^[-*]?\s*\*\*Test\s*File\*\*\s*:\s*(.+?)$",
+    r"^[-*]?\s*(?:\*\*)?Test\s*File(?:\*\*)?\s*:\s*(.+?)$",
     re.MULTILINE,
 )
 _COMMAND_RE = re.compile(
-    r"^[-*]?\s*\*\*Command\*\*\s*:\s*(.+?)$",
+    r"^[-*]?\s*(?:\*\*)?Command(?:\*\*)?\s*:\s*(.+?)$",
     re.MULTILINE,
 )
 _POC_CLASS_RE = re.compile(
-    r"^[-*]?\s*\*\*PoC\s*Class\*\*\s*:\s*(\w+)",
+    r"^[-*]?\s*(?:\*\*)?PoC\s*Class(?:\*\*)?\s*:\s*(\w+)",
     re.MULTILINE,
 )
 # Inside Test File: extract path (.t.sol) and function (test_xxx())
@@ -113,8 +113,75 @@ _MATCH_PATH_RE = re.compile(
     r"--match-path\s+[\"']?([^\"'\s]+)[\"']?"
 )
 
+# v2.8.16 Phase 1 (#1d + adversarial-review must-fix #3): ecosystem-agnostic,
+# test-DIR-ANCHORED path extraction. The EVM-only `.t.sol`-under-`test/` regex
+# above made every non-EVM finding resolve to None → NO_TEST_FILE → it could
+# never reach PASS. These patterns are anchored to test directories so a bare
+# `src/lib.rs` / `build.rs` token is never mistaken for the harm test (the
+# reviewer's #3). Go test files self-anchor via the `_test.go` suffix.
+_TEST_PATH_BY_LANG: dict[str, re.Pattern] = {
+    "evm":     re.compile(r"((?:test|tests)/[\w.\-/]+\.t\.sol)"),
+    "solana":  re.compile(r"((?:tests?/|trident-tests/)[\w.\-/]+\.rs)"),
+    "soroban": re.compile(r"((?:src/)?tests?/[\w.\-/]+\.rs)"),
+    "l1_rust": re.compile(r"((?:src/[\w.\-/]*?)?tests?/[\w.\-/]+\.rs)"),
+    "aptos":   re.compile(r"((?:sources/)?tests?/[\w.\-/]+\.move)"),
+    "sui":     re.compile(r"((?:sources/)?tests?/[\w.\-/]+\.move)"),
+    "l1_go":   re.compile(r"([\w.\-/]+_test\.go)"),
+}
+_TEST_EXT_BY_LANG: dict[str, tuple[str, ...]] = {
+    "evm": (".t.sol",), "solana": (".rs",), "soroban": (".rs",),
+    "l1_rust": (".rs",), "aptos": (".move",), "sui": (".move",),
+    "l1_go": ("_test.go",),
+}
+# Source files that end in a test extension but are never the harm test.
+_NON_TEST_BASENAMES = {"lib.rs", "build.rs", "main.rs", "mod.rs"}
+# Driver-dictated explicit function field (most reliable, language-agnostic).
+_TEST_FUNC_FIELD_RE = re.compile(
+    r"^[-*]?\s*(?:\*\*)?Test\s*Function(?:\*\*)?\s*:\s*`?([A-Za-z_][\w]*)`?",
+    re.MULTILINE,
+)
+# Broadened decl regex: Solidity `function`, Rust `fn`, Move `fun`, Go `func`.
+_FUNC_DECL_ANY_RE = re.compile(
+    r"(?:function|fn|fun|func)\s+`?((?:test|Test)[\w]*)`?\s*[(<]"
+)
 
-def parse_verify_file(verify_path: Path) -> FindingProbe:
+
+def _normalize_lang_for_paths(language: Optional[str]) -> str:
+    """Map a raw config language to a registry/path key (L1 stores raw go/rust)."""
+    lang = (language or "evm").lower().strip()
+    if lang == "go":
+        return "l1_go"
+    if lang == "rust":
+        return "l1_rust"
+    return lang or "evm"
+
+
+def _extract_test_path(test_file_field: str, command: str,
+                       language: Optional[str]) -> Optional[str]:
+    """Ecosystem-keyed test-file path extraction (v2.8.16 Phase 1)."""
+    lang = _normalize_lang_for_paths(language)
+    rx = _TEST_PATH_BY_LANG.get(lang, _TEST_PATH_BY_LANG["evm"])
+    for src in (test_file_field, command):
+        if not src:
+            continue
+        m = rx.search(src.replace("\\", "/"))
+        if m:
+            return m.group(1)
+    # Fallback: a bare path token ending in the language test extension,
+    # excluding known non-test source files. The author/executor split has the
+    # driver dictate an explicit path, which lands here even outside a test/ dir.
+    exts = _TEST_EXT_BY_LANG.get(lang, (".t.sol",))
+    for src in (test_file_field, command):
+        if not src:
+            continue
+        for tok in re.split(r"[\s`'\"(),]+", src.replace("\\", "/")):
+            if any(tok.endswith(e) for e in exts) and Path(tok).name not in _NON_TEST_BASENAMES:
+                return tok
+    return None
+
+
+def parse_verify_file(verify_path: Path,
+                      language: Optional[str] = None) -> FindingProbe:
     try:
         text = verify_path.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:
@@ -150,9 +217,14 @@ def parse_verify_file(verify_path: Path) -> FindingProbe:
     test_file_field = test_file_m.group(1).strip() if test_file_m else ""
     command = command_m.group(1).strip() if command_m else ""
 
-    # Extract function name: try Test File field first, then Command
+    # Extract function name. Priority: driver-dictated `Test Function:` field
+    # (language-agnostic, most reliable under the author/executor split) →
+    # EVM `--match-test` in Command → inline decl in the Test File field.
     test_function = None
-    if test_file_field:
+    func_field_m = _TEST_FUNC_FIELD_RE.search(text)
+    if func_field_m:
+        test_function = func_field_m.group(1)
+    if not test_function and test_file_field:
         f_match = _FUNC_IN_TEST_FILE_RE.search(test_file_field)
         if f_match:
             test_function = f_match.group(1) or f_match.group(2)
@@ -160,17 +232,27 @@ def parse_verify_file(verify_path: Path) -> FindingProbe:
         f_match = _MATCH_TEST_RE.search(command)
         if f_match:
             test_function = f_match.group(1)
+    if not test_function:
+        # Broadened: Rust `fn test_*` / Move `fun test_*` / Go `func Test*`.
+        # Last resort — also scan the body, since for Go/Move the function name
+        # frequently appears only inside the embedded test code, not a field.
+        for src in (test_file_field, command, text):
+            if not src:
+                continue
+            d_match = _FUNC_DECL_ANY_RE.search(src)
+            if d_match:
+                test_function = d_match.group(1)
+                break
 
-    # Extract path: prefer Command's --match-path, fallback to Test File field
+    # Extract path: prefer Command's --match-path (EVM), then the ecosystem-
+    # keyed, test-dir-anchored extractor across the Test File field + Command.
     test_path = None
     if command:
         p_match = _MATCH_PATH_RE.search(command)
         if p_match:
             test_path = p_match.group(1).strip("`")
-    if not test_path and test_file_field:
-        p_match = _PATH_IN_TEST_FILE_RE.search(test_file_field)
-        if p_match:
-            test_path = p_match.group(1)
+    if not test_path:
+        test_path = _extract_test_path(test_file_field, command, language)
 
     return FindingProbe(
         verify_file=verify_path.name,

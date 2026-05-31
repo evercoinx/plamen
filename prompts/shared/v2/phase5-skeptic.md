@@ -177,6 +177,10 @@ Before returning, verify:
 
 1. `skeptic_findings.md` contains a section for every manifest finding ID.
 2. `skeptic_judge_decisions.md` contains a row for every manifest finding ID.
+3. Section headings and judge-table `Finding ID` cells use only manifest
+   finding IDs. Do not invent alternate IDs such as `CC-*`, `EX-*`, `OR-*`, or
+   shorthand `INV-*` labels. If upstream/local labels are useful context, keep
+   them in prose and do not treat them as reviewed finding IDs.
 
 If any entry is missing, repair the aggregate files before returning.
 

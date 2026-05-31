@@ -120,6 +120,33 @@ class TestParser:
         assert probe.test_file_resolved == "test/VerifyM5.t.sol"
         assert probe.test_function == "test_M5"
 
+    def test_plain_bullet_ledger_extraction(self, scratch: Path):
+        body = """# Verification: H-87
+
+Finding ID: H-87
+Verdict: CONFIRMED
+Evidence Tag: [POC-PASS]
+
+## PoC Attempt
+
+- PoC Class: unit
+- Attempted: YES
+- Test File: test/VerifyH87_GatewaySendAsymmetry.t.sol
+- Command: forge test --match-test "test_H87" --match-path test/VerifyH87_GatewaySendAsymmetry.t.sol -vvv
+
+## Execution Result
+
+- Result: PASS
+"""
+        path = _write_verify(scratch, "H-87", body)
+        probe = sp.parse_verify_file(path)
+        assert probe.finding_id == "H-87"
+        assert probe.llm_tag == "[POC-PASS]"
+        assert probe.llm_verdict == "CONFIRMED"
+        assert probe.poc_class == "unit"
+        assert probe.test_file_resolved == "test/VerifyH87_GatewaySendAsymmetry.t.sol"
+        assert probe.test_function == "test_H87"
+
     def test_read_error_does_not_raise(self, scratch: Path):
         # Verify that a missing file produces an EXEC_ERROR probe, not exception
         nonexistent = scratch / "verify_NONEXISTENT.md"

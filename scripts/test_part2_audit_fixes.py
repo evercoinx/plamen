@@ -82,6 +82,25 @@ def test_t1a_no_mechanical_marker_still_downgrades(tmp_path):
     assert len(result) == 1 and result[0]["finding_id"] == "F-02"
 
 
+def test_t1a_mechanical_manifest_pass_overrides_no_assertion_downgrade(tmp_path):
+    """Mechanical PASS in the JSON manifest is ground truth even before annotation."""
+    (tmp_path / "verification_queue.md").write_text(
+        _QUEUE_HEADER + _queue_row("F-03"), encoding="utf-8"
+    )
+    body = (
+        "# Verify F-03\n"
+        "Evidence Tag: [POC-PASS]\n"
+        "### PoC Attempt\n```solidity\n"
+        "function test_F03() public { vault.withdraw(0); }\n```\n"
+    )
+    (tmp_path / "verify_F-03.md").write_text(body, encoding="utf-8")
+    (tmp_path / "mechanical_verify_manifest.json").write_text(
+        '{"results":[{"finding_id":"F-03","status":"PASS"}]}',
+        encoding="utf-8",
+    )
+    assert _validate_poc_pass_integrity(tmp_path) == []
+
+
 # ---------------------------------------------------------------------------
 # T1-b: UNRESOLVED authenticity
 # ---------------------------------------------------------------------------

@@ -32,6 +32,10 @@ from plamen_types import (
     normalize_severity,
 )
 from plamen_parsers import *  # noqa: F403,F401
+from plamen_parsers import (
+    _OPTIONAL_FINDING_METADATA_FIELDS,
+    _OPTIONAL_FINDING_METADATA_LABELS,
+)
 
 __all__ = [
     "_NEVER_CUT_FILENAME_ALIASES",
@@ -1457,7 +1461,14 @@ def _aggregate_supervised_row_statuses(
         sample = ", ".join(legacy_unmarked_expected[:12])
         if len(legacy_unmarked_expected) > 12:
             sample += f", ... (+{len(legacy_unmarked_expected) - 12} more)"
-        log.warning(
+        # NOISE-1: on a resumed/legacy scratchpad an unmarked artifact is the
+        # DESIGNED-correct tolerated outcome (markers lost to compaction/
+        # output-cap are "informational, not a failure" per CLAUDE.md), so log
+        # it at INFO. Keep WARNING only on the fresh-audit branch, where an
+        # unmarked artifact is treated as IN_PROGRESS and genuinely signals
+        # possibly-incomplete work.
+        _level = log.warning if fresh_audit else log.info
+        _level(
             f"[gate_passes] {phase.name}: legacy-unmarked-artifact "
             f"({mode_label} scratchpad; {disposition}): {sample}"
         )
@@ -1731,6 +1742,60 @@ def gate_passes(scratchpad: Path, project_root: str, phase: Phase) -> tuple:
     return (not missing, missing)
 
 
+def _codebase_is_complex(scratchpad: Path) -> bool:
+    """Complex tier per phase2-instantiate Step 2a: >10 in-scope contracts OR
+    >5000 total lines, computed from contract_inventory.md.
+
+    Conservative: if the inventory is absent/unparseable, return False — do NOT
+    enforce the breadth floor on missing data (avoids a false instantiate halt).
+    Total-lines is the primary, reliable signal; contract count (excluding clear
+    interface/mock/test-dir files) is secondary. v2.8.14.
+    """
+    inv = scratchpad / "contract_inventory.md"
+    if not inv.exists():
+        return False
+    try:
+        text = inv.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    lines_idx: Optional[int] = None
+    total_lines = 0
+    contracts = 0
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s.startswith("|"):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if not cells or all(set(c) <= {"-", ":", " "} for c in cells):
+            continue
+        low = [c.lower() for c in cells]
+        if lines_idx is None:
+            if "lines" in low:
+                lines_idx = low.index("lines")
+            continue  # header row consumed
+        name = cells[0]
+        path = (cells[1].lower() if len(cells) > 1 else "")
+        lv: Optional[int] = None
+        if lines_idx < len(cells) and re.fullmatch(r"[\d,]+", cells[lines_idx]):
+            lv = int(cells[lines_idx].replace(",", ""))
+        if lv is None:
+            for c in cells:
+                if re.fullmatch(r"[\d,]+", c):
+                    lv = int(c.replace(",", ""))
+                    break
+        if lv is None:
+            continue
+        total_lines += lv
+        is_aux = (
+            "interface" in path or "/mock" in path or "mock/" in path
+            or "/test/" in path or "/tests/" in path
+            or re.match(r"I[A-Z]", name) is not None  # IFoo.sol interface convention
+        )
+        if not is_aux:
+            contracts += 1
+    return total_lines > 5000 or contracts > 10
+
+
 def _validate_spawn_manifest_schema(scratchpad: Path) -> list[str]:
     """Validate the Phase 2 manifest at the producer boundary.
 
@@ -1799,6 +1864,21 @@ def _validate_spawn_manifest_schema(scratchpad: Path) -> list[str]:
                 f"{len(outputs)} unique output file(s) for {count} spawned "
                 "agent row(s); each spawned agent needs a distinct "
                 "analysis_*.md output"
+            )
+        # v2.8.14: enforce the Complex-tier breadth FLOOR. The merge hierarchy
+        # (300-line cap) can otherwise collapse breadth below the tier floor —
+        # on PulsechainGameWards a Complex codebase got 5 breadth agents instead
+        # of the documented 7-9, merging away whole lenses (NFT/economic/
+        # centralization). Distinct lenses are a recall-protection on big audits.
+        if count < 7 and _codebase_is_complex(scratchpad):
+            issues.append(
+                f"breadth tier floor: codebase is Complex (>10 in-scope "
+                f"contracts or >5000 total lines per contract_inventory.md) but "
+                f"spawn_manifest declares only {count} breadth AGENT row(s); the "
+                f"Complex tier requires >=7 (phase2-instantiate Step 2a). Split "
+                f"merged skills back into separate AGENT rows to reach >=7 — do "
+                f"NOT merge below the tier floor even if each merge stays under "
+                f"the 300-line cap."
             )
         if not issues:
             return []
@@ -2640,7 +2720,74 @@ def _detect_foreign_phase_writes(scratchpad: Path, project_root: str,
     return offenders
 
 
-def _validate_verify_completion(scratchpad: Path, phase_name: str, *, min_bytes: int = 100) -> list[str]:
+# v2.8.8: the Medium+ project-mock PoC override (T1b) is a NEW hard gate on a
+# `critical` verify phase. To prevent a genuinely-unmockable finding from
+# hard-halting the pipeline (the re-audit's only latent halt-class), the
+# override is bounded: it hard-fails for at most `_VERIFY_OVERRIDE_RETRY_CAP`
+# shard attempts, then degrades to a WARN (recorded) so the phase can complete.
+# The pre-existing mandatory-PoC enforcement is NOT bounded — it is satisfiable
+# and load-bearing. Mirrors the body-content Bucket-3 retry-then-WARN pattern.
+_VERIFY_OVERRIDE_RETRY_CAP = 2
+_OVERRIDE_ISSUE_MARK = "EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS skip invalid"
+
+
+def _verify_override_retry_path(scratchpad: Path, phase_name: str) -> Path:
+    return scratchpad / f".{phase_name}.mock_override_retry"
+
+
+def _verify_override_exhausted(scratchpad: Path, phase_name: str) -> bool:
+    try:
+        return int(
+            _verify_override_retry_path(scratchpad, phase_name).read_text()
+        ) >= _VERIFY_OVERRIDE_RETRY_CAP
+    except Exception:
+        return False
+
+
+def _bump_verify_override(scratchpad: Path, phase_name: str) -> None:
+    p = _verify_override_retry_path(scratchpad, phase_name)
+    try:
+        n = int(p.read_text())
+    except Exception:
+        n = 0
+    try:
+        p.write_text(str(n + 1), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _record_verify_override_degraded(
+    scratchpad: Path, phase_name: str, override_issues: list[str]
+) -> None:
+    """Bounded-retry exhausted: degrade the Medium+ mock override to WARN.
+
+    Written so the operator sees that a Medium+ finding shipped without the
+    forced PoC after the retry budget was spent (not silently dropped).
+    """
+    try:
+        path = scratchpad / "verify_override_degraded.md"
+        prior = path.read_text(encoding="utf-8", errors="replace") if path.exists() else (
+            "# Medium+ Mock-Override Degraded to WARN (v2.8.8)\n\n"
+            "Each row is a Medium+ unit/property finding whose "
+            "EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS skip was flagged invalid "
+            "(project mocks the dependency) but the verifier did not produce a "
+            "PoC within the bounded retry budget. Shipped as WARN to avoid a "
+            "critical-phase halt; worth human review.\n\n"
+            "| Phase | Finding/Issue |\n|---|---|\n"
+        )
+        rows = "".join(f"| {phase_name} | {i} |\n" for i in override_issues)
+        path.write_text(prior + rows, encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _validate_verify_completion(
+    scratchpad: Path,
+    phase_name: str,
+    *,
+    min_bytes: int = 100,
+    mode: str = "core",
+) -> list[str]:
     """Ensure a verify shard produced the expected verifier file set.
 
     Accepts both `verify_{id}.md` and `verify_F-{id}.md` — the LLM prompt
@@ -2750,6 +2897,26 @@ def _validate_verify_completion(scratchpad: Path, phase_name: str, *, min_bytes:
             "verify schema: missing required verifier fields in "
             + ", ".join(schema_issues[:8])
         ]
+    poc_issues = _validate_poc_contract_for_rows(scratchpad, expected_rows, mode)
+    if poc_issues:
+        # Split the bounded Medium+ mock override (v2.8.8) from the unbounded
+        # mandatory-PoC enforcement. The override hard-fails for a bounded
+        # number of shard attempts, then degrades to WARN so a genuinely
+        # unmockable Medium+ finding cannot hard-halt this critical phase.
+        override_issues = [i for i in poc_issues if _OVERRIDE_ISSUE_MARK in i]
+        hard_issues = [i for i in poc_issues if _OVERRIDE_ISSUE_MARK not in i]
+        if override_issues:
+            if _verify_override_exhausted(scratchpad, phase_name):
+                _record_verify_override_degraded(
+                    scratchpad, phase_name, override_issues
+                )
+            else:
+                _bump_verify_override(scratchpad, phase_name)
+                hard_issues.extend(override_issues)
+        if hard_issues:
+            return [
+                "verify PoC contract: " + "; ".join(hard_issues)
+            ]
     return []
 
 
@@ -2870,6 +3037,13 @@ def _promote_depth_findings_to_inventory(scratchpad: Path, min_confidence: float
             )
             promoted_ids.append(item["id"])
             dup_line = f"**Dedup Signal**: {item['_dup_tag']}\n" if item.get("_dup_tag") else ""
+            optional_lines: list[str] = []
+            for field in _OPTIONAL_FINDING_METADATA_FIELDS:
+                val = _strip_md(str(item.get(field, ""))).strip()
+                if not val:
+                    continue
+                label = _OPTIONAL_FINDING_METADATA_LABELS[field][0]
+                optional_lines.append(f"**{label}**: {val}")
             additions.extend([
                 f"### Finding [{inv_id}]: {item['title']}",
                 f"**Source IDs**: [{', '.join([item['id']] + item.get('_referenced_ids', []))}]",
@@ -2884,6 +3058,7 @@ def _promote_depth_findings_to_inventory(scratchpad: Path, min_confidence: float
             additions.extend([
                 "",
                 f"**Description**: {item['description']}",
+                *optional_lines,
                 "",
             ])
         inv.write_text(inv_text.rstrip() + "\n" + "\n".join(additions), encoding="utf-8")
@@ -4028,6 +4203,19 @@ def _is_spec_support_path(path: str) -> bool:
         return True
     if "harness" in leaf:
         return True
+    # Interface declarations carry no executable production surface, so depth
+    # agents legitimately never cite them. Recognize the `/interfaces/`
+    # directory marker and the Solidity `I<UpperCamel>.sol` convention
+    # (leaf already lowercased above).
+    if "/interface/" in wrapped or "/interfaces/" in wrapped:
+        return True
+    if re.match(r"^i[a-z0-9][a-z0-9_]*\.(?:sol|vy)$", leaf):
+        return True
+    # Mock/stub/fake declared via SUFFIX (ERC20Mock.sol, GatewayEVMMock.sol)
+    # are test-support doubles, not production surface.
+    stem = leaf.rsplit(".", 1)[0]
+    if stem.endswith(("mock", "stub", "fake", "mockup", "harness")):
+        return True
     return False
 
 
@@ -5023,11 +5211,16 @@ def _validate_consumer_ids_in_ledger(
     if not ledger_ids:
         # Ledger empty — could be a legacy audit (pre-v2.0.6). Silent skip.
         return []
-    try:
-        text = artifact_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    referenced = {m.group(1).upper() for m in _INTERNAL_FINDING_ID_RE.finditer(text)}
+    if phase_name == "skeptic":
+        referenced = _skeptic_structural_id_references(scratchpad)
+    else:
+        try:
+            text = artifact_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+        referenced = {
+            m.group(1).upper() for m in _INTERNAL_FINDING_ID_RE.finditer(text)
+        }
     # Filter out internal/report-tier IDs that this gate doesn't validate:
     # - M-NN, L-NN, C-NN, H-NN, I-NN (report tier IDs, minted at report_index)
     # - CH-NN (chain hypothesis IDs from chain_agent2)
@@ -5035,10 +5228,15 @@ def _validate_consumer_ids_in_ledger(
     # and not part of the same namespace.
     import re as _re
     report_tier_re = _re.compile(r"^[CHMLI]-\d+$")
+    auxiliary_scope_re = _re.compile(r"^AB-\d+$")
     fresh_audit = scratchpad_is_fresh_audit(scratchpad)
     finding_refs = {
         r for r in referenced
-        if not report_tier_re.match(r) and (fresh_audit or not r.startswith("INV-"))
+        if (
+            not report_tier_re.match(r)
+            and not auxiliary_scope_re.match(r)
+            and (fresh_audit or not r.startswith("INV-"))
+        )
     }
     # INV-* remains legacy-tolerant only on pre-marker audits. Fresh audits
     # must have driver-registered INV allocations so stale retry collisions
@@ -5068,6 +5266,55 @@ def _validate_consumer_ids_in_ledger(
         f"{len(unregistered)} unregistered ID(s): "
         f"{', '.join(sample)}{extra}"
     ]
+
+
+def _skeptic_structural_id_references(scratchpad: Path) -> set[str]:
+    """Return IDs used as skeptic section/table keys, not prose examples.
+
+    Skeptic reasoning often mentions local concern labels from upstream
+    artifacts (e.g. OR-2, EX-1, CC-09) while discussing why a manifest finding
+    is overstated. Those prose mentions are not identity bindings. The ledger
+    backstop should only inspect the structural places where skeptic binds a
+    decision to a finding: section headings and judge-table first cells.
+    """
+    from plamen_parsers import _INTERNAL_FINDING_ID_RE
+
+    refs: set[str] = set()
+    findings_path = scratchpad / "skeptic_findings.md"
+    if findings_path.exists():
+        try:
+            text = findings_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        for line in text.splitlines():
+            if not re.match(r"^\s*#{2,6}\s+", line):
+                continue
+            m = _INTERNAL_FINDING_ID_RE.search(line)
+            if m:
+                refs.add(m.group(1).upper())
+
+    decisions_path = scratchpad / "skeptic_judge_decisions.md"
+    if decisions_path.exists():
+        try:
+            text = decisions_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("|"):
+                continue
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            if not cells:
+                continue
+            first = cells[0]
+            if not first or set(first) <= {"-", ":"}:
+                continue
+            if first.lower() in {"finding id", "id", "finding"}:
+                continue
+            m = _INTERNAL_FINDING_ID_RE.search(first)
+            if m:
+                refs.add(m.group(1).upper())
+    return refs
 
 
 def _trace_synthetic_consumer_id(
@@ -5117,6 +5364,12 @@ def _trace_synthetic_consumer_id(
             "chain_summaries_compact.md",
             "chain_topology.md",
         ])
+    elif ref.startswith("EN-"):
+        exact.extend(["enabler_results.md", "chain_hypotheses.md"])
+    elif ref.startswith("ST-"):
+        exact.extend(["design_stress_findings.md"])
+    elif ref.startswith("VS-"):
+        exact.extend(["validation_sweep_findings.md"])
     else:
         return None
 
@@ -5711,33 +5964,49 @@ def _validate_attention_repair(
     summary_blob = "\n".join(summary_outputs)
     rowshard_blob = "\n".join(rowshard_outputs)
     soft: list[str] = []
-    if not re.search(r"(?i)\bverdict\b", blob) or not re.search(r"\b(SAFE|CONFIRMED|FINDING|EXPLOITABLE|FALSE_POSITIVE|NO_FINDING)\b", blob, re.I):
+    verdict_words = (
+        r"SAFE|COVERED|ALREADY_COVERED|REVIEWED|CLOSED|MERGED|DUPLICATE|"
+        r"CONFIRMED|FINDING|EXPLOITABLE|FALSE_POSITIVE|NO_FINDING|NO_ISSUE|"
+        r"NOT_EXPLOITABLE|NEEDS_HUMAN|UNREACHABLE|NOT_APPLICABLE|UNRESOLVED"
+    )
+    if not re.search(r"(?i)\bverdict\b", blob) or not re.search(rf"\b({verdict_words})\b", blob, re.I):
         soft.append("attention repair output lacks per-item verdicts")
     allowed_verdict_re = re.compile(
-        r"\b(SAFE|CONFIRMED|FINDING|EXPLOITABLE|FALSE_POSITIVE|NO_FINDING|NEEDS_HUMAN)\b",
+        rf"\b({verdict_words})\b",
         re.IGNORECASE,
     )
+
+    def _parse_attention_row_no(raw: str) -> int | None:
+        m = re.search(r"\b(?:queue\s*)?(?:row\s*)?#?\s*(\d+)\b", str(raw or ""), re.IGNORECASE)
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+
     summary_receipts: set[int] = set()
+    receipt_context: dict[int, str] = {}
     for line in summary_blob.splitlines():
         s = line.strip()
-        # Table row: | N | VERDICT | ... |
-        if re.match(r"^\|\s*\d+\s*\|", s):
+        # Table row: | N | VERDICT | ... |, also accepts | Row 1 | / | #1 |.
+        if s.startswith("|"):
             cells = [c.strip().strip("`") for c in s.strip("|").split("|")]
-            if len(cells) >= 2 and any(allowed_verdict_re.search(c) for c in cells[1:]):
-                try:
-                    summary_receipts.add(int(cells[0]))
-                except ValueError:
-                    pass
+            row_no = _parse_attention_row_no(cells[0] if cells else "")
+            if row_no is not None and len(cells) >= 2 and any(allowed_verdict_re.search(c) for c in cells[1:]):
+                summary_receipts.add(row_no)
+                receipt_context[row_no] = " | ".join(cells[3:] if len(cells) >= 4 else cells[1:])
             continue
-        # Bullet fallback: - N: VERDICT ... or * N. VERDICT ...
-        bm = re.match(r"^[-*]\s*(\d+)\s*[:.]\s*(.+)$", s)
+        # Bullet fallback: - N: VERDICT ..., * Row N. VERDICT ..., - #N VERDICT ...
+        bm = re.match(r"^[-*]\s*((?:queue\s*)?(?:row\s*)?#?\s*\d+)\s*[:.)-]?\s*(.+)$", s, re.I)
         if bm and allowed_verdict_re.search(bm.group(2)):
-            try:
-                summary_receipts.add(int(bm.group(1)))
-            except ValueError:
-                pass
+            row_no = _parse_attention_row_no(bm.group(1))
+            if row_no is not None:
+                summary_receipts.add(row_no)
+                receipt_context[row_no] = bm.group(2)
     queue_numbers: list[int] = []
     queued_paths: list[str] = []
+    asset_binding_rows: dict[int, tuple[str, str, str]] = {}
     for line in qtext.splitlines():
         s = line.strip()
         if not re.match(r"^\|\s*\d+\s*\|", s):
@@ -5745,11 +6014,25 @@ def _validate_attention_repair(
         cells = [c.strip().strip("`") for c in s.strip("|").split("|")]
         if len(cells) < 3:
             continue
+        row_no: int | None = None
         try:
-            queue_numbers.append(int(cells[0]))
+            row_no = int(cells[0])
+            queue_numbers.append(row_no)
         except ValueError:
             pass
         kind = cells[1].lower()
+        if row_no is not None and "asset-binding-gap" in kind:
+            target = cells[2].strip()
+            m = re.search(
+                r"\b(AB-\d+)\s*:\s*`?([^`<>|]+?)`?\s*<->\s*`?([^`|]+?)`?\s*$",
+                target,
+            )
+            if m:
+                asset_binding_rows[row_no] = (
+                    m.group(1).strip(),
+                    m.group(2).strip(),
+                    m.group(3).strip(),
+                )
         if any(token in kind for token in ("uncited", "notread", "file", "path")):
             for cell in (cells[2], cells[-1]):
                 for p in _extract_gap_paths_from_markdown(cell):
@@ -5798,6 +6081,194 @@ def _validate_attention_repair(
             "attention repair did not cite queued path(s): "
             + ", ".join(missing_paths[:8])
         ], soft
+
+    def _binding_terms(raw: str) -> set[str]:
+        value = str(raw or "").strip().strip("`")
+        terms = {value}
+        if "." in value:
+            terms.add(value.rsplit(".", 1)[-1])
+        return {t.lower() for t in terms if t}
+
+    relation_re = re.compile(
+        r"(?:"
+        r"==|!=|=|<->|->|"
+        r"\b(?:mismatch(?:es|ed)?|diverg(?:e|es|ed|ence)|"
+        r"not\s+match(?:es|ed)?|does\s+not\s+match|"
+        r"not\s+(?:validated|bound|checked|compared)|"
+        r"missing\s+(?:validation|binding|check)|"
+        r"validated\s+against|checked\s+against|compared\s+against|"
+        r"bound\s+to|binds?\s+to|matches?|equals?|same\s+as|"
+        r"consistent\s+with|consistency|must\s+equal|should\s+equal|"
+        r"source\s+of\s+truth|derived\s+from|unreachable|not\s+applicable|"
+        r"mutually\s+exclusive|different\s+purposes|disjoint\s+code\s+paths?|"
+        r"no\s+reachable\s+execution\s+path|never\s+touch(?:es|ed)?\s+both|"
+        r"not\s+used\s+(?:together|simultaneously)|same\s+variable|"
+        r"by\s+identity|by\s+construction|direct\s+and\s+by\s+construction)\b"
+        r")",
+        re.IGNORECASE,
+    )
+    existing_finding_ref_re = re.compile(
+        r"\b(?:INV|H|M|L|I|CH|DS|DT|DE|BS|NS|ATT)-\d{1,4}\b",
+        re.IGNORECASE,
+    )
+    coverage_claim_re = re.compile(
+        r"\b(?:covered\s+by|directly\s+covers?|fully\s+covered|"
+        r"merged\s+into|exact\s+binding\s+failure|binding\s+failure\s+described)\b",
+        re.IGNORECASE,
+    )
+
+    def _local_claim_units(text: str) -> list[str]:
+        units: list[str] = []
+        for line in str(text or "").splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            if "|" in s:
+                units.append(s[:1400])
+                continue
+            for part in re.split(r"(?<=[.;:!?])\s+", s):
+                part = part.strip()
+                if part:
+                    units.append(part[:1400])
+        return units
+
+    def _referenced_record_text(fid: str) -> str:
+        fid = (fid or "").strip()
+        if not fid:
+            return ""
+        chunks: list[str] = []
+        for name in (
+            "attention_repair_findings.md",
+            "findings_inventory.md",
+            "findings_inventory_pre_dedup.md",
+            "hypotheses.md",
+            "chain_hypotheses.md",
+            "verification_queue.md",
+            "verify_core.md",
+        ):
+            p = scratchpad / name
+            if not p.exists():
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            m = re.search(rf"\b{re.escape(fid)}\b", text, re.IGNORECASE)
+            if not m:
+                continue
+            start = max(0, m.start() - 1800)
+            end = min(len(text), m.end() + 2600)
+            chunks.append(text[start:end])
+        vf = _find_verify_file(scratchpad, fid)
+        if vf and vf.exists():
+            try:
+                chunks.append(vf.read_text(encoding="utf-8", errors="replace")[:6000])
+            except Exception:
+                pass
+        return "\n".join(chunks)
+
+    def _unit_closes_pair(unit: str, a: str, b: str) -> bool:
+        low = unit.lower()
+        if not relation_re.search(unit):
+            return False
+        terms_a = _binding_terms(a)
+        terms_b = _binding_terms(b)
+        return any(t in low for t in terms_a) and any(t in low for t in terms_b)
+
+    def _safe_reason_closes_pair(unit: str, a: str, b: str) -> bool:
+        """Accept explicit SAFE_REASON closure when the row names both fields.
+
+        SAFE asset-binding rows are allowed only for driver-known closure
+        classes. Some valid closures are not equality claims: e.g. an
+        IMPOSSIBLE_PAIR where two queued fields are proven to live on disjoint
+        callbacks. The strict relation parser still protects non-SAFE and
+        finding/report rows; this helper prevents valid SAFE_REASON rows from
+        becoming brittle wording traps.
+        """
+        if not safe_reason_re.search(unit):
+            return False
+        low = unit.lower()
+        terms_a = _binding_terms(a)
+        terms_b = _binding_terms(b)
+        return any(t in low for t in terms_a) and any(t in low for t in terms_b)
+
+    def _exact_pair_closed(text: str, a: str, b: str) -> bool:
+        for unit in _local_claim_units(text):
+            # A repair row may close an exact pair by explicitly routing it
+            # to an existing finding. The referenced record must still prove
+            # the same A <-> B relationship; merely saying "covered by INV-N"
+            # is ID accounting, not semantic closure.
+            if existing_finding_ref_re.search(unit) and coverage_claim_re.search(unit):
+                refs = sorted(set(m.group(0).upper() for m in existing_finding_ref_re.finditer(unit)))
+                if any(
+                    _unit_closes_pair(claim, a, b)
+                    for fid in refs
+                    for claim in _local_claim_units(unit + "\n" + _referenced_record_text(fid))
+                ):
+                    return True
+                continue
+            if _unit_closes_pair(unit, a, b):
+                return True
+            if _safe_reason_closes_pair(unit, a, b):
+                return True
+        return False
+
+    safe_reason_re = re.compile(
+        r"\bSAFE_REASON\s*:\s*"
+        r"(?:EXPLICIT_EQUALITY|EXPLICIT_BINDING_CHECK|UNREACHABLE_PATH|IMPOSSIBLE_PAIR)\b",
+        re.IGNORECASE,
+    )
+    unsafe_asset_safe_re = re.compile(
+        r"\b(?:atomic(?:ally)?|self[-\s]*punishing|"
+        r"no\s+(?:normal\s+)?(?:balance|accumulation|residual|leftover)|"
+        r"requires\s+(?:an?\s+)?(?:existing|prior)\s+(?:balance|residual)|"
+        r"leftover\s+balance|residual\s+balance)\b",
+        re.IGNORECASE,
+    )
+    revert_only_safe_re = re.compile(r"\b(?:revert(?:s|ed|ing)?|reverted)\b", re.IGNORECASE)
+    asset_pair_issues: list[str] = []
+    findings_blob = "\n".join(summary_outputs[1:])
+    for row_no, (rid, field_a, field_b) in asset_binding_rows.items():
+        context = receipt_context.get(row_no, "")
+        combined = context + "\n" + findings_blob
+        safe_reason_pair = _safe_reason_closes_pair(context, field_a, field_b)
+        if re.search(r"\bSAFE\b", context, re.IGNORECASE):
+            if not safe_reason_re.search(context):
+                asset_pair_issues.append(
+                    f"row {row_no} {rid} ({field_a} <-> {field_b}) marks SAFE "
+                    "without SAFE_REASON:<EXPLICIT_EQUALITY|EXPLICIT_BINDING_CHECK|UNREACHABLE_PATH|IMPOSSIBLE_PAIR>"
+                )
+                continue
+            if unsafe_asset_safe_re.search(context):
+                asset_pair_issues.append(
+                    f"row {row_no} {rid} ({field_a} <-> {field_b}) marks SAFE "
+                    "using revert/no-balance/residual reasoning; custody/value rows require explicit binding, unreachable-path, or impossible-pair proof"
+                )
+                continue
+            if revert_only_safe_re.search(context) and not safe_reason_pair and not _unit_closes_pair(context, field_a, field_b):
+                asset_pair_issues.append(
+                    f"row {row_no} {rid} ({field_a} <-> {field_b}) marks SAFE "
+                    "using revert-only reasoning; custody/value rows require explicit binding, unreachable-path, or impossible-pair proof"
+                )
+                continue
+        if not _exact_pair_closed(combined, field_a, field_b):
+            asset_pair_issues.append(
+                f"row {row_no} {rid} ({field_a} <-> {field_b}) lacks exact field-pair closure"
+            )
+    if asset_pair_issues:
+        # Prose-quality judgment of how the agent worded a SAFE justification
+        # ("vague or adjacent", revert/no-balance wording, field-pair closure
+        # phrasing). Per the WARN-not-halt policy for LLM-quality gates on
+        # enrichment phases, this is a soft warning -- it must not flip the
+        # phase to failed and trigger a CRITICAL halt. Mechanical gates in
+        # this function (missing receipts, uncited queued paths, missing/stub
+        # summary) remain hard above.
+        soft.append(
+            "attention repair asset-binding closure is vague or adjacent; "
+            "each asset-binding-gap row should explicitly prove/report both "
+            "queued fields in one local claim: "
+            + "; ".join(asset_pair_issues[:6])
+        )
     return [], soft
 
 
@@ -6903,8 +7374,24 @@ def _check_pde_section_present(scratchpad: Path) -> list[str]:
 
 
 _PERTURBATION_BLOCK_RE = re.compile(
-    r"(?:^###\s+Perturbation\s+Block\b|^\*\*Perturbation\s+Block\*\*\s*:)",
-    re.IGNORECASE | re.MULTILINE,
+    r"""
+    ^\s*(?:
+        \#{2,6}\s+
+        (?:adversarial\s+)?perturbation
+        (?:\s+(?:block|matrix|analysis|checks?))?
+        \b
+      |
+        [*_]{1,3}\s*
+        (?:adversarial\s+)?perturbation
+        (?:\s+(?:block|matrix|analysis|checks?))?
+        \s*[*_]{1,3}\s*:?\s*$
+      |
+        (?:adversarial\s+)?perturbation
+        (?:\s+(?:block|matrix|analysis|checks?))?
+        \s*:?\s*$
+    )
+    """,
+    re.IGNORECASE | re.MULTILINE | re.VERBOSE,
 )
 
 
@@ -6912,7 +7399,7 @@ def _missing_perturbation_block_ids(text: str) -> list[str]:
     """Return Medium+ CONFIRMED finding IDs missing an inline perturbation block."""
     findings: list[tuple[int, str]] = []
     for m in re.finditer(
-        r"##\s+Finding\s+\[(?P<id>[A-Z]{1,8}-\d+[A-Z\d-]*)\]",
+        r"#{2,6}\s+Finding\s+\[(?P<id>[A-Z]{1,8}-\d+[A-Z\d-]*)\]",
         text,
     ):
         findings.append((m.start(), m.group("id")))
@@ -7892,9 +8379,30 @@ def _collect_index_acknowledged_ids(
                 break
         if not row_ids:
             continue
-        for tok in dict.fromkeys(row_ids):
+        # v2.8.10/v2.8.13: a MULTI-CONSTITUENT row (a chain tagged
+        # CHAIN-UPGRADE/CHAIN-DOWNGRADE, OR any `+`-joined compound/consolidation
+        # row with >1 internal ID) lists CONSTITUENTS that legitimately also have
+        # their own single-ID rows — compound findings reference standalone
+        # findings (see the Cross-Reference Map design and the prompt's allowed
+        # `H-2+H-13` form). Counting those constituents toward the uniqueness
+        # substrate falsely flags every compound row as a duplicate binding —
+        # the dominant report_index HALT class (PulsechainGameWards: ~31 dups,
+        # of which only ~9 were chain-tagged; the rest were non-chain compound).
+        # v2.8.13 extends the v2.8.10 chain-only exemption to ALL multi-ID rows:
+        # index every constituent for completeness (`master` set) but EXCLUDE
+        # multi-constituent rows from `master_list` so the duplicate-binding
+        # check only counts rows whose SOLE binding is a single internal ID.
+        # Genuine double-binds (same id sole-bound in two single-ID rows) still
+        # fire. (Over-consolidation quality is a separate, non-halt concern.)
+        unique_ids = list(dict.fromkeys(row_ids))
+        is_multi_constituent = (
+            len(unique_ids) > 1
+            or bool(re.search(r"CHAIN-(?:UP|DOWN)GRADE", s, re.IGNORECASE))
+        )
+        for tok in unique_ids:
             master.add(tok)
-            master_list.append(tok)
+            if not is_multi_constituent:
+                master_list.append(tok)
 
     for m in _INTERNAL_FINDING_ID_RE.finditer(excluded_sec):
         excluded.add(m.group(1))
@@ -8296,6 +8804,23 @@ def _is_evidence_missing_for_body(verify_text: str) -> bool:
     )
 
 
+# RPT-2: single source of truth for the PoC-evidence field/section names a body
+# section may use. Both the per-shard gate (_validate_report_body) and the
+# post-assembly gate (_run_report_quality_gate) read from these so their
+# acceptance sets can never drift (the prior drift hard-halted Evidence-Tag-only
+# UNVERIFIED/CODE-TRACE sections). Includes Evidence Tag/Evidence per v2.7.5.
+_BODY_POC_FIELDS = (
+    "PoC Result", "Execution Result", "Execution Output",
+    "Test Output", "Proof", "PoC Attempt", "PoC Execution",
+    "Evidence Tag", "Evidence",
+)
+_BODY_POC_SECTIONS = (
+    "PoC Result", "Execution Result", "Execution Output",
+    "Test Output", "Proof", "Reproduction", "PoC Attempt",
+    "PoC Execution", "Evidence Tag", "Evidence",
+)
+
+
 def _validate_report_body(body: str, manifest: dict) -> dict:
     """Validate an LLM-written body file against its shard manifest.
 
@@ -8318,6 +8843,7 @@ def _validate_report_body(body: str, manifest: dict) -> dict:
 
     integrity_errors: list[str] = []
     blocked_violations: list[str] = []
+    content_errors: list[str] = []
     for f in findings:
         rid = f.get("report_id", "").upper()
         if rid in missing:
@@ -8353,8 +8879,44 @@ def _validate_report_body(body: str, manifest: dict) -> dict:
             blocked_violations.append(
                 f"{rid}: body has [REPORT-BLOCKED] but manifest has verified evidence"
             )
+        severity = normalize_severity(str(f.get("severity", "") or "Medium"))
+        if (
+            severity in {"Critical", "High", "Medium"}
+            and not f.get("report_blocked")
+            and "VERIFICATION NOT EXECUTED" not in section.upper()
+        ):
+            if not _is_substantive_body_evidence(_field_or_section(
+                section,
+                ("Impact", "Security Impact", "Risk"),
+                ("Impact", "Security Impact", "Risk"),
+                fallback="",
+                max_chars=2500,
+            )):
+                content_errors.append(f"{rid}: missing substantive Impact")
+            # RPT-4: a self-declared [UNVERIFIED] finding by definition has no
+            # PoC to report; requiring a substantive PoC Result for it just
+            # forces boilerplate. Keep the Impact requirement; skip PoC Result
+            # for UNVERIFIED. RPT-2: accept the Evidence Tag/Evidence field as a
+            # valid PoC-evidence surface (parity with the post-assembly gate).
+            if "[UNVERIFIED]" not in section.upper() and not _is_substantive_body_evidence(_field_or_section(
+                section,
+                _BODY_POC_FIELDS,
+                _BODY_POC_SECTIONS,
+                fallback="",
+                max_chars=2500,
+            )):
+                content_errors.append(f"{rid}: missing substantive PoC Result")
 
-    ok = not (missing or extras or duplicates or integrity_errors or blocked_violations)
+    # GATE-2: substantive-Impact/PoC adequacy is a prose/LLM-quality judgment,
+    # not a mechanical guarantee. Per the WARN-not-halt doctrine it must NOT
+    # flip `ok` (which gates the critical report_body_writer phase). It is kept
+    # in the returned dict under "content" for telemetry; the consumer logs it
+    # as a WARNING. Mechanical guarantees (missing/extra/duplicate IDs,
+    # location integrity, report-blocked tag) stay hard.
+    ok = not (
+        missing or extras or duplicates or integrity_errors
+        or blocked_violations
+    )
     return {
         "ok": ok,
         "missing": missing,
@@ -8362,6 +8924,7 @@ def _validate_report_body(body: str, manifest: dict) -> dict:
         "duplicates": duplicates,
         "integrity": integrity_errors,
         "blocked_violations": blocked_violations,
+        "content": content_errors,
     }
 
 
@@ -8639,20 +9202,32 @@ def _generate_body_writer_retry_hint(scratchpad: Path, phase_name: str) -> str:
             "- If the manifest row has verified evidence, REMOVE any stale `[REPORT-BLOCKED: ...]` prefix.\n"
             + "\n".join(f"- {s}" for s in result["blocked_violations"])
         )
+    if result.get("content"):
+        parts.append(
+            "\n### Required C/H/M body fields\n"
+            "- Critical, High, and Medium sections must include substantive `Impact` and `PoC Result` fields.\n"
+            "- Use manifest `poc_result` first; otherwise read the referenced `verify_files` and summarize the verifier's PoC/Execution Result or explicit not-executed reason.\n"
+            + "\n".join(f"- {s}" for s in result["content"])
+        )
     parts.append(
         "\n### Self-check before next attempt\n"
         f"- The manifest at `body_manifests/{manifest_path.name}` is the "
         "single source of truth.\n"
         "- Every entry there must appear in your output, no more, no less.\n"
+        "- Include `**PoC Result**:` for each Critical/High/Medium report section.\n"
         "- Use the manifest's `location` verbatim — do not paraphrase paths.\n"
     )
     return "\n".join(parts) + "\n"
 
 
 def _validate_tier_body_against_manifest(
-    scratchpad: Path, phase_name: str
+    scratchpad: Path, phase_name: str, collect_content: "list[str] | None" = None
 ) -> list[str]:
     """Phase E5 wiring: validate the tier file against its body-writer manifest.
+
+    `collect_content` (optional out-param): when a list is passed, substantive
+    Impact/PoC content shortfalls are appended to it (Bucket 3 bounded-retry).
+    They are NEVER added to the returned hard-issue list.
 
     Tier-phase names are mapped to manifest keys:
         report_critical_high  -> body_manifests/report_critical_high.json
@@ -8723,6 +9298,20 @@ def _validate_tier_body_against_manifest(
             issues.append(f"body validator: {body_name} unreadable ({exc})")
             continue
         result = _validate_report_body(body, manifest)
+        # GATE-2: substantive-Impact/PoC adequacy is prose quality -> WARN only,
+        # never a hard issue (it no longer flips result["ok"]). Surface it for
+        # telemetry but do not gate the critical report_body_writer phase on it.
+        if result.get("content"):
+            log.warning(
+                "[body validator %s] content (soft): %s",
+                body_name, "; ".join(result["content"][:5]),
+            )
+            # Bucket 3: expose the content shortfall to callers that drive a
+            # bounded PRODUCTIVE retry of the body-writer (then WARN-ship). This
+            # never enters `issues`, so it cannot hard-halt; it only feeds the
+            # retry trigger in _run_phase_validators.
+            if collect_content is not None:
+                collect_content.extend(result["content"])
         if not result.get("ok"):
             parts = []
             if result.get("missing"):
@@ -8947,8 +9536,13 @@ def _check_unresolved_authenticity(
         # tolerant assignment parser that already handles this.
         assignments, _source = get_tier_assignments(scratchpad)
         for a in assignments:
-            if a.get("finding_id"):
-                internal_to_report[a["finding_id"]] = a["report_id"]
+            rid = a.get("report_id")
+            raw_fid = a.get("finding_id") or ""
+            if not rid or not raw_fid:
+                continue
+            internal_to_report[raw_fid] = rid
+            for m in _INTERNAL_FINDING_ID_RE.finditer(raw_fid):
+                internal_to_report[m.group(1)] = rid
 
     issues: list[str] = []
 
@@ -9147,6 +9741,53 @@ def _check_report_index_unresolved_authenticity(scratchpad: Path) -> list[str]:
     return issues
 
 
+def _chain_constituents_verified(scratchpad: Path, report_id: str) -> bool:
+    """True when a chain/compound report row's constituents are ALL backed by a
+    mechanically-proven verifier file (rule 8 constituent-verification exception).
+
+    Reads the report_index `Verification Files` map: the row whose first cell is
+    `report_id` and which names `verify_<ID>.md` file(s) is treated as the
+    constituent set, and EVERY named file must show mechanical proof
+    (`[POC-PASS]`/`[MEDUSA-PASS]`). Used to suppress the speculative-Critical
+    flag for a chain whose Critical is inherited from a verified constituent
+    (e.g. a chain over a standalone verified-Critical bug). Conservative: returns
+    False when the map is absent or any constituent lacks mechanical proof.
+    """
+    idx = scratchpad / "report_index.md"
+    if not idx.exists():
+        return False
+    try:
+        text = idx.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    rid = report_id.strip().upper()
+    if not rid:
+        return False
+    names: list[str] = []
+    for line in text.splitlines():
+        if "|" not in line:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if not cells or cells[0].upper() != rid:
+            continue
+        for c in cells[1:]:
+            names.extend(re.findall(r"verify_[A-Za-z0-9_.+\-]+?\.md", c))
+    names = list(dict.fromkeys(names))
+    if not names:
+        return False
+    for name in names:
+        vp = scratchpad / name
+        if not vp.exists():
+            return False
+        try:
+            vc = vp.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        if not has_mechanical_proof(vc):
+            return False
+    return True
+
+
 def _check_speculative_critical_chains(scratchpad: Path) -> list[str]:
     """T2-c (WARNING-class): flag Critical chain rows that lack verification.
 
@@ -9154,6 +9795,11 @@ def _check_speculative_critical_chains(scratchpad: Path) -> list[str]:
     ID, or `+`-joined constituents) with a non-VERIFIED disposition is
     speculative; STEP 1 rule 8 of the report-index prompt caps these at
     High. This is the observability backstop — it never blocks the gate.
+
+    Exception (rule 8): a chain whose constituents are EACH independently
+    verified ([POC-PASS]/[MEDUSA-PASS]) is NOT speculative — its Critical is
+    inherited from a verified constituent — so it is not flagged even if the
+    Index Agent left the row's own Verification column as UNVERIFIED.
     """
     rows = _parse_master_finding_index_rows(scratchpad)
     if not rows:
@@ -9169,6 +9815,8 @@ def _check_speculative_critical_chains(scratchpad: Path) -> list[str]:
         verif = (r.get("verification") or "").strip().upper()
         if "VERIFIED" in verif and "UNVERIFIED" not in verif:
             continue  # genuinely verifier-confirmed
+        if _chain_constituents_verified(scratchpad, r.get("report_id", "")):
+            continue  # Critical inherited from verified constituent(s) (rule 8)
         flagged.append(
             f"{r['report_id']} (internal {internal or '?'}, "
             f"verification {verif or '?'})"
@@ -9589,21 +10237,30 @@ def _run_report_quality_gate(
         stub_ch = [rid for rid in stub_recovered_ids if rid[:1].upper() in ("C", "H")]
         blocked_limit = max(3, math.ceil(total_sections * 0.20))
         stub_limit = max(2, math.ceil(total_sections * 0.10))
-        evidence_quality_issues: list[str] = []
+        # GATE-3: an upstream evidence gap (REPORT-BLOCKED/STUB-RECOVERED C/H
+        # section, or too many blocked/stub sections) is a quality/recall
+        # judgment the MECHANICAL assembler cannot fix -- it cannot synthesize
+        # evidence it does not have. Per the WARN-not-halt doctrine these are
+        # SOFT. What stays HARD is mechanical: internal markers must not leak
+        # into the client report, and there must not be duplicate structural
+        # headings. (The upstream verify gate -- still hard -- is the correct
+        # place to catch missing evidence.)
+        evidence_quality_soft: list[str] = []
+        evidence_quality_hard: list[str] = []
         if blocked_ch:
-            evidence_quality_issues.append(
+            evidence_quality_soft.append(
                 f"{len(blocked_ch)} Critical/High REPORT-BLOCKED section(s): {blocked_ch[:10]}"
             )
         if len(blocked_ids) >= blocked_limit:
-            evidence_quality_issues.append(
+            evidence_quality_soft.append(
                 f"{len(blocked_ids)}/{total_sections} REPORT-BLOCKED section(s)"
             )
         if stub_ch:
-            evidence_quality_issues.append(
+            evidence_quality_soft.append(
                 f"{len(stub_ch)} Critical/High STUB-RECOVERED section(s): {stub_ch[:10]}"
             )
         if len(stub_recovered_ids) >= stub_limit:
-            evidence_quality_issues.append(
+            evidence_quality_soft.append(
                 f"{len(stub_recovered_ids)}/{total_sections} STUB-RECOVERED section(s)"
             )
         internal_marker_leaks = re.findall(
@@ -9612,21 +10269,27 @@ def _run_report_quality_gate(
             flags=re.IGNORECASE,
         )
         if internal_marker_leaks:
-            evidence_quality_issues.append(
+            evidence_quality_hard.append(
                 f"{len(internal_marker_leaks)} internal report marker(s) leaked into client report"
             )
         quality_heading_count = len(
             re.findall(r"(?im)^##\s+Quality\s+Observations\s*$", body)
         )
         if quality_heading_count > 1:
-            evidence_quality_issues.append(
+            evidence_quality_hard.append(
                 f"{quality_heading_count} duplicate Quality Observations sections"
             )
-        if evidence_quality_issues:
-            detail = "; ".join(evidence_quality_issues)
+        if evidence_quality_soft:
+            soft_detail = "; ".join(evidence_quality_soft)
+            checks.append(("evidence_quality", "WARN", soft_detail))
+            log.warning(
+                "[_run_report_quality_gate] evidence_quality (soft): %s", soft_detail
+            )
+        if evidence_quality_hard:
+            detail = "; ".join(evidence_quality_hard)
             checks.append(("evidence_quality", "FAIL", detail))
             issues.append("report body evidence quality blocked: " + detail)
-        else:
+        if not evidence_quality_soft and not evidence_quality_hard:
             checks.append((
                 "evidence_quality",
                 "PASS",
@@ -9713,32 +10376,37 @@ def _run_report_quality_gate(
             for i, (t, s) in enumerate(sections)
             if t in ("C", "H", "M")
             and "VERIFICATION NOT EXECUTED" not in s.upper()
+            and "[UNVERIFIED]" not in s.upper()
             and not _section_field_substantive(
                 s,
-                ("PoC Result", "Execution Output", "Test Output", "Proof",
-                 "Evidence Tag", "Evidence"),
-                ("PoC Result", "Execution Output", "Test Output", "Proof",
-                 "Reproduction", "Evidence Tag", "Evidence"),
+                _BODY_POC_FIELDS,
+                _BODY_POC_SECTIONS,
             )
         ]
         if boilerplate > max(0, int(total_sections * 0.05)):
+            # Literal report-stub boilerplate phrase match is MECHANICAL -> hard.
             checks.append((
                 "content_authenticity", "FAIL",
                 f"{boilerplate}/{total_sections} sections contain report-stub boilerplate",
             ))
             issues.append("report body is dominated by boilerplate/stub sections")
         elif missing_impact_chm or missing_poc_ids:
-            # T2-d: C/H/M findings without a substantive Impact / PoC Result
-            # are a hard failure -> block the gate so the writer is retried.
+            # GATE-1: "is this Impact/PoC paragraph substantive" is a prose/
+            # LLM-quality judgment (via _is_substantive_body_evidence), NOT a
+            # mechanical guarantee. Per the WARN-not-halt doctrine it must NOT
+            # be appended to `issues` (which hard-halts the critical
+            # report_assemble phase and survives the FC4 content rescue). It is
+            # recorded as a WARN for telemetry; the mechanical checks (ID set,
+            # duplicates, marker leak, stub_guard==0) remain hard.
             checks.append((
-                "content_authenticity", "FAIL",
-                "C/H/M sections missing Impact: "
+                "content_authenticity", "WARN",
+                "C/H/M sections with non-substantive Impact: "
                 f"{missing_impact_chm[:10]}, PoC Result: {missing_poc_ids[:10]}",
             ))
-            issues.append(
-                "report body: C/H/M finding(s) shipped without a substantive "
-                f"Impact section ({missing_impact_chm[:10]}) or PoC Result "
-                f"section ({missing_poc_ids[:10]})"
+            log.warning(
+                "[_run_report_quality_gate] content_authenticity (soft): C/H/M "
+                "Impact %s / PoC Result %s non-substantive",
+                missing_impact_chm[:10], missing_poc_ids[:10],
             )
         elif missing_impact_li:
             checks.append((
@@ -10290,7 +10958,13 @@ def _sync_degraded_sentinels_to_checkpoint(
     """
     added: list[str] = []
     for p in sorted(scratchpad.glob("*.degraded")):
-        phase_name = p.name[:-len(".degraded")]
+        # RESUME-4: use the canonical sentinel->phase mapper (handles compound
+        # suffixes like `.body_writer.degraded`) so a phantom phase name is
+        # never injected into checkpoint.degraded (which would force a false
+        # EXIT_DEGRADED final state) and stale compound sentinels for completed
+        # phases are correctly cleaned. The naive `.degraded` strip diverged
+        # from _clear_stale_degraded_sentinels' mapping.
+        phase_name = _phase_name_from_sentinel(p.name)
         if phase_name in checkpoint.completed:
             try:
                 p.unlink(missing_ok=True)
@@ -10409,6 +11083,13 @@ def _validate_verify_content_quality(
     scratchpad: Path, max_thin_ratio: float = 0.40
 ) -> list[str]:
     """Detect when too many verify_*.md files are content-thin.
+
+    GATE-4 / SOFT-WARN ONLY -- this is a PROSE/LLM-quality judgment (counting
+    "substantive sections"), NOT a mechanical guarantee. It is currently UNWIRED.
+    If it is ever wired, its result MUST be logged as a WARNING and MUST NOT be
+    appended to any phase's hard-issue list (doing so would reintroduce the
+    prose-gate false-halt class on the critical verify_aggregate path -- see
+    GATE-1/GATE-2). Mechanical verify guarantees live in mechanical_verify.py.
 
     Closes Codex gap #5: a verify file that has only `**Verdict**: CONFIRMED`
     with no Description / Impact / Recommendation cannot produce a useful
@@ -11431,7 +12112,7 @@ def _generate_verify_aggregate_retry_hint(issues: list[str]) -> str:
     if not issues:
         return ""
     lines = [
-        "## RETRY HINT — verify_aggregate quality gate (v2.3.14)",
+        "## RETRY HINT ? verify_aggregate quality gate (v2.3.14)",
         "",
         "Your previous attempt failed these verification quality checks:",
         "",
@@ -11444,11 +12125,10 @@ def _generate_verify_aggregate_retry_hint(issues: list[str]) -> str:
         "formats: `[POC-PASS]`, `[POC-FAIL]`, `[CODE-TRACE]`, "
         "`[MEDUSA-PASS]`, or a Preferred Tag / Evidence Tag field.",
         "",
-        "Do NOT assume prior output files are correct — "
+        "Do NOT assume prior output files are correct ? "
         "they have been quarantined.",
     ])
     return "\n".join(lines) + "\n"
-
 
 def _generate_graph_sweeps_retry_hint(issues: list[str]) -> str:
     """Build retry hint for graph_sweeps validation failures."""
@@ -11491,9 +12171,15 @@ def _generate_attention_repair_retry_hint(issues: list[str]) -> str:
         "table with one row per attention_repair_queue.md row. Copy Queue #, "
         "Kind, and Target exactly from the queue. For path targets, include "
         "the full relative path in Target and cite the same path again in "
-        "Evidence with file:line support, or mark NEEDS_HUMAN if the source "
-        "is unavailable. Do NOT assume prior output files are correct — they "
-        "have been quarantined.",
+        "Evidence with file:line support. Use a clear Verdict such as SAFE, "
+        "COVERED, CONFIRMED, FINDING, FALSE_POSITIVE, NO_FINDING, or "
+        "NEEDS_HUMAN if the source is unavailable. For asset-binding-gap "
+        "targets, explicitly discuss "
+        "both queued fields in the same Evidence/Notes claim and state whether "
+        "they mismatch, are not validated, are bound/equal, are unreachable, "
+        "or need human review. A nearby issue involving only one field does "
+        "not close the row. Do NOT assume prior output files are correct; "
+        "they have been quarantined.",
     ])
     return "\n".join(lines) + "\n"
 
@@ -11795,13 +12481,47 @@ def _depth_core_artifacts_present(
     return True
 
 
-def _generate_depth_repair_hint(missing: list) -> str:
+def _generate_depth_repair_hint(
+    missing: list, pipeline: str = "sc", mode: str = "core"
+) -> str:
     """S1.5: targeted repair hint — produce ONLY the missing/stub artifacts.
 
     The core depth findings are already complete; this steers the one
     auto-granted repair attempt at the tail gaps without a full re-run and
     without overrunning the phase boundary.
+
+    v2.8.16: pipeline-aware. The L1 depth phase has 5 role findings (no
+    blind_spot scanners, no chain phase), so an SC-worded hint would
+    misdescribe the L1 repair target. The SC branch is the verbatim original
+    (reached on the default ``pipeline="sc"``), so SC output is byte-identical.
     """
+    if (pipeline or "sc") == "l1":
+        lines = [
+            "## RETRY HINT — depth targeted repair (L1)",
+            "",
+            "The CORE depth findings are already complete and on disk: the five "
+            "L1 depth role files — `depth_consensus_invariant_findings.md`, "
+            "`depth_network_surface_findings.md`, `depth_state_trace_findings.md`, "
+            "`depth_external_findings.md`, `depth_edge_case_findings.md` — are "
+            "present and substantive. DO NOT regenerate them — reuse them as-is. "
+            "L1 has NO `blind_spot_*` scanners and NO chain phase.",
+            "",
+            "Produce ONLY the missing / stub artifacts below, then STOP:",
+        ]
+        lines.extend(f"- {m}" for m in (missing or []))
+        lines.extend([
+            "",
+            "- If `confidence_scores.md` is missing or a stub, write it for the "
+            "L1 depth findings.",
+            "- In Thorough mode only: write a substantive "
+            "`perturbation_findings.md` and `design_stress_findings.md` if "
+            "missing or stubs, and `skill_execution_gaps.md` if applicable.",
+            "- Do NOT write `verification_queue.md`, any `verify_*.md`, or any "
+            "report artifact — those belong to later phases. Writing them "
+            "wastes the attempt.",
+            "- Return `DONE: depth repair complete` when finished.",
+        ])
+        return "\n".join(lines) + "\n"
     lines = [
         "## RETRY HINT — depth targeted repair",
         "",
@@ -11891,11 +12611,11 @@ def _generate_report_index_retry_hint(issues: list[str]) -> str:
 
 
 def _generate_verify_shard_retry_hint(issues: list[str]) -> str:
-    """Build retry hint for L1 verify shard completion failures."""
+    """Build retry hint for verify shard completion failures."""
     if not issues:
         return ""
     lines = [
-        "## RETRY HINT — verify shard completion gate (v2.3.14)",
+        "## RETRY HINT ? verify shard completion gate (v2.3.14)",
         "",
         "Your previous attempt failed these verify shard checks:",
         "",
@@ -11906,8 +12626,24 @@ def _generate_verify_shard_retry_hint(issues: list[str]) -> str:
         "",
         "Each finding assigned to your shard must have a corresponding "
         "verify_{id}.md file with verdict and evidence tag. "
-        "Do NOT assume prior output files are correct — "
-        "they have been quarantined.",
+        "Do NOT assume prior output files are correct. On verify-shard "
+        "retries, inspect and repair every assigned `verify_<ID>.md` in "
+        "place; the prior failure list may not be exhaustive if an older "
+        "driver truncated gate output.",
+        "",
+        "PoC ledger contract for every mandatory unit/property/property-like finding:",
+        "- If you attempted a PoC, write `Attempted: YES` AND concrete "
+        "`Test File:` and `Command:` fields. Do not use N/A/NONE for either.",
+        "- If you did not attempt a PoC, write `Attempted: NO` AND "
+        "`PoC Not Attempted Because: <VALID_BLOCKER>` using exactly one of:",
+        "  `NO_BUILD_ENVIRONMENT`, `EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS`, "
+        "`DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL`, `PURE_SPEC_OR_DOCS_ONLY`, "
+        "`STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION`, `CROSS_VM_ENCODING_NO_RUNTIME`.",
+        "- For `unit` or `property` rows, weak reasons like missing mocks, "
+        "complex setup, time, or 'not necessary' are not valid blockers by "
+        "themselves. Build a minimal harness/mock when feasible.",
+        "- Before returning, make one final pass over ALL rows in this shard "
+        "manifest, not only the IDs named above.",
     ])
     return "\n".join(lines) + "\n"
 
@@ -12624,7 +13360,7 @@ def _validate_report_index_prewrite_inputs(scratchpad: Path) -> list[str]:
     if issues:
         return ["report_index: " + issues[0] + " - refuse to write report_index.md"]
     if issues:
-        return ["report_index: " + issues[0] + " â€” refuse to write report_index.md"]
+        return ["report_index: " + issues[0] + " — refuse to write report_index.md"]
     return []
 
 
@@ -13241,19 +13977,23 @@ def _load_candidate_semantic_facets_for_validator(
 def _parse_report_coverage_rows_for_contract(text: str) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     active_headers: list[str] = []
+    coverage_header_markers = (
+        "candidate id", "candidate id / label", "internal finding id",
+        "canonical id",
+    )
     for line in text.splitlines():
         s = line.strip()
         if not s.startswith("|") or _is_separator_row(s):
             continue
         cells = [c.strip() for c in s.strip("|").split("|")]
         lower = [_norm_key(c) for c in cells]
-        if any(k in lower for k in (
-            "candidate id", "candidate id / label", "internal finding id",
-            "canonical id",
-        )) or (
+        if any(k in lower for k in coverage_header_markers) or (
             "status" in lower and any("reason" in k or "refutation" in k for k in lower)
         ):
             active_headers = lower
+            continue
+        if any(k in lower for k in ("status", "covered by", "field binding", "obligation id")):
+            active_headers = []
             continue
         if not active_headers:
             continue
@@ -13271,6 +14011,121 @@ def _coverage_row_value(row: dict[str, str], *keys: str) -> str:
         if norm in row:
             return row[norm]
     return ""
+
+
+def _load_obligation_ledger_rows(scratchpad: Path) -> list[dict[str, Any]]:
+    path = scratchpad / "obligation_ledger.json"
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    rows = payload.get("obligations") if isinstance(payload, dict) else []
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _retention_claim_units(text: str) -> list[str]:
+    units: list[str] = []
+    for line in str(text or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if "|" in s:
+            units.append(s[:1800])
+            continue
+        for part in re.split(r"(?<=[.;:!?])\s+", s):
+            part = part.strip()
+            if part:
+                units.append(part[:1800])
+    return units
+
+
+def _retention_pair_closed(text: str, a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    def _base(raw: str) -> str:
+        s = str(raw or "").strip().strip("`")
+        if s == "msg.value":
+            return s
+        if "." in s:
+            return s.rsplit(".", 1)[-1]
+        return s
+    terms_a = {a.lower(), _base(a).lower()}
+    terms_b = {b.lower(), _base(b).lower()}
+    terms_a.discard("")
+    terms_b.discard("")
+    relation = re.compile(
+        r"(?:"
+        r"==|!=|<->|->|"
+        r"\b(?:mismatch(?:es|ed)?|not\s+match(?:es|ed)?|"
+        r"not\s+(?:validated|bound|checked|compared)|"
+        r"missing\s+(?:validation|binding|check)|"
+        r"validated\s+against|checked\s+against|compared\s+against|"
+        r"bound\s+to|binds?\s+to|matches?|equals?|same\s+as|"
+        r"source\s+of\s+truth|derived\s+from|merge(?:d)?\s+into|covered\s+by)\b"
+        r")",
+        re.IGNORECASE,
+    )
+    for unit in _retention_claim_units(text):
+        low = unit.lower()
+        if not relation.search(unit):
+            continue
+        if any(t in low for t in terms_a) and any(t in low for t in terms_b):
+            return True
+    return False
+
+
+def _validate_obligation_ledger_retention(scratchpad: Path, coverage_text: str) -> list[str]:
+    """Hard-gate only stable Medium+ typed obligations.
+
+    This intentionally avoids broad prose semantics. It checks active
+    machine-readable obligations and requires either exact pair preservation,
+    an absorbing report ID, or an explicit refutation token in report_index /
+    report_coverage.
+    """
+    rows = _load_obligation_ledger_rows(scratchpad)
+    if not rows:
+        return []
+    issues: list[str] = []
+    for row in rows:
+        if str(row.get("status") or "").lower() != "active":
+            continue
+        sev = normalize_severity(str(row.get("severity_signal") or ""))
+        if sev not in {"Critical", "High", "Medium"}:
+            continue
+        cls = str(row.get("class") or "")
+        if cls not in {"exact_value_binding", "chain_upgrade_retention"}:
+            continue
+        oid = str(row.get("id") or row.get("source_id") or "unknown")
+        source_id = str(row.get("source_id") or "")
+        relevant = "\n".join(
+            unit for unit in _retention_claim_units(coverage_text)
+            if (
+                (oid and oid.lower() in unit.lower())
+                or (source_id and source_id.lower() in unit.lower())
+            )
+        )
+        if cls == "exact_value_binding":
+            a = str(row.get("field_a") or "")
+            b = str(row.get("field_b") or "")
+            if _retention_pair_closed(coverage_text, a, b):
+                continue
+        if relevant and (
+            re.search(r"\b[CHMLI]-\d{1,4}\b", relevant, re.IGNORECASE)
+            or re.search(
+                r"\b(FALSE_POSITIVE|REFUTED|INFEASIBLE|NO_REACHABLE|NO_TRACE|"
+                r"MERGE_INTO|MERGED|DUPLICATE OF|CONSOLIDATED INTO)\b",
+                relevant,
+                re.IGNORECASE,
+            )
+        ):
+            continue
+        issues.append(
+            f"obligation retention: active {cls} {oid} not preserved by exact "
+            "report coverage, absorbing report ID, or explicit refutation"
+        )
+    return issues[:10]
 
 
 def _validate_report_coverage_semantic_contract(scratchpad: Path) -> list[str]:
@@ -13300,6 +14155,8 @@ def _validate_report_coverage_semantic_contract(scratchpad: Path) -> list[str]:
             "internal finding id", "canonical id", "finding id",
         )
         ids = [m.group(1).upper() for m in _INTERNAL_FINDING_ID_RE.finditer(raw_id)]
+        if not ids:
+            continue
         status = _coverage_row_value(row, "status", "disposition", "action").upper()
         reason = _coverage_row_value(
             row, "report id / refutation / reason", "reason", "notes",
@@ -13368,6 +14225,14 @@ def _validate_report_coverage_semantic_contract(scratchpad: Path) -> list[str]:
             )
         except Exception:
             pass
+    combined_report_text = text
+    idx_path = scratchpad / "report_index.md"
+    if idx_path.exists():
+        try:
+            combined_report_text += "\n" + idx_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    issues.extend(_validate_obligation_ledger_retention(scratchpad, combined_report_text))
     return issues[:10]
 
 
@@ -14167,6 +15032,10 @@ def _validate_recon_content_structure(
     """
     hard: list[str] = []
     soft: list[str] = []
+    prepass_marker = (
+        "<!-- plamen-prepass v1: mechanical pre-pass output; "
+        "safe to overwrite while marker is present -->"
+    )
     def _read_artifact(name: str) -> tuple[str, str]:
         path = scratchpad / name
         if not path.exists():
@@ -14176,6 +15045,25 @@ def _validate_recon_content_structure(
         except Exception:
             text = ""
         return text, _llm_norm(text).lower()
+
+    for name in (
+        "design_context.md",
+        "attack_surface.md",
+        "state_variables.md",
+        "function_list.md",
+        "contract_inventory.md",
+        "template_recommendations.md",
+        "detected_patterns.md",
+        "setter_list.md",
+        "emit_list.md",
+        "build_status.md",
+    ):
+        text, _ = _read_artifact(name)
+        if text.splitlines()[:1] == [prepass_marker]:
+            hard.append(
+                f"{name} still has pre-pass overwrite marker; recon merge "
+                "did not produce a durable canonical handoff"
+            )
 
     # design_context.md: must contain Operational Implications (Rule 14)
     dc = scratchpad / "design_context.md"
@@ -14415,6 +15303,200 @@ def _find_verify_file(scratchpad: Path, fid: str) -> Optional[Path]:
     return matches[0] if len(matches) == 1 else None
 
 
+_POC_SKIP_CODES_RE = (
+    r"NO_BUILD_ENVIRONMENT|EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS|"
+    r"DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL|PURE_SPEC_OR_DOCS_ONLY|"
+    r"STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION|"
+    r"CROSS_VM_ENCODING_NO_RUNTIME"
+)
+
+
+def _poc_attempted_value(content: str) -> str:
+    field = _field_from_markdown(content, ("Attempted", "PoC Attempted"))
+    if field:
+        m = re.match(r"\s*(YES|NO)\b", field, re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+    m = re.search(
+        r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?Attempted(?:\*\*)?\s*:\s*(YES|NO)\b",
+        content,
+    )
+    return m.group(1).upper() if m else ""
+
+
+def _poc_skip_reason_value(content: str) -> str:
+    field = _field_from_markdown(content, (
+        "PoC Not Attempted Because",
+        "Not Attempted Because",
+        "PoC Skip Reason",
+        "Skip Reason",
+        "PoC not attempted",
+    ))
+    if field:
+        return field
+    m = re.search(
+        r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?"
+        r"(?:PoC\s+Not\s+Attempted\s+Because"
+        r"|Not\s+Attempted\s+Because"
+        r"|PoC\s+[Ss]kip(?:\s+[Rr]eason)?"
+        r"|[Ss]kip\s+[Rr]eason"
+        r"|PoC\s+not\s+attempted)"
+        r"(?:\*\*)?\s*:\s*(.+)$",
+        content,
+    )
+    return m.group(1).strip().strip("`") if m else ""
+
+
+def _poc_skip_code(content: str) -> str:
+    reason = _poc_skip_reason_value(content)
+    if not reason:
+        return ""
+    m = re.match(r"\s*\**\s*(" + _POC_SKIP_CODES_RE + r")\b", reason, re.IGNORECASE)
+    return m.group(1).upper() if m else ""
+
+
+def _valid_poc_skip(content: str, poc_class: str) -> bool:
+    skip_code = _poc_skip_code(content)
+    if not skip_code:
+        return False
+    if poc_class in {"unit", "property"} and skip_code == "STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION":
+        return False
+    if poc_class == "unit" and skip_code == "DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL":
+        return False
+    if skip_code == "EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS" and re.search(
+        r"\bmock\w*\b", content, re.IGNORECASE
+    ) and re.search(
+        r"\b(?:missing|no|not|cannot|can't|does\s+not|doesn't|unavailable|"
+        r"lack\w*)\b.{0,80}\bmock\w*\b|\bmock\w*\b.{0,80}\b(?:missing|"
+        r"not|cannot|can't|does\s+not|doesn't|unavailable|lack\w*|"
+        r"implement|replicate)\b",
+        content,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        return False
+    if skip_code == "CROSS_VM_ENCODING_NO_RUNTIME":
+        return bool(re.search(
+            r"\b(?:solana|svm|bitcoin|btc|move|aptos|sui|cosmos|ibc|"
+            r"wormhole|layerzero|near|stellar|substrate|tron|"
+            r"encoding|serialization|serializ\w*|wire\s*format|"
+            r"calldata\s*layout|payload\s*format|message\s*format|"
+            r"abi\s*layout)\b",
+            content,
+            re.IGNORECASE,
+        ))
+    return True
+
+
+def _poc_contract_required(row: dict[str, str], mode: str) -> bool:
+    poc_class = (row.get("poc class") or "structural").strip().lower()
+    if poc_class not in {"unit", "property"}:
+        return False
+    mode_l = (mode or "core").lower()
+    if mode_l == "light":
+        return False
+    sev = normalize_severity(row.get("severity", ""))
+    if mode_l == "core":
+        return sev in {"Critical", "High", "Medium"}
+    return True
+
+
+def _validate_poc_contract_for_rows(
+    scratchpad: Path,
+    rows: list[dict[str, str]],
+    mode: str,
+) -> list[str]:
+    """Hard verifier-shard contract for mandatory PoC attempts.
+
+    A failing/compiling PoC is still an attempt; this gate only prevents
+    ledgerless or unjustified skips for rows already classified as locally
+    testable. Proof strength is handled by evidence tags and demotion logic.
+    """
+    issues: list[str] = []
+    # Project-wide mock feasibility (shared with the aggregate skip audit).
+    # Computed once per shard-gate invocation; sees whatever verify files exist
+    # on disk at gate time, which includes this shard's own outputs.
+    mock_feasible, mock_example = _project_mock_feasible(scratchpad)
+    for row in rows:
+        if not _poc_contract_required(row, mode):
+            continue
+        fid = (row.get("finding id") or "").strip()
+        if not fid:
+            continue
+        path = _find_verify_file(scratchpad, fid)
+        if not path:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        has_poc_section = bool(re.search(
+            r"(?im)^#{2,4}\s+PoC\s+Attempt\b", content
+        ))
+        has_exec_section = bool(re.search(
+            r"(?im)^#{2,4}\s+(?:Execution\s+Result|PoC\s+Result|PoC\s+Execution)\b",
+            content,
+        ))
+        if not has_poc_section or not has_exec_section:
+            issues.append(f"{fid} missing PoC Attempt/Execution Result ledger")
+            continue
+        attempted = _poc_attempted_value(content)
+        attempted_yes = attempted == "YES"
+        attempted_no = attempted == "NO"
+        poc_class = (row.get("poc class") or "structural").strip().lower()
+        if attempted_yes:
+            command = _field_from_markdown(content, ("Command",))
+            test_file = _field_from_markdown(content, ("Test File",))
+            if (
+                not command or re.fullmatch(r"`?(?:N/?A|NONE|NOT_APPLICABLE)`?", command.strip(), re.I)
+                or not test_file or re.fullmatch(r"`?(?:N/?A|NONE|NOT_APPLICABLE)`?", test_file.strip(), re.I)
+            ):
+                issues.append(f"{fid} says Attempted:YES but lacks concrete Test File/Command")
+            continue
+        if attempted_no and _valid_poc_skip(content, poc_class):
+            # Medium+ project-mock override (parity with the aggregate
+            # skip-vocabulary audit, scoped to Critical/High/Medium to avoid
+            # Low/Info retry churn): an EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS
+            # skip is NOT a valid blocker when the project demonstrably mocks
+            # the dependency (a passing sibling test used a *Mock/*Stub). The
+            # verifier can build the same minimal harness, or non-silently
+            # reclassify to structural/integration (handled below) — so this
+            # stays satisfiable and rides bounded-retry-then-WARN, never a halt.
+            sev = normalize_severity(row.get("severity", ""))
+            if (
+                sev in {"Critical", "High", "Medium"}
+                and _poc_skip_code(content) == "EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS"
+                and mock_feasible
+                and re.search(r"\bmock\b", content, re.IGNORECASE)
+            ):
+                issues.append(
+                    f"{fid} EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS skip invalid "
+                    f"for {sev} {poc_class} finding: mocking is demonstrably "
+                    f"feasible here (a passing test used `{mock_example}`) — "
+                    "build the minimal mock/harness and run the PoC, or "
+                    "non-silently reclassify the PoC Class with justification"
+                )
+            continue
+        # Verifier-challenge softening: the queue PoC Class is an LLM estimate
+        # from the finding title; the verifier analyzed the actual code at the
+        # cited Location. The verify prompt explicitly tells the verifier to
+        # CHALLENGE (not silently bypass) a wrong queue class. When the verifier
+        # does so non-silently — declares `PoC Class: structural`/`integration`
+        # in its OWN ledger AND skips via STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION
+        # — honor that informed reclassification instead of hard-degrading the
+        # phase. This is an LLM-classification disagreement, which must WARN, not
+        # FAIL: the soft gate `_validate_poc_attempt_coverage` still records it as
+        # a violations.md warning. A verifier that leaves its ledger PoC Class as
+        # unit/property but skips structurally is a silent bypass and still fails.
+        if attempted_no and _poc_skip_code(content) == "STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION":
+            declared_class = (
+                _field_from_markdown(content, ("PoC Class", "Poc Class", "PoC class")) or ""
+            ).strip().lower()
+            if declared_class in {"structural", "integration"}:
+                continue
+        issues.append(f"{fid} mandatory {poc_class} PoC not attempted with valid blocker")
+    return issues
+
+
 def _validate_poc_attempt_coverage(scratchpad: Path, mode: str) -> list[str]:
     """Post-verification soft gate: check verifiers attempted PoCs for testable findings.
 
@@ -14434,9 +15516,9 @@ def _validate_poc_attempt_coverage(scratchpad: Path, mode: str) -> list[str]:
         fid = row.get("finding id", "")
 
         if mode == "core":
-            if poc_class != "unit":
+            if poc_class not in ("unit", "property"):
                 continue
-            if severity not in ("critical", "high"):
+            if severity not in ("critical", "high", "medium"):
                 continue
         else:  # thorough
             if poc_class not in ("unit", "property"):
@@ -14457,7 +15539,7 @@ def _validate_poc_attempt_coverage(scratchpad: Path, mode: str) -> list[str]:
             content,
         ))
         has_poc_pass = has_mechanical_proof(content)
-        attempted_no = bool(re.search(r"Attempted\s*:\s*NO\b", content, re.IGNORECASE))
+        attempted_no = _poc_attempted_value(content) == "NO"
         compiled_na = bool(re.search(
             r"Compiled\s*:\s*(?:N/?A|NOT_APPLICABLE|NO)\b", content, re.IGNORECASE
         ))
@@ -14472,31 +15554,14 @@ def _validate_poc_attempt_coverage(scratchpad: Path, mode: str) -> list[str]:
             content,
             re.IGNORECASE,
         ))
-        _SKIP_CODES = (
-            r"NO_BUILD_ENVIRONMENT|EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS|"
-            r"DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL|PURE_SPEC_OR_DOCS_ONLY|"
-            r"STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION|"
-            r"CROSS_VM_ENCODING_NO_RUNTIME"
-        )
-        allowed_skip = bool(re.search(
-            r"(?:PoC\s+Not\s+Attempted\s+Because"
-            r"|Not\s+Attempted\s+Because"
-            r"|PoC\s+[Ss]kip(?:\s+[Rr]eason)?"
-            r"|[Ss]kip\s+[Rr]eason"
-            r"|PoC\s+not\s+attempted)"
-            r"\s*:\s*(?:" + _SKIP_CODES + r")",
-            content,
-            re.IGNORECASE,
-        ))
+        allowed_skip = _valid_poc_skip(content, poc_class)
         # v2.x Fix 5: CROSS_VM_ENCODING_NO_RUNTIME requires evidence of a
         # cross-VM context to prevent abuse as a generic escape hatch.
         # Require either (a) a target-VM keyword (Solana/Bitcoin/Move/etc.)
         # OR (b) a wire-format keyword (encoding/serialization/calldata/etc.)
         # in the finding body. Without one of these, treat the skip as
         # unjustified and revoke `allowed_skip`.
-        if allowed_skip and re.search(
-            r"CROSS_VM_ENCODING_NO_RUNTIME", content, re.IGNORECASE
-        ):
+        if allowed_skip and _poc_skip_code(content) == "CROSS_VM_ENCODING_NO_RUNTIME":
             cross_vm_keyword_present = bool(re.search(
                 r"\b(?:solana|svm|bitcoin|btc|move|aptos|sui|cosmos|ibc|"
                 r"wormhole|layerzero|near|stellar|substrate|tron|"
@@ -14629,7 +15694,11 @@ def _apply_poc_fail_demotions(scratchpad: Path, mode: str) -> list[dict[str, str
     carveout_skips: list[dict[str, str]] = []
     for row in rows:
         poc_class = row.get("poc class", "structural")
-        if poc_class not in ("unit", "property"):
+        # VERIF-4: include 'integration' (capped at Low like property) but ONLY
+        # on a genuine EXECUTED mechanical FAIL (checked below), never on a bare
+        # prose [POC-FAIL] without execution. 'structural' stays untouched
+        # (often no harness exists, so a FAIL is not harm-disproof).
+        if poc_class not in ("unit", "property", "integration"):
             continue
 
         fid = row.get("finding id", "")
@@ -14656,7 +15725,18 @@ def _apply_poc_fail_demotions(scratchpad: Path, mode: str) -> list[dict[str, str
         if has_mechanical_proof(content):
             continue
 
-        if poc_class == "unit":
+        if poc_class == "integration":
+            # VERIF-4: integration findings demote ONLY on a real executed FAIL
+            # (mechanical-verify annotation), not a bare prose [POC-FAIL] -- an
+            # integration finding that merely lacked a harness must not be sunk.
+            if not re.search(
+                r"Mechanical[- ]?(?:Verified\s+)?(?:Status|Tag)\s*:\s*\[?FAIL",
+                content, re.IGNORECASE,
+            ):
+                continue
+            new_sev = "Low"
+            reason = "POC-FAIL on integration finding — executed harness disproved the claimed harm"
+        elif poc_class == "unit":
             new_sev = "Informational"
             reason = "POC-FAIL on unit-testable finding — claimed harm mechanically disproved"
         else:
@@ -14958,6 +16038,22 @@ _MECHANICAL_PASS_RE = re.compile(
 )
 
 
+def _mechanical_manifest_pass_ids(scratchpad: Path) -> set[str]:
+    """Return finding IDs with Phase 5b PASS in mechanical manifest JSON."""
+    path = scratchpad / "mechanical_verify_manifest.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return set()
+    out: set[str] = set()
+    for item in data.get("results", []) or []:
+        if str(item.get("status", "")).upper() == "PASS":
+            fid = str(item.get("finding_id", "")).strip()
+            if fid:
+                out.add(fid)
+    return out
+
+
 def _validate_poc_pass_integrity(scratchpad: Path) -> list[dict[str, str]]:
     """Sanity-check [POC-PASS] claims for basic validity.
 
@@ -14985,10 +16081,13 @@ def _validate_poc_pass_integrity(scratchpad: Path) -> list[dict[str, str]]:
     nontrivial_re = dispatch["nontrivial"]
     trivial_strs = dispatch["trivial"]
 
+    manifest_pass_ids = _mechanical_manifest_pass_ids(scratchpad)
     downgrades: list[dict[str, str]] = []
     for row in rows:
         fid = row.get("finding id", "")
         poc_class = row.get("poc class", "structural")
+        if fid in manifest_pass_ids:
+            continue
 
         verify_path = _find_verify_file(scratchpad, fid)
         if not verify_path:
@@ -15077,6 +16176,46 @@ def _build_succeeded(scratchpad: Path) -> Optional[bool]:
     return None
 
 
+def _project_mock_feasible(
+    scratchpad: Path, verify_cache: Optional[dict] = None
+) -> tuple[bool, str]:
+    """Is mocking demonstrably feasible in this project?
+
+    True when any *passing* verify file's code blocks reference a
+    `*Mock`/`*Stub`/`*Fake`/`*Harness` identifier. Single source of the
+    feasibility signal, shared by the per-shard PoC contract (hard gate,
+    Medium+) and the aggregate skip-vocabulary audit (WARN-class). When
+    `verify_cache` is supplied it is populated with every read verify file so
+    the caller can reuse the content without re-reading.
+    """
+    try:
+        rows = parse_verification_queue_rows(scratchpad)
+    except Exception:
+        return (False, "")
+    feasible = False
+    example = ""
+    for row in rows:
+        fid = (row.get("finding id") or "").strip()
+        if not fid:
+            continue
+        vp = _find_verify_file(scratchpad, fid)
+        if not vp:
+            continue
+        try:
+            content = vp.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if verify_cache is not None:
+            verify_cache[fid] = content
+        if not feasible and has_mechanical_proof(content):
+            code = "\n".join(_VERIFY_CODE_BLOCK_RE.findall(content))
+            mm = _MOCK_IDENT_RE.search(code)
+            if mm:
+                feasible = True
+                example = mm.group(0)
+    return (feasible, example)
+
+
 def _validate_verifier_skip_vocabulary(scratchpad: Path) -> list[str]:
     """T2-a (WARNING-class): catch invalid PoC-skip reasons in verify files.
 
@@ -15097,37 +16236,11 @@ def _validate_verifier_skip_vocabulary(scratchpad: Path) -> list[str]:
         return []
     build_ok = _build_succeeded(scratchpad)
 
-    # Pass 1: is mocking demonstrably feasible in this project? (any passing
-    # verify file whose code blocks reference a *Mock/*Stub/*Fake/*Harness).
-    mock_feasible = False
-    mock_example = ""
+    # Pass 1: is mocking demonstrably feasible in this project? Shared signal,
+    # populates verify_cache for the per-row checks below (single source).
     verify_cache: dict[str, str] = {}
-    for row in rows:
-        fid = (row.get("finding id") or "").strip()
-        if not fid:
-            continue
-        vp = _find_verify_file(scratchpad, fid)
-        if not vp:
-            continue
-        try:
-            content = vp.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
-        verify_cache[fid] = content
-        if has_mechanical_proof(content):
-            code = "\n".join(_VERIFY_CODE_BLOCK_RE.findall(content))
-            mm = _MOCK_IDENT_RE.search(code)
-            if mm:
-                mock_feasible = True
-                if not mock_example:
-                    mock_example = mm.group(0)
+    mock_feasible, mock_example = _project_mock_feasible(scratchpad, verify_cache)
 
-    skip_re = re.compile(
-        r"(?:PoC\s+Not\s+Attempted\s+Because|Not\s+Attempted\s+Because"
-        r"|PoC\s+[Ss]kip(?:\s+[Rr]eason)?|[Ss]kip\s+[Rr]eason)"
-        r"\s*:\s*\**\s*([A-Za-z_/ ]+)",
-        re.IGNORECASE,
-    )
     warnings: list[str] = []
     audit_rows: list[str] = []
     for row in rows:
@@ -15136,11 +16249,8 @@ def _validate_verifier_skip_vocabulary(scratchpad: Path) -> list[str]:
         if not content:
             continue
         poc_class = (row.get("poc class") or "structural").strip().lower()
-        attempted_no = bool(
-            re.search(r"Attempted\s*:\s*NO\b", content, re.IGNORECASE)
-        )
-        m = skip_re.search(content)
-        skip_code = (m.group(1).strip() if m else "").upper()
+        attempted_no = _poc_attempted_value(content) == "NO"
+        skip_code = _poc_skip_code(content)
         if not attempted_no and not skip_code:
             continue  # PoC was attempted — nothing to audit
 

@@ -36,12 +36,27 @@ def _write_inventory(sp: Path, findings: list[dict]) -> None:
     lines = ["# Findings Inventory", "", "## Findings", ""]
     for f in findings:
         lines.append(f"### Finding [{f['id']}]: {f.get('title', f['id'] + ' title')}")
+        if f.get("source_ids"):
+            lines.append(f"**Source IDs**: {f['source_ids']}")
         lines.append(f"**Severity**: {f.get('severity', 'Medium')}")
         lines.append(f"**Location**: {f.get('location', 'X.sol:L1')}")
         lines.append(f"**Verdict**: {f.get('verdict', 'CONFIRMED')}")
         lines.append(f"**Root Cause**: {f.get('root_cause', '')}")
         lines.append(f"**Description**: {f.get('description', '')}")
         lines.append(f"**Impact**: {f.get('impact', 'some impact')}")
+        for label, key in (
+            ("Discovery Steer", "discovery_steer"),
+            ("Missing Precondition", "missing_precondition"),
+            ("Precondition Type", "precondition_type"),
+            ("Postconditions Created", "postconditions_created"),
+            ("Postcondition Types", "postcondition_types"),
+            ("Semantic Invariant", "semantic_invariant"),
+            ("Branch Preconditions", "branch_preconditions"),
+            ("Terminal Mechanism", "terminal_mechanism"),
+            ("Composition Candidates", "composition_candidates"),
+        ):
+            if f.get(key):
+                lines.append(f"**{label}**: {f[key]}")
         lines.append("")
     (sp / "findings_inventory.md").write_text("\n".join(lines), encoding="utf-8")
 
@@ -124,6 +139,56 @@ def test_candidate_pairs_far_apart_same_file_not_paired(tmp_path):
     out = cp.compute_chain_candidate_pairs(tmp_path)
     # Same file but 8900 lines apart, no shared state/identifier → not a candidate
     assert out["pairs"] == 0
+
+
+def test_candidate_pairs_generic_discovery_signal_does_not_pair(tmp_path):
+    cp = _cp()
+    _write_state_write_map(tmp_path, "Vault", [])
+    _write_inventory(tmp_path, [
+        {"id": "INV-001", "severity": "High", "location": "Vault.sol:L100",
+         "root_cause": "issue alpha", "description": "distinct wording one",
+         "discovery_steer": "arithmetic rounding terminal effect"},
+        {"id": "INV-002", "severity": "Medium", "location": "Router.sol:L9000",
+         "root_cause": "issue beta", "description": "distinct wording two",
+         "discovery_steer": "arithmetic rounding terminal effect"},
+    ])
+    out = cp.compute_chain_candidate_pairs(tmp_path)
+    assert out["pairs"] == 0
+
+
+def test_candidate_pairs_concrete_discovery_term_pairs(tmp_path):
+    cp = _cp()
+    _write_state_write_map(tmp_path, "Vault", [])
+    _write_inventory(tmp_path, [
+        {"id": "INV-001", "severity": "High", "location": "Vault.sol:L100",
+         "root_cause": "issue alpha", "description": "distinct wording one",
+         "discovery_steer": "branch creates `pendingShares` mismatch"},
+        {"id": "INV-002", "severity": "Medium", "location": "Router.sol:L9000",
+         "root_cause": "issue beta", "description": "distinct wording two",
+         "missing_precondition": "`pendingShares` already nonzero"},
+    ])
+    out = cp.compute_chain_candidate_pairs(tmp_path)
+    assert out["pairs"] == 1
+    text = (tmp_path / "chain_candidate_pairs.md").read_text(encoding="utf-8")
+    assert "discovery: pendingshares" in text
+
+
+def test_candidate_pairs_explicit_discovery_ref_matches_source_id_alias(tmp_path):
+    cp = _cp()
+    _write_state_write_map(tmp_path, "Vault", [])
+    _write_inventory(tmp_path, [
+        {"id": "INV-001", "source_ids": "CS-1", "severity": "High",
+         "location": "Vault.sol:L100", "root_cause": "issue alpha",
+         "description": "distinct wording one",
+         "discovery_steer": "candidate ID CS-2 may provide missing state"},
+        {"id": "INV-002", "source_ids": "CS-2", "severity": "Medium",
+         "location": "Router.sol:L9000", "root_cause": "issue beta",
+         "description": "distinct wording two"},
+    ])
+    out = cp.compute_chain_candidate_pairs(tmp_path)
+    assert out["pairs"] == 1
+    text = (tmp_path / "chain_candidate_pairs.md").read_text(encoding="utf-8")
+    assert "discovery: explicit finding reference" in text
 
 
 def test_candidate_pairs_bounded_cap_and_balance(tmp_path):

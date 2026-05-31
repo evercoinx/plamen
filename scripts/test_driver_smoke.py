@@ -25,13 +25,15 @@ Eleven scenarios:
      L1 writes `phase4b_manifest.md` declaring 5 depth agents. Depth writes
      only 3 `depth_*_findings.md` files. Assert depth halts despite clearing
      the old fixed floor of 3.
-  E. Depth pre-baked gatefail enforcement
+  E. Depth pre-baked gatefail -> degrade-and-continue (v2.8.16)
      L1 depth writes enough artifacts to satisfy the glob gate, but appends a
      `[GATE FAIL] ... pre-baked reads` violation. Assert the driver retries
-     depth once, then degrades/halts on the second violation.
-  F. Never-cut checkpoint/artifact enforcement
+     depth once + one S1.5 targeted-repair attempt (3 depth calls), degrades,
+     and CONTINUES past depth (L1 now mirrors SC; haltless-on-any-mode).
+  F. Never-cut tail-gap -> degrade-and-continue (v2.8.16)
      L1 depth clears quorum but omits one required post-depth artifact and
-     checkpoint entry. Assert the driver retries once, then degrades/halts.
+     checkpoint entry. Assert retry + S1.5 repair (3 depth calls), degrade,
+     and continue to later thorough-mode phases (no force-halt).
   G. Depth exit validation
      L1 depth clears quorum and writes all artifacts, but `depth_exit.md`
      has an invalid criterion / insufficient explored paths. Assert retry and
@@ -1024,26 +1026,40 @@ def test_scenario_d_depth_manifest_quorum() -> None:
 
 @pytest.mark.integration
 def test_scenario_e_depth_gatefail_enforced() -> None:
-    """Depth pre-baked gatefail enforcement."""
+    """Depth pre-baked gatefail -> degrade-and-continue (v2.8.16).
+
+    L1 depth used to force-halt on a tail-artifact/violation gap. v2.8.16
+    makes L1 mirror SC: when the 5 core depth role findings are present, the
+    driver retries once, runs one S1.5 targeted-repair attempt (3 depth calls
+    total), marks depth degraded, then DEGRADES-AND-CONTINUES instead of
+    halting. The audit must progress past depth on the core findings
+    (haltless-on-any-mode goal). Any later non-zero exit comes from a
+    downstream stub-artifact gap, not from depth policy.
+    """
     tmp, project, scratch, cfg_path, call_log = _make_project(
         "plamen_smoke_e_", pipeline="l1"
     )
     try:
-        rc = _run_driver(tmp, cfg_path, call_log, "E")
-        _assert(rc == 3, f"E exit: got {rc}, expected 3 (depth policy halt)")
+        _run_driver(tmp, cfg_path, call_log, "E")
 
         calls = call_log.read_text(encoding="utf-8").splitlines()
         depth_calls = [c for c in calls if c.startswith("depth:")]
-        _assert(len(depth_calls) == 2,
-                f"E: depth should retry once; got {depth_calls}")
+        _assert(len(depth_calls) == 3,
+                f"E: depth should retry once + one S1.5 repair (3 calls); got {depth_calls}")
 
         ckpt = json.loads(
             (scratch / "_v2_checkpoint.json").read_text(encoding="utf-8")
         )
         _assert("depth" in ckpt["degraded"],
                 f"E: depth must be degraded; got {ckpt['degraded']}")
+        _assert("depth" not in ckpt.get("completed", []),
+                f"E: degraded depth must not be completed; got {ckpt.get('completed')}")
         _assert((scratch / "depth.degraded").exists(),
                 "E: depth.degraded marker missing")
+        # The defining v2.8.16 contract: the pipeline does NOT halt at depth.
+        # It continues to the post-depth phase (verify_queue) on the core findings.
+        _assert("verify_queue" in ckpt.get("completed", []),
+                f"E: pipeline must continue past degraded depth; completed={ckpt.get('completed')}")
 
         print("[scenario E] PASS")
     finally:
@@ -1052,24 +1068,35 @@ def test_scenario_e_depth_gatefail_enforced() -> None:
 
 @pytest.mark.integration
 def test_scenario_f_never_cut_enforced() -> None:
-    """Never-cut checkpoint/artifact enforcement (Thorough — checkpoint gate)."""
+    """Never-cut tail-gap on depth -> degrade-and-continue (v2.8.16, Thorough).
+
+    F omits a required post-depth artifact + checkpoint entry. As with E,
+    L1 depth no longer force-halts: it retries once + one S1.5 repair (3 depth
+    calls), marks depth degraded, then continues to the later thorough-mode
+    phases (attention_repair runs after depth) on the core findings.
+    """
     tmp, project, scratch, cfg_path, call_log = _make_project(
         "plamen_smoke_f_", pipeline="l1", mode="thorough"
     )
     try:
-        rc = _run_driver(tmp, cfg_path, call_log, "F")
-        _assert(rc == 3, f"F exit: got {rc}, expected 3 (never-cut halt)")
+        _run_driver(tmp, cfg_path, call_log, "F")
 
         calls = call_log.read_text(encoding="utf-8").splitlines()
         depth_calls = [c for c in calls if c.startswith("depth:")]
-        _assert(len(depth_calls) == 2,
-                f"F: depth should retry once; got {depth_calls}")
+        _assert(len(depth_calls) == 3,
+                f"F: depth should retry once + one S1.5 repair (3 calls); got {depth_calls}")
 
         ckpt = json.loads(
             (scratch / "_v2_checkpoint.json").read_text(encoding="utf-8")
         )
         _assert("depth" in ckpt["degraded"],
                 f"F: depth must be degraded; got {ckpt['degraded']}")
+        _assert("depth" not in ckpt.get("completed", []),
+                f"F: degraded depth must not be completed; got {ckpt.get('completed')}")
+        # Haltless: depth degrades and the pipeline advances to a later
+        # thorough-mode phase (attention_repair is invoked after depth).
+        _assert(any(c.startswith("attention_repair:") for c in calls),
+                f"F: pipeline must continue past degraded depth; calls={calls}")
 
         print("[scenario F] PASS")
     finally:

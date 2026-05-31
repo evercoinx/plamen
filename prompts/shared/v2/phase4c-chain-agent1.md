@@ -130,6 +130,11 @@ Check if reaching state S1 (from Finding A) also reaches state S2 (from Finding 
 5. ANALYZE compound exploits
 6. VERIFY coverage — every finding has a status
 
+When finding details include optional Discovery Steer or semantic preservation
+fields, use them only as prioritization hints for grouping/enabler review.
+They are not proof, do not require a new section, and do not create any new
+artifact or gate.
+
 ### GROUPING RULES (MANDATORY)
 1. **Max 5 findings per hypothesis**. If grouping would exceed 5, split by exploit path.
 2. **No catch-all hypotheses**. Every finding must map to a hypothesis with a specific root cause. 'Miscellaneous' groupings are PROHIBITED.

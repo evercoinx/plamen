@@ -85,6 +85,20 @@ Return ONLY: "DONE: {FINDING_ID} verdict={VERDICT} tag={TAG}"
 
 ---
 
+## Driver owns the final Evidence Tag (read this first)
+
+A mechanical executor RE-RUNS your test after this phase using the node client's
+own toolchain (`go test` for Go, `cargo test` for Rust), and the DRIVER — not
+you — stamps the authoritative `[POC-PASS]`/`[POC-FAIL]` from that run. A
+`[POC-PASS]` you write that is NOT backed by a test the executor can locate and
+run to a real pass is **auto-demoted to `[CODE-TRACE]` and your `Verdict:` flips
+`CONFIRMED → CONTESTED [INTEGRITY-DOWNGRADE]`.** To earn a real `[POC-PASS]`,
+write a real test asserting the harm and fill `Test File:`/`Test Function:`/
+`Command:` with the exact values. `[DIFF-PASS]`/`[CONFORMANCE-PASS]`/
+`[NON-DET-PASS]`/`[FUZZ-PASS]`/`[LSP-TRACE]` are unaffected (the cargo/go
+executor only governs `[POC-PASS]`). If you cannot run a test, declare it
+honestly — the executor degrades to UNPROVEN without penalty and never halts.
+
 ## Output File Schema
 
 Each `verify_{FINDING_ID}.md` MUST contain:
@@ -95,6 +109,9 @@ Each `verify_{FINDING_ID}.md` MUST contain:
 **Preferred Tag**: {TAG from queue row}
 **Evidence Tag**: {ACTUAL_TAG_USED}
 **Verdict**: CONFIRMED / REFUTED / CONTESTED / INFEASIBLE / FALSE_POSITIVE
+**Test File**: {path under the test dir, *_test.go (Go) or tests/*.rs (Rust), or N/A}
+**Test Function**: {exact test function name the executor runs, or N/A}
+**Command**: {full `go test`/`cargo test` command, or N/A}
 
 ## Execution Output
 {Mechanical evidence: diff output, test output, SCIP citation, or code trace}
@@ -106,6 +123,8 @@ Each `verify_{FINDING_ID}.md` MUST contain:
 **Schema rules**:
 - Missing `Preferred Tag:` line is a schema failure.
 - `Evidence Tag` must be one of the 7 tags from the routing table above.
+- For a `[POC-PASS]` claim, `Test File:`/`Test Function:` MUST name a real
+  executable test (the executor re-runs it; an unbacked claim is demoted).
 - If the preferred tag workflow fails and fallback is used, document why in Execution Output.
 
 ---

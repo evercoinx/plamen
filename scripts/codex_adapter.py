@@ -393,10 +393,13 @@ PLATFORM_DIRECTIVE = (
 try:
     from plamen_types import _CODEX_MODEL_MAP as CODEX_MODEL_TIERS  # noqa: N811
 except ImportError:
+    # PARITY-7: these MUST equal plamen_types._CODEX_MODEL_MAP exactly so an
+    # import failure is a true no-op, not a silent tier drift (the old values
+    # reintroduced the documented 7x-cost sonnet drift).
     CODEX_MODEL_TIERS: dict[str, str] = {
         "opus": os.environ.get("PLAMEN_CODEX_OPUS_MODEL", "gpt-5.5"),
-        "sonnet": os.environ.get("PLAMEN_CODEX_SONNET_MODEL", "gpt-5.4-mini"),
-        "haiku": os.environ.get("PLAMEN_CODEX_HAIKU_MODEL", "gpt-5.4-nano"),
+        "sonnet": os.environ.get("PLAMEN_CODEX_SONNET_MODEL", "gpt-5.4"),
+        "haiku": os.environ.get("PLAMEN_CODEX_HAIKU_MODEL", "gpt-5.4-mini"),
     }
 
 # Role definitions: (filename, name, description, developer_instructions)

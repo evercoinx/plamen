@@ -214,6 +214,10 @@ Write to {SCRATCHPAD}/depth_{type}_findings.md:
 ## Chain Summary (MANDATORY)
 | Finding ID | Location | Root Cause (1-line) | Verdict | Severity | Precondition Type | Postcondition Type |
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
+Optionally include `Discovery Steer: ...` inside the root-cause cell or an
+existing notes cell when it gives a compact generic pairing hint. Do not add
+or rename table columns. It is not proof, not required, and does not change
+the output file set.
 
 Return: 'DONE: {N} new findings, {X} combinations, {Y} coverage gaps, {Z} REFUTED updates'
 
@@ -271,6 +275,10 @@ Write to {SCRATCHPAD}/depth_{type}_injectable_findings.md:
 ## Chain Summary (MANDATORY)
 | Finding ID | Location | Root Cause (1-line) | Verdict | Severity | Precondition Type | Postcondition Type |
 |------------|----------|--------------------:|---------|----------|-------------------|-------------------|
+Optionally include `Discovery Steer: ...` inside the root-cause cell or an
+existing notes cell when it gives a compact generic pairing hint. Do not add
+or rename table columns. It is not proof, not required, and does not change
+the output file set.
 
 Return: 'DONE: {N} findings from {Q} investigation questions'
 

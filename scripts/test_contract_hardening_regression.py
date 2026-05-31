@@ -4,6 +4,7 @@ import plamen_driver as D
 from plamen_types import plamen_home
 from plamen_parsers import (
     _extract_report_ids_from_body,
+    _filter_verification_queue_by_mode,
     _filter_sc_verification_queue_by_mode,
     _sanitize_client_body,
     parse_verification_queue_rows,
@@ -15,6 +16,7 @@ from plamen_mechanical import (
     _repair_report_body_from_manifest,
     _repair_sc_report_index_from_prior,
     _synth_report_section_from_verify,
+    _tag_report_index_unresolved_sections,
 )
 from plamen_prompt import build_phase_prompt
 from plamen_validators import (
@@ -28,11 +30,50 @@ from plamen_validators import (
     _run_report_quality_gate,
     _repair_report_index_dropouts,
     _write_chain_passthrough_outputs,
+    _generate_verify_shard_retry_hint,
 )
 
 
 def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
+
+
+def test_report_assembly_tags_report_index_unresolved_sections(tmp_path: Path):
+    sp = tmp_path / ".scratchpad"
+    sp.mkdir()
+    _write(
+        sp / "skeptic_judge_decisions.md",
+        "| Finding ID | Original Severity | Final Severity | Decision | Rationale |\n"
+        "|------------|-------------------|----------------|----------|-----------|\n"
+        "| H-12 | High | Medium | UNRESOLVED | Demote and retain for human review. |\n"
+        "| HH-21 | High | Medium | PARTIAL | Demote and retain for human review. |\n",
+    )
+    index = (
+        "## Master Finding Index\n\n"
+        "| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |\n"
+        "|-----------|-------|----------|----------|--------------|------------|---------------------|\n"
+        "| M-01 | Composite uncertainty | Medium | Z.sol:L1 | VERIFIED [CODE-TRACE] | UNRESOLVED(High) | HH-21+HH-22+HH-23 |\n"
+        "| M-02 | Trusted actor parameter uncertainty | Medium | A.sol:L1 | VERIFIED [CODE-TRACE] | UNRESOLVED(High) | H-12 |\n"
+        "| M-03 | Ordinary confirmed finding | Medium | B.sol:L2 | VERIFIED [CODE-TRACE] | - | H-13 |\n"
+        "| L-01 | Downgraded partial text but no judge unresolved | Low | C.sol:L3 | VERIFIED [CODE-TRACE] | PARTIAL(Medium) | H-41 |\n"
+    )
+    body = (
+        "### [M-01] Composite uncertainty [UNVERIFIED]\n\n"
+        "body\n\n"
+        "### [M-02] Trusted actor parameter uncertainty [UNVERIFIED]\n\n"
+        "body\n\n"
+        "### [M-03] Ordinary confirmed finding\n\n"
+        "body\n\n"
+        "### [L-01] Downgraded partial text but no judge unresolved\n\n"
+        "body\n"
+    )
+
+    tagged = _tag_report_index_unresolved_sections(body, index, sp)
+
+    assert "### [M-01] Composite uncertainty [UNVERIFIED] [UNRESOLVED]" in tagged
+    assert "### [M-02] Trusted actor parameter uncertainty [UNVERIFIED] [UNRESOLVED]" in tagged
+    assert "### [M-03] Ordinary confirmed finding [UNRESOLVED]" not in tagged
+    assert "### [L-01] Downgraded partial text but no judge unresolved [UNRESOLVED]" not in tagged
 
 
 def test_sc_core_queue_moves_low_info_to_excluded(tmp_path: Path):
@@ -56,6 +97,29 @@ def test_sc_core_queue_moves_low_info_to_excluded(tmp_path: Path):
     assert moved == 2
     assert [r["finding id"] for r in rows] == ["H-3"]
     assert "H-1" in excluded and "H-2" in excluded
+
+
+def test_l1_core_queue_moves_low_info_to_excluded(tmp_path: Path):
+    sp = tmp_path / ".scratchpad"
+    sp.mkdir()
+    _write(
+        sp / "verification_queue.md",
+        "| Queue # | Finding ID | Severity | Title |\n"
+        "|---------|------------|----------|-------|\n"
+        "| 1 | L1-H-1 | High | high issue |\n"
+        "| 2 | L1-L-1 | Low | low issue |\n"
+        "| 3 | L1-I-1 | Informational | info issue |\n",
+    )
+
+    moved = _filter_verification_queue_by_mode(sp, "core", pipeline_label="L1")
+
+    rows = parse_verification_queue_rows(sp)
+    excluded = (sp / "verification_queue_evidence_excluded.md").read_text(
+        encoding="utf-8"
+    )
+    assert moved == 2
+    assert [r["finding id"] for r in rows] == ["L1-H-1"]
+    assert "L1-L-1" in excluded and "L1-I-1" in excluded
 
 
 def test_resume_rewinds_completed_sc_verify_shard_missing_outputs(tmp_path: Path):
@@ -218,9 +282,9 @@ def test_recon_prompt_uses_language_split_clean_handoff_contract(tmp_path: Path)
     assert "TURN BUDGET POLICY" in prompt
     assert "RECON CLEAN HANDOFF CONTRACT" in prompt
     assert "CONTEXT DELEGATION PROTOCOL" in prompt
-    assert "Use the Task tool for parallel subagent work" in prompt
+    assert "Use the Task tool for parallel subagent work" not in prompt
     assert "RECON EXECUTION CONTEXT POLICY" not in prompt
-    assert "Do NOT use the Task tool or spawn child agents" not in prompt
+    assert "Do NOT use the Task tool or spawn child agents" in prompt
     for artifact in phase.expected_artifacts:
         assert f"`{artifact}`" in prompt
     assert "[LLM TO ENRICH]" not in prompt
@@ -324,8 +388,25 @@ def test_sc_verification_prompts_require_poc_testability_ledger() -> None:
         assert "STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION" in text
 
     assert '"no test written" is not a' in shared
+    assert "default to `Attempted: YES`" in shared
+    assert "minimal mock, harness, fork, or property test" in shared
+    assert "concrete blocker" in shared and "evidence" in shared
     assert "Compiled: N/A" in evm
     assert "`unit` and `property` findings" in rules
+
+
+def test_verify_shard_retry_hint_restates_poc_contract() -> None:
+    hint = _generate_verify_shard_retry_hint([
+        "verify PoC contract: H-1 mandatory unit PoC not attempted with valid blocker"
+    ])
+
+    assert "Attempted: YES" in hint
+    assert "Test File:" in hint
+    assert "Command:" in hint
+    assert "Attempted: NO" in hint
+    assert "PoC Not Attempted Because: <VALID_BLOCKER>" in hint
+    assert "EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS" in hint
+    assert "missing mocks" in hint
 
 
 def test_sc_verification_prompt_resumes_completed_rows() -> None:
@@ -1078,7 +1159,9 @@ def test_legacy_tier_restores_valid_body_from_overflow(tmp_path: Path):
         "### [C-01] critical title\n\n"
         "**Severity**: Critical\n"
         "**Location**: A.sol:L1\n\n"
-        "**Description**: valid restored body.\n",
+        "**Description**: valid restored body.\n"
+        "**Impact**: Funds can be stolen from the pool.\n"
+        "**PoC Result**: Test confirms the theft; assertion passed.\n",
     )
 
     assert D._restore_tier_body_from_overflow(sp, "report_critical_high") is True

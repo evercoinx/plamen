@@ -197,7 +197,13 @@ def test_scip_to_graph_artifacts_writes_all_four(tmp_path):
         f = scratch / name
         assert f.exists(), f"{name} not written"
         content = f.read_text(encoding="utf-8")
-        assert "POPULATED" in content
+        # RECON-3: callee_map is a file-co-occurrence heuristic, so its status
+        # is HEURISTIC (or PARTIAL above the node cap), not POPULATED. The other
+        # three remain POPULATED.
+        if name == "callee_map.md":
+            assert ("HEURISTIC" in content or "PARTIAL" in content), content[:200]
+        else:
+            assert "POPULATED" in content
 
 
 def test_scip_artifacts_have_correct_content(tmp_path):
@@ -285,6 +291,7 @@ def test_prepass_solana_triggers_scip_bake(tmp_path):
         "project_root": str(proj),
         "language": "solana",
         "pipeline": "sc",
+        "prepass_external_scanners": True,  # RECON-2: exercise opt-in startup bake
     }
     with mock.patch("recon_prepass._bake_rust_scip", return_value="SKIPPED:test") as m:
         results = run_recon_prepass(config)
@@ -301,6 +308,7 @@ def test_prepass_soroban_triggers_scip_bake(tmp_path):
         "project_root": str(proj),
         "language": "soroban",
         "pipeline": "sc",
+        "prepass_external_scanners": True,  # RECON-2: exercise opt-in startup bake
     }
     with mock.patch("recon_prepass._bake_rust_scip", return_value="SKIPPED:test") as m:
         results = run_recon_prepass(config)
@@ -363,6 +371,7 @@ def test_prepass_scip_bake_failure_does_not_crash(tmp_path):
         "project_root": str(proj),
         "language": "solana",
         "pipeline": "sc",
+        "prepass_external_scanners": True,  # RECON-2: exercise opt-in startup bake
     }
     with mock.patch("recon_prepass._bake_rust_scip", side_effect=RuntimeError("boom")):
         results = run_recon_prepass(config)
