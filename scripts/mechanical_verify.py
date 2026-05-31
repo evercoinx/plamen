@@ -201,10 +201,18 @@ def _format_test_command(template: str, test_function: str,
         fn_sub = f"^{test_function}$"
     cmd = template.replace("{test_function}", fn_sub)
     cmd = cmd.replace("{test_name}", fn_sub)
-    # Legacy {ID} / {id}: extract suffix after last 'test_' if present
+    # Legacy {ID} / {id}: extract suffix after leading 'test_' if present.
+    # Use a leading-prefix strip (NOT global replace) so internal 'test_'
+    # substrings — e.g. 'test_a_test_b' — are preserved.
     fn_lower = (test_function or "").lower()
-    id_suffix = fn_lower.replace("test_", "") if fn_lower.startswith("test_") else fn_lower
+    id_suffix = fn_lower[5:] if fn_lower.startswith("test_") else fn_lower
     cmd = cmd.replace("{ID}", id_suffix.upper())
+    # Intercept the literal `test_{id}` token with the dictated function name
+    # verbatim BEFORE the {id} substitution, so non-`test_`-prefixed names
+    # (e.g. aptos 'overflow_check') filter on the real name rather than
+    # 'test_overflow_check'. Guarded on a non-empty test_function.
+    if test_function:
+        cmd = cmd.replace("test_{id}", test_function)
     cmd = cmd.replace("{id}", id_suffix)
     if test_file:
         cmd = cmd.replace("{test_path}", test_file.replace("\\", "/"))
@@ -243,6 +251,61 @@ _BUILD_SCAN_SKIP_DIRS = {
     "node_modules", "target", ".git", "out", "cache", "artifacts",
     "dist", "build", ".venv", "venv", "__pycache__", "lib", ".cargo",
 }
+
+
+_RECON_BUILD_ROOT_RE = re.compile(
+    r"(?im)^\s*\**\s*Chosen\s+build\s+root\s*\**\s*:\s*`?\s*([^`\n]+?)\s*`?\s*$"
+)
+
+
+def _read_recon_build_root(scratchpad, language: str) -> Optional[Path]:
+    """Honor recon's authoritative chosen build root from build_status.md.
+
+    Recon (phase1 TASK 1) resolves the directory that owns the real build
+    manifest — frequently a sibling/ancestor of the source-only audit scope
+    dir that the heuristic upward-walk + tight neighbourhood scan cannot
+    reach. Recon records it in build_status.md as a line:
+
+        **Chosen build root**: `<absolute path>`
+
+    Returns the resolved path ONLY if it exists AND actually owns a manifest
+    for `language` (so a stale/wrong recon line degrades safely to the
+    heuristic). Returns None when:
+      - scratchpad/build_status.md is missing,
+      - no `Chosen build root` line is present,
+      - the value is the explicit `(none)` token,
+      - the path does not exist or owns no matching manifest.
+    """
+    if scratchpad is None:
+        return None
+    try:
+        status_path = Path(scratchpad) / "build_status.md"
+        if not status_path.exists():
+            return None
+        text = status_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = _RECON_BUILD_ROOT_RE.search(text)
+    if not m:
+        return None
+    raw = (m.group(1) or "").strip().strip("`").strip()
+    if not raw or raw.lower() in ("(none)", "none"):
+        return None
+    _lang = (language or "").lower().strip()
+    if _lang == "go":
+        _lang = "l1_go"
+    elif _lang == "rust":
+        _lang = "l1_rust"
+    manifests = _BUILD_MANIFESTS.get(_lang, ("foundry.toml",))
+    try:
+        cand = Path(raw).resolve()
+    except OSError:
+        return None
+    if not cand.is_dir():
+        return None
+    if any((cand / man).exists() for man in manifests):
+        return cand
+    return None
 
 
 def _find_build_root(project_root: Path, language: str) -> Path:
@@ -535,11 +598,13 @@ def _classify_non_evm_outcome(language: str, rc: int, stdout: str) -> str:
     s = stdout
     # Cargo (solana, soroban, l1_rust)
     if language in ("solana", "soroban", "l1_rust"):
-        if rc == 0 and re.search(r"test result:\s*ok\.\s*\d+\s*passed", s):
+        if re.search(r"test result:\s*ok\.\s*0\s*passed", s) or "running 0 tests" in s:
+            return "NO_TEST_MATCH"
+        if rc == 0 and re.search(r"test result:\s*ok\.\s*[1-9]\d*\s*passed", s):
             return "PASS"
         if re.search(r"error\[E\d+\]|could not compile|error: linking", s):
             return "COMPILE_FAIL"
-        if re.search(r"\d+\s+passed;\s+0\s+failed", s) and rc == 0:
+        if re.search(r"[1-9]\d*\s+passed;\s+0\s+failed", s) and rc == 0:
             return "PASS"
         if re.search(r"\d+\s+failed", s) or rc != 0:
             if "0 tests" in s or "0 passed" in s:
@@ -548,12 +613,14 @@ def _classify_non_evm_outcome(language: str, rc: int, stdout: str) -> str:
         return "FAIL"
     # Go testing
     if language == "l1_go":
+        # Zero-tests-matched must NOT be read as a pass (the `ok\tpkg` summary
+        # is printed even when `-run` matched nothing).
+        if "no tests to run" in s or "no test files" in s or "matching no tests" in s:
+            return "NO_TEST_MATCH"
         if rc == 0 and (re.search(r"^ok\s+", s, re.MULTILINE) or "--- PASS" in s):
             return "PASS"
         if "build failed" in s or "cannot find package" in s or "syntax error" in s:
             return "COMPILE_FAIL"
-        if "no test files" in s or "matching no tests" in s:
-            return "NO_TEST_MATCH"
         if rc != 0:
             return "FAIL"
         return "PASS"
@@ -565,7 +632,8 @@ def _classify_non_evm_outcome(language: str, rc: int, stdout: str) -> str:
             return "COMPILE_FAIL"
         if rc != 0:
             return "FAIL"
-        return "PASS"
+        # rc==0 but no PASS/OK marker → zero tests matched, not a real pass.
+        return "NO_TEST_MATCH"
     # Sui Move
     if language == "sui":
         if rc == 0 and re.search(r"Test result:\s*OK|PASS\s*$", s, re.MULTILINE):
@@ -574,7 +642,8 @@ def _classify_non_evm_outcome(language: str, rc: int, stdout: str) -> str:
             return "COMPILE_FAIL"
         if rc != 0:
             return "FAIL"
-        return "PASS"
+        # rc==0 but no PASS/OK marker → zero tests matched, not a real pass.
+        return "NO_TEST_MATCH"
     return "EXEC_ERROR"
 
 
@@ -1026,7 +1095,12 @@ def run_phase5b_mechanical_verify(scratchpad: Path, project_root: Path,
     # Resolve the build root once — the directory that owns the build
     # manifest (foundry.toml etc.), which is often a PARENT of the audit
     # scope dir. Test files and `test/` live here, not under project_root.
-    build_root = _find_build_root(Path(project_root), lang)
+    # Recon's authoritative chosen build root (from build_status.md) wins when
+    # present — the heuristic is the fallback for runs where recon emitted no
+    # (or a stale) choice.
+    build_root = _read_recon_build_root(scratchpad, lang) or _find_build_root(
+        Path(project_root), lang
+    )
 
     results: list[ExecResult] = []
     annotated = 0
@@ -1069,6 +1143,7 @@ __all__ = [
     "_load_registry",
     "_ensure_l1_registry_entries",
     "_find_build_root",
+    "_read_recon_build_root",
     "_format_test_command",
     "_classify_non_evm_outcome",
     "_classify_evm_outcome",

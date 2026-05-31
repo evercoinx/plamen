@@ -1951,6 +1951,31 @@ def _fc4_autocomplete_if_content_valid(
     return None
 
 
+def _inventory_has_usable_findings(scratchpad: Path, min_blocks: int = 3) -> bool:
+    """True when findings_inventory.md holds enough parseable finding blocks to
+    feed downstream phases (chain/verify/report).
+
+    Used by the inventory degrade-and-continue branch: a STRUCTURE /
+    field-completeness gate failure on an inventory that nonetheless contains
+    >= `min_blocks` usable finding blocks is a quality shortfall, not a
+    catastrophe — downstream phases can still operate. A missing/near-empty
+    inventory (0 blocks) still funnels to the critical-halt path.
+    """
+    inv_path = scratchpad / "findings_inventory.md"
+    try:
+        if not inv_path.exists():
+            return False
+        text = inv_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    if len(text.strip()) < 500:
+        return False
+    try:
+        return len(_inventory_blocks(text)) >= min_blocks
+    except Exception:
+        return False
+
+
 _BODY_CONTENT_RETRY_CAP = 2
 
 
@@ -9151,7 +9176,13 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
             import sys as _sys_br
             _sys_br.path.insert(0, str(Path(__file__).parent))
             _mv_br = _il_br.import_module("mechanical_verify")
-            _build_root = _mv_br._find_build_root(
+            # Honor recon's authoritative chosen build root (build_status.md)
+            # so the PoC-writing --add-dir grant and the mechanical executor
+            # resolve the SAME build root — otherwise the LLM writes its test
+            # where the executor will not look.
+            _build_root = _mv_br._read_recon_build_root(
+                scratchpad, config.get("language", "")
+            ) or _mv_br._find_build_root(
                 Path(config["project_root"]), config.get("language", "")
             )
             _br_posix = Path(_build_root).as_posix()
@@ -14624,6 +14655,37 @@ def main():
                                 f"(verify-shard net, v2.8.15)\n"
                                 f"- findings shipped UNPROVEN; unmet PoC "
                                 f"contract: {missing}\n"
+                            )
+                    except Exception:
+                        pass
+                    if phase.name not in checkpoint.degraded:
+                        checkpoint.degraded.append(phase.name)
+                    checkpoint.save(scratchpad)
+                    continue
+                elif phase.name == "inventory" and _inventory_has_usable_findings(
+                    scratchpad
+                ):
+                    # AP-HF-1: inventory degraded on a STRUCTURE /
+                    # field-completeness gate but >= 3 usable finding blocks are
+                    # present — downstream phases (chain/verify/report) can still
+                    # operate on them. Degrade-and-continue instead of funneling
+                    # to wait_critical_halt_choice. (Parity-only failures already
+                    # degrade via FC4, which skips parity for inventory; this
+                    # branch handles the STRUCTURE gate that FC4 still enforces.)
+                    log.warning(
+                        "[inventory] degraded on a structure/field-completeness "
+                        f"gate but usable finding blocks are present ({missing}) "
+                        "- degrading and continuing; downstream phases work on "
+                        "the parseable inventory"
+                    )
+                    try:
+                        with (scratchpad / "violations.md").open(
+                            "a", encoding="utf-8"
+                        ) as _vf:
+                            _vf.write(
+                                "\n## inventory degrade-not-halt (AP-HF-1)\n"
+                                "- usable finding blocks present; unresolved "
+                                f"structure gaps: {missing}\n"
                             )
                     except Exception:
                         pass

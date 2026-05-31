@@ -133,10 +133,11 @@ def test_classify_go_pass():
 def test_classify_go_no_match():
     mv = _mv()
     out = "testing: warning: no tests to run\nPASS\nok\tgithub.com/x/y"
-    # Go's "matching no tests" still rc=0 and emits PASS line — our classifier
-    # treats that as PASS (which is technically correct from Go's perspective).
-    # We accept that for now; finer-grained no-match detection lives in callers.
-    assert mv._classify_non_evm_outcome("l1_go", 0, out) == "PASS"
+    # AP-EXEC-5: Go prints `ok\tpkg` + PASS even when `-run` matched NOTHING.
+    # Reading that as PASS fabricated a [POC-PASS] for a zero-tests-matched run.
+    # The early "no tests to run" guard now classifies it NO_TEST_MATCH so it
+    # maps to [CODE-TRACE], not a mechanical proof.
+    assert mv._classify_non_evm_outcome("l1_go", 0, out) == "NO_TEST_MATCH"
 
 
 def test_classify_aptos_pass():

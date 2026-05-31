@@ -414,3 +414,128 @@ def test_build_root_no_false_match_on_unrelated_sibling(tmp_path):
     scope.mkdir(parents=True)
     # Neither upward walk nor the tight neighbourhood scan should reach it.
     assert MV._find_build_root(scope, "evm") == scope.resolve()
+
+
+# --------------------------------------------------------------------------- #
+# AP-EXEC-1a — recon's authoritative chosen build root (build_status.md)        #
+# --------------------------------------------------------------------------- #
+
+def _write_build_status(scratch: Path, chosen) -> None:
+    scratch.mkdir(parents=True, exist_ok=True)
+    line = f"**Chosen build root**: `{chosen}`\n" if chosen is not None else ""
+    (scratch / "build_status.md").write_text(
+        "# Build Status\n- **Build Result**: success\n" + line, encoding="utf-8"
+    )
+
+
+def test_recon_build_root_honored_sibling(tmp_path):
+    scratch = tmp_path / "scratch"
+    foundry = tmp_path / "contracts"
+    foundry.mkdir()
+    (foundry / "foundry.toml").write_text("[profile.default]\n")
+    _write_build_status(scratch, foundry)
+    assert MV._read_recon_build_root(scratch, "evm") == foundry.resolve()
+
+
+def test_recon_build_root_beats_heuristic_when_unreachable(tmp_path):
+    """Foundry root far away (heuristic can't reach), scope dir has no manifest —
+    the heuristic degrades to the scope dir, but recon's choice is honored."""
+    far = tmp_path / "x" / "y" / "z" / "contracts"
+    far.mkdir(parents=True)
+    (far / "foundry.toml").write_text("[profile.default]\n")
+    scope = tmp_path / "scope"
+    scope.mkdir()
+    scratch = tmp_path / "scratch"
+    _write_build_status(scratch, far)
+    # Heuristic cannot reach `far` → degrades to scope.
+    assert MV._find_build_root(scope, "evm") == scope.resolve()
+    # Recon's authoritative choice does reach it.
+    assert MV._read_recon_build_root(scratch, "evm") == far.resolve()
+
+
+def test_recon_build_root_rejected_when_no_manifest(tmp_path):
+    chosen = tmp_path / "nomanifest"
+    chosen.mkdir()
+    scratch = tmp_path / "scratch"
+    _write_build_status(scratch, chosen)
+    assert MV._read_recon_build_root(scratch, "evm") is None
+
+
+def test_recon_build_root_missing_file_returns_none(tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    assert MV._read_recon_build_root(scratch, "evm") is None
+
+
+def test_recon_build_root_none_token_ignored(tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "build_status.md").write_text(
+        "**Chosen build root**: `(none)`\n", encoding="utf-8"
+    )
+    assert MV._read_recon_build_root(scratch, "evm") is None
+
+
+def test_recon_build_root_solana_sibling_honored(tmp_path):
+    scratch = tmp_path / "scratch"
+    program = tmp_path / "program"
+    program.mkdir()
+    (program / "Cargo.toml").write_text("[package]\n")
+    _write_build_status(scratch, program)
+    assert MV._read_recon_build_root(scratch, "solana") == program.resolve()
+
+
+# --------------------------------------------------------------------------- #
+# AP-EXEC-2 — zero-tests-matched must be NO_TEST_MATCH, never a false PASS      #
+# --------------------------------------------------------------------------- #
+
+def test_classify_cargo_zero_passed_is_no_match():
+    out = "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored"
+    assert MV._classify_non_evm_outcome("solana", 0, out) == "NO_TEST_MATCH"
+
+
+def test_classify_cargo_one_passed_is_pass():
+    out = "running 1 test\ntest test_x ... ok\ntest result: ok. 1 passed; 0 failed"
+    assert MV._classify_non_evm_outcome("solana", 0, out) == "PASS"
+
+
+def test_classify_aptos_zero_tests_no_match():
+    # rc=0, no PASS/OK marker → zero tests matched.
+    assert MV._classify_non_evm_outcome("aptos", 0, "Running Move unit tests\n") == "NO_TEST_MATCH"
+
+
+def test_classify_sui_zero_tests_no_match():
+    assert MV._classify_non_evm_outcome("sui", 0, "BUILDING pkg\n") == "NO_TEST_MATCH"
+
+
+# --------------------------------------------------------------------------- #
+# AP-EXEC-4 — dictated test-function name used verbatim                         #
+# --------------------------------------------------------------------------- #
+
+def test_id_subst_preserves_non_test_prefixed_name():
+    argv = MV._format_test_command(
+        "aptos move test --filter test_{id}", "overflow_check", None, language="aptos"
+    )
+    assert "overflow_check" in argv
+    assert "test_overflow_check" not in argv
+
+
+def test_id_subst_internal_test_substring():
+    argv = MV._format_test_command(
+        "cargo test {test_function} -- --nocapture", "test_a_test_b", None, language="solana"
+    )
+    assert "test_a_test_b" in argv  # internal 'test_' not mangled by global replace
+
+
+# --------------------------------------------------------------------------- #
+# AP-EXEC-5 — Go zero-tests-matched run is NO_TEST_MATCH                        #
+# --------------------------------------------------------------------------- #
+
+def test_classify_go_no_tests_to_run_is_no_match():
+    out = "testing: warning: no tests to run\nPASS\nok\tgithub.com/x/y"
+    assert MV._classify_non_evm_outcome("l1_go", 0, out) == "NO_TEST_MATCH"
+
+
+def test_classify_go_real_pass_unchanged():
+    out = "=== RUN   TestH3\n--- PASS: TestH3 (0.01s)\nPASS\nok\tgithub.com/x/y\t0.12s"
+    assert MV._classify_non_evm_outcome("l1_go", 0, out) == "PASS"

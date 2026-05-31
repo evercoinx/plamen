@@ -213,6 +213,15 @@ Write to {SCRATCHPAD}/build_status.md:
 - **AST_GREP_AVAILABLE**: {true/false} (probe `ast-grep --version`. If true, TASK 2 supplements grep extraction with structural pattern matching for AST-aware queries that pure regex misses.)
 ```
 
+**MANDATORY — Chosen build root**: the audit scope dir is often source-only;
+the real `Move.toml` package root frequently lives in a sibling or ancestor
+directory. After resolving where the build actually compiled, emit EXACTLY
+this line into `build_status.md` (the mechanical PoC executor parses it
+verbatim): `**Chosen build root**: ` followed by the absolute path of the
+directory that owns `Move.toml`, wrapped in backticks — e.g.
+`` **Chosen build root**: `/abs/path/to/package` ``. If no build environment
+exists at all, emit `` **Chosen build root**: `(none)` ``.
+
 ## TASK 2: Static Analysis Artifacts
 
 Sui Move does not have a Slither equivalent. Extract program structure using grep as the PRIMARY method.

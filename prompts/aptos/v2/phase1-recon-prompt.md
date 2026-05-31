@@ -281,6 +281,15 @@ Write to {SCRATCHPAD}/build_status.md:
 - **Token Standard**: {Coin<T> / FungibleAsset / both / neither detected}
 ```
 
+**MANDATORY — Chosen build root**: the audit scope dir is often source-only;
+the real `Move.toml` package root frequently lives in a sibling or ancestor
+directory. After resolving where the build actually compiled, emit EXACTLY
+this line into `build_status.md` (the mechanical PoC executor parses it
+verbatim): `**Chosen build root**: ` followed by the absolute path of the
+directory that owns `Move.toml`, wrapped in backticks — e.g.
+`` **Chosen build root**: `/abs/path/to/package` ``. If no build environment
+exists at all, emit `` **Chosen build root**: `(none)` ``.
+
 ## TASK 2: Static Analysis Artifacts
 
 ### Move Prover (Primary Static Analyzer)

@@ -200,6 +200,17 @@ Write build result to {SCRATCHPAD}/build_status.md
 Include: `MEDUSA_AVAILABLE: true/false` (and version if available)
 Include: `REPO_SHAPE: squashed_import` if `git rev-list --count HEAD` returns 1, otherwise `REPO_SHAPE: normal_dev`. This tells FORK_ANCESTRY whether git history analysis is useful.
 
+**MANDATORY — Chosen build root**: the audit scope dir is often source-only
+(no `foundry.toml`/`hardhat.config.js`); the real build manifest lives in a
+sibling or ancestor directory. After resolving where `forge build` / `npx
+hardhat compile` actually compiled, emit EXACTLY this line into
+`build_status.md` (the mechanical PoC executor parses it verbatim):
+
+`**Chosen build root**: ` followed by the absolute path of the directory that
+owns the build manifest, wrapped in backticks — e.g.
+`` **Chosen build root**: `/abs/path/to/contracts` ``. If no build
+environment exists at all, emit `` **Chosen build root**: `(none)` ``.
+
 ## TASK 2: Static Analysis Artifacts
 
 ### Pre-Slither Compatibility: hardhat-dependency-compiler fix

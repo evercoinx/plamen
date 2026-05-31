@@ -135,6 +135,75 @@ def test_H1_missing_inventory_fails():
           repr(issues))
 
 
+# --------------------------------------------------------------------------
+# AP-HF-1: inventory degrade-and-continue helper
+# --------------------------------------------------------------------------
+
+def _inventory_block(idx: int, *, fields: bool = True) -> str:
+    lines = [f"### Finding [INV-{idx:03d}]: usable issue {idx}"]
+    if fields:
+        lines += [
+            "**Severity**: Medium",
+            f"**Location**: src/F{idx}.sol:L{idx}",
+            f"**Source IDs**: AC-{idx}",
+            "**Preferred Tag**: CODE-TRACE",
+        ]
+    lines.append(f"Description of issue {idx} with enough body to be substantive.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def test_AP_HF_1_usable_findings_true_for_3plus_blocks():
+    sp = _mkscratch({
+        "findings_inventory.md": "# Finding Inventory\n\n## Findings\n\n"
+        + "\n".join(_inventory_block(i) for i in range(1, 4)),
+    })
+    assert D._inventory_has_usable_findings(sp) is True
+
+
+def test_AP_HF_1_usable_findings_false_for_zero_blocks():
+    sp = _mkscratch({
+        "findings_inventory.md": "# Finding Inventory\n\nNo parseable findings here.\n",
+    })
+    assert D._inventory_has_usable_findings(sp) is False
+
+
+def test_AP_HF_1_usable_findings_false_for_near_empty():
+    sp = _mkscratch({"findings_inventory.md": "# Finding Inventory\n"})
+    assert D._inventory_has_usable_findings(sp) is False
+
+
+def test_AP_HF_1_usable_findings_false_for_missing_file():
+    sp = _mkscratch({})
+    assert D._inventory_has_usable_findings(sp) is False
+
+
+def test_AP_HF_1_structure_failure_with_usable_blocks_would_degrade():
+    """Integration precondition: a genuine STRUCTURE field-completeness HARD
+    failure on an inventory that STILL has >= 3 usable blocks. The new driver
+    branch degrades-and-continues (does NOT funnel to wait_critical_halt_choice)
+    precisely because both conditions hold."""
+    # 5 titled blocks, 4 of which (>40%) are missing required fields.
+    blocks = [_inventory_block(1)]  # complete
+    blocks += [_inventory_block(i, fields=False) for i in range(2, 6)]  # 4 incomplete
+    inv = "# Finding Inventory\n\n## Findings\n\n" + "\n".join(blocks)
+    sp = _mkscratch({"findings_inventory.md": inv})
+    structure_issues = D._validate_inventory_structure(sp)
+    # The STRUCTURE gate (the one FC4 enforces for inventory) genuinely fails...
+    assert any("missing one or more required fields" in s for s in structure_issues), structure_issues
+    # ...yet usable blocks are present, so the degrade branch fires.
+    assert D._inventory_has_usable_findings(sp) is True
+
+
+def test_AP_HF_1_zero_blocks_still_halts():
+    """Regression: an inventory with 0 usable blocks (missing-file class) does
+    NOT satisfy the degrade precondition, so the critical-halt path is preserved."""
+    sp = _mkscratch({})
+    # FC4's content gate (structure) fails AND no usable blocks → halt preserved.
+    assert D._validate_inventory_structure(sp), "structure gate must fail for missing inventory"
+    assert D._inventory_has_usable_findings(sp) is False
+
+
 def test_H1_block_count_retention_gate():
     """IDs align but heading-block count drops >60%. Flag retention."""
     upstream = "\n".join(
@@ -2937,6 +3006,12 @@ def main():
         test_H1_zero_upstream_signal_fails_loudly,
         test_H1_no_upstream_no_inventory_body_passes,
         test_H1_missing_inventory_fails,
+        test_AP_HF_1_usable_findings_true_for_3plus_blocks,
+        test_AP_HF_1_usable_findings_false_for_zero_blocks,
+        test_AP_HF_1_usable_findings_false_for_near_empty,
+        test_AP_HF_1_usable_findings_false_for_missing_file,
+        test_AP_HF_1_structure_failure_with_usable_blocks_would_degrade,
+        test_AP_HF_1_zero_blocks_still_halts,
         test_H1_block_count_retention_gate,
         test_H1_inventory_shard_merge_allows_dedup_against_chunks,
         test_A1_module_key_grouping,

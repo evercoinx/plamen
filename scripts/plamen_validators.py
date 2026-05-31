@@ -12283,6 +12283,25 @@ def _count_depth_promotion_inventory_blocks(inv_text: str) -> int:
     return len(_inventory_blocks(section.group(1)))
 
 
+def _count_niche_promotion_inventory_blocks(inv_text: str) -> int:
+    """Count inventory blocks under the disjoint niche-promoted section.
+
+    Niche-agent promotions are written to a separate `## Niche-Promoted
+    Findings` section (promotion skips IDs already present in inventory, so
+    this section is disjoint from the depth-promotion supplement and from the
+    base inventory). The depth-promotion receipt does NOT account for these,
+    so a clean merge can self-fail parity unless they are counted separately.
+    """
+    section = re.search(
+        r"(?is)^##\s+Niche[- ]Promoted Findings\b(.*?)(?=^##\s+|\Z)",
+        _llm_norm(inv_text),
+        re.MULTILINE,
+    )
+    if not section:
+        return 0
+    return len(_inventory_blocks(section.group(1)))
+
+
 def _generate_verify_queue_retry_hint(issues: list[str]) -> str:
     """Build retry hint for verify_queue parity failures."""
     if not issues:
@@ -13074,7 +13093,10 @@ def _validate_inventory_parity(scratchpad: Path) -> list[str]:
     receipt = _read_inventory_merge_receipt(scratchpad)
     promoted_inventory_blocks = _count_depth_promotion_inventory_blocks(inv_text)
     promoted_receipt_count = _read_depth_promotion_receipt_count(scratchpad)
-    accounted_promotions = max(promoted_inventory_blocks, promoted_receipt_count)
+    niche_inventory_blocks = _count_niche_promotion_inventory_blocks(inv_text)
+    accounted_promotions = (
+        max(promoted_inventory_blocks, promoted_receipt_count) + niche_inventory_blocks
+    )
     expected_inventory_blocks = (
         receipt.get("merged", 0) + accounted_promotions
         if receipt else 0
@@ -13099,6 +13121,7 @@ def _validate_inventory_parity(scratchpad: Path) -> list[str]:
             f"observed loose source blocks={observed_chunk_blocks or source_blocks}, "
             f"promoted inventory blocks={promoted_inventory_blocks}, "
             f"promotion receipt count={promoted_receipt_count}, "
+            f"niche inventory blocks={niche_inventory_blocks}, "
             f"inventory blocks={inv_blocks})"
         )
 
