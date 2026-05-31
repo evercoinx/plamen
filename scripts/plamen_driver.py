@@ -6772,6 +6772,12 @@ def _niche_skill_path_for_role(role: str) -> Path:
 _SC_SKILL_INJECT_EXCLUDE = frozenset({
     "FORK_ANCESTRY", "VERIFICATION_PROTOCOL", "MOVE_SAFETY_CORE_DIRECTIVES",
     "CORE_STATE", "ACCESS_CONTROL",
+    # v2.8.17: GENERAL is the instantiate floor-fill sentinel for a focus-only
+    # breadth agent with no skill methodology (phase2-instantiate Step 2a.3).
+    # It has no SKILL.md BY DESIGN — exclude it so it does not emit a spurious
+    # "did not resolve to a SKILL.md" binding-loss warning. The manifest schema
+    # gate is what rejects FABRICATED (non-sentinel, non-real) template names.
+    "GENERAL", "GENERAL_ANALYSIS", "CUSTOM", "CUSTOM_FOCUS",
 })
 
 
@@ -6992,6 +6998,12 @@ def _sc_skill_injection_block(
     skill resolves (so the prompt is unchanged for unbound agents)."""
     resolved: list[tuple[str, str]] = []
     for name in skill_names or []:
+        # v2.8.17: a recognized non-skill sentinel/baseline (GENERAL floor-fill,
+        # CORE_STATE/ACCESS_CONTROL) has no SKILL.md BY DESIGN — skip silently,
+        # not a binding loss. (Defense-in-depth at the warning site; the parser
+        # also filters these, but the suppression must not depend on caller.)
+        if str(name or "").strip().strip("`").upper() in _SC_SKILL_INJECT_EXCLUDE:
+            continue
         p = _sc_skill_path_for_name(name, language)
         if p is not None:
             resolved.append((name, p.as_posix()))

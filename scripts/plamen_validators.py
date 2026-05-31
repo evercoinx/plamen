@@ -30,11 +30,16 @@ from plamen_types import (
     EVIDENCE_TAGS_PROOF, EVIDENCE_TAG_NAMES_RE, has_mechanical_proof,
     FINDING_BLOCK_HEADING_RE,
     normalize_severity,
+    plamen_home,
 )
 from plamen_parsers import *  # noqa: F403,F401
 from plamen_parsers import (
     _OPTIONAL_FINDING_METADATA_FIELDS,
     _OPTIONAL_FINDING_METADATA_LABELS,
+    _normalize_manifest_header,
+    _split_markdown_table_row,
+    _manifest_row_from_cells,
+    _manifest_row_is_spawned_breadth_agent,
 )
 
 __all__ = [
@@ -206,6 +211,8 @@ __all__ = [
     "_validate_skeptic_full_ch_coverage",
     "_validate_skeptic_scope",
     "_validate_spawn_manifest_schema",
+    "_skill_template_resolves",
+    "_manifest_fabricated_templates",
     "_validate_tier_body_against_manifest",
     "_validate_verification_queue_inventory_parity",
     "_validate_verify_completion",
@@ -1796,6 +1803,99 @@ def _codebase_is_complex(scratchpad: Path) -> bool:
     return total_lines > 5000 or contracts > 10
 
 
+# v2.8.17: non-skill Template tokens that are valid in an AGENT row but have
+# no SKILL.md BY DESIGN — the GENERAL floor-fill sentinel (phase2-instantiate
+# Step 2a.3) and the always-required baseline focus areas. Mirrors the driver's
+# _SC_SKILL_INJECT_EXCLUDE so the fabricated-template gate and the injector
+# agree on what is "not a real skill but not an error".
+_NON_SKILL_TEMPLATE_TOKENS = frozenset({
+    "GENERAL", "GENERAL_ANALYSIS", "CUSTOM", "CUSTOM_FOCUS",
+    "CORE_STATE", "ACCESS_CONTROL",
+    "FORK_ANCESTRY", "VERIFICATION_PROTOCOL", "MOVE_SAFETY_CORE_DIRECTIVES",
+})
+
+
+def _skill_template_resolves(token: str) -> bool:
+    """True if an UPPER_SNAKE skill-template name has a SKILL.md in ANY SC
+    skill tree (language/injectable/niche). Mirrors driver's
+    _sc_skill_path_for_name existence check (searched across all trees, since
+    a shared skill resolves regardless of which language dir it lives in)."""
+    slug = str(token or "").strip().strip("`").lower().replace("_", "-")
+    if not slug:
+        return False
+    base = plamen_home() / "agents" / "skills"
+    for sub in ("evm", "solana", "aptos", "sui", "soroban",
+                "injectable", "niche", "injectable/l1"):
+        if (base / sub / slug / "SKILL.md").exists():
+            return True
+    return False
+
+
+def _manifest_fabricated_templates(scratchpad: Path) -> list[str]:
+    """Return `agent_id:TOKEN` for each spawned breadth AGENT row whose
+    Template column names a skill-like token (UPPER_SNAKE) that resolves to NO
+    SKILL.md and is not a recognized non-skill sentinel/baseline.
+
+    This catches `instantiate` inventing skill names to satisfy the breadth
+    floor (phase2-instantiate Step 2a.3) — e.g. REWARD_ACCOUNTING /
+    GAME_LOGIC_CORRECTNESS — which silently drop methodology. Combined cells
+    ("A + B") are split. Fails soft to [] on any parse problem.
+    """
+    p = scratchpad / "spawn_manifest.md"
+    if not p.exists():
+        return []
+    try:
+        text = _llm_norm(p.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    fabricated: list[str] = []
+    headers: list[str] = []
+    in_table = False
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not in_table:
+            s_lc = s.lower()
+            if s.startswith("|") and "template" in s_lc and "required" in s_lc:
+                headers = [
+                    _normalize_manifest_header(c)
+                    for c in _split_markdown_table_row(s)
+                ]
+                in_table = True
+            continue
+        if not s.startswith("|"):
+            in_table = False
+            headers = []
+            continue
+        if _is_separator_row(s):
+            continue
+        cells = _split_markdown_table_row(s)
+        if not cells:
+            continue
+        row = _manifest_row_from_cells(headers, cells)
+        req = (row.get("required") or row.get("required_")
+               or row.get("required?") or "")
+        if req and re.match(r"(?i)^(?:no|n|false|skip|optional|merged)\b",
+                            req.strip()):
+            continue
+        if not _manifest_row_is_spawned_breadth_agent(row, cells):
+            continue
+        template = _strip_md(row.get("template", "") or "").strip()
+        agent_id = _strip_md(row.get("agent_id", "")
+                             or row.get("agent", "")).strip() or "?"
+        for tok in re.split(r"\s*(?:\+|,|;|/|\band\b)\s*", template,
+                            flags=re.IGNORECASE):
+            t = re.sub(r"\s*\([^)]*\)\s*$", "", tok).strip().strip("`")
+            T = t.upper().replace(" ", "_")
+            if not re.match(r"^[A-Z][A-Z0-9_]+$", T):
+                continue
+            if T in _NON_SKILL_TEMPLATE_TOKENS:
+                continue
+            if _skill_template_resolves(T):
+                continue
+            fabricated.append(f"{agent_id}:{T}")
+    return fabricated
+
+
 def _validate_spawn_manifest_schema(scratchpad: Path) -> list[str]:
     """Validate the Phase 2 manifest at the producer boundary.
 
@@ -1870,15 +1970,34 @@ def _validate_spawn_manifest_schema(scratchpad: Path) -> list[str]:
         # on PulsechainGameWards a Complex codebase got 5 breadth agents instead
         # of the documented 7-9, merging away whole lenses (NFT/economic/
         # centralization). Distinct lenses are a recall-protection on big audits.
-        if count < 7 and _codebase_is_complex(scratchpad):
+        is_complex = _codebase_is_complex(scratchpad)
+        if count < 7 and is_complex:
             issues.append(
                 f"breadth tier floor: codebase is Complex (>10 in-scope "
                 f"contracts or >5000 total lines per contract_inventory.md) but "
                 f"spawn_manifest declares only {count} breadth AGENT row(s); the "
-                f"Complex tier requires >=7 (phase2-instantiate Step 2a). Split "
-                f"merged skills back into separate AGENT rows to reach >=7 — do "
-                f"NOT merge below the tier floor even if each merge stays under "
-                f"the 300-line cap."
+                f"Complex tier requires >=7 (phase2-instantiate Step 2a). Reach "
+                f">=7 per Step 2a.3 floor-fill: split a real skill's scope across "
+                f"agents, bind the closest real skill, or use Template `GENERAL` "
+                f"— do NOT invent skill names and do NOT merge below the floor."
+            )
+        # v2.8.17: reject FABRICATED skill templates on COMPLEX codebases — the
+        # breadth-floor-fill scenario where instantiate invents names (e.g.
+        # REWARD_ACCOUNTING) to reach >=7 agents, silently dropping methodology.
+        # Scoped to Complex so it never false-fires on simple/test manifests that
+        # use placeholder template names; non-complex fabrication is still
+        # surfaced by the driver's binding-loss warning. Soft/retry-driven;
+        # GENERAL is the valid escape, so there is no halt loop.
+        fabricated = _manifest_fabricated_templates(scratchpad) if is_complex else []
+        if fabricated:
+            issues.append(
+                "spawn_manifest.md binds fabricated skill template(s) "
+                + ", ".join(sorted(set(fabricated))[:8])
+                + " — these resolve to no SKILL.md (phase2-instantiate Step "
+                "2a.3). Bind the closest REAL skill from skill-index.md / "
+                "template_recommendations.md (split scope or closest-fit) or use "
+                "Template `GENERAL` for a skill-less focus agent; never invent a "
+                "template name."
             )
         if not issues:
             return []

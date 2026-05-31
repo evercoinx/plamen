@@ -50,6 +50,21 @@ The Move-Safety Agent prompt: load all 4 always-required SKILLs into a single ag
 
 ---
 
+## Step 2a.3: Breadth Floor-Fill — NEVER invent skill templates
+
+The Complex tier requires >=7 breadth agents (Step 2a). When the recon-recommended REAL skills yield FEWER agents than the floor, you MUST reach the floor **without inventing skill names**. The `Template` column of every AGENT row must contain ONLY:
+- a **real** skill/template name that exists at `~/.claude/agents/skills/{LANGUAGE|injectable|niche}/<lowercase-hyphenated-name>/SKILL.md` (the names in `skill-index.md` and your `template_recommendations.md`), a baseline focus (`CORE_STATE`, `ACCESS_CONTROL`), **or**
+- the literal sentinel `GENERAL` — a focus-only breadth pass with no skill methodology (the driver runs it as a general agent over that focus area; this is expected, not an error).
+
+To fill extra agents up to the floor, **in this order**:
+1. **Split a broad real skill's scope** across multiple agents by file/subsystem (e.g. `ORACLE_ANALYSIS` on RNG contracts as one agent, on price contracts as another) — same real `Template`, different `Focus Area` + file scope.
+2. **Bind the closest applicable real skill** to an under-covered domain. Examples: reward/payout accounting -> `ECONOMIC_DESIGN_AUDIT` or `SHARE_ALLOCATION_FAIRNESS`; game/round/RNG outcome logic -> `OUTCOME_DETERMINISM`; auxiliary swap/pricing -> the relevant real skill (`ORACLE_ANALYSIS`, `TOKEN_FLOW_TRACING`, ...).
+3. **Only if no real skill applies**, create a focus-only agent with `Template = GENERAL`.
+
+**PROHIBITED**: inventing a skill-like `Template` name that has no `SKILL.md` (e.g. `REWARD_ACCOUNTING`, `GAME_LOGIC_CORRECTNESS`, `MINIGAME_AUXILIARY`). A fabricated `Template` silently drops methodology and emits a binding-loss warning. The manifest schema gate rejects fabricated templates and you will be asked to retry — bind a real skill (split scope or closest-fit) or use `GENERAL`.
+
+---
+
 ## Step 2b: Instantiate Templates
 
 For each template marked `Required? = YES` in `template_recommendations.md`:

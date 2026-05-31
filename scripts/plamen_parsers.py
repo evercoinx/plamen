@@ -31,6 +31,10 @@ from plamen_types import (
 
 __all__ = [
     "DedupSignature",
+    "_manifest_row_from_cells",
+    "_manifest_row_is_spawned_breadth_agent",
+    "_normalize_manifest_header",
+    "_split_markdown_table_row",
     "_BODY_REPORT_ID_RE",
     "_BODY_SHARD_CAPS",
     "_BRACKETED_ID_RE",
