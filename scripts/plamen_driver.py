@@ -11647,6 +11647,61 @@ def _purge_scratchpad(scratchpad: Path, config: dict) -> None:
             pass
 
 
+def _archive_stale_mismatched_checkpoint(
+    scratchpad: Path,
+    checkpoint: "Checkpoint",
+    config: dict,
+    mode: str,
+    exc: Exception,
+) -> "Optional[Checkpoint]":
+    """Recover from a stale checkpoint whose phases are outside the active graph.
+
+    Triggered when `_reconcile_completed_checkpoint_artifacts` raises because
+    the loaded `_v2_checkpoint.json` references phases not present in the active
+    mode's graph — the classic "finished Thorough run, then a new Core audit in
+    the same scratchpad" situation. That is a mode/graph MISMATCH, not
+    corruption, and must never hard-halt a fresh start.
+
+    On a recoverable mismatch: archive the stale checkpoint to
+    `_v2_checkpoint.<old_mode>.bak-<ts>.json` (best-effort; falls back to delete)
+    and return a fresh empty `Checkpoint` bound to `config` (already saved).
+    Returns None when the error is NOT a recoverable mismatch (genuine
+    corruption / empty checkpoint / unrelated RuntimeError) — the caller must
+    then hard-exit. Same-mode resume never reaches here (no foreign phases →
+    no exception).
+    """
+    if "outside the active graph" not in str(exc):
+        return None
+    if not (checkpoint.completed or checkpoint.degraded):
+        return None
+    old_mode = "unknown"
+    try:
+        if isinstance(checkpoint.config, dict):
+            old_mode = str(checkpoint.config.get("mode") or "unknown")
+    except Exception:
+        pass
+    ckpt_file = scratchpad / "_v2_checkpoint.json"
+    archived = ckpt_file.with_suffix(f".{old_mode}.bak-{int(time.time())}.json")
+    try:
+        if ckpt_file.exists():
+            ckpt_file.rename(archived)
+    except Exception:
+        try:
+            if ckpt_file.exists():
+                ckpt_file.unlink()
+        except Exception:
+            pass
+    log.warning(
+        f"[checkpoint] stale checkpoint (mode={old_mode}) references phases "
+        f"outside the active '{mode}' graph; archived to {archived.name} and "
+        f"starting fresh. ({exc})"
+    )
+    fresh = Checkpoint()
+    fresh.config = config
+    fresh.save(scratchpad)
+    return fresh
+
+
 def _prompt_halt_resume_choice(
     checkpoint: Checkpoint,
     scratchpad: Path,
@@ -12073,8 +12128,21 @@ def main():
             scratchpad, config["project_root"], checkpoint, phases, mode
         )
     except RuntimeError as exc:
-        log.error(f"[checkpoint] invalid resume state: {exc}")
-        sys.exit(EXIT_DEGRADED)
+        # A stale checkpoint from a DIFFERENT mode/graph (e.g. a finished
+        # Thorough run, then a new Core audit launched in the same scratchpad)
+        # references phases absent from the active graph. That is NOT corruption
+        # and must not halt a fresh start: archive the stale checkpoint and
+        # continue with an empty one. Genuine corruption is caught earlier in
+        # Checkpoint.load; any other RuntimeError still hard-exits.
+        fresh_cp = _archive_stale_mismatched_checkpoint(
+            scratchpad, checkpoint, config, mode, exc
+        )
+        if fresh_cp is not None:
+            checkpoint = fresh_cp
+            artifact_rewound = []
+        else:
+            log.error(f"[checkpoint] invalid resume state: {exc}")
+            sys.exit(EXIT_DEGRADED)
     if artifact_rewound:
         checkpoint.save(scratchpad)
         log.warning(

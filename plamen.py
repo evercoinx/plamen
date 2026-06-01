@@ -4895,7 +4895,19 @@ def launch_v2(pipeline: str, mode: str, target: str, language: str,
 
     if sys.platform == "win32":
         os.system("")
-    result = subprocess.run([sys.executable, driver, config_path])
+    # launch_v2 just wrote a BRAND-NEW config.json, so this is a fresh run by
+    # definition. If a stale `_v2_checkpoint.json` survived in this scratchpad
+    # (e.g. the "New audit" path's shutil.rmtree(ignore_errors=True) silently
+    # skipped a Windows-locked file), launching WITHOUT --fresh makes the driver
+    # load that stale checkpoint and hard-halt on a mode/graph mismatch
+    # ("checkpoint references phases outside the active graph"). Pass --fresh so
+    # the driver's _purge_scratchpad clears it; config.json + dotfiles survive
+    # the purge, so the just-written config is safe.
+    _driver_cmd = [sys.executable, driver]
+    if os.path.isfile(os.path.join(scratchpad, "_v2_checkpoint.json")):
+        _driver_cmd.append("--fresh")
+    _driver_cmd.append(config_path)
+    result = subprocess.run(_driver_cmd)
 
     if result.returncode == 0:
         report = os.path.join(target, "AUDIT_REPORT.md")
