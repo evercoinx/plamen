@@ -1806,7 +1806,7 @@ def _resume_phase_contract_issues(
         hard, _soft = _validate_recon_content_structure(scratchpad)
         issues.extend(hard)
     elif phase.name == "instantiate":
-        issues.extend(_validate_spawn_manifest_schema(scratchpad))
+        issues.extend(_validate_spawn_manifest_schema(scratchpad, mode))
     elif phase.name in (
         "inventory_chunk_a", "inventory_chunk_b", "inventory_chunk_c"
     ):
@@ -5489,7 +5489,9 @@ applicable, and write the mandatory Chain Summary table.
     sc_skill_block = ""
     if pipeline != "l1":
         try:
-            breadth_map, _ = _parse_sc_skill_bindings(scratchpad)
+            breadth_map, _ = _parse_sc_skill_bindings(
+                scratchpad, str(config.get("language", ""))
+            )
             sc_skill_block = _sc_skill_injection_block(
                 breadth_map.get(str(focus).lower(), []), agent_kind="breadth",
                 language=str(config.get("language", "")),
@@ -6808,7 +6810,9 @@ def _sc_skill_path_for_name(name: str, language: str = "") -> "Path | None":
     return None
 
 
-def _parse_sc_skill_bindings(scratchpad: Path) -> "tuple[dict, dict]":
+def _parse_sc_skill_bindings(
+    scratchpad: Path, language: str = ""
+) -> "tuple[dict, dict]":
     """Parse spawn_manifest.md -> (breadth_focus -> [skills], depth_role -> [skills]).
 
     Header-aware: walks every markdown table, maps columns by header name, and
@@ -6884,14 +6888,34 @@ def _parse_sc_skill_bindings(scratchpad: Path) -> "tuple[dict, dict]":
 
     def _has_non_evm_target_evidence() -> bool:
         """Detect the recon condition for CROSS_VM_SERIALIZATION_CONFORMANCE
-        without trusting the LLM to have emitted a perfect manifest row."""
+        without trusting the LLM to have emitted a perfect manifest row.
+
+        Prefer the canonical `NON_EVM_TARGET` flag that recon writes to
+        detected_patterns.md: an explicit YES is authoritative-True and an
+        explicit NO is authoritative-False. Only when recon did NOT emit the
+        flag do we fall back to the substring heuristic, and that heuristic
+        excludes template_recommendations.md — that file DOCUMENTS the
+        CROSS_VM trigger pattern verbatim (the false-positive source that made
+        pure-EVM audits like DODO spuriously recover the binding)."""
+        dp = scratchpad / "detected_patterns.md"
+        try:
+            if dp.exists():
+                dp_text = dp.read_text(encoding="utf-8", errors="replace")
+                m = re.search(
+                    r"NON_EVM_TARGET\s*(?:=|:)\s*(YES|NO|TRUE|FALSE)",
+                    dp_text,
+                    re.IGNORECASE,
+                )
+                if m:
+                    return m.group(1).upper() in ("YES", "TRUE")
+        except Exception:
+            pass
         hay_parts: list[str] = []
         for name in (
             "recon_summary.md",
             "design_context.md",
             "attack_surface.md",
             "detected_patterns.md",
-            "template_recommendations.md",
             "contract_inventory.md",
             "function_list.md",
         ):
@@ -6965,23 +6989,56 @@ def _parse_sc_skill_bindings(scratchpad: Path) -> "tuple[dict, dict]":
                         f = agent_focus.get(aid.group(1), "")
                 if f:
                     _add(breadth, f, skill)
-    if _has_non_evm_target_evidence():
+    # The CROSS_VM_SERIALIZATION_CONFORMANCE recovery only applies when the
+    # audit target is a non-EVM VM serializer (EVM -> Solana/BTC/foreign-VM).
+    # Gate it on language: pure-EVM audits (language=='evm') and legacy/unknown
+    # runs (language=='') must NOT recover this binding — that was the
+    # false-fire source on pure-Solidity audits like DODO.
+    lang = (language or "").strip().lower()
+    if lang not in ("evm", "") and _has_non_evm_target_evidence():
         # This injectable is load-bearing for EVM -> Solana/BTC/foreign-VM
         # serialization bugs. If recon saw the evidence but instantiate omitted
         # the row, recover mechanically instead of silently losing recall.
         cross_vm = "CROSS_VM_SERIALIZATION_CONFORMANCE"
+
+        def _log_recovery_once(msg: str, *args) -> None:
+            # Dedupe across the many breadth/depth worker calls per run: emit
+            # each distinct recovery warning at most once via a scratchpad
+            # marker so it cannot spam dozens of identical lines.
+            flag = scratchpad / "_skill_recovery_logged.flag"
+            try:
+                rendered = msg % args if args else msg
+            except Exception:
+                rendered = msg
+            try:
+                seen = (
+                    flag.read_text(encoding="utf-8", errors="replace").splitlines()
+                    if flag.exists()
+                    else []
+                )
+            except Exception:
+                seen = []
+            if rendered in seen:
+                return
+            log.warning(msg, *args)
+            try:
+                with flag.open("a", encoding="utf-8") as fh:
+                    fh.write(rendered + "\n")
+            except Exception:
+                pass
+
         if not any(cross_vm in skills for skills in breadth.values()):
             f = _best_non_evm_breadth_focus()
             if f:
                 _add(breadth, f, cross_vm)
-                log.warning(
+                _log_recovery_once(
                     "[skill-injection] recovered %s breadth binding for focus %s "
                     "from non-EVM target evidence",
                     cross_vm, f,
                 )
         if not any(cross_vm in skills for skills in depth.values()):
             _add(depth, "external", cross_vm)
-            log.warning(
+            _log_recovery_once(
                 "[skill-injection] recovered %s depth binding for depth-external "
                 "from non-EVM target evidence",
                 cross_vm,
@@ -7371,7 +7428,7 @@ Mandatory perturbation-retention contract for this role:
     depth_skill_block = ""
     if pipeline != "l1":
         try:
-            _, depth_map = _parse_sc_skill_bindings(scratchpad)
+            _, depth_map = _parse_sc_skill_bindings(scratchpad, language)
             depth_skill_block = _sc_skill_injection_block(
                 depth_map.get(str(role).lower(), []), agent_kind="depth",
                 language=language,
@@ -10413,7 +10470,9 @@ def _run_phase_validators(
 
     # --- instantiate: validate spawn_manifest.md at the producer boundary ---
     if phase.name == "instantiate" and passed:
-        manifest_issues = _validate_spawn_manifest_schema(scratchpad)
+        manifest_issues = _validate_spawn_manifest_schema(
+            scratchpad, config.get("mode", "core")
+        )
         if manifest_issues:
             passed = False
             missing = list(missing) + manifest_issues

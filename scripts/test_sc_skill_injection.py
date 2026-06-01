@@ -97,7 +97,9 @@ def test_non_evm_target_evidence_mechanically_recovers_cross_vm_binding():
         "AccountEncoder serializes Solana pubkey/account bytes for a destination chain.",
         encoding="utf-8",
     )
-    breadth, depth = D._parse_sc_skill_bindings(sp)
+    # Recovery is gated on a non-EVM audit language (a genuine EVM->non-EVM
+    # serializer). Pure-EVM and legacy/unknown ('') runs must NOT recover.
+    breadth, depth = D._parse_sc_skill_bindings(sp, "solana")
     assert "CROSS_VM_SERIALIZATION_CONFORMANCE" in breadth.get(
         "cross_chain_message_integrity", []
     )

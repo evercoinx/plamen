@@ -1896,7 +1896,7 @@ def _manifest_fabricated_templates(scratchpad: Path) -> list[str]:
     return fabricated
 
 
-def _validate_spawn_manifest_schema(scratchpad: Path) -> list[str]:
+def _validate_spawn_manifest_schema(scratchpad: Path, mode: str = "core") -> list[str]:
     """Validate the Phase 2 manifest at the producer boundary.
 
     `spawn_manifest.md` is the contract consumed by breadth. Letting
@@ -1971,7 +1971,12 @@ def _validate_spawn_manifest_schema(scratchpad: Path) -> list[str]:
         # of the documented 7-9, merging away whole lenses (NFT/economic/
         # centralization). Distinct lenses are a recall-protection on big audits.
         is_complex = _codebase_is_complex(scratchpad)
-        if count < 7 and is_complex:
+        # The Complex-tier breadth floor (>=7) is a Core/Thorough recall
+        # protection. LIGHT mode deliberately runs 3-4 breadth agents per the
+        # AUDIT MODES table, so enforcing the floor there would false-fail a
+        # correctly-sized Light manifest. Gate the floor to Core/Thorough only;
+        # any non-core/thorough mode (light, and unknown modes) skips it.
+        if count < 7 and is_complex and mode in ("core", "thorough"):
             issues.append(
                 f"breadth tier floor: codebase is Complex (>10 in-scope "
                 f"contracts or >5000 total lines per contract_inventory.md) but "
