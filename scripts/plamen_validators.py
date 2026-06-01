@@ -43,6 +43,10 @@ from plamen_parsers import (
 )
 
 __all__ = [
+    "verify_poc_contract_only_failed_ids",
+    "_generate_verify_targeted_repair_hint",
+    "verify_targeted_repair_already_done",
+    "mark_verify_targeted_repair_done",
     "_NEVER_CUT_FILENAME_ALIASES",
     "_QUARANTINE_PATTERNS_BY_PHASE",
     "_RETRY_HINT_SUFFIX",
@@ -12789,6 +12793,130 @@ def _generate_verify_shard_retry_hint(issues: list[str]) -> str:
         "manifest, not only the IDs named above.",
     ])
     return "\n".join(lines) + "\n"
+
+
+# --- MVP verify targeted PoC-contract repair (additive, haltless) -----------
+#
+# Class scope: the ONLY failure this MVP targets is the per-finding PoC-contract
+# gate emitting "{fid} says Attempted:YES but lacks concrete Test File/Command"
+# (plamen_validators._validate_poc_contract_for_rows). Those sub-issues are
+# wrapped by _validate_verify_completion into a single combined entry of the
+# shape "verify PoC contract: <sub>; <sub>; ...". The targeted repair fires at
+# most ONCE per phase, scoped to ONLY the named IDs via a sharpened hint, and
+# only when the WHOLE gate failure is this class. Any other issue type (schema,
+# missing files, mandatory-not-attempted, location recovery, EXTERNAL_DEPENDENCY
+# mock-override, base gate issues, ...) means we do NOT fire and the existing
+# verify-shard degrade-and-continue runs unchanged.
+_VERIFY_POC_CONTRACT_PREFIX = "verify PoC contract: "
+_VERIFY_ATTEMPTED_YES_NO_TESTFILE = "says Attempted:YES but lacks concrete Test File/Command"
+_VERIFY_TARGETED_REPAIR_FLAG_SUFFIX = "_verify_targeted_repair_done"
+
+
+def verify_poc_contract_only_failed_ids(missing: list[str]) -> list[str]:
+    """Return failed finding IDs IFF the gate failure is PoC-contract-only.
+
+    PoC-contract-only means: every entry in ``missing`` is a combined
+    ``"verify PoC contract: ..."`` entry AND every sub-issue inside it is the
+    ``"says Attempted:YES but lacks concrete Test File/Command"`` class. If the
+    failure mixes in any other issue type (or any other PoC-contract sub-class),
+    return ``[]`` so the caller skips the targeted attempt and degrades as now.
+
+    The returned IDs are de-duplicated, order-preserved. An empty list is the
+    "do not fire" signal for ALL non-matching inputs (empty/mixed/other-class).
+    """
+    if not missing:
+        return []
+    fids: list[str] = []
+    seen: set[str] = set()
+    for entry in missing:
+        if not isinstance(entry, str):
+            return []
+        if not entry.startswith(_VERIFY_POC_CONTRACT_PREFIX):
+            # Any non-PoC-contract issue (schema, missing files, location
+            # recovery, base gate, ...) -> not PoC-contract-only -> bail.
+            return []
+        body = entry[len(_VERIFY_POC_CONTRACT_PREFIX):]
+        # _validate_verify_completion joins sub-issues with "; ".
+        for sub in body.split(";"):
+            sub = sub.strip()
+            if not sub:
+                continue
+            if _VERIFY_ATTEMPTED_YES_NO_TESTFILE not in sub:
+                # A different PoC-contract sub-class (mandatory-not-attempted,
+                # missing ledger, EXTERNAL_DEPENDENCY mock-override, ...) -> the
+                # targeted hint would not fully repair the gate -> bail.
+                return []
+            m = re.match(r"^([A-Za-z0-9_.\[\]\-]+)\s+says\s+Attempted:YES", sub)
+            if not m:
+                # Could not isolate the id from a matching-class sub-issue ->
+                # ambiguous -> bail (degrade as now).
+                return []
+            fid = m.group(1).strip().strip("[]")
+            if fid and fid not in seen:
+                seen.add(fid)
+                fids.append(fid)
+    return fids
+
+
+def _generate_verify_targeted_repair_hint(fids: list[str]) -> str:
+    """Sharpened, scoped retry hint naming ONLY the failed IDs.
+
+    Tells the verifier to repair ONLY these verify_<ID>.md files and to leave
+    every other verify_*.md file untouched (the good findings' files are already
+    on disk and are preserved by the partial-results accumulation logic).
+    """
+    if not fids:
+        return ""
+    lines = [
+        "## RETRY HINT — targeted PoC-contract repair (MVP, one-shot)",
+        "",
+        "The verify-shard PoC contract gate failed for ONLY these findings; "
+        "each declared `Attempted: YES` but did NOT supply a concrete "
+        "`Test File:` AND `Command:`. This is your final targeted attempt for "
+        "this shard — repair ONLY the IDs listed below:",
+        "",
+    ]
+    for fid in fids:
+        lines.append(
+            f"- `verify_{fid}.md`: either (a) keep `Attempted: YES` and add a "
+            f"concrete `Test File:` AND `Command:` (no N/A / NONE), OR "
+            f"(b) change to `Attempted: NO` and add "
+            f"`PoC Not Attempted Because: <VALID_BLOCKER>` using exactly one of "
+            f"`NO_BUILD_ENVIRONMENT`, `EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS`, "
+            f"`DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL`, `PURE_SPEC_OR_DOCS_ONLY`, "
+            f"`STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION`, "
+            f"`CROSS_VM_ENCODING_NO_RUNTIME`."
+        )
+    lines.extend([
+        "",
+        "Repair ONLY the verify_*.md files named above. Do NOT touch, rewrite, "
+        "delete, or re-verify any other verify_*.md file in this shard — all "
+        "other findings are already complete and must be preserved verbatim.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def verify_targeted_repair_already_done(scratchpad: Path, phase_name: str) -> bool:
+    """Fire-once guard: True if the targeted repair already ran for this phase.
+
+    Disk-marker based so it survives resume (the marker is written to the
+    scratchpad before the targeted attempt is spawned).
+    """
+    flag = scratchpad / f"{phase_name}{_VERIFY_TARGETED_REPAIR_FLAG_SUFFIX}.flag"
+    return flag.exists()
+
+
+def mark_verify_targeted_repair_done(scratchpad: Path, phase_name: str) -> None:
+    """Set the fire-once marker for this phase (before spawning the attempt)."""
+    flag = scratchpad / f"{phase_name}{_VERIFY_TARGETED_REPAIR_FLAG_SUFFIX}.flag"
+    try:
+        flag.write_text(
+            f"targeted PoC-contract repair attempted for {phase_name} at "
+            f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 # --- end v2.3.14 retry hint generators --------------------------------------

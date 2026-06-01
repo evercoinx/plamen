@@ -14545,6 +14545,74 @@ def main():
                 phase, config, scratchpad, phases, rc, file_state_before,
                 violations_before,
             )
+
+            # MVP targeted PoC-contract repair (additive, haltless, fire-once).
+            # When attempt 2 of a PoC verify shard fails EXCLUSIVELY on the
+            # "Attempted:YES but lacks concrete Test File/Command" PoC-contract
+            # class, fire ONE extra repair attempt — scoped via a sharpened retry
+            # hint to ONLY the failed IDs — BEFORE the existing verify-shard
+            # degrade-and-continue branch below. The good findings' verify_*.md
+            # files are already on disk and are preserved by the v2.4.5
+            # partial-results accumulation (NO new quarantine logic). A hard
+            # disk-marker fire-once guard means this can NEVER loop: it runs at
+            # most once per phase. If the targeted attempt satisfies the gate,
+            # `passed` flips True and the normal completion path runs. If it still
+            # fails (or anything is ambiguous), `passed` stays False and control
+            # reaches the UNCHANGED `_is_poc_verify_shard` degrade branch (ship
+            # UNPROVEN, continue). The degrade remains the floor; verify shards
+            # never halt. Triggers ONLY on the PoC-contract-only class — a mixed
+            # failure skips the targeted attempt and degrades as before.
+            if (
+                not passed
+                and _is_poc_verify_shard(phase.name)
+                and not verify_targeted_repair_already_done(
+                    scratchpad, phase.name
+                )
+            ):
+                _tr_failed_ids = verify_poc_contract_only_failed_ids(
+                    list(missing)
+                )
+                if _tr_failed_ids:
+                    log.warning(
+                        f"[{phase.name}] PoC-contract-only gate failure for "
+                        f"{_tr_failed_ids} — running ONE targeted repair attempt "
+                        f"(scoped to those IDs) before degrading"
+                    )
+                    # Set the fire-once marker BEFORE spawning so a crash /
+                    # resume mid-attempt cannot re-fire it.
+                    mark_verify_targeted_repair_done(scratchpad, phase.name)
+                    _write_retry_hint(
+                        scratchpad, phase.name,
+                        _generate_verify_targeted_repair_hint(_tr_failed_ids),
+                    )
+                    _tr_state_before = _snapshot_file_state(
+                        scratchpad, config["project_root"]
+                    )
+                    rc = run_phase(phase, config, attempt=3)
+                    if rc == -3:
+                        if _prompt_halt_resume_choice(
+                            checkpoint, scratchpad, phase.name, config_path
+                        ):
+                            rc = run_phase(phase, config, attempt=3)
+                        else:
+                            _halted = True
+                            break
+                    passed, missing = _run_phase_validators(
+                        phase, config, scratchpad, phases, rc,
+                        _tr_state_before, 0,
+                    )
+                    if passed:
+                        log.info(
+                            f"[{phase.name}] targeted PoC-contract repair "
+                            f"satisfied the gate — completing normally"
+                        )
+                    else:
+                        log.warning(
+                            f"[{phase.name}] targeted PoC-contract repair did "
+                            f"not satisfy the gate ({missing}) — degrading and "
+                            f"continuing (verify shards never halt)"
+                        )
+
             if passed and phase.name in ("semantic_dedup", "sc_semantic_dedup"):
                 passthrough_issue = _semantic_dedup_passthrough_issue(scratchpad)
                 if passthrough_issue:
