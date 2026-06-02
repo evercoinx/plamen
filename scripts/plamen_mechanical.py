@@ -21,6 +21,8 @@ from plamen_parsers import *  # noqa: F403,F401
 from plamen_parsers import (
     _OPTIONAL_FINDING_METADATA_FIELDS,
     _OPTIONAL_FINDING_METADATA_LABELS,
+    _queue_rows_from_inventory_with_exclusions,
+    _write_queue_subset_manifest,
 )
 from plamen_validators import *  # noqa: F403,F401
 from plamen_validators import (  # explicit private helpers used by SC index repair
@@ -6056,13 +6058,26 @@ def _apply_location_recovery(scratchpad: Path, project_root: str) -> list[str]:
 
 
 def backfill_unrouted_inventory_into_queue(scratchpad: Path) -> list[str]:
-    """Append any inventory ID unrouted by queue generation to
-    verification_queue.md as an active row so verification-queue<->inventory
-    parity always holds. Deterministic + idempotent. Returns backfilled IDs.
+    """Route any inventory ID dropped by queue generation back into the
+    ACTIVE verification queue so verification-queue<->inventory parity always
+    holds. Deterministic + idempotent. Returns the backfilled finding IDs.
 
-    This converts a silent LLM queue-generation dropout (which otherwise makes
-    the resume reconciliation rewind the entire verify stage) into explicit,
-    verifiable queue rows.
+    This converts a silent LLM/mechanical queue-generation dropout (which
+    otherwise makes the resume reconciliation rewind the entire verify stage)
+    into explicit, verifiable active queue rows.
+
+    The persistence is via the CANONICAL writer `_write_queue_subset_manifest`,
+    which rewrites BOTH `verification_queue.md` (canonical 10-column manifest)
+    AND its JSON sidecar `verification_queue.json`. We never raw-append markdown
+    text and never hand-roll a partial-column row: the previous implementation
+    appended 6-column rows AFTER the manifest footer line, which the markdown
+    table parser stops at, and left the JSON sidecar stale -> parity never
+    closed and resume rewound ~15 phases on every attempt.
+
+    Each backfilled row reuses the EXACT field extraction from
+    `_queue_rows_from_inventory_with_exclusions` (the queue builder), so the
+    row dict carries the same queue/severity/title/bug-class/preferred-tag/
+    location/primary-artifact/poc-class fields any normal active row has.
     """
     from plamen_validators import _compute_unrouted_inventory_ids
 
@@ -6074,75 +6089,76 @@ def backfill_unrouted_inventory_into_queue(scratchpad: Path) -> list[str]:
     if not queue_path.exists():
         # A missing queue is a different failure owned by the existing gate.
         return []
-    try:
-        text = queue_path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return []
-    if "| Finding ID |" not in text and "|finding id|" not in text.replace(" ", "").lower():
-        # No parseable queue table; the existing gate owns that failure.
-        return []
 
-    # Existing rows: derive present Finding IDs (for idempotency) and the
-    # current max Queue # so appended rows keep a monotonic numbering.
+    # Existing ACTIVE rows (authoritative via JSON sidecar when present, with
+    # markdown fallback handled inside parse_verification_queue_rows). These are
+    # preserved verbatim; we only ADD the unrouted IDs.
     existing_rows = parse_verification_queue_rows(scratchpad)
     present_ids: set[str] = set()
-    max_queue = 0
     for row in existing_rows:
         fid = _normalize_finding_id(row.get("finding id", "")) or (
             row.get("finding id", "") or ""
         ).strip()
         if fid:
             present_ids.add(fid)
-        raw_q = str(row.get("queue") or row.get("queue #") or "").strip()
-        m = re.search(r"\d+", raw_q)
-        if m:
-            try:
-                max_queue = max(max_queue, int(m.group(0)))
-            except ValueError:
-                pass
 
-    # Inventory severity/title lookup, keyed by normalized ID.
-    inv_path = scratchpad / "findings_inventory.md"
-    inv_meta: dict[str, tuple[str, str]] = {}
-    try:
-        inv_text = inv_path.read_text(encoding="utf-8", errors="replace")
-        for block in _inventory_blocks(inv_text):
-            bid = _normalize_finding_id(block.get("id", ""))
-            if not bid:
-                continue
-            sev = normalize_severity(
-                _field_from_markdown(
-                    block.get("block", ""), ("Severity", "Final Severity")
-                )
-            ) or "Medium"
-            title = (block.get("title") or "").strip() or bid
-            inv_meta[bid] = (sev, title)
-    except Exception:
-        inv_meta = {}
+    # Build canonical row dicts for every inventory block, using the SAME
+    # builder the queue phase uses. Index the builder's ACTIVE rows by
+    # normalized finding ID so each backfilled row is byte-for-byte the kind of
+    # row the builder would have emitted had it not been dropped. Fall back to
+    # excluded rows (a dropout can also originate from an inventory block the
+    # builder placed nowhere) and finally to a minimal canonical dict.
+    builder_active, builder_excluded = _queue_rows_from_inventory_with_exclusions(
+        scratchpad
+    )
+    builder_by_id: dict[str, dict[str, str]] = {}
+    for src in (builder_excluded, builder_active):
+        # active last so it wins on collision (active is the preferred route)
+        for row in src:
+            bid = _normalize_finding_id(row.get("finding id", "")) or (
+                row.get("finding id", "") or ""
+            ).strip()
+            if bid:
+                builder_by_id[bid] = row
 
     appended: list[str] = []
-    new_lines: list[str] = []
-    n = max_queue
+    new_rows: list[dict[str, str]] = []
     for fid in unrouted:
         if fid in present_ids:
-            # Idempotency: never duplicate an ID already in the queue.
+            # Idempotency: never duplicate an ID already in the active queue.
             continue
-        n += 1
-        sev, title = inv_meta.get(fid, ("Medium", fid))
-        new_lines.append(
-            f"| {n} | {fid} | {sev} | {title} | "
-            "Unrouted by queue generation (mechanical backfill) | [CODE-TRACE] |"
-        )
+        src = builder_by_id.get(fid)
+        if src is not None:
+            row = dict(src)
+            # Drop any exclusion reason so this routes ACTIVE, and annotate the
+            # backfill provenance via the bug class without losing the real one.
+            row.pop("exclusion reason", None)
+            if not row.get("bug class"):
+                row["bug class"] = "Unrouted by queue generation (mechanical backfill)"
+        else:
+            row = {
+                "finding id": fid,
+                "severity": "Medium",
+                "title": fid,
+                "bug class": "Unrouted by queue generation (mechanical backfill)",
+                "preferred tag": "CODE-TRACE",
+                "location": "",
+                "primary artifact": "findings_inventory.md",
+                "poc class": "structural",
+            }
+        new_rows.append(row)
         present_ids.add(fid)
         appended.append(fid)
 
-    if not new_lines:
+    if not new_rows:
         return []
 
-    # Append rows at the end of the table. Preserve existing content + header;
-    # add a trailing newline only when needed so we don't break table parsing.
-    if text and not text.endswith("\n"):
-        text += "\n"
-    text += "\n".join(new_lines) + "\n"
-    queue_path.write_text(text, encoding="utf-8")
+    # Persist via the canonical writer: it writes the 10-column manifest AND
+    # the JSON sidecar, so parse_verification_queue_rows (and therefore
+    # _compute_unrouted_inventory_ids) immediately sees the rows. Assign a
+    # monotonic Queue # across the combined set so numbering stays well-formed.
+    combined = existing_rows + new_rows
+    for idx, row in enumerate(combined, start=1):
+        row["queue #"] = str(idx)
+    _write_queue_subset_manifest(queue_path, combined)
     return appended

@@ -93,7 +93,10 @@ def test_backfill_rows_wellformed(tmp_path):
     sp = _make_two_missing(tmp_path)
     M.backfill_unrouted_inventory_into_queue(sp)
     text = (sp / "verification_queue.md").read_text(encoding="utf-8")
-    # Locate the two appended rows by ID.
+    # The queue MUST be persisted via the canonical 10-column manifest writer,
+    # never a raw 6-column append after the footer. Confirm the canonical
+    # header is present and every backfilled row has 10 columns.
+    assert "| Queue # | Finding ID | Expected Output File |" in text
     appended_lines = [
         ln for ln in text.splitlines()
         if ("INV-004" in ln or "INV-005" in ln) and ln.strip().startswith("|")
@@ -101,9 +104,7 @@ def test_backfill_rows_wellformed(tmp_path):
     assert len(appended_lines) == 2
     for ln in appended_lines:
         cells = [c.strip() for c in ln.strip().strip("|").split("|")]
-        assert len(cells) == 6, cells
-        assert "backfill" in ln.lower()
-        assert "[CODE-TRACE]" in ln
+        assert len(cells) == 10, cells
     # Carries inventory severity + title.
     inv4 = next(ln for ln in appended_lines if "INV-004" in ln)
     assert "Critical" in inv4
@@ -115,6 +116,15 @@ def test_backfill_rows_wellformed(tmp_path):
     rows = P.parse_verification_queue_rows(sp)
     ids = {r.get("finding id", "") for r in rows}
     assert "INV-004" in ids and "INV-005" in ids
+    # The JSON sidecar (authoritative for parse_verification_queue_rows) MUST
+    # have been rewritten to include the backfilled IDs, not left stale.
+    import json
+    sidecar = (sp / "verification_queue.json")
+    assert sidecar.exists()
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar_ids = {r.get("finding id", "") for r in payload.get("rows", [])}
+    assert {"INV-004", "INV-005"} <= sidecar_ids
+    assert payload.get("row_count") == 5
 
 
 def test_backfill_noop_when_complete(tmp_path):

@@ -207,6 +207,7 @@ __all__ = [
     "_write_queue_json_sidecar",
     "_write_queue_excluded_manifest",
     "_write_queue_subset_manifest",
+    "_queue_rows_from_inventory_with_exclusions",
     "compute_report_medium_shards",  # backward compat wrapper
     "compute_report_tier_shards",
     "classify_poc_testability",
