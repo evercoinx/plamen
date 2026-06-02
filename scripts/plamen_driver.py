@@ -11310,6 +11310,24 @@ def _run_phase_validators(
 
     # --- recon: Slither materialization + coverage + scope_leftover ---
     if phase.name == "recon":
+        # Codex apply_patch enriches recon artifact bodies without replacing
+        # line 1, so the pre-pass marker survives on legitimately-populated
+        # files and false-fails the content gate below (a full recon retry
+        # every Codex run). Strip the line-1 marker from artifacts whose body
+        # holds real content; pure [LLM TO ENRICH] placeholders keep it so the
+        # gate still catches a genuinely-empty recon. No-op on Claude (Write
+        # already removed the marker).
+        if config.get("cli_backend", "claude") == "codex":
+            try:
+                _codex_stripped = strip_codex_prepass_markers(scratchpad)
+                if _codex_stripped:
+                    log.info(
+                        "[recon] stripped pre-pass marker from Codex-enriched "
+                        "artifacts: %s",
+                        ", ".join(_codex_stripped),
+                    )
+            except Exception as exc:
+                log.warning(f"[recon] codex marker strip failed: {exc!r}")
         if config["pipeline"] == "sc":
             generated = _materialize_sc_slither_flat_files(scratchpad)
             if generated:
@@ -12312,6 +12330,24 @@ def main():
             )
         except Exception:
             recon_hard = []
+        if recon_hard and any("pre-pass overwrite marker" in str(x) for x in recon_hard):
+            # On Codex, the marker survives apply_patch body edits even when
+            # recon enriched the file. Strip it directly before falling back to
+            # the heavier shard re-merge.
+            if config.get("cli_backend", "claude") == "codex":
+                try:
+                    _resumed_stripped = strip_codex_prepass_markers(scratchpad)
+                    if _resumed_stripped:
+                        log.info(
+                            "[startup] stripped pre-pass marker from "
+                            "Codex-enriched recon artifacts: %s",
+                            ", ".join(_resumed_stripped),
+                        )
+                        recon_hard, _ = _validate_recon_content_structure(
+                            scratchpad, backend=config.get("cli_backend", "claude")
+                        )
+                except Exception as exc:
+                    log.warning(f"[startup] codex marker strip failed: {exc!r}")
         if recon_hard and any("pre-pass overwrite marker" in str(x) for x in recon_hard):
             log.warning(
                 "[startup] completed recon artifacts still carry pre-pass "

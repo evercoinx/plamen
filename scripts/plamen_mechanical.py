@@ -71,6 +71,7 @@ __all__ = [
     "_write_mechanical_inventory_from_chunks",
     "_write_mechanical_report_index",
     "promote_niche_to_inventory",
+    "strip_codex_prepass_markers",
     "_write_mechanical_report_tier",
     "ensure_inventory_shard_plan",
     "estimate_rate_limit_wait_seconds",
@@ -118,6 +119,51 @@ def _strip_prepass_marker(text: str) -> str:
     if lines and lines[0].strip() == _PREPASS_MARKER:
         return "\n".join(lines[1:]).lstrip()
     return text
+
+
+def strip_codex_prepass_markers(scratchpad: Path) -> list[str]:
+    """Codex-only: drop the line-1 pre-pass marker from recon artifacts whose
+    body holds durable content.
+
+    The recon content gate treats a surviving line-1 ``_PREPASS_MARKER`` as
+    proof that recon never produced a durable canonical handoff. That proxy is
+    valid under Claude's whole-file ``Write`` (which always replaces line 1),
+    but Codex's ``apply_patch`` makes targeted body edits that leave line 1
+    untouched -- so a legitimately-enriched file keeps the marker and
+    false-fails the gate, costing a full recon retry on every Codex run. The
+    marker's real purpose is pre-pass resume idempotency, which is fully served
+    once the recon phase has run.
+
+    Recall-safe: only the line-1 comment is removed, never content. A file whose
+    body is still a pure ``[LLM TO ENRICH]`` placeholder (pre-pass populated
+    nothing real and recon did not enrich it) or is empty KEEPS its marker, so
+    the gate still fails and forces a retry. Mechanically-populated files (real
+    regex-extracted tables) and LLM-enriched files both have real bodies and get
+    the marker stripped.
+
+    Returns the list of artifact names whose marker was stripped.
+    """
+    stripped: list[str] = []
+    for name in _RECON_CANONICAL_OUTPUTS:
+        path = scratchpad / name
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        lines = text.splitlines()
+        if lines[:1] != [_PREPASS_MARKER]:
+            continue  # already enriched (marker gone) or no marker present
+        body = "\n".join(lines[1:])
+        if not body.strip() or "[LLM TO ENRICH]" in body:
+            continue  # placeholder/empty -- keep marker so the gate still fails
+        try:
+            path.write_text(body.lstrip("\n").rstrip() + "\n", encoding="utf-8")
+            stripped.append(name)
+        except Exception:
+            continue
+    return stripped
 
 
 def _merge_recon_worker_shards(scratchpad: Path, config: dict) -> list[str]:
