@@ -219,6 +219,7 @@ __all__ = [
     "_manifest_fabricated_templates",
     "_validate_tier_body_against_manifest",
     "_validate_verification_queue_inventory_parity",
+    "_compute_unrouted_inventory_ids",
     "_validate_verify_completion",
     "_find_verify_file",
     "_validate_poc_attempt_coverage",
@@ -2055,26 +2056,24 @@ def _validate_spawn_manifest_schema(scratchpad: Path, mode: str = "core") -> lis
     ]
 
 
-def _validate_verification_queue_inventory_parity(scratchpad: Path) -> list[str]:
-    """Ensure every inventory ID is routed to verify or explicitly excluded.
+def _verification_queue_parity_sets(
+    scratchpad: Path,
+) -> tuple[set[str], set[str], set[str], set[str]]:
+    """Compute the ID sets used by verification-queue<->inventory parity.
 
-    Evidence filtering is allowed to suppress rows only by writing
-    verification_queue_evidence_excluded.md. Anything else is a promotion
-    dropout and must halt before verification.
+    Returns (inventory_ids, active_ids, mapped_hypos, acknowledged) using the
+    SAME hypothesis-expansion + evidence-excluded + semantic-dedup
+    acknowledgement logic the parity validator relies on. Side-effect-free.
+
+    Raises on inventory parse failure so callers can surface a parse-error
+    issue distinct from a clean empty inventory.
     """
     inv_path = scratchpad / "findings_inventory.md"
-    if not inv_path.exists():
-        return ["verification queue parity: findings_inventory.md missing"]
-    try:
-        inventory_ids = {
-            _normalize_finding_id(b.get("id", ""))
-            for b in _inventory_blocks(inv_path.read_text(encoding="utf-8", errors="replace"))
-        }
-    except Exception as exc:
-        return [f"verification queue parity: inventory parse failed: {exc}"]
+    inventory_ids = {
+        _normalize_finding_id(b.get("id", ""))
+        for b in _inventory_blocks(inv_path.read_text(encoding="utf-8", errors="replace"))
+    }
     inventory_ids.discard("")
-    if not inventory_ids:
-        return []
 
     active_ids = {
         _normalize_finding_id(r.get("finding id", ""))
@@ -2129,6 +2128,52 @@ def _validate_verification_queue_inventory_parity(scratchpad: Path) -> list[str]
 
     dedup_acknowledged_ids = _collect_semantic_dedup_acknowledged_ids(scratchpad)
     acknowledged = expanded_ids | expanded_excluded_ids | dedup_acknowledged_ids
+    return inventory_ids, active_ids, mapped_hypos, acknowledged
+
+
+def _compute_unrouted_inventory_ids(scratchpad: Path) -> list[str]:
+    """Return sorted normalized inventory IDs not routed/excluded/deduped.
+
+    Side-effect-free. This is the exact "missing" set
+    `_validate_verification_queue_inventory_parity` reports as a dropout, so
+    a mechanical backfill of these IDs makes parity hold deterministically.
+
+    Returns [] if findings_inventory.md is missing or unparseable (those are
+    distinct failures owned by the parity validator's issue strings).
+    """
+    inv_path = scratchpad / "findings_inventory.md"
+    if not inv_path.exists():
+        return []
+    try:
+        inventory_ids, _active, _mapped, acknowledged = _verification_queue_parity_sets(
+            scratchpad
+        )
+    except Exception:
+        return []
+    if not inventory_ids:
+        return []
+    return sorted(inventory_ids - acknowledged)
+
+
+def _validate_verification_queue_inventory_parity(scratchpad: Path) -> list[str]:
+    """Ensure every inventory ID is routed to verify or explicitly excluded.
+
+    Evidence filtering is allowed to suppress rows only by writing
+    verification_queue_evidence_excluded.md. Anything else is a promotion
+    dropout and must halt before verification.
+    """
+    inv_path = scratchpad / "findings_inventory.md"
+    if not inv_path.exists():
+        return ["verification queue parity: findings_inventory.md missing"]
+    try:
+        inventory_ids, active_ids, mapped_hypos, acknowledged = (
+            _verification_queue_parity_sets(scratchpad)
+        )
+    except Exception as exc:
+        return [f"verification queue parity: inventory parse failed: {exc}"]
+    if not inventory_ids:
+        return []
+
     missing = sorted(inventory_ids - acknowledged)
     extra = sorted((active_ids - mapped_hypos) - inventory_ids)
     issues: list[str] = []

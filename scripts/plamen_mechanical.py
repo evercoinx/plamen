@@ -33,6 +33,7 @@ __all__ = [
     "_ATTENTION_REPAIR_MAX_ITEMS",
     "_apply_location_recovery",
     "_apply_mechanical_dedup_from_pairs",
+    "backfill_unrouted_inventory_into_queue",
     "_assemble_report_python",
     "_build_attention_repair_items",
     "_build_asset_binding_repair_items",
@@ -6052,3 +6053,96 @@ def _apply_location_recovery(scratchpad: Path, project_root: str) -> list[str]:
         inv.write_text(new_text, encoding="utf-8")
         _validate_inventory_evidence(scratchpad, project_root)
     return applied
+
+
+def backfill_unrouted_inventory_into_queue(scratchpad: Path) -> list[str]:
+    """Append any inventory ID unrouted by queue generation to
+    verification_queue.md as an active row so verification-queue<->inventory
+    parity always holds. Deterministic + idempotent. Returns backfilled IDs.
+
+    This converts a silent LLM queue-generation dropout (which otherwise makes
+    the resume reconciliation rewind the entire verify stage) into explicit,
+    verifiable queue rows.
+    """
+    from plamen_validators import _compute_unrouted_inventory_ids
+
+    unrouted = _compute_unrouted_inventory_ids(scratchpad)
+    if not unrouted:
+        return []
+
+    queue_path = scratchpad / "verification_queue.md"
+    if not queue_path.exists():
+        # A missing queue is a different failure owned by the existing gate.
+        return []
+    try:
+        text = queue_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    if "| Finding ID |" not in text and "|finding id|" not in text.replace(" ", "").lower():
+        # No parseable queue table; the existing gate owns that failure.
+        return []
+
+    # Existing rows: derive present Finding IDs (for idempotency) and the
+    # current max Queue # so appended rows keep a monotonic numbering.
+    existing_rows = parse_verification_queue_rows(scratchpad)
+    present_ids: set[str] = set()
+    max_queue = 0
+    for row in existing_rows:
+        fid = _normalize_finding_id(row.get("finding id", "")) or (
+            row.get("finding id", "") or ""
+        ).strip()
+        if fid:
+            present_ids.add(fid)
+        raw_q = str(row.get("queue") or row.get("queue #") or "").strip()
+        m = re.search(r"\d+", raw_q)
+        if m:
+            try:
+                max_queue = max(max_queue, int(m.group(0)))
+            except ValueError:
+                pass
+
+    # Inventory severity/title lookup, keyed by normalized ID.
+    inv_path = scratchpad / "findings_inventory.md"
+    inv_meta: dict[str, tuple[str, str]] = {}
+    try:
+        inv_text = inv_path.read_text(encoding="utf-8", errors="replace")
+        for block in _inventory_blocks(inv_text):
+            bid = _normalize_finding_id(block.get("id", ""))
+            if not bid:
+                continue
+            sev = normalize_severity(
+                _field_from_markdown(
+                    block.get("block", ""), ("Severity", "Final Severity")
+                )
+            ) or "Medium"
+            title = (block.get("title") or "").strip() or bid
+            inv_meta[bid] = (sev, title)
+    except Exception:
+        inv_meta = {}
+
+    appended: list[str] = []
+    new_lines: list[str] = []
+    n = max_queue
+    for fid in unrouted:
+        if fid in present_ids:
+            # Idempotency: never duplicate an ID already in the queue.
+            continue
+        n += 1
+        sev, title = inv_meta.get(fid, ("Medium", fid))
+        new_lines.append(
+            f"| {n} | {fid} | {sev} | {title} | "
+            "Unrouted by queue generation (mechanical backfill) | [CODE-TRACE] |"
+        )
+        present_ids.add(fid)
+        appended.append(fid)
+
+    if not new_lines:
+        return []
+
+    # Append rows at the end of the table. Preserve existing content + header;
+    # add a trailing newline only when needed so we don't break table parsing.
+    if text and not text.endswith("\n"):
+        text += "\n"
+    text += "\n".join(new_lines) + "\n"
+    queue_path.write_text(text, encoding="utf-8")
+    return appended

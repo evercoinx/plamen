@@ -12579,6 +12579,25 @@ def main():
 
     active_phases = [p for p in phases if mode in p.modes]
     config["_active_phase_names"] = [p.name for p in active_phases]
+    # Repair an already-degraded run BEFORE reconciliation: if a verify queue
+    # phase completed with a queue-generation dropout, mechanically backfill the
+    # unrouted inventory IDs so parity holds. Without this, reconciliation
+    # rewinds verify_queue + every downstream verify_* phase, the LLM re-drops
+    # the same IDs, and the resume loops forever.
+    if {"verify_queue", "sc_verify_queue"} & set(checkpoint.completed):
+        try:
+            _bf = backfill_unrouted_inventory_into_queue(scratchpad)
+            if _bf:
+                log.warning(
+                    "[startup] mechanically backfilled "
+                    f"{len(_bf)} unrouted inventory ID(s) into "
+                    "verification_queue.md before reconciliation "
+                    f"(queue-generation dropout): {', '.join(_bf[:10])}"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[startup] queue backfill skipped (non-blocking): {exc!r}"
+            )
     try:
         artifact_rewound = _reconcile_completed_checkpoint_artifacts(
             scratchpad, config["project_root"], checkpoint, phases, mode
@@ -12968,6 +12987,18 @@ def main():
                     f"[verify_queue] moved {mode_filtered} Low/Info "
                     f"finding(s) to evidence-excluded for {config.get('mode')} mode"
                 )
+            try:
+                _bf = backfill_unrouted_inventory_into_queue(scratchpad)
+                if _bf:
+                    log.warning(
+                        f"[{phase.name}] mechanically backfilled {len(_bf)} "
+                        "unrouted inventory ID(s) into verification_queue.md "
+                        f"(queue-generation dropout): {', '.join(_bf[:10])}"
+                    )
+            except Exception as exc:
+                log.warning(
+                    f"[{phase.name}] queue backfill skipped (non-blocking): {exc!r}"
+                )
             shards = ensure_verify_shard_manifests(scratchpad)
             queue_issues = _validate_verification_queue_inventory_parity(scratchpad)
             if queue_issues:
@@ -13048,6 +13079,18 @@ def main():
                     f"row(s) to evidence-excluded for {config.get('mode')} mode"
                 )
             removed = _filter_verification_queue_by_evidence(scratchpad)
+            try:
+                _bf = backfill_unrouted_inventory_into_queue(scratchpad)
+                if _bf:
+                    log.warning(
+                        f"[{phase.name}] mechanically backfilled {len(_bf)} "
+                        "unrouted inventory ID(s) into verification_queue.md "
+                        f"(queue-generation dropout): {', '.join(_bf[:10])}"
+                    )
+            except Exception as exc:
+                log.warning(
+                    f"[{phase.name}] queue backfill skipped (non-blocking): {exc!r}"
+                )
             shards = ensure_sc_verify_shard_manifests(scratchpad)
             queue_issues = _validate_verification_queue_inventory_parity(scratchpad)
             if queue_issues:
