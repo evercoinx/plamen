@@ -1,0 +1,84 @@
+"""2026-06-02: (1) L1 Thorough reasoning-role bump to Opus 4.8; (2) Bug-1 fix —
+the 529 overload-retry must ITERATE attempts 1..N (was pinned to a hardcoded
+attempt=2 / attempt2.log so it never advanced past attempt 1).
+"""
+from __future__ import annotations
+import re
+from pathlib import Path
+
+import plamen_types as T
+
+
+def _phase(name, model="sonnet"):
+    p = T.Phase(name, ["S"], [name + ".md"], base_timeout_s=60, min_artifact_bytes=10)
+    p.model = model
+    return p
+
+
+# ---------- Edit 1: L1 Thorough Opus-4.8 bump (verify caps preserved) ----------
+
+def test_l1_thorough_depth_is_opus_48():
+    assert T.phase_model(_phase("depth", "opus"), "thorough", {"pipeline": "l1"}) == "claude-opus-4-8"
+
+def test_l1_thorough_breadth_promoted_to_opus_48():
+    assert T.phase_model(_phase("breadth", "sonnet"), "thorough", {"pipeline": "l1"}) == "claude-opus-4-8"
+
+def test_l1_thorough_skeptic_promoted_to_opus_48():
+    assert T.phase_model(_phase("skeptic", "sonnet"), "thorough", {"pipeline": "l1"}) == "claude-opus-4-8"
+
+def test_l1_thorough_verify_shard_stays_sonnet():
+    # L1 verify shards are `verify_*` (not `sc_verify_*`) + sonnet-tier -> NOT promoted.
+    assert T.phase_model(_phase("verify_high_b", "sonnet"), "thorough", {"pipeline": "l1"}) == "sonnet"
+
+def test_l1_thorough_verify_queue_stays_unpromoted():
+    assert T.phase_model(_phase("verify_queue", "haiku"), "thorough", {"pipeline": "l1"}) == T._resolve_model_alias("haiku")
+
+def test_l1_core_depth_not_bumped():
+    assert T.phase_model(_phase("depth", "opus"), "core", {"pipeline": "l1"}) == "claude-opus-4-6"
+
+def test_l1_light_depth_sonnet():
+    assert T.phase_model(_phase("depth", "opus"), "light", {"pipeline": "l1"}) == "sonnet"
+
+def test_sc_thorough_depth_still_opus_48():
+    # Regression: SC Thorough behavior unchanged.
+    assert T.phase_model(_phase("depth", "opus"), "thorough", {"pipeline": "sc"}) == "claude-opus-4-8"
+
+def test_sc_thorough_sc_verify_shard_still_promoted():
+    assert T.phase_model(_phase("sc_verify_high_b", "sonnet"), "thorough", {"pipeline": "sc"}) == "claude-opus-4-8"
+
+
+# ---------- Edit 2: Bug-1 overload-retry iterates 1..N ----------
+
+def test_overload_loop_uses_incrementing_attempt_not_hardcoded_2():
+    """Source-level guard: the overload retry block must NOT re-introduce the
+    hardcoded attempt=2 / attempt2.log that pinned every iteration to attempt 1."""
+    src = Path(__file__).resolve().parent.joinpath("plamen_driver.py").read_text(encoding="utf-8")
+    # isolate the overload loop region, then drop comment lines so the checks
+    # match CODE only (the fix comment legitimately mentions the old strings).
+    start = src.index("529 transient-overload pre-check")
+    end = src.index("rate limit detected -- auto-waiting", start)
+    region = src[start:end]
+    code = "\n".join(l for l in region.splitlines() if not l.strip().startswith("#"))
+    assert "_ovl_run_attempt" in code, "overload loop must track an incrementing attempt number"
+    assert "run_phase(phase, config, attempt=_ovl_run_attempt)" in code, \
+        "overload re-run must use the incrementing attempt, not a constant"
+    assert "run_phase(phase, config, attempt=2)" not in code, \
+        "hardcoded attempt=2 must be gone from the overload loop"
+    assert ".attempt2.log" not in code, "hardcoded attempt2.log path must be gone"
+    assert "attempt{_ovl_run_attempt}.log" in code, \
+        "retry log must be parameterized by the incrementing attempt"
+
+def test_overload_backoff_plan_iterates_at_least_4():
+    # The schedule the loop consumes must allow >=4 retries (helper lives in driver).
+    import plamen_driver as D
+    attempts = []
+    i = 0
+    while True:
+        go, wait = D.overload_backoff_plan(i)
+        if not go:
+            break
+        attempts.append(wait)
+        i += 1
+        if i > 20:
+            break
+    assert len(attempts) >= 4, f"overload backoff should allow >=4 retries, got {attempts}"

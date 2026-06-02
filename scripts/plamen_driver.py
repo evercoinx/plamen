@@ -14181,6 +14181,12 @@ def main():
                 and detect_overloaded(_stdio_log)
             ):
                 _ovl_attempts = 0
+                # Bug-1 fix: increment a REAL attempt number per overload retry
+                # (mirrors the Codex capacity-retry pattern at ~14164) instead of
+                # the prior hardcoded `attempt=2` / `attempt2.log`, which pinned
+                # every iteration to the same attempt + stale log so the backoff
+                # schedule (30/60/120/180s) never actually advanced past attempt 1.
+                _ovl_run_attempt = current_attempt
                 while True:
                     _should_retry, _ovl_wait = overload_backoff_plan(_ovl_attempts)
                     if not _should_retry:
@@ -14199,17 +14205,18 @@ def main():
                     checkpoint.save(scratchpad)
                     time.sleep(_overload_sleep_seconds(_ovl_wait))
                     _ovl_attempts += 1
-                    rc = run_phase(phase, config, attempt=2)
+                    _ovl_run_attempt += 1
+                    rc = run_phase(phase, config, attempt=_ovl_run_attempt)
                     if rc == -3:
                         if _prompt_halt_resume_choice(
                             checkpoint, scratchpad, phase.name, config_path
                         ):
-                            rc = run_phase(phase, config, attempt=2)
+                            rc = run_phase(phase, config, attempt=_ovl_run_attempt)
                         else:
                             _halted = True
                             break
                     _ovl_retry_log = (
-                        scratchpad / f"_stdio_{phase.name}.attempt2.log"
+                        scratchpad / f"_stdio_{phase.name}.attempt{_ovl_run_attempt}.log"
                     )
                     if not _ovl_retry_log.exists():
                         _ovl_retry_log = _stdio_log
@@ -14224,6 +14231,9 @@ def main():
                         # 429 surfaced. Hand off to the usage-cap path below.
                         break
                     # Still overloaded -> loop for the next backoff step.
+                # Keep the outer attempt counter in sync with the overload
+                # re-runs so any later fall-through reads the correct log.
+                current_attempt = _ovl_run_attempt
                 if _halted:
                     break
 

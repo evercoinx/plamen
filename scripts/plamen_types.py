@@ -619,11 +619,14 @@ def phase_model(phase: Phase, mode: str, config: Optional[dict] = None) -> str:
     # `opus` and ride the 4.8 resolution below; breadth (normally Sonnet), the
     # sc_verify shards, and skeptic are force-promoted to the opus tier here.
     # Queue/aggregate verify phases (routing/summary, not reasoning) are NOT
-    # promoted. SCOPED to SC pipeline: L1 keeps its own deliberate cost caps
-    # (L1 verify shards stay Sonnet, queue/aggregate Haiku) and Core/Light are
+    # promoted. Applies to SC AND L1 Thorough: breadth + skeptic + the opus-tier
+    # reasoning phases (depth/critical-writer) promote to 4.8. L1 verify shards
+    # are named `verify_*` (not `sc_verify_*`) and are Sonnet-tier, so they do
+    # NOT match the promotion below — L1's deliberate verify cost cap (Sonnet
+    # shards, Haiku queue/aggregate) is preserved automatically. Core/Light are
     # untouched. Rescan/per-contract stay Sonnet (model-diversity + cost).
     # Env override: PLAMEN_THOROUGH_OPUS_MODEL.
-    if mode == "thorough" and config and config.get("pipeline") == "sc":
+    if mode == "thorough" and config and config.get("pipeline") in ("sc", "l1"):
         name = phase.name
         override = _breadth_override()
         if override:
