@@ -4468,7 +4468,9 @@ def _first_production_location_for_validator(text: str, *fallbacks: str) -> str:
     return ""
 
 
-def _compute_scip_coverage_sets(scratchpad: Path) -> dict[str, object]:
+def _compute_scip_coverage_sets(
+    scratchpad: Path, scope_file: str | None = None
+) -> dict[str, object]:
     indexed = _collect_scip_indexed_paths(scratchpad)
     cited = _collect_cited_paths(scratchpad)
     cited_basenames = _basenames(cited)
@@ -4478,6 +4480,14 @@ def _compute_scip_coverage_sets(scratchpad: Path) -> dict[str, object]:
         p for p in indexed
         if p not in spec_support_indexed
     }
+    # Narrow the required (prod) universe to in-scope files only when the
+    # wizard supplied a scope file, so out-of-scope vendored libraries are not
+    # reported as coverage gaps. Empty scope → require everything (unchanged).
+    scope_names = _load_scope_file_paths(scope_file)
+    if scope_names:
+        prod_indexed = {
+            p for p in prod_indexed if _path_in_scope_file(p, scope_names)
+        }
     indexed_basenames = _basenames(prod_indexed)
 
     uncited: list[str] = []
@@ -4573,7 +4583,7 @@ def _materialize_sc_slither_flat_files(scratchpad: Path) -> list[str]:
 
 
 def _compute_subsystem_coverage_gap(
-    scratchpad: Path, mode: str
+    scratchpad: Path, mode: str, scope_file: str | None = None
 ) -> list[str]:
     """SCIP-driven generic coverage gap. Soft validator.
 
@@ -4617,7 +4627,7 @@ def _compute_subsystem_coverage_gap(
         )
         return []
 
-    cov = _compute_scip_coverage_sets(scratchpad)
+    cov = _compute_scip_coverage_sets(scratchpad, scope_file=scope_file)
     prod_indexed = cov["prod_indexed"]
     uncited = cov["uncited"]
     coverage_pct = cov["coverage_pct"]
@@ -14988,7 +14998,8 @@ def _validate_inventory_structure(scratchpad: Path) -> list[str]:
 
 
 def _validate_sc_subsystem_coverage(
-    scratchpad: Path, mode: str, min_bucket_files: int = 4
+    scratchpad: Path, mode: str, min_bucket_files: int = 4,
+    scope_file: str | None = None,
 ) -> list[str]:
     """Hard SC coverage gate from contract inventory / Slither flat files.
 
@@ -14996,6 +15007,15 @@ def _validate_sc_subsystem_coverage(
     substantial contract/program bucket is indexed by recon but never cited by
     breadth/depth/scanner/verify outputs and not explicitly ACKNOWLEDGED, the
     pipeline must not treat the run as coverage-complete.
+
+    When the wizard supplied a `scope_file` listing the explicit audit-scope
+    files, the required-coverage universe is narrowed to those files only —
+    a properly-scoped audit must never be failed for not covering out-of-scope
+    vendored libraries (e.g. uniswap math libs). This mirrors how
+    `_validate_recon_coverage` consults the scope file. The filter is applied
+    to the REQUIRED (`prod`) set, never the cited set, so out-of-scope files
+    are simply not demanded. `_path_in_scope_file` is permissive when scope is
+    empty, so the no-scope-file behaviour is unchanged.
     """
     if mode != "thorough":
         return []
@@ -15022,6 +15042,12 @@ def _validate_sc_subsystem_coverage(
         if not any(t in p.lower() for t in test_markers)
         and not any(p.lower().startswith(pfx) for pfx in non_auditable_prefixes)
     }
+    # Narrow the required-coverage universe to in-scope files only. Out-of-scope
+    # vendored libraries must never be demanded by this gate. Empty scope means
+    # no scope file → require everything (behaviour unchanged).
+    scope_names = _load_scope_file_paths(scope_file)
+    if scope_names:
+        prod = {p for p in prod if _path_in_scope_file(p, scope_names)}
     if not prod:
         return []
 

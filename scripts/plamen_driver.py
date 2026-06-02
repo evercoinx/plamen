@@ -11724,7 +11724,7 @@ def _run_phase_validators(
                     "confidence iter2: " + "; ".join(conf_iter2_issues)
                 ]
         cov_issues = _compute_subsystem_coverage_gap(
-            scratchpad, _mode
+            scratchpad, _mode, scope_file=config.get("scope_file")
         )
         if cov_issues:
             log.info(f"[{phase.name}] {cov_issues[0]}")
@@ -11830,7 +11830,8 @@ def _run_phase_validators(
                 "depth iteration invariant: " + "; ".join(iter_issues)
             ]
         sc_cov_issues = _validate_sc_subsystem_coverage(
-            scratchpad, config.get("mode", "core")
+            scratchpad, config.get("mode", "core"),
+            scope_file=config.get("scope_file"),
         )
         if sc_cov_issues:
             passed = False
@@ -11908,7 +11909,7 @@ def _run_phase_validators(
                     "confidence iter2: " + "; ".join(conf_iter2_issues)
                 ]
         cov_issues = _compute_subsystem_coverage_gap(
-            scratchpad, _sc_mode
+            scratchpad, _sc_mode, scope_file=config.get("scope_file")
         )
         if cov_issues:
             log.info(f"[{phase.name}] {cov_issues[0]}")
@@ -12817,7 +12818,8 @@ def main():
 
         if config["pipeline"] == "l1" and phase.name == "graph_sweeps":
             cov_issues = _compute_subsystem_coverage_gap(
-                scratchpad, config.get("mode", "core")
+                scratchpad, config.get("mode", "core"),
+                scope_file=config.get("scope_file"),
             )
             if cov_issues:
                 log.info(f"[graph_sweeps] {cov_issues[0]}")
