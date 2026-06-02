@@ -15734,6 +15734,47 @@ _POC_SKIP_CODES_RE = (
 )
 
 
+# Section-label detection for the PoC testability ledger. The verifier emits
+# the per-finding ledger as MARKDOWN HEADINGS ("### PoC Attempt" /
+# "### Execution Result") in the common case, but format drift across backends
+# (Claude vs Codex) and prompt revisions also produces:
+#   - bold-field forms:           **PoC Attempt** / **Execution Result**
+#   - a single combined heading:  ### PoC Attempt & Execution Result
+# All three are semantically a present ledger. The gate must accept any of them
+# (mirroring _field_from_markdown's existing heading/bold tolerance) while still
+# FAILING when there is genuinely no PoC accounting in any form. The "& combined"
+# heading satisfies BOTH the attempt and execution requirements at once.
+_POC_ATTEMPT_SECTION_RE = re.compile(
+    r"(?im)^\s*(?:#{2,4}\s+|(?:[-*]\s*)?\*\*)\s*"
+    r"PoC\s+Attempt(?:\s*(?:&|and|/|\+)\s*(?:Execution\s+Result|"
+    r"PoC\s+Result|PoC\s+Execution|Result))?\b"
+)
+_POC_EXEC_SECTION_RE = re.compile(
+    r"(?im)^\s*(?:#{2,4}\s+|(?:[-*]\s*)?\*\*)\s*"
+    r"(?:Execution\s+Result|PoC\s+Result|PoC\s+Execution)\b"
+)
+# A single combined heading "PoC Attempt & Execution Result" provides the
+# execution-section requirement too, even though the exec label is the second
+# half of the same line (so _POC_EXEC_SECTION_RE's line-anchored match misses).
+_POC_COMBINED_SECTION_RE = re.compile(
+    r"(?im)^\s*(?:#{2,4}\s+|(?:[-*]\s*)?\*\*)\s*"
+    r"PoC\s+Attempt\s*(?:&|and|/|\+)\s*"
+    r"(?:Execution\s+Result|PoC\s+Result|PoC\s+Execution|Result)\b"
+)
+
+
+def _has_poc_ledger_sections(content: str) -> tuple[bool, bool]:
+    """Detect the PoC Attempt and Execution Result ledger sections.
+
+    Accepts markdown-heading, bold-field, and combined-heading forms. Returns
+    (has_attempt_section, has_exec_section).
+    """
+    combined = bool(_POC_COMBINED_SECTION_RE.search(content))
+    has_attempt = combined or bool(_POC_ATTEMPT_SECTION_RE.search(content))
+    has_exec = combined or bool(_POC_EXEC_SECTION_RE.search(content))
+    return has_attempt, has_exec
+
+
 def _poc_attempted_value(content: str) -> str:
     field = _field_from_markdown(content, ("Attempted", "PoC Attempted"))
     if field:
@@ -15852,16 +15893,29 @@ def _validate_poc_contract_for_rows(
             content = path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        has_poc_section = bool(re.search(
-            r"(?im)^#{2,4}\s+PoC\s+Attempt\b", content
-        ))
-        has_exec_section = bool(re.search(
-            r"(?im)^#{2,4}\s+(?:Execution\s+Result|PoC\s+Result|PoC\s+Execution)\b",
-            content,
-        ))
+        has_poc_section, has_exec_section = _has_poc_ledger_sections(content)
         if not has_poc_section or not has_exec_section:
-            issues.append(f"{fid} missing PoC Attempt/Execution Result ledger")
-            continue
+            # Write-completion race: the worker returns "DONE" and the driver
+            # invokes this gate the instant the file appears, but the OS write
+            # buffer for the ledger sections may not be flushed yet. The file
+            # passes the size check (partial body) while the "PoC Attempt" /
+            # "Execution Result" sections are still in-flight. A bounded
+            # re-read after a short filesystem-sync delay resolves the partial
+            # state without a full shard retry — mirroring the driver-level
+            # bounded retry but at I/O granularity. Only fail if the sections
+            # are STILL absent after the resync (a genuine omission).
+            for _delay in (0.25, 0.5):
+                time.sleep(_delay)
+                try:
+                    content = path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    break
+                has_poc_section, has_exec_section = _has_poc_ledger_sections(content)
+                if has_poc_section and has_exec_section:
+                    break
+            if not has_poc_section or not has_exec_section:
+                issues.append(f"{fid} missing PoC Attempt/Execution Result ledger")
+                continue
         attempted = _poc_attempted_value(content)
         attempted_yes = attempted == "YES"
         attempted_no = attempted == "NO"
@@ -15956,11 +16010,8 @@ def _validate_poc_attempt_coverage(scratchpad: Path, mode: str) -> list[str]:
         except Exception:
             continue
 
-        has_poc_section = bool(re.search(
-            r"(?im)^#{2,4}\s+(?:PoC\s+Attempt|Execution\s+Result|PoC\s+Result"
-            r"|PoC\s+Execution)\b",
-            content,
-        ))
+        _attempt_sec, _exec_sec = _has_poc_ledger_sections(content)
+        has_poc_section = _attempt_sec or _exec_sec
         has_poc_pass = has_mechanical_proof(content)
         attempted_no = _poc_attempted_value(content) == "NO"
         compiled_na = bool(re.search(

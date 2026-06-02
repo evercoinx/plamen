@@ -113,6 +113,19 @@ Each `verify_{FINDING_ID}.md` MUST contain:
 **Test Function**: {exact test function name the executor runs, or N/A}
 **Command**: {full `go test`/`cargo test` command, or N/A}
 
+### PoC Attempt
+- PoC Required: YES/NO
+- PoC Class: {unit|property|integration|structural}
+- Attempted: YES/NO
+- PoC Not Attempted Because: {NO_BUILD_ENVIRONMENT|EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS|DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL|PURE_SPEC_OR_DOCS_ONLY|STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION|N/A}
+- Test File: {path or N/A}
+- Command: {command or N/A}
+
+### Execution Result
+- Compiled: YES/NO/N/A
+- Result: PASS/FAIL/REVERT/NOT_EXECUTED
+- Output: {assertions, revert reasons, or skip justification}
+
 ## Execution Output
 {Mechanical evidence: diff output, test output, SCIP citation, or code trace}
 
@@ -126,6 +139,16 @@ Each `verify_{FINDING_ID}.md` MUST contain:
 - For a `[POC-PASS]` claim, `Test File:`/`Test Function:` MUST name a real
   executable test (the executor re-runs it; an unbacked claim is demoted).
 - If the preferred tag workflow fails and fallback is used, document why in Execution Output.
+- **MANDATORY for `unit`/`property` PoC Class**: the `### PoC Attempt` AND
+  `### Execution Result` ledger sections above are NOT optional — they are a
+  hard per-finding contract gate. A `unit`/`property` verify file missing
+  either section is rejected. If you legitimately cannot execute, still write
+  BOTH sections with `Attempted: NO` and a real blocker code; do not omit them.
+- **POST-WRITE VERIFICATION**: after writing `verify_{FINDING_ID}.md`, READ THE
+  FILE BACK and confirm it contains both the `### PoC Attempt` and
+  `### Execution Result` sections (for `unit`/`property` findings) before
+  returning. This guarantees the ledger is flushed to disk and prevents the
+  gate from reading a partially-written file.
 
 ---
 
