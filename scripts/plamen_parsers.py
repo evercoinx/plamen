@@ -3105,7 +3105,11 @@ def _sanitize_client_title(title: str) -> str:
     s = re.sub(r"\b(?:" + internal + r")\b", "", s, flags=re.IGNORECASE)
     s = re.sub(r"(?i)\b(?:and|or|of)\s+(?:and|or|of)\b", " ", s)
     s = re.sub(r"(?i)\bduplicate\s+of\s*(?:/|\band\b|\bor\b)?\s*$", "duplicate", s)
-    s = re.sub(r"\s+", " ", s).strip(" -–—:")
+    # Strip a leading agent-finding-ID prefix the mechanical index recovery
+    # sometimes leaves on titles, e.g. "/ EXT-001: ..." or "STATE-001 - ...".
+    s = re.sub(r"^[\s/]*[A-Z]{2,6}-\d{1,4}\s*[:\-–—]\s*", "", s)
+    s = s.lstrip("/ ")
+    s = re.sub(r"\s+", " ", s).strip(" -–—:/")
     return s or "Verified finding"
 
 
@@ -3125,7 +3129,18 @@ def _sanitize_client_body(text: str) -> str:
         text or "",
         flags=re.IGNORECASE,
     )
-    return _CLIENT_BODY_INTERNAL_ID_RE.sub("upstream finding", clean).strip()
+    clean = _CLIENT_BODY_INTERNAL_ID_RE.sub("upstream finding", clean)
+    # Drop internal-status narration the body writer sometimes leaks into prose.
+    # The manifest's report_blocked flag is meant to drive a heading tag the
+    # assembler strips, NOT client-facing sentences. Remove whole sentences
+    # mentioning the internal status so no dangling fragment remains.
+    clean = re.sub(
+        r"(?is)(?:(?<=[.!?])\s+|^)[^.!?\n]*(?:report[\s-]?blocked|shard\s+inputs?)[^.!?\n]*[.!?]",
+        " ",
+        clean,
+    )
+    clean = re.sub(r"[ \t]{2,}", " ", clean)
+    return clean.strip()
 
 
 def _markdown_section(text: str, headings: tuple[str, ...], max_chars: int = 3500) -> str:

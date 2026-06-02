@@ -40,6 +40,7 @@ __all__ = [
     "_build_sc_body_writer_manifests",
     "_collect_raw_candidate_ledger_rows",
     "_extract_source_ids_from_inventory",
+    "_finalize_report_tier_section",
     "_count_inventory_source_signals",
     "_extract_graph_attention_rows",
     "_inventory_location_map",
@@ -1862,6 +1863,42 @@ def _repair_promotion_dropouts(body: str, scratchpad: Path) -> str:
     return body.rstrip() + "\n\n---\n\n" + insertion
 
 
+def _finalize_report_tier_section(section: str, id_to_title: dict) -> str:
+    """Rewrite generic/broken finding headings from the canonical index title
+    and strip internal-status prose. Preserves a trailing verification-status
+    tag ([VERIFIED]/[UNVERIFIED]/[CONTESTED]); drops a [REPORT-BLOCKED ...] tag."""
+    if not section:
+        return section
+    head_re = re.compile(
+        r"^(#{2,3})\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[\s*([CHMLI]-\d+)\s*\]\s*(.*?)\s*$"
+    )
+    status_re = re.compile(
+        r"(?i)(\[(?:VERIFIED|UNVERIFIED|CONTESTED|VERIFICATION NOT EXECUTED|REPORT-BLOCKED[^\]]*)\])\s*$"
+    )
+    out = []
+    for ln in section.split("\n"):
+        m = head_re.match(ln)
+        if not m:
+            out.append(ln)
+            continue
+        level, rid, rest = m.group(1), m.group(2), m.group(3)
+        status = ""
+        sm = status_re.search(rest)
+        title_part = rest
+        if sm:
+            tag = sm.group(1)
+            if not re.match(r"(?i)\[REPORT-BLOCKED", tag):
+                status = " " + tag
+            title_part = rest[:sm.start()].strip()
+        title_clean = _sanitize_client_title(title_part)
+        if (not title_clean
+                or title_clean.lower() in {"verification", "untitled", "finding", "verified finding"}
+                or len(title_clean) < 8):
+            title_clean = id_to_title.get(rid) or title_clean or "Verified finding"
+        out.append(f"{level} [{rid}] {title_clean}{status}".rstrip())
+    return _sanitize_client_body("\n".join(out))
+
+
 def _assemble_report_python(
     scratchpad: Path, project_root: str
 ) -> bool:
@@ -1982,6 +2019,9 @@ def _assemble_report_python(
             int(re.findall(r"\d+", r["id"])[0]) if re.findall(r"\d+", r["id"]) else 0,
         )
     )
+    # Canonical report-ID -> title map used to repair generic/broken tier
+    # headings during section finalization.
+    id_to_title = {r["id"]: r["title"] for r in finding_rows}
 
     # --- Generate Executive Summary mechanically -----------------------------
     top_crits = [r for r in finding_rows if r["id"].startswith("C-")][:5]
@@ -2074,6 +2114,14 @@ def _assemble_report_python(
         r"^##\s+Medium\s+Findings[^\n]*\n+", "",
         medium_clean, flags=re.MULTILINE,
     ).strip()
+
+    # Rewrite generic/broken finding headings from the canonical index title
+    # and strip internal-status prose leaked into bodies.
+    crit_section = _finalize_report_tier_section(crit_section, id_to_title)
+    high_section = _finalize_report_tier_section(high_section, id_to_title)
+    medium_clean = _finalize_report_tier_section(medium_clean, id_to_title)
+    low_section = _finalize_report_tier_section(low_section, id_to_title)
+    info_section = _finalize_report_tier_section(info_section, id_to_title)
 
     # --- Assemble per ~/.claude/rules/report-template.md ---------------------
     auditor = header_info.get("auditor", "Automated Security Analysis (Plamen V2)")
