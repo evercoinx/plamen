@@ -51,6 +51,7 @@ __all__ = [
     "_render_id_ledger_directive",
     "_render_expected_output_block",
     "_render_phase_isolation_block",
+    "_render_forbidden_output_block",
     "_render_runtime_placeholders",
     "_resolve_l1_skill_paths",
     "_resolve_recon_prompt",

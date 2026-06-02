@@ -551,20 +551,18 @@ def _codex_depth_artifact_checklist(pipeline: str, mode: str) -> str:
     return "\n".join(lines)
 
 
-def _codex_precreated_fill_directive(
+def _codex_mandatory_secondary_names(
     phase_name: str, pipeline: str, mode: str, scratchpad: Optional[Path]
-) -> str:
-    """Codex-only directive naming the pre-created secondary files to fill.
+) -> list[str]:
+    """Return a phase's mandatory pre-created SECONDARY artifact filenames.
 
-    `_precreate_codex_artifacts` seeds empty files for the phase's mandatory
-    secondary artifacts (never-cut scanners/validation/confidence, triggered
-    niches, recon shards) because Codex's apply_patch cannot create new files.
-    This tells the model those EMPTY files already exist on disk and MUST be
-    filled with real content this phase — an empty seed still fails the
-    never-cut/stub gate, so leaving them blank degrades the phase.
-
-    Derives the same filenames as `_codex_secondary_artifact_targets` from the
-    existing sources so the prompt and the seeding stay in sync.
+    Scalar-arg sibling of `_codex_secondary_artifact_targets` (which needs a
+    Phase object) so prompt-construction code can call it. Single source of
+    truth for both (a) the pre-created-fill directive and (b) the Codex depth
+    Expected-Output-Contract widening. Derives names from the same canonical
+    sources (`sc_never_cut_groups` / `l1_never_cut_groups`,
+    `_required_niche_worker_jobs`, `_recon_worker_jobs`); for `[A|B]`
+    alternations only the first representative is returned.
     """
     pipeline = (pipeline or "sc").lower()
     mode = (mode or "core").lower()
@@ -597,9 +595,75 @@ def _codex_precreated_fill_directive(
                     names.append(out)
         except Exception:
             pass
-
     seen: set = set()
-    deduped = [n for n in names if n and not (n in seen or seen.add(n))]
+    return [n for n in names if n and not (n in seen or seen.add(n))]
+
+
+def _codex_widen_depth_output_contract(
+    prompt_text: str, secondary_names: list[str]
+) -> str:
+    """Codex-only: add the mandatory secondary artifacts to the depth phase's
+    EXPECTED OUTPUT FILES (HARD CONTRACT) section.
+
+    The base depth prompt's `OUTPUT ALLOWLIST (HARD)` and `PHASE ISOLATION
+    CONTRACT` both derive their allowed/writable set from "this phase's Expected
+    Output Contract" — which lists only `depth_*_findings.md` (the core glob from
+    `phase.expected_artifacts`). On Codex (single-turn, full base prompt) the
+    model reads that allowlist literally, treats the never-cut scanners /
+    validation / confidence / niche artifacts as "an output file outside this
+    allowlist", and refuses to write them — failing the never-cut gate even
+    though it precreated them and the checklist asked for them. By listing the
+    secondaries INSIDE the Expected Output Contract, both downstream HARD
+    references include them and the contradiction is gone.
+
+    Claude PTY never reaches this: its depth prompt is replaced by the
+    worker-pool stub (one allowlisted worker per artifact). This function runs
+    only inside `_translate_prompt_for_codex` (`if backend == "codex"`), so it
+    cannot affect a Claude run. Skips gracefully (returns input unchanged) if
+    the anchor header is absent or there are no secondaries — never corrupts.
+    """
+    if not secondary_names:
+        return prompt_text
+    header = (
+        "## EXPECTED OUTPUT FILES (HARD CONTRACT -- GATE WILL FAIL IF VIOLATED)"
+    )
+    if header not in prompt_text:
+        return prompt_text  # base prompt shape changed — skip, do not corrupt
+    block_lines = [
+        "",
+        "### Mandatory secondary outputs (part of THIS contract and your allowlist)",
+        "",
+        "The artifacts below are PART of this phase's Expected Output Contract "
+        "and your OUTPUT ALLOWLIST — NOT 'outside the allowlist'. They are "
+        "pre-created EMPTY on disk (apply_patch can modify them; they already "
+        "exist). You MUST fill EACH with real first-pass content this phase. The "
+        "post-phase never-cut gate FAILS the phase if any is missing or empty, "
+        "so these are mandatory, not optional:",
+        "",
+    ]
+    block_lines += [f"- `{n}`" for n in secondary_names]
+    block = "\n".join(block_lines) + "\n"
+    return prompt_text.replace(header, header + "\n" + block, 1)
+
+
+def _codex_precreated_fill_directive(
+    phase_name: str, pipeline: str, mode: str, scratchpad: Optional[Path]
+) -> str:
+    """Codex-only directive naming the pre-created secondary files to fill.
+
+    `_precreate_codex_artifacts` seeds empty files for the phase's mandatory
+    secondary artifacts (never-cut scanners/validation/confidence, triggered
+    niches, recon shards) because Codex's apply_patch cannot create new files.
+    This tells the model those EMPTY files already exist on disk and MUST be
+    filled with real content this phase — an empty seed still fails the
+    never-cut/stub gate, so leaving them blank degrades the phase.
+
+    Derives the same filenames as `_codex_secondary_artifact_targets` from the
+    existing sources so the prompt and the seeding stay in sync.
+    """
+    deduped = _codex_mandatory_secondary_names(
+        phase_name, pipeline, mode, scratchpad
+    )
     if not deduped:
         return ""
 
@@ -712,6 +776,23 @@ def _translate_prompt_for_codex(prompt_text: str, *,
     )
     if fill_directive:
         fill_directive += "\n"
+
+    # Codex-only: the base depth prompt's OUTPUT ALLOWLIST (HARD) and PHASE
+    # ISOLATION CONTRACT derive their allowed set from the Expected Output
+    # Contract, which lists only the depth_*_findings.md core glob. The model
+    # then refuses the never-cut secondaries (blind-spot scanners, validation
+    # sweep, confidence, niche) as "outside the allowlist". List those inside
+    # the Expected Output Contract so the allowlist includes them. Depth only;
+    # core depth_* reps are already covered by the glob, so drop them here.
+    if phase_name == "depth":
+        _secondary = [
+            n
+            for n in _codex_mandatory_secondary_names(
+                phase_name, pipeline or "sc", mode or "core", scratchpad
+            )
+            if not (n.startswith("depth_") and n.endswith("_findings.md"))
+        ]
+        translated = _codex_widen_depth_output_contract(translated, _secondary)
 
     return preamble + "\n" + depth_checklist + fill_directive + translated
 
