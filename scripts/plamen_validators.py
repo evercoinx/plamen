@@ -1727,6 +1727,26 @@ def gate_passes(scratchpad: Path, project_root: str, phase: Phase) -> tuple:
                     f"{pattern} (quorum: {len(substantial)}/{needed} substantial)"
                 )
         else:
+            # location_recovery.md may be a legitimate N/A skip-summary. When
+            # `_location_recovery_needed` is false, the driver writes a ~75-byte
+            # `_write_location_recovery_skip` output ("SKIPPED: all inventory
+            # locations resolve mechanically"). That is BELOW min_artifact_bytes
+            # but is a valid terminal artifact — treating it as "(stub only)"
+            # makes every resume rewind location_recovery (and the downstream
+            # invariants/invariants_p2 it gates). Recognize the skip-summary
+            # exactly the way the empty-verify short-circuit recognizes valid
+            # terminal states. Genuinely missing/empty/other-broken files still
+            # fail below (no "SKIPPED ... resolve mechanically" marker present).
+            if phase.name == "location_recovery" and pattern == "location_recovery.md":
+                try:
+                    _lr_text = matches[0].read_text(
+                        encoding="utf-8", errors="replace"
+                    ).lower()
+                except Exception:
+                    _lr_text = ""
+                if "skipped" in _lr_text and "resolve mechanically" in _lr_text:
+                    # Valid N/A skip-summary — passing terminal artifact.
+                    continue
             # Strict: single explicit filename — it must be substantial
             if matches[0].stat().st_size < phase.min_artifact_bytes:
                 missing.append(pattern + " (stub only)")

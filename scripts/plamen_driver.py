@@ -35,9 +35,11 @@ from pty_exec import (
     SUBPROCESS_ISOLATION_PAYLOAD,
     ClaudePtySession,
     append_claude_pty_prompt_arg,
+    event_is_overloaded,
     event_is_rate_limited,
     parse_transcript_agentids,
     parse_transcript_usage,
+    text_shows_overloaded,
     text_shows_rate_limit,
     transcript_shows_compaction,
 )
@@ -2275,6 +2277,124 @@ def detect_rate_limit(stdio_log: Path, tail_bytes: int = 65536) -> bool:
     if text_shows_rate_limit(tail):
         return True
     return bool(_STRUCTURED_RATE_LIMIT_RE.search(tail))
+
+
+# ── 529 overload (transient provider overload) ──────────────────────────────
+#
+# A 529 / `overloaded_error` is Anthropic being temporarily overloaded
+# provider-wide. It is NOT the user's account rate/usage cap (429 / "weekly
+# limit"). `detect_rate_limit` returns True for BOTH (the structured paths and
+# the regexes cover 429+529 alike). `detect_overloaded` narrows to the 529
+# class so the depth-retry path can give transient overloads short-backoff
+# retries BEFORE ever surfacing the usage-cap pause panel. Genuine 429s skip
+# this path entirely and keep their existing long-wait + pause behavior.
+
+# Short exponential backoff schedule for transient 529 overloads (seconds).
+# Capped at ~3 min per the design; >=4 attempts before any pause is surfaced.
+_OVERLOAD_BACKOFF_SCHEDULE_S = (30, 60, 120, 180)
+
+
+def _detect_overloaded_jsonl_tail(tail_text: str) -> bool:
+    """Detect 529/overloaded signals in Claude Code session JSONL events."""
+    for line in tail_text.splitlines()[-200:]:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(event, dict) and event_is_overloaded(event):
+            return True
+    return False
+
+
+def detect_overloaded(stdio_log: Path, tail_bytes: int = 65536) -> bool:
+    """Return True iff a transient 529 / `overloaded_error` is detected.
+
+    Strict subset of `detect_rate_limit`: matches ONLY the 529/overload class,
+    never the 429 usage-cap class. Same envelope-first/text-fallback strategy.
+    """
+    if not stdio_log.exists():
+        return False
+    try:
+        with stdio_log.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - tail_bytes))
+            tail = f.read().decode("utf-8", errors="replace")
+    except Exception:
+        return False
+
+    envelope = _extract_json_envelope(tail)
+    if envelope is not None:
+        # Structured path: trust only fields.
+        if event_is_overloaded(envelope):
+            return True
+        if envelope.get("is_error") is True:
+            status = envelope.get("api_error_status")
+            try:
+                status_code = int(status)
+            except Exception:
+                status_code = None
+            if status_code == 529:
+                return True
+            err = envelope.get("error") or {}
+            if isinstance(err, dict):
+                err_type = (err.get("type") or "").lower()
+                if "overloaded" in err_type:
+                    return True
+        stop_reason = (envelope.get("stop_reason") or "").lower()
+        if stop_reason == "overloaded":
+            return True
+        if _detect_overloaded_jsonl_tail(tail):
+            return True
+        return False
+
+    # Envelope not parseable.
+    if _detect_overloaded_jsonl_tail(tail):
+        return True
+    return bool(text_shows_overloaded(tail))
+
+
+def overload_backoff_plan(
+    attempts_so_far: int,
+    *,
+    max_attempts: int = len(_OVERLOAD_BACKOFF_SCHEDULE_S),
+    schedule: tuple[int, ...] = _OVERLOAD_BACKOFF_SCHEDULE_S,
+) -> tuple[bool, int]:
+    """Pure decision helper for 529 overload handling (unit-testable).
+
+    `attempts_so_far` = number of short-backoff overload retries ALREADY made
+    for this phase (0 before the first retry).
+
+    Returns ``(should_retry, wait_seconds)``:
+    - If more overload retries remain → ``(True, <backoff for this attempt>)``.
+    - If the overload budget is exhausted → ``(False, 0)`` and the caller MUST
+      fall back to the existing pause-for-resume path (haltless floor).
+    """
+    if attempts_so_far < 0:
+        attempts_so_far = 0
+    if attempts_so_far >= max_attempts:
+        return False, 0
+    idx = min(attempts_so_far, len(schedule) - 1)
+    return True, schedule[idx]
+
+
+def _overload_sleep_seconds(wait_s: int) -> int:
+    """Resolve the actual sleep length for a 529 backoff step.
+
+    In tests the env var PLAMEN_OVERLOAD_BACKOFF_TEST_S forces a short sleep so
+    real wall-clock backoff never runs in the suite. Production uses the real
+    schedule value.
+    """
+    override = os.environ.get("PLAMEN_OVERLOAD_BACKOFF_TEST_S")
+    if override:
+        try:
+            return max(0, int(override))
+        except Exception:
+            return 0
+    return max(0, int(wait_s))
 
 
 def _append_rate_limit_sentinel(
@@ -14045,6 +14165,68 @@ def main():
                     current_attempt += 1
                     _stdio_log = scratchpad / f"_stdio_{phase.name}.attempt{current_attempt}.log"
                     _is_rate_limited = _detect_codex_rate_limit(_stdio_log, rc)
+            # ── 529 transient-overload pre-check (Bug 1 fix) ───────────────
+            # A 529 / `overloaded_error` is Anthropic temporarily overloaded
+            # provider-wide -- NOT the user's account rate/usage cap (429).
+            # `detect_rate_limit` returns True for both, so before treating
+            # this as a usage-cap pause, check whether it is actually a 529
+            # overload. If so, retry with SHORT exponential backoff for several
+            # attempts BEFORE ever surfacing the pause panel. Only if the 529
+            # persists past the overload budget do we fall through to the
+            # existing 429/usage-cap pause path below (haltless floor
+            # preserved). Genuine 429s never enter this block.
+            if (
+                _is_rate_limited
+                and config.get("cli_backend") != "codex"
+                and detect_overloaded(_stdio_log)
+            ):
+                _ovl_attempts = 0
+                while True:
+                    _should_retry, _ovl_wait = overload_backoff_plan(_ovl_attempts)
+                    if not _should_retry:
+                        log.warning(
+                            f"[{phase.name}] Anthropic still overloaded after "
+                            f"{_ovl_attempts} short-backoff retries; falling "
+                            f"back to pause-for-resume"
+                        )
+                        break
+                    log.warning(
+                        f"[{phase.name}] Anthropic temporarily overloaded "
+                        f"(529) -- retrying in {_ovl_wait}s "
+                        f"(overload attempt {_ovl_attempts + 1})"
+                    )
+                    checkpoint.rate_limited_at = phase.name
+                    checkpoint.save(scratchpad)
+                    time.sleep(_overload_sleep_seconds(_ovl_wait))
+                    _ovl_attempts += 1
+                    rc = run_phase(phase, config, attempt=2)
+                    if rc == -3:
+                        if _prompt_halt_resume_choice(
+                            checkpoint, scratchpad, phase.name, config_path
+                        ):
+                            rc = run_phase(phase, config, attempt=2)
+                        else:
+                            _halted = True
+                            break
+                    _ovl_retry_log = (
+                        scratchpad / f"_stdio_{phase.name}.attempt2.log"
+                    )
+                    if not _ovl_retry_log.exists():
+                        _ovl_retry_log = _stdio_log
+                    if not detect_rate_limit(_ovl_retry_log):
+                        # Overload cleared and the retry was not rate-limited:
+                        # treat as a normal completed attempt.
+                        _is_rate_limited = False
+                        rate_limit_consumed_retry = True
+                        break
+                    if not detect_overloaded(_ovl_retry_log):
+                        # No longer a 529 but still rate-limited -> a genuine
+                        # 429 surfaced. Hand off to the usage-cap path below.
+                        break
+                    # Still overloaded -> loop for the next backoff step.
+                if _halted:
+                    break
+
             if not _is_rate_limited:
                 pass
             else:

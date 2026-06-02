@@ -130,6 +130,82 @@ def text_shows_rate_limit(text: str) -> bool:
     return False
 
 
+def text_shows_overloaded(text: str) -> bool:
+    """Detect a 529 / `overloaded_error` (transient provider overload).
+
+    This is DISTINCT from `text_shows_rate_limit`: a 529 is Anthropic being
+    temporarily overloaded provider-wide, NOT the user's account hitting a
+    rate/usage cap (429 / "weekly limit" / "Switch to Team plan"). The two
+    require different recovery: 529 → short exponential backoff + more retries
+    before any pause; 429 → long wait + usage-cap pause panel. We deliberately
+    do NOT match the 429 usage-cap phrases here.
+    """
+    normalized = _normalized_pty_text(text)
+    if not normalized:
+        return False
+    if re.search(r"\b529\b[^\n\r]{0,80}\boverloaded\b", normalized):
+        return True
+    if re.search(r"\b(?:type|code|error)\"?\s*[:=]\s*\"?overloaded_error\b", normalized):
+        return True
+    if re.search(
+        r"\b(?:apierrorstatus|api error status)\b[^\n\r]{0,80}\b529\b", normalized
+    ):
+        return True
+    if re.search(r"\bstatus[_ ]?code\b[^\n\r]{0,20}\b529\b", normalized):
+        return True
+    return False
+
+
+def event_is_overloaded(event: dict[str, Any]) -> bool:
+    """Return True iff a transcript event carries a 529 / overloaded signal.
+
+    Mirrors `event_is_rate_limited` but matches ONLY the overload class (529 /
+    `overloaded_error` / stop_reason `overloaded`), never the 429 usage-cap
+    class. Used to give transient provider overloads short-backoff retries
+    before the rate-limit pause path is ever surfaced.
+    """
+    status = event.get("api_error_status") or event.get("apiErrorStatus")
+    if _status_code(status) == 529:
+        return True
+    event_type = str(event.get("type") or "").lower()
+    if event_type == "user":
+        # Tool-result/prompt echoes may contain audited prose; never trust them.
+        return False
+    for source in (event, _event_message(event), event.get("error")):
+        if isinstance(source, str):
+            if source.lower() == "overloaded":
+                return True
+            if text_shows_overloaded(source):
+                return True
+            continue
+        if not isinstance(source, dict):
+            continue
+        status = (
+            source.get("api_error_status")
+            or source.get("apiErrorStatus")
+            or source.get("status")
+        )
+        if _status_code(status) == 529:
+            return True
+        err = source.get("error")
+        if isinstance(err, str) and err.lower() == "overloaded":
+            return True
+        if isinstance(err, dict):
+            typ = str(err.get("type") or err.get("code") or "").lower()
+            if "overloaded" in typ:
+                return True
+        typ = str(source.get("type") or source.get("code") or "").lower()
+        if "overloaded" in typ:
+            return True
+        stop = str(source.get("stop_reason") or "").lower()
+        if stop == "overloaded":
+            return True
+        message = source.get("message") or source.get("content") or ""
+        if isinstance(message, str) and text_shows_overloaded(message):
+            return True
+    return False
+
+
 def isolation_overlay_hash(payload: str | None) -> str:
     """Short stable hash of the isolation overlay payload. Part of the
     preflight cache key so a probe taken under a different overlay is not
