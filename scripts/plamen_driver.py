@@ -551,10 +551,78 @@ def _codex_depth_artifact_checklist(pipeline: str, mode: str) -> str:
     return "\n".join(lines)
 
 
+def _codex_precreated_fill_directive(
+    phase_name: str, pipeline: str, mode: str, scratchpad: Optional[Path]
+) -> str:
+    """Codex-only directive naming the pre-created secondary files to fill.
+
+    `_precreate_codex_artifacts` seeds empty files for the phase's mandatory
+    secondary artifacts (never-cut scanners/validation/confidence, triggered
+    niches, recon shards) because Codex's apply_patch cannot create new files.
+    This tells the model those EMPTY files already exist on disk and MUST be
+    filled with real content this phase — an empty seed still fails the
+    never-cut/stub gate, so leaving them blank degrades the phase.
+
+    Derives the same filenames as `_codex_secondary_artifact_targets` from the
+    existing sources so the prompt and the seeding stay in sync.
+    """
+    pipeline = (pipeline or "sc").lower()
+    mode = (mode or "core").lower()
+    names: list[str] = []
+    if phase_name == "depth":
+        try:
+            groups = (
+                l1_never_cut_groups(mode)
+                if pipeline == "l1"
+                else sc_never_cut_groups(mode)
+            )
+        except Exception:
+            groups = []
+        for group in groups:
+            if group:
+                names.append(group[0])
+        if scratchpad is not None:
+            try:
+                for job in _required_niche_worker_jobs(scratchpad):
+                    out = job.get("output")
+                    if out:
+                        names.append(out)
+            except Exception:
+                pass
+    elif phase_name == "recon":
+        try:
+            for job in _recon_worker_jobs({"mode": mode, "pipeline": pipeline}):
+                out = job.get("output")
+                if out:
+                    names.append(out)
+        except Exception:
+            pass
+
+    seen: set = set()
+    deduped = [n for n in names if n and not (n in seen or seen.add(n))]
+    if not deduped:
+        return ""
+
+    lines = [
+        "## PRE-CREATED SECONDARY ARTIFACTS (Codex — MUST FILL)",
+        "",
+        "The following files have already been created EMPTY on disk so your",
+        "apply_patch tool has valid targets (apply_patch cannot create new",
+        "files). You MUST fill EACH with real first-pass content this phase.",
+        "An empty file still FAILS the mandatory artifact gate, so leaving any",
+        "of these blank degrades the phase:",
+        "",
+    ]
+    lines += [f"- {n}" for n in deduped]
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _translate_prompt_for_codex(prompt_text: str, *,
                                phase_name: str = "",
                                pipeline: str = "",
-                               mode: str = "") -> str:
+                               mode: str = "",
+                               scratchpad: Optional[Path] = None) -> str:
     """Translate Claude-specific prompt content for Codex runtime.
 
     Path translation: only rewrite ~/.claude/ → ~/.codex/plamen/ when the
@@ -637,7 +705,15 @@ def _translate_prompt_for_codex(prompt_text: str, *,
             pipeline or "sc", mode or "core"
         ) + "\n"
 
-    return preamble + "\n" + depth_checklist + translated
+    # Codex-only: name the pre-created secondary artifact files (seeded by
+    # _precreate_codex_artifacts) the model must fill this phase.
+    fill_directive = _codex_precreated_fill_directive(
+        phase_name, pipeline or "sc", mode or "core", scratchpad
+    )
+    if fill_directive:
+        fill_directive += "\n"
+
+    return preamble + "\n" + depth_checklist + fill_directive + translated
 
 
 _CODEX_CONTEXT_LIMITS: dict[str, int] = {
@@ -947,7 +1023,75 @@ def _detect_codex_content_filter(log_path: Path) -> bool:
     ))
 
 
-def _precreate_codex_artifacts(phase: "Phase", scratchpad: Path) -> None:
+def _codex_secondary_artifact_targets(
+    phase: "Phase", scratchpad: Path, config: Optional[dict] = None
+) -> list[str]:
+    """Return the phase's mandatory first-pass SECONDARY artifact filenames.
+
+    `phase.expected_artifacts` only declares the glob of CORE outputs (e.g.
+    `depth_*_findings.md` → the 4/5 core depth findings). The never-cut gate
+    additionally requires the blind-spot scanners, validation sweep, confidence
+    scores, and triggered niche outputs (and recon's worker shards). Codex's
+    apply_patch cannot create new files, so unless those are pre-seeded the
+    model has no target to fill and the never-cut gate degrades the phase.
+
+    This derives the secondary filenames from EXISTING single-sources-of-truth
+    (`sc_never_cut_groups` / `l1_never_cut_groups`, `_required_niche_worker_jobs`,
+    `_recon_worker_jobs`) rather than a hardcoded parallel list. For never-cut
+    `[A|B]` alternations only the FIRST representative is seeded (one valid
+    target is enough; the gate accepts either). Only TRIGGERED niches (from the
+    manifest) are seeded, never all possible.
+    """
+    cfg = config or {}
+    mode = str(cfg.get("mode") or "core").lower()
+    pipeline = str(cfg.get("pipeline") or "sc").lower()
+    targets: list[str] = []
+
+    if phase.name == "depth":
+        try:
+            groups = (
+                l1_never_cut_groups(mode)
+                if pipeline == "l1"
+                else sc_never_cut_groups(mode)
+            )
+        except Exception:
+            groups = []
+        for group in groups:
+            # `group` is a list of alternations ([A|B]); seed ONE representative.
+            if group:
+                targets.append(group[0])
+        # Triggered niche outputs from the instantiate manifest (manifest-driven,
+        # only required/triggered rows return).
+        try:
+            for job in _required_niche_worker_jobs(scratchpad):
+                out = job.get("output")
+                if out:
+                    targets.append(out)
+        except Exception:
+            pass
+    elif phase.name == "recon":
+        try:
+            for job in _recon_worker_jobs(cfg):
+                out = job.get("output")
+                if out:
+                    targets.append(out)
+        except Exception:
+            pass
+
+    # De-dupe while preserving order; drop any that overlap a core glob target
+    # already covered by expected_artifacts handling (those are seeded anyway).
+    seen: set = set()
+    deduped: list[str] = []
+    for name in targets:
+        if name and name not in seen:
+            seen.add(name)
+            deduped.append(name)
+    return deduped
+
+
+def _precreate_codex_artifacts(
+    phase: "Phase", scratchpad: Path, config: Optional[dict] = None
+) -> None:
     """Seed empty files for expected artifacts so apply_patch has targets.
 
     Codex's apply_patch tool cannot create new files — it only modifies
@@ -956,25 +1100,33 @@ def _precreate_codex_artifacts(phase: "Phase", scratchpad: Path) -> None:
     already have content (from a prior attempt or phase) are left untouched.
     Glob patterns with wildcards are expanded to a single representative
     filename using the phase's example_tokens if available.
+
+    In addition to `phase.expected_artifacts` (the CORE outputs), this also
+    seeds the phase's mandatory first-pass SECONDARY artifacts — the never-cut
+    scanners/validation/confidence files, triggered niche outputs, and recon
+    worker shards — so Codex can fill the full first-pass set rather than only
+    the core glob. Secondary names are derived from existing sources (see
+    `_codex_secondary_artifact_targets`); seeding is additive and an unfilled
+    empty seed still fails the stub/never-cut gate (no false-pass).
     """
+    def _seed(concrete: str) -> None:
+        target = scratchpad / concrete
+        if not target.exists():
+            try:
+                target.write_text("", encoding="utf-8")
+            except OSError:
+                pass
+
     for pattern in phase.expected_artifacts:
         if "*" in pattern or "?" in pattern:
             if phase.example_tokens:
                 for token in phase.example_tokens:
-                    concrete = pattern.replace("*", token, 1)
-                    target = scratchpad / concrete
-                    if not target.exists():
-                        try:
-                            target.write_text("", encoding="utf-8")
-                        except OSError:
-                            pass
+                    _seed(pattern.replace("*", token, 1))
         else:
-            target = scratchpad / pattern
-            if not target.exists():
-                try:
-                    target.write_text("", encoding="utf-8")
-                except OSError:
-                    pass
+            _seed(pattern)
+
+    for name in _codex_secondary_artifact_targets(phase, scratchpad, config):
+        _seed(name)
 
 
 def _update_depth_alias_markers(path: Path, expected_name: str) -> None:
@@ -9164,6 +9316,7 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
             prompt, phase_name=phase.name,
             pipeline=config.get("pipeline", "sc"),
             mode=config.get("mode", "core"),
+            scratchpad=scratchpad,
         )
     elif (
         is_claude_pty
@@ -9239,8 +9392,11 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
         # Pre-create expected artifact files so Codex's apply_patch (which
         # cannot create new files) has valid targets. The model's preamble
         # directs it to use shell+heredoc for new files, but models don't
-        # always follow instructions — pre-seeding is defensive.
-        _precreate_codex_artifacts(phase, scratchpad)
+        # always follow instructions — pre-seeding is defensive. Also seeds
+        # the phase's mandatory first-pass secondary artifacts (never-cut
+        # scanners/validation/confidence, triggered niches, recon shards) so
+        # Codex can fill the full first-pass set, not just the core glob.
+        _precreate_codex_artifacts(phase, scratchpad, config)
         if config.get("_codex_skip_model"):
             cmd = _build_codex_cmd_no_model(
                 needs_mcp=phase.needs_mcp,
