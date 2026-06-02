@@ -10920,7 +10920,9 @@ def _run_phase_validators(
     if phase.name in ("verify_aggregate", "sc_verify_aggregate") and passed:
         if _generate_verify_core_if_missing(scratchpad):
             log.info("[verify_aggregate] verify_core.md generated mechanically")
-        path_issues = _validate_cited_paths_in_verify(scratchpad)
+        path_issues = _validate_cited_paths_in_verify(
+            scratchpad, config.get("project_root")
+        )
         if path_issues:
             log.info(f"[verify_aggregate] {path_issues[0]}")
         parity_issues = _validate_verify_files_for_queue(scratchpad, min_bytes=effective_min_bytes)
@@ -11422,7 +11424,9 @@ def _run_phase_validators(
             hint = _generate_verify_shard_retry_hint(verify_issues)
             if hint:
                 _write_retry_hint(scratchpad, phase.name, hint)
-        path_issues = _validate_cited_paths_in_verify(scratchpad)
+        path_issues = _validate_cited_paths_in_verify(
+            scratchpad, config.get("project_root")
+        )
         if path_issues:
             passed = False
             missing = list(missing) + [

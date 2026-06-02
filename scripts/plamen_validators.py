@@ -6421,14 +6421,22 @@ def _validate_attention_repair(
 
 
 def _validate_cited_paths_in_verify(
-    scratchpad: Path
+    scratchpad: Path,
+    project_root: str | None = None,
 ) -> list[str]:
     """Path-existence gate. Bucket C of v2.2.2 post-mortem.
 
     For each verify_*.md file, harvest the **Location**: cited path and
     check whether it resolves against:
       (a) the SCIP-indexed file set (preferred), OR
-      (b) basename-only match against indexed files (lenient fallback).
+      (b) basename-only match against indexed files (lenient fallback), OR
+      (c) filesystem existence under the project/repo root.
+
+    SCIP coverage is frequently incomplete (e.g. rust-analyzer scip may
+    skip some crates), so a path absent from the SCIP map is NOT proof of
+    hallucination. A cited path that resolves to a real file on disk is
+    treated as RESOLVED. Only paths absent from BOTH the SCIP map AND the
+    filesystem are genuine hallucinations and stay flagged.
 
     Findings whose path resolves to NEITHER are flagged for the report
     pipeline as `[PATH-UNRESOLVED]`. Soft v2.3.0 — informational only.
@@ -6440,6 +6448,31 @@ def _validate_cited_paths_in_verify(
     if not indexed:
         return []  # No SCIP → can't validate
     indexed_basenames = _basenames(indexed)
+
+    # Candidate roots for filesystem-existence fallback. Cited paths are
+    # repo-relative (e.g. "crates/p2p/src/gossip_service.rs"), so resolve
+    # against the project_root the SCIP index was built from, plus a couple
+    # of adjacent roots in case the build root differs from project_root.
+    fs_roots: list[Path] = []
+    if project_root:
+        try:
+            pr = Path(project_root)
+            fs_roots.append(pr)
+            fs_roots.append(pr.parent)
+        except Exception:
+            pass
+
+    def _exists_on_disk(rel_path: str) -> bool:
+        if not fs_roots:
+            return False
+        rel = rel_path.lstrip("/")
+        for root in fs_roots:
+            try:
+                if (root / rel).exists():
+                    return True
+            except Exception:
+                continue
+        return False
 
     location_re = re.compile(
         r"^\s*(?:-\s+)?\*\*Location\*\*\s*:?\s*`?([^\n`]+?)`?\s*$",
@@ -6481,6 +6514,11 @@ def _validate_cited_paths_in_verify(
             checked += 1
             bn = path.rsplit("/", 1)[-1]
             if path in indexed or bn in indexed_basenames:
+                continue
+            # SCIP miss is not proof of hallucination — SCIP coverage is
+            # often partial. Fall back to filesystem existence under the
+            # project/repo root before flagging as unresolved.
+            if _exists_on_disk(path):
                 continue
             unresolved.append((f.name, path))
 
