@@ -3801,7 +3801,26 @@ def _validate_depth_artifact_substance(
         reasons = [_depth_artifact_is_stub(p) for p in present]
         # Group is satisfied if ANY present member is substantive.
         if all(r is not None for r in reasons):
-            stubs.append("; ".join(r for r in reasons if r))
+            reason_str = "; ".join(r for r in reasons if r)
+            # Core/Light: a present, substantive-but-UNIFORM confidence table is
+            # advisory only (2-axis scoring; Core/Light have NO iter2/iter3
+            # adaptive routing that depends on differentiated scores) and the
+            # mechanical scorer (_compute_depth_confidence) cannot differentiate
+            # findings that carry no evidence/depth-evidence tags -> every row
+            # lands on the same composite. Mirror the L1 depth gate, which treats
+            # confidence uniformity as a NON-blocking warning outside Thorough.
+            # Genuine stubs (empty / driver-synthesized placeholder / no rows)
+            # still block here; only the "formulaic" uniformity reason is
+            # downgraded. Thorough keeps it blocking (iter2 enforcement depends
+            # on differentiated scores).
+            if (
+                (mode or "core").lower() != "thorough"
+                and len(group) == 1
+                and group[0] == "confidence_scores.md"
+                and "formulaic" in reason_str
+            ):
+                continue
+            stubs.append(reason_str)
     return stubs
 
 

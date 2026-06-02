@@ -26,12 +26,30 @@ def test_l1_thorough_breadth_promoted_to_opus_48():
 def test_l1_thorough_skeptic_promoted_to_opus_48():
     assert T.phase_model(_phase("skeptic", "sonnet"), "thorough", {"pipeline": "l1"}) == "claude-opus-4-8"
 
-def test_l1_thorough_verify_shard_stays_sonnet():
-    # L1 verify shards are `verify_*` (not `sc_verify_*`) + sonnet-tier -> NOT promoted.
-    assert T.phase_model(_phase("verify_high_b", "sonnet"), "thorough", {"pipeline": "l1"}) == "sonnet"
+def test_l1_thorough_verify_shard_now_opus48():
+    # L1 verify shards (`verify_*`, not `_queue`/`_aggregate`) now promote to
+    # Opus 4.8 in Thorough for parity with SC sc_verify_* shards (Sonnet was
+    # dropping the mandatory PoC ledger under load).
+    assert T.phase_model(_phase("verify_high_b", "sonnet"), "thorough", {"pipeline": "l1"}) == "claude-opus-4-8"
 
 def test_l1_thorough_verify_queue_stays_unpromoted():
     assert T.phase_model(_phase("verify_queue", "haiku"), "thorough", {"pipeline": "l1"}) == T._resolve_model_alias("haiku")
+
+def test_l1_thorough_verify_aggregate_stays_unpromoted():
+    # verify_aggregate is a summary phase, not a reasoning shard -> NOT promoted.
+    assert T.phase_model(_phase("verify_aggregate", "haiku"), "thorough", {"pipeline": "l1"}) == T._resolve_model_alias("haiku")
+
+def test_sc_thorough_generic_phase_unaffected():
+    # Regression: a generic SC Thorough phase (rescan) is NOT promoted.
+    assert T.phase_model(_phase("rescan", "sonnet"), "thorough", {"pipeline": "sc"}) == "sonnet"
+
+def test_l1_core_verify_shard_not_promoted():
+    # Promotion is Thorough-only: Core L1 verify shards keep their phase model.
+    assert T.phase_model(_phase("verify_high_b", "sonnet"), "core", {"pipeline": "l1"}) == T._resolve_model_alias("sonnet")
+
+def test_l1_light_verify_shard_sonnet():
+    # Light forces sonnet for all phases regardless of promotion.
+    assert T.phase_model(_phase("verify_high_b", "sonnet"), "light", {"pipeline": "l1"}) == "sonnet"
 
 def test_l1_core_depth_not_bumped():
     assert T.phase_model(_phase("depth", "opus"), "core", {"pipeline": "l1"}) == "claude-opus-4-6"

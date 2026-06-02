@@ -636,7 +636,25 @@ def phase_model(phase: Phase, mode: str, config: Optional[dict] = None) -> str:
             and not name.endswith("_queue")
             and not name.endswith("_aggregate")
         )
-        promote = name in ("breadth", "skeptic") or is_sc_verify_shard
+        # L1 verify shards are named verify_* (not sc_verify_*) and were left at
+        # Sonnet as a deliberate cost cap. But Sonnet drops the mandatory PoC
+        # Attempt/Execution Result ledger for some findings under load, failing
+        # the verify PoC-contract gate and degrading findings to unverified. SC
+        # Thorough verify shards already promote to Opus and do NOT exhibit this.
+        # Promote L1 Thorough verify SHARDS to Opus for parity. Queue/aggregate
+        # are routing/summary phases (verify_queue, verify_aggregate) and stay
+        # unpromoted. Scoped to pipeline == "l1" so SC verify_* (if any) untouched.
+        is_l1_verify_shard = (
+            (config.get("pipeline") if config else None) == "l1"
+            and name.startswith("verify_")
+            and not name.endswith("_queue")
+            and not name.endswith("_aggregate")
+        )
+        promote = (
+            name in ("breadth", "skeptic")
+            or is_sc_verify_shard
+            or is_l1_verify_shard
+        )
         tier = "opus" if promote else (phase.model or "sonnet").strip()
         if tier == "opus":
             return PLAMEN_THOROUGH_OPUS_MODEL or _resolve_model_alias("opus")
