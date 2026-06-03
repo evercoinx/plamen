@@ -11,7 +11,7 @@
 > **Coverage-first design**: Iteration 1 ALWAYS spawns all 8 agents.
 > Iterations 2-3 are targeted, autonomous, and anti-dilution protected.
 > **The orchestrator runs the ENTIRE loop without user intervention.**
-> **Reference**: `~/.claude/rules/phase4-confidence-scoring.md` for scoring model and anti-dilution rules.
+> **Reference**: `~/.plamen/rules/phase4-confidence-scoring.md` for scoring model and anti-dilution rules.
 
 ### Loop Pseudocode (Orchestrator Executes This)
 
@@ -354,7 +354,7 @@ ADAPTIVE_DEPTH_LOOP(findings_inventory):
 
       Write to {SCRATCHPAD}/perturbation_findings.md
       Use finding IDs [PERT-1], [PERT-2]... Max 8 new findings.
-      Use standard finding format from ~/.claude/rules/finding-output-format.md.
+      Use standard finding format from ~/.plamen/rules/finding-output-format.md.
 
       SCOPE: Write ONLY to your assigned output file. Return your findings and stop.
       Return: 'DONE: {P} perturbations tested, {N} new findings'

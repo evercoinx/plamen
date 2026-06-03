@@ -43,7 +43,7 @@ For each CONFIRMED or PARTIAL finding in depth agent outputs, apply the followin
 - Each perturbation MUST reference specific code locations (file:line)
 - Do NOT re-report the original finding -- only report genuinely NEW vulnerabilities discovered via mutation
 - Tag each finding with [PERTURBATION:OPERATOR_NAME] in the Depth Evidence field
-- Use standard finding format from ~/.claude/rules/finding-output-format.md
+- Use standard finding format from ~/.plamen/rules/finding-output-format.md
 
 ## Output
 

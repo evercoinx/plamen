@@ -12,7 +12,7 @@
 > Iterations 2-3 are targeted, autonomous, and anti-dilution protected.
 > **The orchestrator runs the ENTIRE loop without user intervention.**
 > Timeout-aware split-and-retry, severity-weighted budget, dynamic cap, loop dynamics detection, post-verification error trace feedback.
-> **Reference**: `~/.claude/rules/phase4-confidence-scoring.md` for scoring model and anti-dilution rules.
+> **Reference**: `~/.plamen/rules/phase4-confidence-scoring.md` for scoring model and anti-dilution rules.
 
 ## Depth Agent Domain Mapping - Solana
 
@@ -252,7 +252,7 @@ ADAPTIVE_DEPTH_LOOP(findings_inventory):
 
       Write to {SCRATCHPAD}/perturbation_findings.md
       Use finding IDs [PERT-1], [PERT-2]... Max 8 new findings.
-      Use standard finding format from ~/.claude/rules/finding-output-format.md.
+      Use standard finding format from ~/.plamen/rules/finding-output-format.md.
 
       SCOPE: Write ONLY to your assigned output file. Return your findings and stop.
       Return: 'DONE: {P} perturbations tested, {N} new findings'

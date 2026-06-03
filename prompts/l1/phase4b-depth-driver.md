@@ -152,7 +152,7 @@ to reserve the file.
 
 Write all findings to {SCRATCHPAD}/depth_{ROLE}_findings.md.
 Use finding IDs: [D{ROLE_ABBREV}-1], [D{ROLE_ABBREV}-2], ...
-Use standard finding format from ~/.claude/rules/finding-output-format.md.
+Use standard finding format from ~/.plamen/rules/finding-output-format.md.
 
 Include Depth Evidence tags on every finding:
   [BOUNDARY:X=val], [VARIATION:param A->B], [TRACE:path->outcome], [LSP-TRACE]
@@ -226,7 +226,7 @@ has fewer than 2 entries, the agent degraded. Log but do not block.
 
 ### Thorough-Only: Iteration 2 (Devil's Advocate)
 
-Per `~/.claude/rules/phase4-confidence-scoring.md` "Hard Devil's Advocate Role":
+Per `~/.plamen/rules/phase4-confidence-scoring.md` "Hard Devil's Advocate Role":
 
 For each UNCERTAIN finding (composite < 0.7) in `{SCRATCHPAD}/confidence_scores.md`:
 1. Extract evidence-only card (no verdicts, no reasoning contamination)

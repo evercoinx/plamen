@@ -1,19 +1,18 @@
-"""Update ~/.claude/mcp.json to use locally-installed pinned MCP packages.
+"""Update ~/.claude/settings.json to use locally-installed pinned MCP packages.
 
 Replaces npx commands with direct node invocations pointing at the local
 node_modules. Wraps servers that need schema sanitization. Preserves all
 existing env vars and non-npm servers untouched.
 
 Cross-platform: works on Windows, macOS, and Linux.
-Target: ~/.claude/mcp.json (NOT ~/.claude.json — that is the global Claude
-config and should not have mcpServers managed by this script).
+Target: ~/.claude/settings.json (the Claude Code canonical MCP config).
 """
 
 import json
 import os
 import sys
 
-MCP_JSON = os.path.join(os.path.expanduser("~"), ".claude", "mcp.json")
+MCP_JSON = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
 MCP_DIR = os.path.dirname(os.path.abspath(__file__))
 NM = os.path.join(MCP_DIR, "node_modules")
 SANITIZER = os.path.join(MCP_DIR, "schema-sanitizer.js")
@@ -57,7 +56,8 @@ def main():
     with open(MCP_JSON, "r") as f:
         config = json.load(f)
 
-    servers = config.setdefault("mcpServers", {})
+    config.setdefault("mcpServers", {})
+    servers = config["mcpServers"]
     node_bin = _find_node()
     updated = []
 
@@ -87,7 +87,7 @@ def main():
         json.dump(config, f, indent=2)
         f.write("\n")
 
-    print(f"DONE: {len(updated)} npm-based MCP servers updated in {MCP_JSON}:")
+    print(f"DONE: {len(updated)} npm-based MCP servers updated in settings.json:")
     for line in updated:
         print(line)
     print()

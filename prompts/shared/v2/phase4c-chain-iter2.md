@@ -8,7 +8,7 @@ Execute the instructions below directly and stop. Do not spawn subagents.
 > unexplored cross-class Medium+ rows, this phase should not have been
 > spawned — return immediately with `DONE: 0 new chains (no unexplored pairs)`.
 > **Reference (not load-bearing)**: Full multi-agent methodology is in
-> `~/.claude/rules/phase4c-chain-prompt.md`.
+> `~/.plamen/rules/phase4c-chain-prompt.md`.
 
 ---
 

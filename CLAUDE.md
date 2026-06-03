@@ -59,16 +59,16 @@ output you produce may be mechanically recovered if it is malformed.
 
 | Purpose | Location |
 |---------|----------|
-| Orchestration rules | `~/.claude/rules/orchestrator-rules.md` |
-| Finding output format | `~/.claude/rules/finding-output-format.md` |
-| Breadth re-scan | `~/.claude/rules/phase3b-rescan-prompt.md` |
-| Confidence scoring | `~/.claude/rules/phase4-confidence-scoring.md` |
-| Chain prompt | `~/.claude/rules/phase4c-chain-prompt.md` |
-| PoC execution rules | `~/.claude/rules/phase5-poc-execution.md` |
-| Report prompts | `~/.claude/rules/phase6-report-prompts.md` |
-| Report template | `~/.claude/rules/report-template.md` |
-| Skill index | `~/.claude/rules/skill-index.md` |
-| Post-audit improvement | `~/.claude/rules/post-audit-improvement-protocol.md` |
+| Orchestration rules | `~/.plamen/rules/orchestrator-rules.md` |
+| Finding output format | `~/.plamen/rules/finding-output-format.md` |
+| Breadth re-scan | `~/.plamen/rules/phase3b-rescan-prompt.md` |
+| Confidence scoring | `~/.plamen/rules/phase4-confidence-scoring.md` |
+| Chain prompt | `~/.plamen/rules/phase4c-chain-prompt.md` |
+| PoC execution rules | `~/.plamen/rules/phase5-poc-execution.md` |
+| Report prompts | `~/.plamen/rules/phase6-report-prompts.md` |
+| Report template | `~/.plamen/rules/report-template.md` |
+| Skill index | `~/.plamen/rules/skill-index.md` |
+| Post-audit improvement | `~/.plamen/rules/post-audit-improvement-protocol.md` |
 | Depth agents (definitions) | `~/.claude/agents/depth-*.md` |
 
 ### Language-specific (resolve `{LANGUAGE}` to `evm`, `solana`, `aptos`, `sui`, or `soroban`)

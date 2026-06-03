@@ -124,7 +124,7 @@ to reserve the file.
 
 Write all findings to `{SCRATCHPAD}/analysis_layer_{LAYER_PRIMARY}.md`.
 Use finding IDs: [L{N}-1], [L{N}-2], ...
-Use standard finding format from ~/.claude/rules/finding-output-format.md.
+Use standard finding format from ~/.plamen/rules/finding-output-format.md.
 
 Every finding MUST include:
 - Specific code location (file:line)
@@ -176,5 +176,5 @@ fi
 | Per-cluster analysis (Phase 3c) | Skip | After Phase 3b |
 
 In Thorough mode, Phase 3b and 3c run after Phase 4a produces the exclusion list.
-See `~/.claude/rules/phase3b-rescan-prompt.md` for the re-scan protocol.
+See `~/.plamen/rules/phase3b-rescan-prompt.md` for the re-scan protocol.
 The driver spawns those phases separately — this file covers Phase 3a only.

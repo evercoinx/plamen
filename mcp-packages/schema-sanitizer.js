@@ -39,6 +39,7 @@ const child = spawn(command, commandArgs, {
 
 let parentBuf = Buffer.alloc(0);
 let childBuf = Buffer.alloc(0);
+let parentTransport = null;
 
 function sanitizeMessage(msg) {
   if (msg.result && msg.result.tools && Array.isArray(msg.result.tools)) {
@@ -60,6 +61,18 @@ function writeFramedToParent(msg) {
   process.stdout.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
 }
 
+function writeJsonLineToParent(msg) {
+  process.stdout.write(JSON.stringify(sanitizeMessage(msg)) + '\n');
+}
+
+function writeMessageToParent(msg) {
+  if (parentTransport === 'line') {
+    writeJsonLineToParent(msg);
+    return;
+  }
+  writeFramedToParent(msg);
+}
+
 function writeJsonLineToChild(msg) {
   child.stdin.write(JSON.stringify(msg) + '\n');
 }
@@ -68,29 +81,53 @@ function processParentInput(chunk) {
   parentBuf = Buffer.concat([parentBuf, chunk]);
 
   while (true) {
-    const headerEnd = parentBuf.indexOf('\r\n\r\n');
-    if (headerEnd === -1) {
-      return;
-    }
+    if (parentBuf.length === 0) return;
 
-    const header = parentBuf.subarray(0, headerEnd).toString('utf8');
-    const match = header.match(/Content-Length:\s*(\d+)/i);
-    if (!match) {
-      parentBuf = parentBuf.subarray(headerEnd + 4);
+    if (parentBuf.indexOf(Buffer.from('Content-Length:')) === 0) {
+      parentTransport = parentTransport || 'framed';
+      const headerEnd = parentBuf.indexOf('\r\n\r\n');
+      if (headerEnd === -1) {
+        return;
+      }
+
+      const header = parentBuf.subarray(0, headerEnd).toString('utf8');
+      const match = header.match(/Content-Length:\s*(\d+)/i);
+      if (!match) {
+        parentBuf = parentBuf.subarray(headerEnd + 4);
+        continue;
+      }
+
+      const contentLength = parseInt(match[1], 10);
+      const bodyStart = headerEnd + 4;
+      if (parentBuf.length < bodyStart + contentLength) {
+        return;
+      }
+
+      const body = parentBuf.subarray(bodyStart, bodyStart + contentLength).toString('utf8');
+      parentBuf = parentBuf.subarray(bodyStart + contentLength);
+
+      try {
+        writeJsonLineToChild(JSON.parse(body));
+      } catch {
+        // Drop malformed parent messages instead of poisoning the child stream.
+      }
       continue;
     }
 
-    const contentLength = parseInt(match[1], 10);
-    const bodyStart = headerEnd + 4;
-    if (parentBuf.length < bodyStart + contentLength) {
+    const newline = parentBuf.indexOf('\n');
+    if (newline === -1) {
       return;
     }
 
-    const body = parentBuf.subarray(bodyStart, bodyStart + contentLength).toString('utf8');
-    parentBuf = parentBuf.subarray(bodyStart + contentLength);
+    const line = parentBuf.subarray(0, newline).toString('utf8').trim();
+    parentBuf = parentBuf.subarray(newline + 1);
+    if (!line) {
+      continue;
+    }
+    parentTransport = parentTransport || 'line';
 
     try {
-      writeJsonLineToChild(JSON.parse(body));
+      writeJsonLineToChild(JSON.parse(line));
     } catch {
       // Drop malformed parent messages instead of poisoning the child stream.
     }
@@ -128,7 +165,7 @@ function processChildOutput(chunk) {
       childBuf = childBuf.subarray(bodyStart + contentLength);
 
       try {
-        writeFramedToParent(JSON.parse(body));
+        writeMessageToParent(JSON.parse(body));
       } catch {
         process.stdout.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
       }
@@ -147,7 +184,7 @@ function processChildOutput(chunk) {
     }
 
     try {
-      writeFramedToParent(JSON.parse(line));
+      writeMessageToParent(JSON.parse(line));
     } catch {
       // Child logs should go to stderr; ignore stray stdout text.
     }

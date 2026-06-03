@@ -19,7 +19,7 @@ Read:
 - `{SCRATCHPAD}/report_critical_high.md` (Critical + High sections)
 - `{SCRATCHPAD}/report_medium.md` (Medium section)
 - `{SCRATCHPAD}/report_low_info.md` (Low + Informational sections)
-- `~/.claude/rules/report-template.md` (report structure template)
+- `~/.plamen/rules/report-template.md` (report structure template)
 
 ---
 

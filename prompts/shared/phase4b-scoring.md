@@ -6,7 +6,7 @@ description: "Phase 4b Step 2: Confidence Scoring after depth iteration 1"
 
 > **Efficiency**: This is a mechanical formula-application task. Prioritize responding quickly rather than thinking deeply. Apply the scoring formulas directly without extensive reasoning.
 > **Mode gate**: Light mode skips scoring entirely. Core uses 2-axis. Thorough uses 4-axis.
-> **Reference**: Full scoring model, formulas, and routing thresholds are in `~/.claude/rules/phase4-confidence-scoring.md`.
+> **Reference**: Full scoring model, formulas, and routing thresholds are in `~/.plamen/rules/phase4-confidence-scoring.md`.
 
 This step runs after ALL depth iteration 1 agents (depth, scanners, validation sweep, niche) have completed. It scores every finding to determine which need further depth analysis.
 
@@ -42,7 +42,7 @@ Read:
 - {SCRATCHPAD}/validation_sweep_findings.md or scanner_validation_findings.md
 - {SCRATCHPAD}/niche_*_findings.md (if any exist)
 - {SCRATCHPAD}/consensus_map.md (pre-computed consensus scores)
-- ~/.claude/rules/phase4-confidence-scoring.md (full scoring model reference)
+- ~/.plamen/rules/phase4-confidence-scoring.md (full scoring model reference)
 
 ## Scoring Formula
 

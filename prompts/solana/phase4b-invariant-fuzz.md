@@ -237,7 +237,7 @@ Return: 'DONE: {N} invariants tested ({categories} categories), {H} handlers, {V
 
 When `trident_available: false`, the invariant fuzz campaign is skipped entirely at this phase.
 Proptest or boundary-value parameterized tests are used instead during Phase 5 verification
-(see `~/.claude/rules/phase5-poc-execution.md` - Non-EVM Fuzz Guidance).
+(see `~/.plamen/rules/phase5-poc-execution.md` - Non-EVM Fuzz Guidance).
 
 This is NOT a failure - native Solana programs without Anchor IDLs cannot use Trident.
 The Phase 5 proptest fallback provides per-finding fuzz coverage with bounded inputs.

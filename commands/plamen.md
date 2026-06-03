@@ -47,7 +47,7 @@ description: "Launch the V2 deterministic Smart Contract audit pipeline (same as
 
 ## Orchestration Protocol
 
-**MANDATORY**: Before starting any audit work, read and apply `~/.claude/rules/orchestrator-rules.md`. It contains the AUDIT MODES table, CRITICAL RULES 1-16, and the orchestration architecture. You are the orchestrator " those rules govern how you spawn agents, manage phases, and enforce completeness.
+**MANDATORY**: Before starting any audit work, read and apply `~/.plamen/rules/orchestrator-rules.md`. It contains the AUDIT MODES table, CRITICAL RULES 1-16, and the orchestration architecture. You are the orchestrator " those rules govern how you spawn agents, manage phases, and enforce completeness.
 
 ## Step 0: Interactive Setup Wizard
 
@@ -374,7 +374,7 @@ AskUserQuestion(questions=[{
 If the user selected "Compare":
 1. If `REPORT_PATH` and `GROUND_TRUTH_PATH` are both set from `$ARGUMENTS`, skip to step 3.
 2. Otherwise, use `AskUserQuestion` to ask for both report paths (both must be `.md` files " PDFs cannot be diffed).
-3. Read both files and follow the Post-Audit Improvement Protocol from `~/.claude/rules/post-audit-improvement-protocol.md`.
+3. Read both files and follow the Post-Audit Improvement Protocol from `~/.plamen/rules/post-audit-improvement-protocol.md`.
 
 Do NOT proceed to Step 1.
 
@@ -441,7 +441,7 @@ in the project root. For EVM call-graph DOT exports, always use
 
 **Tree architecture " path resolution**:
 - **Language-specific prompts**: `~/.claude/prompts/{LANGUAGE}/`
-- **Shared rules**: `~/.claude/rules/`
+- **Shared rules**: `~/.plamen/rules/`
 - **Skills**: `~/.claude/agents/skills/{LANGUAGE}/`
 - **Injectable skills**: `~/.claude/agents/skills/injectable/`
 - **Niche agents**: `~/.claude/agents/skills/niche/`
@@ -507,7 +507,7 @@ Include this block verbatim in every Thorough-mode SC depth agent prompt:
 >
 > The `{...}` tokens above are placeholders showing the schema " replace with REAL values from the codebase you are auditing. Do NOT copy the placeholder text verbatim. Cite real file paths from THIS audit's source tree, not from any example or prior audit. File extensions vary by language: `.sol` (Solidity), `.rs` (Soroban / Solana / Aptos / Sui), `.move` (Move). Use whatever extension matches your audit target.
 >
-> **One row per (skill, numbered-section) pair** for every skill listed in `template_recommendations.md` BINDING MANIFEST as `Required = YES` and routed to your role per `~/.claude/rules/skill-index.md` "Inject Into" column. Resolve the numbered sections by reading each skill's `SKILL.md` " sections start with `## N. Title`.
+> **One row per (skill, numbered-section) pair** for every skill listed in `template_recommendations.md` BINDING MANIFEST as `Required = YES` and routed to your role per `~/.plamen/rules/skill-index.md` "Inject Into" column. Resolve the numbered sections by reading each skill's `SKILL.md` " sections start with `## N. Title`.
 >
 > **Allowed `Executed` values**:
 > - `yes` " section executed; Evidence MUST contain a `file:line` token (e.g. `Vault.sol:L45` or `Vault.sol:L45-67`). The driver hard-rejects ceremonial `yes` rows without `file:line` evidence.
@@ -794,7 +794,7 @@ After all return:
 
 **Skip in Light and Core mode.**
 
-**Read full prompt from**: `~/.claude/rules/phase3b-rescan-prompt.md`
+**Read full prompt from**: `~/.plamen/rules/phase3b-rescan-prompt.md`
 
 **Flow**: first-pass breadth runs first, then re-scan loop (sonnet, 2-3 agents, max 2 iterations, exit on 0 new findings above Info), then per-contract analysis (3c), then Phase 4a inventory consumes first-pass, re-scan, and per-contract outputs before Phase 4a.5. Re-scan/per-contract phases do not write `findings_inventory.md`.
 
@@ -807,16 +807,16 @@ After all return:
 | Step | Prompt File | Agent | Trigger |
 |------|-------------|-------|---------|
 | 4a | `~/.claude/prompts/{LANGUAGE}/phase4a-inventory-prompt.md` | Inventory (+ side effect trace) | Always |
-| 3b | `~/.claude/rules/phase3b-rescan-prompt.md` | Breadth Re-Scan (sonnet) | Thorough only (after Phase 3, before 4a) |
+| 3b | `~/.plamen/rules/phase3b-rescan-prompt.md` | Breadth Re-Scan (sonnet) | Thorough only (after Phase 3, before 4a) |
 | 4a.5 | (inline below) | Semantic Invariant Agent (sonnet) | Core/Thorough |
 | 4b (loop) | `~/.claude/prompts/{LANGUAGE}/phase4b-loop.md` | Orchestrator | Always |
 | 4b (depth) | `~/.claude/prompts/{LANGUAGE}/phase4b-depth-templates.md` | 4 Depth Agents | Always |
 | 4b (scanners) | `~/.claude/prompts/{LANGUAGE}/phase4b-scanner-templates.md` | 3 Scanners + Validation + Design Stress | Always |
 | 4b.4 | inline below | Attention Repair | Thorough only |
-| 4c | `~/.claude/rules/phase4c-chain-prompt.md` | Chain Analysis (+ enabler enumeration) | Always |
-| 5 | `~/.claude/prompts/{LANGUAGE}/phase5-verification-prompt.md` + `~/.claude/rules/phase5-poc-execution.md` | Verifiers (with PoC execution) | Both (scope differs) |
+| 4c | `~/.plamen/rules/phase4c-chain-prompt.md` | Chain Analysis (+ enabler enumeration) | Always |
+| 5 | `~/.claude/prompts/{LANGUAGE}/phase5-verification-prompt.md` + `~/.plamen/rules/phase5-poc-execution.md` | Verifiers (with PoC execution) | Both (scope differs) |
 | 5.5 | (orchestrator inline) | Post-verification finding extraction | Always |
-| 6a-c | `~/.claude/rules/phase6-report-prompts.md` | Index â†’ Tier Writers â†’ Assembler | Core/Thorough (Light: 2-agent override) |
+| 6a-c | `~/.plamen/rules/phase6-report-prompts.md` | Index â†’ Tier Writers â†’ Assembler | Core/Thorough (Light: 2-agent override) |
 
 ### Gate Enforcement
 
@@ -968,7 +968,7 @@ If violations are detected, log them to `{SCRATCHPAD}/violations.md` but continu
 
 ### Phase 4b: Adaptive Depth Loop
 
-> **Reference**: `~/.claude/rules/phase4-confidence-scoring.md` for scoring model, anti-dilution rules, and convergence criteria.
+> **Reference**: `~/.plamen/rules/phase4-confidence-scoring.md` for scoring model, anti-dilution rules, and convergence criteria.
 
 The orchestrator runs the full loop autonomously:
 
@@ -1126,7 +1126,7 @@ verification, or report.
 
 ### Phase 4b.5: RAG Validation Sweep (MANDATORY for Core/Thorough)
 
-Read: `~/.claude/rules/phase4-confidence-scoring.md` â†’ "Phase 4b.5" section.
+Read: `~/.plamen/rules/phase4-confidence-scoring.md` â†’ "Phase 4b.5" section.
 Spawn sonnet RAG sweep agent. This is NOT optional.
 If MCP tools fail â†’ agent falls back to WebSearch â†’ if that fails â†’ floor scores (0.3).
 The sweep MUST be attempted. Writing floor scores without attempting is a VIOLATION.
@@ -1135,7 +1135,7 @@ The sweep MUST be attempted. Writing floor scores without attempting is a VIOLAT
 
 ### Phase 5: Verification (Batched Spawning)
 
-> **Read templates from**: `~/.claude/prompts/{LANGUAGE}/phase5-verification-prompt.md` + `~/.claude/rules/phase5-poc-execution.md`
+> **Read templates from**: `~/.claude/prompts/{LANGUAGE}/phase5-verification-prompt.md` + `~/.plamen/rules/phase5-poc-execution.md`
 
 **Step 5.0: Compute verification scope**
 
@@ -1233,9 +1233,9 @@ After ALL verifiers complete:
 
 ### Phase 6: Report Generation
 
-> **Light mode override**: Do NOT read `~/.claude/rules/phase6-report-prompts.md`. Instead, spawn 2 agents: (1) a single sonnet writer handling ID assignment, root-cause consolidation, and all severity tiers inline; (2) a haiku assembler that merges the writer output with the report header template. No separate index agent or tier-split writers. Include the Light mode disclaimer per override #9.
+> **Light mode override**: Do NOT read `~/.plamen/rules/phase6-report-prompts.md`. Instead, spawn 2 agents: (1) a single sonnet writer handling ID assignment, root-cause consolidation, and all severity tiers inline; (2) a haiku assembler that merges the writer output with the report header template. No separate index agent or tier-split writers. Include the Light mode disclaimer per override #9.
 
-> **Core/Thorough**: Read `~/.claude/rules/phase6-report-prompts.md` and follow the full 5-agent pipeline (Index â†’ 3 Tier Writers â†’ Assembler).
+> **Core/Thorough**: Read `~/.plamen/rules/phase6-report-prompts.md` and follow the full 5-agent pipeline (Index â†’ 3 Tier Writers â†’ Assembler).
 
 > **V2 driver sharded execution (v2.1.2)**: When this prompt is invoked by the V2 driver (`plamen_driver.py`) in Core/Thorough mode, each sub-step below is a SEPARATE `claude -p` subprocess with its own timeout. The driver extracts ONLY the relevant sub-step section for each subprocess (via `extract_phase_sections`). Do NOT attempt to run multiple sub-steps in one conversation when the incoming prompt contains only ONE of the sub-sections below " that signals a sharded execution and you must execute only the one section you received and then stop. V1 (LLM-orchestrator) runs all sub-steps in one conversation as before.
 
@@ -1243,15 +1243,15 @@ After ALL verifiers complete:
 
 **Scope**: Produce the Master Finding Index (`report_index.md`) and `report_coverage.md` from `findings_inventory.md`, `verify_*.md` files, `rag_validation.md`, `finding_mapping.md`, and chain outputs. Apply STEP 1.5 Root-Cause Consolidation and STEP 5.5 Promotion Coverage Audit.
 
-**Execution**: Read `~/.claude/rules/phase6-report-prompts.md` §Step 6a and follow it verbatim. The Index Agent is ONE `general-purpose` subagent with `model="haiku"`. Verify completeness inline per §Step 6a.1.
+**Execution**: Read `~/.plamen/rules/phase6-report-prompts.md` §Step 6a and follow it verbatim. The Index Agent is ONE `general-purpose` subagent with `model="haiku"`. Verify completeness inline per §Step 6a.1.
 
 **Output contract**: `{SCRATCHPAD}/report_index.md` (Master Finding Index, summary counts, tier assignments, consolidation map, cross-reference map, excluded findings) AND `{SCRATCHPAD}/report_coverage.md` (raw candidate ledger, uncovered mode-limited recommendations, promotion failures repaired).
 
 #### Step 6b: Tier Writers
 
-**Scope**: Produce `report_critical_high.md`, `report_medium.md`, and `report_low_info.md` by spawning THREE tier-writer agents in parallel (one message, three `Task()` calls). Each tier writer follows the Tier Writer Common Rules from `~/.claude/rules/phase6-report-prompts.md` §Step 6b.
+**Scope**: Produce `report_critical_high.md`, `report_medium.md`, and `report_low_info.md` by spawning THREE tier-writer agents in parallel (one message, three `Task()` calls). Each tier writer follows the Tier Writer Common Rules from `~/.plamen/rules/phase6-report-prompts.md` §Step 6b.
 
-**Execution**: Read `~/.claude/rules/phase6-report-prompts.md` §Step 6b and spawn the three tier writers per that spec. The V2 driver overrides Critical+High to `model="sonnet"` for cost discipline; Medium and Low+Info also use `model="sonnet"`.
+**Execution**: Read `~/.plamen/rules/phase6-report-prompts.md` §Step 6b and spawn the three tier writers per that spec. The V2 driver overrides Critical+High to `model="sonnet"` for cost discipline; Medium and Low+Info also use `model="sonnet"`.
 
 **Output contract**: Three tier files, each with one `###` section per finding assigned by the Index Agent. Every section â‰¥ 400 chars. NO internal pipeline IDs in the body. Cross-references use only report IDs.
 
@@ -1259,7 +1259,7 @@ After ALL verifiers complete:
 
 **Scope**: Merge the three tier files + `report_index.md` header + Executive Summary + Priority Remediation + Appendix A into `{PROJECT_ROOT}/AUDIT_REPORT.md`.
 
-**Execution**: Read `~/.claude/rules/phase6-report-prompts.md` §Step 6c and follow its STEP 1 (assemble), STEP 1.5 (runtime metadata hygiene), STEP 2 (quality checks), STEP 3 (write) verbatim.
+**Execution**: Read `~/.plamen/rules/phase6-report-prompts.md` §Step 6c and follow its STEP 1 (assemble), STEP 1.5 (runtime metadata hygiene), STEP 2 (quality checks), STEP 3 (write) verbatim.
 
 **Output contract**: `{PROJECT_ROOT}/AUDIT_REPORT.md` exists with header + summary table + every finding from the three tier files + remediation order + Appendix A. The V2 driver runs a mechanical `report_quality.md` gate after this phase exits (v2.1.2): section count per tier matches the summary table, no internal-ID leakage outside Appendix A, no Claude-era runtime metadata, non-stub. Assembler does NOT need to produce `report_quality.md` itself " the driver generates it mechanically. A timestamped snapshot `AUDIT_REPORT-YYYYMMDD-HHMM.md` is written by the driver on successful pipeline exit.
 
@@ -1267,7 +1267,7 @@ After ALL verifiers complete:
 
 ## FINDING OUTPUT FORMAT
 
-**Full format in**: `~/.claude/rules/finding-output-format.md` " ALL agents MUST read this file and use its format for findings. Includes finding template, Rules Applied table (R4-R16), enforcement rules, and Depth Evidence Tags.
+**Full format in**: `~/.plamen/rules/finding-output-format.md` " ALL agents MUST read this file and use its format for findings. Includes finding template, Rules Applied table (R4-R16), enforcement rules, and Depth Evidence Tags.
 
 ---
 

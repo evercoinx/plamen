@@ -48,7 +48,7 @@ or `niche_*_findings.md` in this pre-depth inventory phase.
 ## TASK 2: Parse findings
 
 Each source file uses the canonical finding format from
-`~/.claude/rules/finding-output-format.md`:
+`~/.plamen/rules/finding-output-format.md`:
 
 ```
 ## Finding [{PREFIX}-N]: Title

@@ -7,7 +7,7 @@ Execute the instructions below directly and stop. Do not spawn subagents.
 > `hypotheses.md`, `finding_mapping.md`, and `enabler_results.md`. You
 > read those outputs; do NOT redo the grouping or enabler enumeration.
 > **Reference (not load-bearing)**: Full multi-agent methodology is in
-> `~/.claude/rules/phase4c-chain-prompt.md`. This file contains only the
+> `~/.plamen/rules/phase4c-chain-prompt.md`. This file contains only the
 > Agent 2 directive.
 
 ---

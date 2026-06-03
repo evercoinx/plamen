@@ -12,7 +12,7 @@ Execute the instructions below directly and stop. Do not spawn subagents.
 > by the driver before you are spawned. Thorough mode Consensus-axis
 > lookups read it directly — do NOT try to compute consensus yourself.
 > **Reference (not load-bearing)**: Full scoring model, formulas, and
-> routing thresholds are in `~/.claude/rules/phase4-confidence-scoring.md`.
+> routing thresholds are in `~/.plamen/rules/phase4-confidence-scoring.md`.
 
 ---
 
