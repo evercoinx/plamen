@@ -37,6 +37,7 @@ __all__ = [
     "_apply_mechanical_dedup_from_pairs",
     "backfill_unrouted_inventory_into_queue",
     "_assemble_report_python",
+    "_build_human_review_appendix",
     "_build_attention_repair_items",
     "_build_asset_binding_repair_items",
     "_build_body_writer_manifests",
@@ -1902,6 +1903,55 @@ def _finalize_report_tier_section(section: str, id_to_title: dict) -> str:
     return _sanitize_client_body("\n".join(out))
 
 
+_HUMAN_REVIEW_SOURCES: tuple[tuple[str, str], ...] = (
+    ("report_semantic_retention_risks.md", "Retention / obligation coverage"),
+    ("report_semantic_severity_repairs.md", "Severity-provenance adjustments"),
+)
+
+
+def _build_human_review_appendix(scratchpad: Path) -> str:
+    """Fold degrade-with-flag items (report_semantic_*.md) into a DELIVERED
+    appendix.
+
+    The late-stage gates that now degrade-with-flag instead of halting
+    (obligation/retention retention, severity-provenance) write their deferred
+    items to report_semantic_*.md "for human review". Those files live in the
+    scratchpad, which is cleaned on success and is never read by the client — so
+    the human-review flag never reached the human. This folds them into
+    AUDIT_REPORT.md so the flag is actually delivered (and survives cleanup).
+
+    Returns "" when there is nothing to flag.
+    """
+    blocks: list[str] = []
+    ordered: list[tuple[str, str]] = list(_HUMAN_REVIEW_SOURCES)
+    known = {n for n, _ in ordered}
+    try:
+        for p in sorted(scratchpad.glob("report_semantic_*.md")):
+            if p.name not in known:
+                label = (
+                    p.stem.replace("report_semantic_", "").replace("_", " ").strip().title()
+                    or p.name
+                )
+                ordered.append((p.name, label))
+                known.add(p.name)
+    except Exception:
+        pass
+    for name, label in ordered:
+        p = scratchpad / name
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            continue
+        # Drop a leading H1 the source carries; keep the substantive body.
+        text = re.sub(r"(?m)\A#\s+[^\n]*\n+", "", text).strip()
+        if len(text) < 20:
+            continue
+        blocks.append(f"### {label}\n\n{text}")
+    return "\n\n".join(blocks)
+
+
 def _assemble_report_python(
     scratchpad: Path, project_root: str
 ) -> bool:
@@ -2187,6 +2237,20 @@ def _assemble_report_python(
     if appendix_block:
         parts.extend(["", "---", "", "## Appendix A: Excluded Findings", ""])
         parts.extend([appendix_block, ""])
+    # Appendix B: items the late-stage gates DEFERRED with a flag instead of
+    # halting (obligation/retention, severity-provenance). They are written to
+    # report_semantic_*.md in the scratchpad, which is cleaned on success — so
+    # without folding them here the "flagged for human review" promise never
+    # reaches the human. Deliver them in the report so they survive cleanup.
+    human_review = _build_human_review_appendix(scratchpad)
+    if human_review:
+        parts.extend([
+            "", "---", "", "## Appendix B: Flagged for Human Review", "",
+            "_The pipeline deferred the items below with a flag rather than "
+            "halting the audit. They are retained here for reviewer attention "
+            "and were not silently dropped._", "",
+            human_review, "",
+        ])
 
     body = "\n".join(parts)
     body = _tag_report_index_unresolved_sections(body, idx_text, scratchpad)
