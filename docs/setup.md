@@ -104,7 +104,7 @@ The installer creates symlinks from `~/.plamen/` into `~/.claude/` (and `~/.code
 ### 1. Clone and initialize
 
 ```bash
-git clone --recurse-submodules https://github.com/PlamenTSV/plamen.git ~/.plamen
+git clone --recurse-submodules https://github.com/evercoinx/plamen.git ~/.plamen
 cd ~/.plamen
 ```
 

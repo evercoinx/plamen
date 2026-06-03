@@ -82,7 +82,7 @@ Codex-specific commands (`codex-adapter/commands/`) and skill overrides (`codex-
 
 ```bash
 # Clone the repo
-git clone https://github.com/PlamenTSV/plamen.git ~/.plamen
+git clone https://github.com/evercoinx/plamen.git ~/.plamen
 
 # Install into ~/.claude/ (Claude Code backend)
 cd ~/.plamen && python3 plamen.py install  # or 'python' on Windows
