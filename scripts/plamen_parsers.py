@@ -205,6 +205,7 @@ __all__ = [
     "_filter_verification_queue_by_mode",
     "_filter_sc_verification_queue_by_mode",
     "_write_queue_json_sidecar",
+    "_read_queue_json_sidecar",
     "_write_queue_excluded_manifest",
     "_write_queue_subset_manifest",
     "_queue_rows_from_inventory_with_exclusions",

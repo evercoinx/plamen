@@ -6057,14 +6057,30 @@ def _apply_location_recovery(scratchpad: Path, project_root: str) -> list[str]:
     return applied
 
 
-def backfill_unrouted_inventory_into_queue(scratchpad: Path) -> list[str]:
-    """Route any inventory ID dropped by queue generation back into the
-    ACTIVE verification queue so verification-queue<->inventory parity always
-    holds. Deterministic + idempotent. Returns the backfilled finding IDs.
+def backfill_unrouted_inventory_into_queue(
+    scratchpad: Path, route: str = "active"
+) -> list[str]:
+    """Route any inventory ID dropped by queue generation back so
+    verification-queue<->inventory parity always holds. Deterministic +
+    idempotent. Returns the backfilled finding IDs.
+
+    route="active" (default; fresh-run / verify_queue-completion, BEFORE the
+    verify shards run): add the dropped IDs to the ACTIVE verification_queue.md
+    so they get verified.
+
+    route="excluded" (RESUME, AFTER verify shards have completed): acknowledge
+    the dropped IDs in verification_queue_evidence_excluded.md as DEFERRED
+    instead. This satisfies verify_queue<->inventory parity (excluded counts as
+    acknowledged) WITHOUT adding active rows that demand a verify_<ID>.md file.
+    Adding active rows at resume retroactively makes already-completed verify
+    shards look incomplete ("wrote 1/4 verifier files; missing INV-002...") and
+    the reconciliation rewinds the entire verify stage. Routing to excluded
+    avoids that: the IDs are flagged deferred-unverified (never silently
+    dropped) and no finished phase is invalidated.
 
     This converts a silent LLM/mechanical queue-generation dropout (which
     otherwise makes the resume reconciliation rewind the entire verify stage)
-    into explicit, verifiable active queue rows.
+    into explicit, accounted queue rows.
 
     The persistence is via the CANONICAL writer `_write_queue_subset_manifest`,
     which rewrites BOTH `verification_queue.md` (canonical 10-column manifest)
@@ -6122,6 +6138,48 @@ def backfill_unrouted_inventory_into_queue(scratchpad: Path) -> list[str]:
                 builder_by_id[bid] = row
 
     appended: list[str] = []
+
+    # RESUME route: acknowledge the dropped IDs as DEFERRED in the excluded
+    # ledger instead of expanding the active queue. Satisfies parity without
+    # demanding verify_<ID>.md files, so completed verify shards are not
+    # retroactively invalidated (no rewind).
+    if route == "excluded":
+        from plamen_parsers import (
+            _read_queue_json_sidecar,
+            _write_queue_excluded_manifest,
+        )
+        excl_path = scratchpad / "verification_queue_evidence_excluded.md"
+        existing_excl = _read_queue_json_sidecar(excl_path)
+        seen_excl: set[str] = set()
+        for r in existing_excl:
+            eid = _normalize_finding_id(r.get("finding id", "")) or (
+                r.get("finding id", "") or ""
+            ).strip()
+            if eid:
+                seen_excl.add(eid)
+        new_excl: list[dict[str, str]] = []
+        for fid in unrouted:
+            if fid in present_ids or fid in seen_excl:
+                continue
+            src = builder_by_id.get(fid)
+            row = dict(src) if src is not None else {"finding id": fid}
+            row["finding id"] = fid
+            row.setdefault("severity", "Medium")
+            row.setdefault("title", fid)
+            row["exclusion reason"] = (
+                "Deferred on resume: queue-generation dropout acknowledged here "
+                "to preserve verify_queue<->inventory parity without re-running "
+                "the already-completed verify stage (flagged unverified, not "
+                "silently dropped)"
+            )
+            new_excl.append(row)
+            seen_excl.add(fid)
+            appended.append(fid)
+        if not new_excl:
+            return []
+        _write_queue_excluded_manifest(excl_path, existing_excl + new_excl)
+        return appended
+
     new_rows: list[dict[str, str]] = []
     for fid in unrouted:
         if fid in present_ids:

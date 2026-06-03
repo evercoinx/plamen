@@ -12587,13 +12587,32 @@ def main():
     # the same IDs, and the resume loops forever.
     if {"verify_queue", "sc_verify_queue"} & set(checkpoint.completed):
         try:
-            _bf = backfill_unrouted_inventory_into_queue(scratchpad)
+            # If any verify SHARD already completed, route dropped IDs to the
+            # excluded ledger (acknowledge for parity) instead of the active
+            # queue — expanding the active queue post-verify makes completed
+            # shards look incomplete ("wrote 1/4 verifier files") and triggers a
+            # full verify-stage rewind. If only verify_queue completed (verify
+            # shards have NOT run yet), route active so they still get verified.
+            _verify_shards_done = any(
+                (n.startswith("verify_") or n.startswith("sc_verify_"))
+                and not n.endswith("_queue")
+                and not n.endswith("_aggregate")
+                for n in (checkpoint.completed or [])
+            )
+            _route = "excluded" if _verify_shards_done else "active"
+            _bf = backfill_unrouted_inventory_into_queue(scratchpad, route=_route)
             if _bf:
+                _where = (
+                    "deferred to the evidence-excluded ledger (verify shards "
+                    "already completed — not re-running verification)"
+                    if _route == "excluded"
+                    else "into the active verification_queue.md"
+                )
                 log.warning(
                     "[startup] mechanically backfilled "
-                    f"{len(_bf)} unrouted inventory ID(s) into "
-                    "verification_queue.md before reconciliation "
-                    f"(queue-generation dropout): {', '.join(_bf[:10])}"
+                    f"{len(_bf)} unrouted inventory ID(s) {_where} before "
+                    f"reconciliation (queue-generation dropout): "
+                    f"{', '.join(_bf[:10])}"
                 )
         except Exception as exc:
             log.warning(
