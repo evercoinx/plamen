@@ -1497,26 +1497,35 @@ def _aggregate_supervised_row_statuses(
         # _BREADTH_STATUS_COMPLETE -> no action
 
     if legacy_unmarked_expected:
-        mode_label = "fresh-audit" if fresh_audit else "legacy"
-        disposition = (
-            "treated as IN_PROGRESS for continuation"
-            if fresh_audit
-            else "tolerated as legacy pass"
-        )
-        sample = ", ".join(legacy_unmarked_expected[:12])
-        if len(legacy_unmarked_expected) > 12:
-            sample += f", ... (+{len(legacy_unmarked_expected) - 12} more)"
-        # NOISE-1: on a resumed/legacy scratchpad an unmarked artifact is the
-        # DESIGNED-correct tolerated outcome (markers lost to compaction/
-        # output-cap are "informational, not a failure" per CLAUDE.md), so log
-        # it at INFO. Keep WARNING only on the fresh-audit branch, where an
-        # unmarked artifact is treated as IN_PROGRESS and genuinely signals
-        # possibly-incomplete work.
-        _level = log.warning if fresh_audit else log.info
-        _level(
-            f"[gate_passes] {phase.name}: legacy-unmarked-artifact "
-            f"({mode_label} scratchpad; {disposition}): {sample}"
-        )
+        # Split by whether the unmarked file ACTUALLY blocks. A file is only in
+        # in_progress_expected when it was classified IN_PROGRESS (a live Claude
+        # PTY worker on a fresh audit may still be mid-write -> blocks). A file
+        # classified LEGACY_UNMARKED is NON-blocking: either a resumed scratchpad
+        # (marker lost to compaction) OR a codex single-subprocess run (codex
+        # never writes the PLAMEN marker; a RETURNED subprocess produced a final
+        # file). Do NOT alarm the operator with "treated as IN_PROGRESS" text for
+        # the non-blocking case — that misread looked like a failure.
+        _in_prog_set = set(in_progress_expected)
+        tolerated_unmarked = [n for n in legacy_unmarked_expected if n not in _in_prog_set]
+        blocking_unmarked = [n for n in legacy_unmarked_expected if n in _in_prog_set]
+        if tolerated_unmarked:
+            sample = ", ".join(tolerated_unmarked[:12])
+            if len(tolerated_unmarked) > 12:
+                sample += f", ... (+{len(tolerated_unmarked) - 12} more)"
+            log.info(
+                f"[gate_passes] {phase.name}: legacy-unmarked-artifact "
+                f"(tolerated, non-blocking -- no PLAMEN marker; codex "
+                f"single-subprocess or resumed scratchpad): {sample}"
+            )
+        if blocking_unmarked:
+            sample = ", ".join(blocking_unmarked[:12])
+            if len(blocking_unmarked) > 12:
+                sample += f", ... (+{len(blocking_unmarked) - 12} more)"
+            log.warning(
+                f"[gate_passes] {phase.name}: legacy-unmarked-artifact "
+                f"(fresh-audit scratchpad; treated as IN_PROGRESS for "
+                f"continuation): {sample}"
+            )
 
     # Ship 8.18: explicit IN_PROGRESS (a file carrying PLAMEN markers but not
     # COMPLETE) must NEVER pass -- not even on a resumed/legacy scratchpad. An
@@ -12982,23 +12991,52 @@ def _generate_verify_shard_retry_hint(issues: list[str]) -> str:
 # verify-shard degrade-and-continue runs unchanged.
 _VERIFY_POC_CONTRACT_PREFIX = "verify PoC contract: "
 _VERIFY_ATTEMPTED_YES_NO_TESTFILE = "says Attempted:YES but lacks concrete Test File/Command"
+# Codex-direction sub-class (parity with the Claude-direction Attempted:YES
+# shape above). _validate_poc_contract_for_rows emits this when a row that is
+# locally PoC-required declared `Attempted: NO` without a valid blocker (or
+# omitted the ledger value entirely): "{fid} mandatory {poc_class} PoC not
+# attempted with valid blocker". The cheap one-shot targeted repair hint asks
+# the verifier to EITHER attempt the PoC (supply Test File/Command) OR
+# non-silently re-justify with a valid blocker — exactly the remediation this
+# sub-class needs — so it is repairable by the same scoped hint. This match is
+# backend-gated to codex only (see verify_poc_contract_only_failed_ids).
+_VERIFY_MANDATORY_NOT_ATTEMPTED = "PoC not attempted with valid blocker"
 _VERIFY_TARGETED_REPAIR_FLAG_SUFFIX = "_verify_targeted_repair_done"
 
 
-def verify_poc_contract_only_failed_ids(missing: list[str]) -> list[str]:
+def verify_poc_contract_only_failed_ids(
+    missing: list[str], scratchpad: Path | None = None
+) -> list[str]:
     """Return failed finding IDs IFF the gate failure is PoC-contract-only.
 
     PoC-contract-only means: every entry in ``missing`` is a combined
-    ``"verify PoC contract: ..."`` entry AND every sub-issue inside it is the
-    ``"says Attempted:YES but lacks concrete Test File/Command"`` class. If the
-    failure mixes in any other issue type (or any other PoC-contract sub-class),
+    ``"verify PoC contract: ..."`` entry AND every sub-issue inside it belongs
+    to a targeted-repairable class. The always-on class is the Claude-direction
+    ``"says Attempted:YES but lacks concrete Test File/Command"``. When
+    ``scratchpad`` is supplied AND ``cli_backend == "codex"``, the
+    Codex-direction ``"mandatory {class} PoC not attempted with valid blocker"``
+    class is ALSO accepted — both are repaired by the same scoped one-shot hint
+    (attempt the PoC or non-silently re-justify). If the failure mixes in any
+    other issue type (or, outside codex, the mandatory-not-attempted class),
     return ``[]`` so the caller skips the targeted attempt and degrades as now.
+
+    NOTE: this only changes WHICH ids are eligible for the cheap one-shot repair
+    path; the underlying ``_validate_poc_contract_for_rows`` gate is UNTOUCHED
+    and stays exactly as hard (anti-fabrication preserved). A repaired file is
+    re-validated by the same gate on the next attempt.
 
     The returned IDs are de-duplicated, order-preserved. An empty list is the
     "do not fire" signal for ALL non-matching inputs (empty/mixed/other-class).
     """
     if not missing:
         return []
+    # Backend gate: the Codex-direction mandatory-not-attempted class is only
+    # eligible when the active backend is codex. Default (claude, or absent
+    # config) keeps the original Attempted:YES-only behavior unchanged.
+    codex_backend = (
+        scratchpad is not None
+        and _read_cli_backend_from_config(scratchpad) == "codex"
+    )
     fids: list[str] = []
     seen: set[str] = set()
     for entry in missing:
@@ -13014,12 +13052,18 @@ def verify_poc_contract_only_failed_ids(missing: list[str]) -> list[str]:
             sub = sub.strip()
             if not sub:
                 continue
-            if _VERIFY_ATTEMPTED_YES_NO_TESTFILE not in sub:
-                # A different PoC-contract sub-class (mandatory-not-attempted,
-                # missing ledger, EXTERNAL_DEPENDENCY mock-override, ...) -> the
-                # targeted hint would not fully repair the gate -> bail.
+            if _VERIFY_ATTEMPTED_YES_NO_TESTFILE in sub:
+                m = re.match(r"^([A-Za-z0-9_.\[\]\-]+)\s+says\s+Attempted:YES", sub)
+            elif codex_backend and _VERIFY_MANDATORY_NOT_ATTEMPTED in sub:
+                # Codex-direction: "{fid} mandatory {poc_class} PoC not attempted
+                # with valid blocker". Isolate the leading id.
+                m = re.match(r"^([A-Za-z0-9_.\[\]\-]+)\s+mandatory\b", sub)
+            else:
+                # A different PoC-contract sub-class (missing ledger,
+                # EXTERNAL_DEPENDENCY mock-override, ... — or the
+                # mandatory-not-attempted class outside codex) -> the targeted
+                # hint would not fully repair the gate -> bail.
                 return []
-            m = re.match(r"^([A-Za-z0-9_.\[\]\-]+)\s+says\s+Attempted:YES", sub)
             if not m:
                 # Could not isolate the id from a matching-class sub-issue ->
                 # ambiguous -> bail (degrade as now).

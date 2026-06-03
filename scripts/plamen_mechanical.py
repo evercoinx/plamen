@@ -485,20 +485,40 @@ def _synthesize_components_audited(scratchpad: Path) -> str:
                     inv_text = _llm_norm(inv.read_text(encoding="utf-8", errors="replace"))
                 except Exception:
                     inv_text = ""
+                # FIX #7: prose subsystem headings (e.g. "Rate Limiting
+                # (mempool)") never matched path tokens (e.g.
+                # "mempool/rate_limiting.rs"), yielding the all-zero Covered
+                # column. Pre-normalize each heading to a path token form:
+                # strip parentheticals, lowercase, collapse spaces/hyphens to
+                # underscores. Then match the normalized token against the
+                # lowercased path so prose-style headings attribute correctly.
+                # Presentation-only: this changes no finding, only counts.
+                def _heading_path_token(h: str) -> str:
+                    base = h.replace("\\", "/").lstrip("./").strip("`")
+                    base = re.sub(r"\([^)]*\)", " ", base)  # drop parentheticals
+                    base = base.lower().strip()
+                    base = re.sub(r"[\s\-]+", "_", base)
+                    return base.strip("_")
+
+                heading_tokens = {h: _heading_path_token(h) for h in headings}
                 for block in _inventory_blocks(inv_text):
                     loc = block.get("location", "") or ""
                     rel, _line = _parse_location_ref(loc)
                     if not rel:
                         continue
                     rel_norm = rel.replace("\\", "/").lstrip("./")
+                    rel_lower = rel_norm.lower()
                     # Component matches if heading is a prefix of the path,
-                    # OR if heading contains a path-segment that matches.
+                    # OR if heading contains a path-segment that matches,
+                    # OR if the normalized heading token appears in the path.
                     for h in headings:
                         h_norm = h.replace("\\", "/").lstrip("./").strip("`")
+                        h_token = heading_tokens.get(h, "")
                         if (
                             rel_norm.startswith(h_norm + "/")
                             or rel_norm == h_norm
                             or h_norm in rel_norm
+                            or (h_token and h_token in rel_lower)
                         ):
                             covered_per_component[h] += 1
                             break  # Each finding counts once.
@@ -4337,6 +4357,24 @@ def _apply_mechanical_dedup_from_pairs(
             except (ValueError, IndexError):
                 pass
             has_strong = "location overlap" in signal and title_score >= 1.0
+            # FIX #5: narrow relax — allow a merge when the two findings share
+            # an EXACT file:line location (identical line range, same file is
+            # already guaranteed by the same-file pair grouping) AND the same
+            # severity tier (already enforced by same_sev above), at a lower
+            # title-similarity threshold (>= 0.5). Adjacent-but-different lines
+            # produce different ranges and MUST NOT merge — equality of both
+            # endpoints is required. Do NOT broaden beyond exact-location +
+            # same-tier.
+            if not has_strong and "location overlap" in signal and title_score >= 0.5:
+                _ranges = re.findall(
+                    r"l(\d+)\s*-\s*(\d+)\s+vs\s+l(\d+)\s*-\s*(\d+)",
+                    signal,
+                    re.IGNORECASE,
+                )
+                if _ranges:
+                    _a0, _a1, _b0, _b1 = _ranges[0]
+                    if _a0 == _b0 and _a1 == _b1:
+                        has_strong = True
         else:
             has_strong = "source-id subset" in signal or "pert lineage" in signal
         if not has_strong:
@@ -4512,6 +4550,16 @@ def _write_mechanical_report_index(scratchpad: Path) -> int:
     poc_caps = _load_poc_demotion_caps(scratchpad)
     judge_downgrades = _collect_judge_downgrade_map(scratchpad)
     finding_record_maps = _load_finding_record_maps(scratchpad)
+    # FIX #1: Skeptic-Judge UNRESOLVED rulings are authoritative even when the
+    # verifier text says CONFIRMED (the INV-004 case). Pull the judge-unresolved
+    # internal-ID set so a judge UNRESOLVED over a CONFIRMED verifier still
+    # demotes once + stamps Trust Adj. + drives the body [UNRESOLVED] flag.
+    try:
+        judge_unresolved_ids = {
+            x.upper() for x in _collect_judge_unresolved_ids(scratchpad)
+        }
+    except Exception:
+        judge_unresolved_ids = set()
 
     for row in rows:
         fid = (row.get("finding id") or "").strip()
@@ -4527,11 +4575,20 @@ def _write_mechanical_report_index(scratchpad: Path) -> int:
         # Phase B: matrix is authoritative when Impact + Likelihood are present.
         # Falls back to LLM/queue severity otherwise (back-compat).
         severity = _enforce_severity_matrix(vtxt, row)
-        unresolved = any(tok in status for tok in ("UNRESOLVED", "PARTIAL"))
+        # FIX #1: unresolved is driven by verifier text OR a Skeptic-Judge
+        # UNRESOLVED ruling on this finding id (judge overrides a CONFIRMED
+        # verifier). Demote at most once total even if both sources fire.
+        unresolved = any(tok in status for tok in ("UNRESOLVED", "PARTIAL")) or (
+            fid.upper() in judge_unresolved_ids
+        )
         adjustments: list[str] = []
         if unresolved:
+            # FIX #2: capture the PRE-demote severity and stamp the paren form
+            # (UNRESOLVED(<sev>)) so the body UNRESOLVED tagger regex
+            # (UNRESOLVED\s*\() matches and report_assemble does not re-degrade.
+            original_severity = severity
             severity = _demote_severity_once(severity)
-            adjustments.append("UNRESOLVED")
+            adjustments.append(f"UNRESOLVED({original_severity})")
         judge_sev = judge_downgrades.get(fid)
         if judge_sev and not unresolved:
             capped = _cap_severity_at(severity, judge_sev)
@@ -4989,6 +5046,14 @@ def _repair_sc_report_index_from_prior(scratchpad: Path) -> int:
 
     expected_by_id = _expected_report_index_severities(scratchpad)
     severity_rank_map = {s: i for i, s in enumerate(SEVERITY_ORDER)}
+    # FIX #1 (SC parity): Skeptic-Judge UNRESOLVED rulings demote once + stamp
+    # paren-form Trust Adj. even when the preserved LLM row did not record it.
+    try:
+        judge_unresolved_ids = {
+            x.upper() for x in _collect_judge_unresolved_ids(scratchpad)
+        }
+    except Exception:
+        judge_unresolved_ids = set()
     rows: list[dict[str, object]] = []
     changed = False
     for original_order, line in enumerate(lines[header_idx + 2:end_idx]):
@@ -5017,6 +5082,29 @@ def _repair_sc_report_index_from_prior(scratchpad: Path) -> int:
                 target_sev = source_sev
                 cells[sev_i] = source_sev
                 changed = True
+        # FIX #1 (SC parity): a judge UNRESOLVED ruling on any internal ID of
+        # this row demotes the (already-resolved) severity once and stamps the
+        # paren-form Trust Adj. token, but only if not already present.
+        row_ids_upper = {fid.upper() for fid in ids}
+        existing_trust = cells[trust_i] if 0 <= trust_i < len(cells) else ""
+        if (
+            judge_unresolved_ids
+            and (row_ids_upper & judge_unresolved_ids)
+            and not re.search(r"\bUNRESOLVED\s*\(", existing_trust, re.IGNORECASE)
+        ):
+            pre_demote = target_sev
+            demoted = _demote_severity_once(target_sev)
+            target_sev = demoted
+            if sev_i >= 0 and sev_i < len(cells):
+                cells[sev_i] = demoted
+            token = f"UNRESOLVED({pre_demote})"
+            if trust_i >= 0 and trust_i < len(cells):
+                cells[trust_i] = (
+                    f"{existing_trust.strip()}, {token}".lstrip(", ").strip()
+                    if existing_trust.strip()
+                    else token
+                )
+            changed = True
         rows.append({
             "old_report_id": rid,
             "report_id": rid,

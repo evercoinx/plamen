@@ -91,6 +91,66 @@ def test_codex_explicit_in_progress_marker_still_blocks(tmp_path):
     assert status == V._BREADTH_STATUS_IN_PROGRESS
 
 
+def test_codex_unmarked_depth_gate_PASSES_and_logs_non_blocking(tmp_path, caplog):
+    """Gate-level proof: 5 unmarked codex depth files -> _aggregate_supervised_
+    row_statuses returns None (PASS), and the log says non-blocking, NOT the
+    alarming 'treated as IN_PROGRESS for continuation'."""
+    import logging
+    from plamen_types import Phase
+
+    _cfg(tmp_path, "codex")
+    # fresh-audit sentinel so scratchpad_is_fresh_audit() is True
+    (tmp_path / V._AUDIT_FRESH_SENTINEL_NAME).write_text("{}", encoding="utf-8")
+    names = [
+        f"depth_{x}_findings.md"
+        for x in ("consensus_invariant", "network_surface", "state_trace",
+                  "edge_case", "external")
+    ]
+    rows = []
+    for n in names:
+        p = _substantive(tmp_path, n)
+        status, reasons = V._classify_artifact_row(
+            p, fresh_audit=True, min_bytes=100, structural_kwargs={}
+        )
+        rows.append({"name": n, "status": status, "reasons": reasons})
+    # codex => every row is the non-blocking LEGACY_UNMARKED class
+    assert all(r["status"] == V._BREADTH_STATUS_LEGACY_UNMARKED for r in rows)
+
+    phase = Phase("depth", ["x"], ["depth_*_findings.md"],
+                  base_timeout_s=60, min_artifact_bytes=100)
+    with caplog.at_level(logging.INFO):
+        detail = V._aggregate_supervised_row_statuses(
+            phase, rows, tmp_path, "depth_*_findings.md"
+        )
+    assert detail is None, f"gate should PASS for codex unmarked depth, got: {detail}"
+    msgs = " ".join(r.getMessage() for r in caplog.records)
+    assert "non-blocking" in msgs
+    assert "treated as IN_PROGRESS" not in msgs  # no misleading text for codex
+
+
+def test_claude_unmarked_depth_gate_FAILS_with_in_progress(tmp_path):
+    """Regression: Claude fresh-audit unmarked depth still BLOCKS (detail names
+    in_progress), and the warning still says treated as IN_PROGRESS."""
+    from plamen_types import Phase
+    _cfg(tmp_path, "claude")
+    (tmp_path / V._AUDIT_FRESH_SENTINEL_NAME).write_text("{}", encoding="utf-8")
+    names = ["depth_state_trace_findings.md", "depth_external_findings.md"]
+    rows = []
+    for n in names:
+        p = _substantive(tmp_path, n)
+        status, reasons = V._classify_artifact_row(
+            p, fresh_audit=True, min_bytes=100, structural_kwargs={}
+        )
+        rows.append({"name": n, "status": status, "reasons": reasons})
+    assert all(r["status"] == V._BREADTH_STATUS_IN_PROGRESS for r in rows)
+    phase = Phase("depth", ["x"], ["depth_*_findings.md"],
+                  base_timeout_s=60, min_artifact_bytes=100)
+    detail = V._aggregate_supervised_row_statuses(
+        phase, rows, tmp_path, "depth_*_findings.md"
+    )
+    assert detail is not None and "in_progress:" in detail  # Claude still blocks
+
+
 def test_codex_marked_file_not_caught_by_legacy_unmarked_branch(tmp_path):
     # A file carrying a PLAMEN marker is NOT "legacy-unmarked", so the codex
     # exemption never applies to it — it flows through the normal completeness

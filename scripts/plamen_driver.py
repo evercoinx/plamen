@@ -79,6 +79,93 @@ def _run_sec3_xray(scratch: Path, proj: Path) -> str:
 # inside LLM prose don't have those.
 _API_RATE_LIMIT_STATUSES = {429, 529}  # 429 Too Many Requests, 529 Overloaded
 
+# Codex-only extended retry budget. The Codex CLI is a single-pass executor
+# that frequently under-covers a discovery/synthesis phase on the first run
+# and recovers when re-prompted with a delta retry hint. Claude (and every
+# other phase) keep the standard "retry-once-then-degrade" 2-attempt budget;
+# ONLY these RECOVERING content phases get up to 3 attempts, and ONLY when the
+# active backend is Codex. This hedges the 2nd-flake degrade/halt for Codex
+# without weakening any recall/silent-drop protection (the extra attempt only
+# RE-RUNS the same gated phase; it never relaxes a gate).
+_CODEX_EXTRA_RETRY_MAX_ATTEMPTS = 3
+_CODEX_EXTRA_RETRY_PHASES = (
+    "recon",
+    "breadth",
+    "inventory",
+)
+
+
+def _is_codex_extra_retry_phase(phase_name: str) -> bool:
+    """True for the RECOVERING content phases eligible for the Codex-only
+    extended retry budget: recon, breadth, inventory, and inventory_chunk_*.
+
+    Phase-scoped on purpose — verify/report/skeptic/chain/depth and all other
+    phases are excluded so their existing budgets stay UNCHANGED.
+    """
+    if not phase_name:
+        return False
+    if phase_name in _CODEX_EXTRA_RETRY_PHASES:
+        return True
+    return phase_name.startswith("inventory_chunk_")
+
+
+def _codex_max_attempts_for_phase(cli_backend: str | None, phase_name: str) -> int:
+    """Return the max attempt budget for a phase given the active backend.
+
+    Codex + RECOVERING content phase -> 3 attempts. Everything else (Claude,
+    any other backend, or any non-recovering phase) -> 2 (the unchanged
+    retry-once-then-degrade default).
+    """
+    backend = (cli_backend or "claude").strip().lower()
+    if backend == "codex" and _is_codex_extra_retry_phase(phase_name):
+        return _CODEX_EXTRA_RETRY_MAX_ATTEMPTS
+    return 2
+
+
+def _llm_report_index_is_usable(scratchpad: Path) -> bool:
+    """True iff a LLM-written report_index.md exists and is usable as-is.
+
+    "Usable" means: the file exists, is non-trivial, exposes a Master Finding
+    Index (or Excluded Findings) the parser can read, passes the unverified-
+    queue input gate, AND accounts for every verify hypothesis ID (no silent
+    dropouts per _check_index_completeness). When this returns True the LLM
+    Index Agent's STEP 1.5 root-cause consolidation output should be kept; when
+    False the deterministic mechanical builder is used as the backstop so NO
+    finding can vanish.
+    """
+    idx_path = scratchpad / "report_index.md"
+    if not idx_path.exists():
+        return False
+    try:
+        if idx_path.stat().st_size <= 200:
+            return False
+    except Exception:
+        return False
+    # Must expose at least one acknowledged ID (master or excluded), otherwise
+    # the file is a header-only stub / parse failure.
+    try:
+        master_ids, excluded_ids, _ = _collect_index_acknowledged_ids(scratchpad)
+    except Exception:
+        return False
+    if not master_ids and not excluded_ids:
+        return False
+    # Input gate: never accept an index that indexes unverified queue rows.
+    try:
+        if _validate_report_index_prewrite_inputs(scratchpad):
+            return False
+    except Exception:
+        return False
+    # Completeness gate: every verify_<ID>.md must be indexed/excluded/absorbed.
+    # write_retry_hint=False keeps this a pure read-only probe.
+    try:
+        if _check_index_completeness(
+            scratchpad, None, write_retry_hint=False
+        ):
+            return False
+    except Exception:
+        return False
+    return True
+
 
 class _PtyStop(Exception):
     def __init__(self, rc: int):
@@ -13324,6 +13411,10 @@ def main():
                     + "; ".join(idx_in_issues + coverage_issues)
                 )
 
+        # FIX #4: default the L1 backstop flag so the guarded mechanical-tail
+        # `if` below is safe even on resume / refactor (it is only ever read
+        # when this iteration is an L1 report_index phase, but be explicit).
+        _run_mechanical_backstop = False
         if config["pipeline"] == "l1" and phase.name == "report_index":
             # Phase E2: refuse to mechanically write report_index when queue
             # has unverified rows. Do not validate stale report_index.md
@@ -13343,6 +13434,76 @@ def main():
                     phase.name, str(scratchpad), idx_in_issues, config,
                 )
                 sys.exit(EXIT_DEGRADED)
+            # FIX #4 (v2.8.18): let the LLM Index Agent's STEP 1.5 root-cause
+            # consolidation run FIRST for L1 (it consumes [LIKELY-DUP] hints and
+            # dedup_candidate_pairs.md, which the unconditional mechanical
+            # builder ignored). The mechanical builder is retained below as the
+            # DETERMINISTIC BACKSTOP so NO finding can ever vanish:
+            #   (a) a valid+complete LLM index already on disk  -> keep it;
+            #       fall through to the normal subprocess/artifact-recovery and
+            #       post-Index completeness gate that validate and accept it.
+            #   (b) the LLM Index subprocess has not yet had a chance this run
+            #       -> fall through so run_phase() spawns it (a one-shot disk
+            #       sentinel records that the LLM was given its turn).
+            #   (c) the LLM was given its turn but produced a missing/invalid/
+            #       incomplete index -> run the mechanical builder backstop
+            #       (the same code path L1 always used).
+            # This changes ONLY L1 report_index; SC is untouched.
+            _llm_attempted_marker = scratchpad / "report_index.llm_attempted"
+            if _llm_report_index_is_usable(scratchpad):
+                # Case (a): keep the LLM consolidation output. Clear the
+                # one-shot marker and fall through to the standard flow.
+                try:
+                    _llm_attempted_marker.unlink()
+                except (FileNotFoundError, OSError):
+                    pass
+                log.info(
+                    "[report_index] L1: valid LLM Index consolidation present "
+                    "on disk — keeping it (mechanical backstop not used)"
+                )
+            elif not _llm_attempted_marker.exists():
+                # Case (b): give the LLM Index Agent its turn. Mark the
+                # one-shot sentinel and fall through to run_phase().
+                try:
+                    _llm_attempted_marker.write_text(
+                        "LLM Index Agent given its turn for report_index "
+                        "(FIX #4 LLM-first). If the produced index is "
+                        "missing/invalid/incomplete, the mechanical builder "
+                        "backstop runs on the next pass.\n"
+                        f"Timestamp: {time.strftime('%Y-%m-%dT%H:%M:%S')}\n",
+                        encoding="utf-8",
+                    )
+                except OSError:
+                    pass
+                log.info(
+                    "[report_index] L1: deferring to LLM Index Agent for "
+                    "STEP 1.5 root-cause consolidation (mechanical builder "
+                    "retained as backstop)"
+                )
+            else:
+                # Case (c): the LLM had its turn but did not produce a usable
+                # index. Clear the one-shot sentinel and run the deterministic
+                # mechanical builder backstop so nothing vanishes.
+                try:
+                    _llm_attempted_marker.unlink()
+                except (FileNotFoundError, OSError):
+                    pass
+                log.warning(
+                    "[report_index] L1: LLM Index Agent did not produce a "
+                    "usable report_index.md — falling back to the mechanical "
+                    "builder backstop (no finding dropped)"
+                )
+                _run_mechanical_backstop = True
+
+        # FIX #4: L1 mechanical report_index backstop. Runs ONLY when the LLM
+        # Index Agent was given its turn and failed to produce a usable index
+        # (case (c) above). Guard with the flag computed in the block above so
+        # cases (a)/(b) fall through to the LLM subprocess instead.
+        if (
+            config["pipeline"] == "l1"
+            and phase.name == "report_index"
+            and _run_mechanical_backstop
+        ):
             active = _write_mechanical_report_index(scratchpad)
             idx_post_issues = _validate_report_index_inputs(scratchpad)
             if idx_post_issues:
@@ -14307,6 +14468,30 @@ def main():
                 checkpoint.mark_completed(phase.name)
                 checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
                 checkpoint.save(scratchpad)
+                # FIX #4: when an L1 report_index is auto-completed from a
+                # pre-existing (LLM-authored) index, still expand the tier
+                # body-writer shard phases — the L1 mechanical path does this
+                # inline before its own `continue`, and the normal completion
+                # path does it too, but this artifact-recovery `continue`
+                # bypasses both. Without this the downstream tier writers have
+                # no shard phases to run.
+                if (
+                    phase.name == "report_index"
+                    and config.get("pipeline") == "l1"
+                ):
+                    try:
+                        phases[:] = expand_shard_phases(phases, scratchpad)
+                        active_phases = [p for p in phases if mode in p.modes]
+                        total_active = len(active_phases)
+                        log.info(
+                            "[report_index] L1 artifact-recovery — shard "
+                            "phases expanded for pre-existing index"
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            f"[report_index] L1 artifact-recovery shard "
+                            f"expansion failed: {exc!r}"
+                        )
                 gate_summary = _format_gate_summary(phase, scratchpad, config)
                 log.info(
                     f"[{phase.name}] artifact-recovery: all expected artifacts "
@@ -15178,7 +15363,7 @@ def main():
                 )
             ):
                 _tr_failed_ids = verify_poc_contract_only_failed_ids(
-                    list(missing)
+                    list(missing), scratchpad
                 )
                 if _tr_failed_ids:
                     log.warning(
@@ -15253,6 +15438,72 @@ def main():
                         "non-blocking passthrough after retry",
                     )
                     continue
+
+            # Codex-only extended retry budget for RECOVERING content phases
+            # (recon, breadth, inventory, inventory_chunk_*). Standard budget is
+            # retry-once-then-degrade (2 attempts). Codex single-pass workers
+            # often under-cover on attempt 2 and recover when re-prompted with
+            # the existing delta retry hint, so grant up to
+            # _CODEX_EXTRA_RETRY_MAX_ATTEMPTS (3) total before falling into the
+            # UNCHANGED degrade/halt block below. Strictly backend- and
+            # phase-scoped: Claude (and every other backend), plus every
+            # non-recovering phase (verify/report/skeptic/chain/depth/etc.),
+            # keep their existing budget untouched. This NEVER relaxes a gate —
+            # it only re-runs the same gated phase, so it cannot drop a finding.
+            if not passed:
+                _codex_budget = _codex_max_attempts_for_phase(
+                    config.get("cli_backend"), phase.name
+                )
+                _codex_attempt = 2  # attempts 1 + 2 already consumed above
+                while not passed and _codex_attempt < _codex_budget:
+                    _codex_attempt += 1
+                    log.warning(
+                        f"[{phase.name}] Codex extended retry budget: gate "
+                        f"failed after {_codex_attempt - 1} attempt(s) "
+                        f"({missing}) — re-running (attempt {_codex_attempt} of "
+                        f"{_codex_budget}) before degrading"
+                    )
+                    # Reuse the existing delta retry-hint machinery so the
+                    # re-run sees an explicit checklist, then re-snapshot the
+                    # containment baseline for the fresh attempt.
+                    _ensure_retry_hint(
+                        scratchpad, phase, list(missing), config["project_root"]
+                    )
+                    file_state_before = _snapshot_file_state(
+                        scratchpad, config["project_root"]
+                    )
+                    display.print_phase_start(
+                        phase_idx + 1, total_active, phase.name,
+                        phase_model(phase, mode, config), attempt=_codex_attempt,
+                    )
+                    rc = run_phase(phase, config, attempt=_codex_attempt)
+                    if rc == -3:
+                        if _prompt_halt_resume_choice(
+                            checkpoint, scratchpad, phase.name, config_path
+                        ):
+                            rc = run_phase(
+                                phase, config, attempt=_codex_attempt
+                            )
+                        else:
+                            _halted = True
+                            break
+                    if phase.name == "breadth":
+                        _normalize_breadth_outputs(scratchpad)
+                    if phase.name in _QUARANTINE_PATTERNS_BY_PHASE:
+                        moved = _quarantine_phase_overreach(
+                            scratchpad, phase.name, file_state_before
+                        )
+                        if moved:
+                            log.info(
+                                f"[{phase.name}] Codex extra-retry quarantined "
+                                f"{len(moved)} files to _overflow/"
+                            )
+                    passed, missing = _run_phase_validators(
+                        phase, config, scratchpad, phases, rc,
+                        file_state_before, violations_before,
+                    )
+                if _halted:
+                    break
 
             # v2.1.6: on retry success, clear the retry-hint file so it
             # doesn't contaminate future runs if the checkpoint is reused.
@@ -15625,7 +15876,7 @@ def main():
         checkpoint.save(scratchpad)
 
         # SC report_index: build body-writer manifests + expand shard phases.
-        # L1 does this in its mechanical path (line ~1701); SC's LLM-authored
+        # L1 does this in its mechanical path; SC's LLM-authored
         # report_index needs the same treatment after the gate passes.
         if (
             phase.name == "report_index"
@@ -15649,6 +15900,27 @@ def main():
                 log.warning(
                     f"[report_index] SC manifest build failed: {exc!r} — "
                     f"body writers will use LLM-only mode"
+                )
+
+        # FIX #4: L1 report_index completed via the LLM Index Agent path
+        # (cases (a)/(b)). The L1 mechanical-backstop path already expands
+        # shard phases inline before its `continue`, so it never reaches here;
+        # this branch covers the LLM-authored index so the tier body-writer
+        # shard phases still get expanded (parity with the mechanical path).
+        if (
+            phase.name == "report_index"
+            and config.get("pipeline") == "l1"
+        ):
+            try:
+                phases[:] = expand_shard_phases(phases, scratchpad)
+                active_phases = [p for p in phases if mode in p.modes]
+                log.info(
+                    "[report_index] L1 LLM-authored index complete — "
+                    "shard phases expanded"
+                )
+            except Exception as exc:
+                log.warning(
+                    f"[report_index] L1 shard expansion failed: {exc!r}"
                 )
 
         # Gate summary: show what was checked so success isn't silent

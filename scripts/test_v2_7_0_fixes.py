@@ -156,7 +156,29 @@ class TestSupplementalMechanicalDedup:
     # 4. location overlap + low title score rejects
     # ------------------------------------------------------------------
     def test_supplemental_rejects_location_overlap_low_title(self, tmp_path: Path):
-        """Location overlap but title_score 0.60 (< 1.0) should NOT merge."""
+        """Overlapping-but-NOT-exact location with title 0.60 (< 1.0) must NOT
+        merge.
+
+        v2.x FIX #5 narrowly relaxed supplemental dedup so an EXACT file:line
+        match (identical line range) + same severity tier merges at title >=
+        0.5. This test guards the boundary: when the two line ranges overlap
+        but are NOT identical (L117-120 vs L118-121), the relaxed path must not
+        fire and the strict title>=1.0 path also does not apply, so n == 0.
+        """
+        _write_full_pairs(tmp_path, [
+            "| INV-001: Bug Alpha | INV-002: Bug Beta"
+            " | 0.60 | location overlap (L117-120 vs L118-121)"
+            " + title overlap 0.60 | Yes |",
+        ])
+        _write_queue(tmp_path, ["INV-001", "INV-002"])
+        n = M._apply_mechanical_dedup_from_pairs(
+            tmp_path, "semantic_dedup", supplemental=True,
+        )
+        assert n == 0
+
+    def test_supplemental_exact_location_same_tier_low_title_merges(self, tmp_path: Path):
+        """v2.x FIX #5: EXACT file:line + same severity tier merges at title
+        >= 0.5 even though title < 1.0 (the prior strict threshold)."""
         _write_full_pairs(tmp_path, [
             "| INV-001: Bug Alpha | INV-002: Bug Beta"
             " | 0.60 | location overlap (L117-120 vs L117-120)"
@@ -166,7 +188,69 @@ class TestSupplementalMechanicalDedup:
         n = M._apply_mechanical_dedup_from_pairs(
             tmp_path, "semantic_dedup", supplemental=True,
         )
-        assert n == 0
+        assert n == 1
+
+    def test_supplemental_exact_single_line_merges(self, tmp_path: Path):
+        """v2.x FIX #5 boundary: a single-line exact match (L42-42 vs L42-42)
+        is still an exact endpoint match and merges at title >= 0.5."""
+        _write_full_pairs(tmp_path, [
+            "| INV-001: Bug Alpha | INV-002: Bug Beta"
+            " | 0.55 | location overlap (L42-42 vs L42-42)"
+            " + title overlap 0.55 | Yes |",
+        ])
+        _write_queue(tmp_path, ["INV-001", "INV-002"])
+        n = M._apply_mechanical_dedup_from_pairs(
+            tmp_path, "semantic_dedup", supplemental=True,
+        )
+        assert n == 1
+
+    def test_supplemental_exact_location_title_below_floor_rejects(self, tmp_path: Path):
+        """v2.x FIX #5 recall guard: even an EXACT line range must NOT merge
+        when title score is below the 0.5 relaxed floor. The relax never
+        merges purely on location identity; a title-similarity floor remains."""
+        _write_full_pairs(tmp_path, [
+            "| INV-001: Bug Alpha | INV-002: Wholly Unrelated Issue"
+            " | 0.40 | location overlap (L117-120 vs L117-120)"
+            " + title overlap 0.40 | Yes |",
+        ])
+        _write_queue(tmp_path, ["INV-001", "INV-002"])
+        n = M._apply_mechanical_dedup_from_pairs(
+            tmp_path, "semantic_dedup", supplemental=True,
+        )
+        assert n == 0, "exact line range alone (title < 0.5) must NOT merge"
+
+    def test_supplemental_adjacent_exact_subrange_rejects(self, tmp_path: Path):
+        """v2.x FIX #5 recall guard: a contained-but-not-identical range
+        (L10-30 vs L15-20) shares lines but is NOT an exact endpoint match,
+        so the relaxed path must not fire at title 0.9 (< strict 1.0)."""
+        _write_full_pairs(tmp_path, [
+            "| INV-001: Bug Alpha | INV-002: Bug Beta"
+            " | 0.90 | location overlap (L10-30 vs L15-20)"
+            " + title overlap 0.90 | Yes |",
+        ])
+        _write_queue(tmp_path, ["INV-001", "INV-002"])
+        n = M._apply_mechanical_dedup_from_pairs(
+            tmp_path, "semantic_dedup", supplemental=True,
+        )
+        assert n == 0, "contained-but-not-identical range must NOT merge below title 1.0"
+
+    def test_supplemental_exact_match_absorbed_recorded_as_merged(self, tmp_path: Path):
+        """v2.x FIX #5 recall guard: a relax-merged finding is recorded as
+        MERGED in the coverage ledger (via dedup_decisions.md), never silently
+        dropped. The absorbed ID must be recoverable downstream."""
+        _write_full_pairs(tmp_path, [
+            "| INV-001: Bug Alpha | INV-002: Bug Beta"
+            " | 0.55 | location overlap (L117-120 vs L117-120)"
+            " + title overlap 0.55 | Yes |",
+        ])
+        _write_queue(tmp_path, ["INV-001", "INV-002"])
+        n = M._apply_mechanical_dedup_from_pairs(
+            tmp_path, "semantic_dedup", supplemental=True,
+        )
+        assert n == 1
+        absorbed = M._extract_dedup_absorbed_ids(tmp_path)
+        assert "INV-002" in absorbed, \
+            "relax-merged finding must be recorded as absorbed (MERGED), not dropped"
 
     # ------------------------------------------------------------------
     # 5. different severity rejects

@@ -133,6 +133,20 @@ Each `verify_{FINDING_ID}.md` MUST contain:
 {If CONFIRMED — minimal diff-style fix. Omit if REFUTED/FALSE_POSITIVE.}
 ```
 
+**Ledger honesty — `Attempted:` is about a real executed test, not analysis**:
+For rust/go node-client findings where NO local build, fork, or test harness is
+available, the HONEST ledger answer is `Attempted: NO` with blocker
+`NO_BUILD_ENVIRONMENT` (or `EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS` when a live
+external dependency cannot be forked or addressed). Doing a manual code trace is
+NOT execution — a `[CODE-TRACE]` finding is `Attempted: NO`, never
+`Attempted: YES`. Only write `Attempted: YES` when a named test file AND a
+runnable `go test`/`cargo test` command actually exist and were run; in that
+case `Test File:`/`Command:` MUST be filled with the real values. Do not guess
+`Attempted: YES` to look thorough, and do not guess `Attempted: NO` to avoid
+work — fill the ledger to match what you actually did. This is a documentation
+rule only: it does NOT instruct you to skip analysis, and the driver's executor
+degrades an unproven finding to UNPROVEN without penalty and never halts.
+
 **Schema rules**:
 - Missing `Preferred Tag:` line is a schema failure.
 - `Evidence Tag` must be one of the 7 tags from the routing table above.

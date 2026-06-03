@@ -455,6 +455,27 @@ Write `{SCRATCHPAD}/test_infrastructure.md`:
 
 ## Return protocol
 
+### Pre-DONE coverage gate (MANDATORY — run before returning DONE)
+
+Before returning DONE, enumerate EVERY top-level module/crate that contains
+≥10 source files (by the language's primary extensions — `.go`, `.rs`, `.sol`,
+`.move`). For EACH such module, confirm exactly ONE of:
+
+1. **CITED** — at least one file from that module is cited in some recon
+   artifact (`recon_summary.md`, `subsystem_map.md`, `attack_surface.md`,
+   `integration_points.md`, `opengrep_hits_ranked.md`, `function_list.md`,
+   `state_variables.md`, `threat_model.md`, `trust_boundaries.md`,
+   `detected_patterns.md`, `contract_inventory.md`), OR
+2. **ACKNOWLEDGED** — the whole module is recorded in `scope_leftover.md` as
+   `ACKNOWLEDGED: <reason>`.
+
+A module with ≥10 files that is neither cited nor acknowledged (e.g.
+"crates/database 17 files not cited") will FAIL the driver's
+`_validate_recon_coverage` gate and force a recon retry. Resolve every such
+module — add a citation or an `ACKNOWLEDGED:` row to `scope_leftover.md` — and
+confirm the `### Module Coverage Summary` table in `file_coverage_ledger.md`
+shows `Uncovered = 0` for every module with ≥10 files BEFORE returning DONE.
+
 Return ONLY: `DONE: L1 Recon Agent {N}` (max 1 line).
 ")
 ```

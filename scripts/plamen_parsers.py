@@ -3818,11 +3818,44 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
         )
         return 0
 
-    # Sort: source-ID/PERT first, then location-overlap, then title score
+    # Sort: genuine same-code signals first, bare CC co-occurrence last.
+    #
+    # The limited live-pair budget must be spent on pairs that are likely to
+    # be the SAME code/bug seen twice, not on pairs that merely co-occur in a
+    # cross-cutting (CC) breadth sweep. The signals split into two strengths:
+    #
+    #   STRONG (genuine same-code): location overlap, source-ID subset
+    #     (mechanical proof of containment), and PERT lineage (documented
+    #     derivative sharing depth source IDs).
+    #   WEAK (bare CC co-occurrence): "source-ID overlap" — partial shared
+    #     source IDs with NEITHER set a subset of the other. This fires for
+    #     unrelated findings that a breadth agent happened to cite together;
+    #     it is provenance noise, not a same-code signal.
+    #
+    # Bare-CC-only pairs are demoted below every genuine same-code pair so the
+    # budget is not exhausted by provenance noise (the failure that let the
+    # clock-underflow x4 / pull_data x3 clusters escape dedup).
+    #
+    # NOTE: this only re-RANKS the candidate pairs handed to the dedup LLM. It
+    # does NOT decide any merge and CANNOT drop a finding — pairs beyond the
+    # live budget are preserved as deferred in dedup_candidate_pairs_full.md.
     def _sort_key(p: tuple) -> tuple:
-        has_src = "source-ID" in p[3] or "PERT" in p[3]
-        has_loc = "location overlap" in p[3]
-        return (-int(has_src), -int(has_loc), -p[2])
+        reason = p[3]
+        has_loc = "location overlap" in reason
+        has_subset = "source-ID subset" in reason
+        has_pert = "PERT lineage" in reason
+        # A pair whose ONLY source-ID signal is the bare partial overlap
+        # (and which has no location/subset/PERT genuine signal) is weak CC.
+        has_bare_cc = "source-ID overlap" in reason
+        is_genuine = has_loc or has_subset or has_pert
+        bare_cc_only = has_bare_cc and not is_genuine
+        return (
+            -int(is_genuine),     # genuine same-code pairs first
+            int(bare_cc_only),    # bare-CC-only pairs sink to the bottom
+            -int(has_loc),        # within genuine, prefer location overlap
+            -int(has_subset),     # then source-ID subset
+            -p[2],                # then title score
+        )
 
     sorted_pairs = sorted(pairs, key=_sort_key)
     live_pairs = sorted_pairs[:_DEDUP_LIVE_PAIR_LIMIT]
