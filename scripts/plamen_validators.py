@@ -936,6 +936,30 @@ _DEPTH_CANONICAL_ROLES: tuple[str, ...] = (
 )
 
 
+def _read_cli_backend_from_config(scratchpad: Path) -> str:
+    """Read 'cli_backend' from {scratchpad}/config.json. Default 'claude'.
+
+    Makes worker-completion-marker semantics backend-aware. Only the Claude PTY
+    worker pool streams artifacts and writes the `PLAMEN_STATUS: COMPLETE`
+    marker, so "unmarked on a fresh audit => a worker is still mid-write =>
+    IN_PROGRESS" is a Claude-PTY assumption. A single-subprocess backend
+    (codex exec) that has RETURNED has produced FINAL files and never writes the
+    marker, so its unmarked-but-substantive artifacts are COMPLETE, not
+    in-progress. Defaults to 'claude' (strict) when config is absent/unreadable.
+    """
+    try:
+        import json as _json
+        cfg = scratchpad / "config.json"
+        if cfg.exists():
+            val = _json.loads(
+                cfg.read_text(encoding="utf-8", errors="replace")
+            ).get("cli_backend")
+            return (str(val).strip().lower() or "claude") if val else "claude"
+    except Exception:
+        pass
+    return "claude"
+
+
 def _classify_artifact_row(
     path: Path,
     *,
@@ -963,7 +987,16 @@ def _classify_artifact_row(
         return _BREADTH_STATUS_STUB, []
 
     if is_artifact_legacy_unmarked(path):
-        if fresh_audit:
+        # Codex runs each phase as a single `codex exec` subprocess (NOT a PTY
+        # worker pool), so it never writes the PLAMEN_STATUS marker. An unmarked
+        # but substantive file from a RETURNED Codex subprocess is COMPLETE, not
+        # a worker still mid-write — so do NOT treat it as IN_PROGRESS even on a
+        # fresh audit; classify it tolerated-legacy-unmarked (non-blocking).
+        # Claude PTY keeps the strict fresh-audit IN_PROGRESS semantics (a live
+        # worker may still be writing). `path.parent` is the scratchpad. Stub /
+        # missing / explicit-marked-IN_PROGRESS files are handled outside this
+        # branch and still block for both backends (silent-incomplete protection).
+        if fresh_audit and _read_cli_backend_from_config(path.parent) != "codex":
             return _BREADTH_STATUS_IN_PROGRESS, ["legacy-unmarked on fresh audit"]
         return _BREADTH_STATUS_LEGACY_UNMARKED, []
 
