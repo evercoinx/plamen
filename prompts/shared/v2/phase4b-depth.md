@@ -1,7 +1,7 @@
 # Phase 4b: Adaptive Depth Loop
 
 > **Loaded by**: The V2 driver's Phase 4b subprocess (depth analysis loop).
-> **Reference**: `~/.claude/rules/phase4-confidence-scoring.md` for scoring model,
+> **Reference**: `~/.plamen/rules/phase4-confidence-scoring.md` for scoring model,
 > anti-dilution rules, and convergence criteria.
 > **Purpose**: Self-contained methodology for the adaptive depth loop including
 > iteration 1-3, agent roles, scoring integration, convergence criteria, blind

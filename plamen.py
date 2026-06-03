@@ -487,11 +487,11 @@ def _probe_mcp_servers() -> list:
     """Probe configured MCP servers for health. Returns list of (name, ok) tuples.
     npx-based servers are skipped if the package isn't cached (download would exceed timeout)."""
     import json as _json
-    mcp_path = os.path.join(CLAUDE_HOME, "mcp.json")
-    if not os.path.isfile(mcp_path):
+    settings_path = os.path.join(CLAUDE_HOME, "settings.json")
+    if not os.path.isfile(settings_path):
         return []
     try:
-        with open(mcp_path) as f:
+        with open(settings_path) as f:
             mcp = _json.load(f)
     except Exception:
         return []
@@ -1772,10 +1772,10 @@ def _setup_mcp_packages(w):
         return  # mcp-packages not part of this install — skip silently
 
     # Only activate if: (a) node_modules already exists (user previously opted in), or
-    # (b) ~/.claude/mcp.json has bare npx -y without version pins (legacy config needing fix)
+    # (b) ~/.claude/settings.json has bare npx -y without version pins (legacy config needing fix)
     has_local_install = os.path.isdir(nm_dir)
     has_legacy_config = False
-    mcp_json_path = os.path.join(CLAUDE_HOME, "mcp.json")
+    mcp_json_path = os.path.join(CLAUDE_HOME, "settings.json")
     if os.path.isfile(mcp_json_path):
         try:
             with open(mcp_json_path) as f:
@@ -1970,18 +1970,29 @@ def _run_symlink_install(w):
                 installed.append(dst)
     _clean_dangling_plamen_links(commands_dir, w)
 
-    # 4. Rule files (individual — user may have own rules)
+    # 4. Rule files — NOT linked into ~/.claude/rules/ to avoid polluting global
+    #    Claude Code context. Agents access rules directly from PLAMEN_HOME via
+    #    absolute paths. Remove ALL Plamen-pointing symlinks from prior installs.
     rules_dir = os.path.join(CLAUDE_HOME, "rules")
-    os.makedirs(rules_dir, exist_ok=True)
-    rule_files = sorted(glob.glob(os.path.join(PLAMEN_HOME, "rules", "*.md")) +
-                        glob.glob(os.path.join(PLAMEN_HOME, "rules", "*.json")))
-    if rule_files:
-        w(f"  {_C_ORANGE}>{_RST} Linking rules ({len(rule_files)} files)\n")
-        for f in rule_files:
-            dst = os.path.join(rules_dir, os.path.basename(f))
-            if _safe_link(f, dst, w):
-                installed.append(dst)
-    _clean_dangling_plamen_links(rules_dir, w)
+    if os.path.isdir(rules_dir):
+        plamen_norm = os.path.normpath(PLAMEN_HOME)
+        removed_rules = 0
+        for entry in sorted(os.listdir(rules_dir)):
+            path = os.path.join(rules_dir, entry)
+            if not os.path.islink(path):
+                continue
+            target_path = os.readlink(path)
+            if not os.path.isabs(target_path):
+                target_path = os.path.normpath(os.path.join(rules_dir, target_path))
+            if plamen_norm in os.path.normpath(target_path):
+                os.remove(path)
+                removed_rules += 1
+        if removed_rules:
+            w(f"  {_C_GREEN}rules/: removed {removed_rules} legacy Plamen symlink(s){_RST}\n")
+        try:
+            os.rmdir(rules_dir)  # remove if now empty
+        except OSError:
+            pass  # non-empty (user has own rules) — leave it
 
     # 5. Prompts directory (Plamen-only — per-language prompt trees)
     prompts_src = os.path.join(PLAMEN_HOME, "prompts")
@@ -2265,11 +2276,11 @@ def _merge_settings_json(w):
 
 
 def _merge_mcp_json(w):
-    """Merge Plamen's MCP servers into ~/.claude/mcp.json (additive only)."""
+    """Merge Plamen's MCP servers into ~/.claude/settings.json (additive only)."""
     import json as _json
 
     example = os.path.join(PLAMEN_HOME, "mcp.json.example")
-    target = os.path.join(CLAUDE_HOME, "mcp.json")
+    target = os.path.join(CLAUDE_HOME, "settings.json")
 
     if not os.path.isfile(example):
         w(f"  {_C_ORANGE}mcp.json.example not found — skipping{_RST}\n")
@@ -2311,17 +2322,19 @@ def _merge_mcp_json(w):
             config["cwd"] = os.path.join(PLAMEN_HOME, config["cwd"][2:])
         config["command"] = _resolve_command(config["command"])
 
-    existing = {"mcpServers": {}}
+    existing = {}
     if os.path.isfile(target):
         try:
             with open(target) as f:
                 existing = _json.load(f)
         except (_json.JSONDecodeError, ValueError) as e:
-            w(f"  {_C_RED}mcp.json is not valid JSON: {e}{_RST}\n")
+            w(f"  {_C_RED}settings.json is not valid JSON: {e}{_RST}\n")
             w(f"  {_C_GRAY}  Fix the file manually, then re-run install.{_RST}\n")
             w(f"  {_C_GRAY}  Common cause: trailing commas or missing quotes.{_RST}\n")
             return
         existing.setdefault("mcpServers", {})
+    else:
+        existing["mcpServers"] = {}
 
     def _is_wrong_platform_path(path: str) -> bool:
         """Detect paths from a different OS (e.g., Windows paths on macOS/Linux)."""
@@ -2357,7 +2370,8 @@ def _merge_mcp_json(w):
                         existing_env[k] = v
                         patched_env.append(f"{name}.{k}")
         else:
-            existing["mcpServers"][name] = config
+            clean = {k: v for k, v in config.items() if k != "_comment"}
+            existing["mcpServers"][name] = clean
             added.append(name)
 
     with open(target, "w") as f:
@@ -2365,43 +2379,63 @@ def _merge_mcp_json(w):
         f.write("\n")
 
     if added:
-        w(f"  {_C_GREEN}mcp.json: added {', '.join(added)}{_RST}\n")
+        w(f"  {_C_GREEN}settings.json: added MCP servers {', '.join(added)}{_RST}\n")
     if patched_paths:
-        w(f"  {_C_GREEN}mcp.json: fixed platform paths: {', '.join(patched_paths)}{_RST}\n")
+        w(f"  {_C_GREEN}settings.json: fixed MCP platform paths: {', '.join(patched_paths)}{_RST}\n")
     if patched_env:
-        w(f"  {_C_GREEN}mcp.json: backfilled env vars: {', '.join(patched_env)}{_RST}\n")
+        w(f"  {_C_GREEN}settings.json: backfilled MCP env vars: {', '.join(patched_env)}{_RST}\n")
     if skipped:
-        w(f"  {_C_GRAY}mcp.json: kept existing {', '.join(skipped)}{_RST}\n")
+        w(f"  {_C_GRAY}settings.json: kept existing MCP servers {', '.join(skipped)}{_RST}\n")
     if not added and not skipped and not patched_env and not patched_paths:
-        w(f"  {_C_GREEN}mcp.json: up to date{_RST}\n")
+        w(f"  {_C_GREEN}settings.json: MCP servers up to date{_RST}\n")
 
     # Remind about API keys for newly added servers
     needs_keys = [n for n in added if any(
         "YOUR_" in str(v) for v in (plamen.get("mcpServers", {}).get(n, {}).get("env", {})).values()
     )]
     if needs_keys:
-        w(f"  {_C_GRAY}  Edit {target} to add API keys for: {', '.join(needs_keys)}{_RST}\n")
+        w(f"  {_C_GRAY}  Edit ~/.claude/settings.json to add API keys for: {', '.join(needs_keys)}{_RST}\n")
         w(f"  {_C_GRAY}  Free keys: solodit.cyfrin.io, etherscan.io/apis, tavily.com{_RST}\n")
 
 
 def _merge_claude_md(w):
-    """Inject Plamen's CLAUDE.md into ~/.claude/CLAUDE.md between markers."""
+    """Inject Plamen's CLAUDE.md into ~/Workspace/audit/CLAUDE.md between markers.
+
+    Scoped to the audit workspace so Plamen identity only loads in audit sessions,
+    not in every Claude Code session globally. Also removes any legacy injection
+    from ~/.claude/CLAUDE.md.
+    """
     plamen_md = os.path.join(PLAMEN_HOME, "CLAUDE.md")
-    target = os.path.join(CLAUDE_HOME, "CLAUDE.md")
+    audit_dir = os.path.expanduser("~/Workspace/audit")
+    target = os.path.join(audit_dir, "CLAUDE.md")
+
+    # Remove legacy injection from ~/.claude/CLAUDE.md if present
+    global_md = os.path.join(CLAUDE_HOME, "CLAUDE.md")
+    if os.path.isfile(global_md):
+        with open(global_md, "r", encoding="utf-8") as f:
+            global_content = f.read()
+        if _CLAUDE_MD_START in global_content:
+            if _CLAUDE_MD_END in global_content:
+                before = global_content[:global_content.index(_CLAUDE_MD_START)]
+                after_end = global_content.index(_CLAUDE_MD_END) + len(_CLAUDE_MD_END)
+                after = global_content[after_end:]
+                cleaned = before.rstrip("\n") + after.lstrip("\n")
+            else:
+                cleaned = global_content[:global_content.index(_CLAUDE_MD_START)].rstrip("\n")
+            with open(global_md, "w", encoding="utf-8") as f:
+                f.write(cleaned)
+            w(f"  {_C_GREEN}CLAUDE.md: removed legacy Plamen injection from ~/.claude/CLAUDE.md{_RST}\n")
 
     if not os.path.isfile(plamen_md):
         w(f"  {_C_ORANGE}CLAUDE.md not found in repo — skipping{_RST}\n")
         return
 
+    os.makedirs(audit_dir, exist_ok=True)
+
     with open(plamen_md, "r", encoding="utf-8") as f:
         plamen_content = f.read().strip()
 
-    same_file = os.path.realpath(plamen_md) == os.path.realpath(target)
-
-    # If source file already contains markers (same-dir install, or prior install
-    # committed back to repo), extract only the content within markers as the
-    # canonical Plamen instructions. This prevents content doubling/tripling
-    # when PLAMEN_HOME == CLAUDE_HOME.
+    # Strip markers if source already has them (prevents doubling)
     if _CLAUDE_MD_START in plamen_content:
         start_idx = plamen_content.index(_CLAUDE_MD_START) + len(_CLAUDE_MD_START)
         if _CLAUDE_MD_END in plamen_content:
@@ -2410,18 +2444,14 @@ def _merge_claude_md(w):
             end_idx = len(plamen_content)
         plamen_content = plamen_content[start_idx:end_idx].strip()
 
-    if same_file:
-        # Same-dir install: file is both source and target.
-        # No separate user content to preserve — just write clean markers.
-        with open(target, "w", encoding="utf-8") as f:
-            f.write(f"{_CLAUDE_MD_START}\n{plamen_content}\n{_CLAUDE_MD_END}\n")
-        w(f"  {_C_GREEN}CLAUDE.md: refreshed Plamen instructions (same-dir){_RST}\n")
-        return
-
     existing = ""
     if os.path.isfile(target):
         with open(target, "r", encoding="utf-8") as f:
             existing = f.read()
+
+    # Strip legacy @include shim (written by earlier installs before marker injection)
+    if existing.strip() == "@~/.plamen/CLAUDE.md":
+        existing = ""
 
     # Remove any prior Plamen section
     if _CLAUDE_MD_START in existing:
@@ -2431,16 +2461,16 @@ def _merge_claude_md(w):
             after = existing[after_end:]
             existing = before.rstrip("\n") + after.lstrip("\n")
         else:
-            # End marker missing (user corrupted file) — strip from start marker to EOF
             existing = existing[:existing.index(_CLAUDE_MD_START)].rstrip("\n")
 
-    # Append Plamen section with markers
-    injected = f"\n\n{_CLAUDE_MD_START}\n{plamen_content}\n{_CLAUDE_MD_END}\n"
+    # Write Plamen section with markers (no leading user content for this file)
+    injected = f"{_CLAUDE_MD_START}\n{plamen_content}\n{_CLAUDE_MD_END}\n"
+    prefix = existing.rstrip("\n") + "\n\n" if existing.strip() else ""
 
     with open(target, "w", encoding="utf-8") as f:
-        f.write(existing.rstrip("\n") + injected)
+        f.write(prefix + injected)
 
-    w(f"  {_C_GREEN}CLAUDE.md: injected Plamen instructions (with markers){_RST}\n")
+    w(f"  {_C_GREEN}CLAUDE.md: injected Plamen instructions into ~/Workspace/audit/CLAUDE.md{_RST}\n")
 
 
 def run_uninstall():
@@ -2511,23 +2541,34 @@ def run_uninstall():
                 shutil.move(backup, path)
                 restored += 1
 
-    # Remove CLAUDE.md injection
-    claude_md = os.path.join(CLAUDE_HOME, "CLAUDE.md")
-    if os.path.isfile(claude_md):
-        with open(claude_md, "r", encoding="utf-8") as f:
+    # Remove CLAUDE.md injection from both possible locations
+    def _strip_plamen_block(path):
+        if not os.path.isfile(path):
+            return False
+        with open(path, "r", encoding="utf-8") as f:
             content = f.read()
-        if _CLAUDE_MD_START in content:
-            if _CLAUDE_MD_END in content:
-                before = content[:content.index(_CLAUDE_MD_START)]
-                after_end = content.index(_CLAUDE_MD_END) + len(_CLAUDE_MD_END)
-                after = content[after_end:]
-                cleaned = before.rstrip("\n") + after.lstrip("\n")
-            else:
-                # End marker missing — strip from start marker to EOF
-                cleaned = content[:content.index(_CLAUDE_MD_START)].rstrip("\n")
-            with open(claude_md, "w", encoding="utf-8") as f:
-                f.write(cleaned if cleaned.strip() else "")
-            w(f"  {_C_GREEN}CLAUDE.md: removed Plamen section{_RST}\n")
+        if _CLAUDE_MD_START not in content:
+            return False
+        if _CLAUDE_MD_END in content:
+            before = content[:content.index(_CLAUDE_MD_START)]
+            after_end = content.index(_CLAUDE_MD_END) + len(_CLAUDE_MD_END)
+            after = content[after_end:]
+            cleaned = before.rstrip("\n") + after.lstrip("\n")
+        else:
+            cleaned = content[:content.index(_CLAUDE_MD_START)].rstrip("\n")
+        # If nothing left but the @~/.plamen/CLAUDE.md include line, remove the file
+        if cleaned.strip() == "@~/.plamen/CLAUDE.md":
+            os.remove(path)
+            return True
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(cleaned if cleaned.strip() else "")
+        return True
+
+    claude_md = os.path.join(CLAUDE_HOME, "CLAUDE.md")
+    audit_md = os.path.expanduser("~/Workspace/audit/CLAUDE.md")
+    for md_path in [claude_md, audit_md]:
+        if _strip_plamen_block(md_path):
+            w(f"  {_C_GREEN}CLAUDE.md: removed Plamen section from {md_path}{_RST}\n")
 
     # Remove Plamen entries from settings.json
     settings_path = os.path.join(CLAUDE_HOME, "settings.json")
@@ -2566,21 +2607,26 @@ def run_uninstall():
                 f.write("\n")
             w(f"  {_C_GREEN}settings.json: removed Plamen entries{_RST}\n")
 
-    # Remove Plamen MCP servers from mcp.json
-    mcp_path = os.path.join(CLAUDE_HOME, "mcp.json")
-    if os.path.isfile(mcp_path):
-        with open(mcp_path) as f:
-            mcp = _json.load(f)
+    # Remove Plamen MCP servers from settings.json
+    settings_mcp_path = os.path.join(CLAUDE_HOME, "settings.json")
+    if os.path.isfile(settings_mcp_path):
+        with open(settings_mcp_path) as f:
+            settings_mcp = _json.load(f)
         example = os.path.join(PLAMEN_HOME, "mcp.json.example")
         if os.path.isfile(example):
             with open(example) as f:
                 plamen_mcp = _json.load(f)
+            removed_servers = []
             for name in plamen_mcp.get("mcpServers", {}):
-                mcp.get("mcpServers", {}).pop(name, None)
-            with open(mcp_path, "w") as f:
-                _json.dump(mcp, f, indent=2)
+                if settings_mcp.get("mcpServers", {}).pop(name, None) is not None:
+                    removed_servers.append(name)
+            if not settings_mcp.get("mcpServers"):
+                settings_mcp.pop("mcpServers", None)
+            with open(settings_mcp_path, "w") as f:
+                _json.dump(settings_mcp, f, indent=2)
                 f.write("\n")
-            w(f"  {_C_GREEN}mcp.json: removed Plamen servers{_RST}\n")
+            if removed_servers:
+                w(f"  {_C_GREEN}settings.json: removed MCP servers {', '.join(removed_servers)}{_RST}\n")
 
     os.remove(manifest_path)
 

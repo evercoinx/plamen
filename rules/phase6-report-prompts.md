@@ -414,7 +414,7 @@ Read:
 - {SCRATCHPAD}/findings_inventory.md (fallback detail and source citations)
 - {SCRATCHPAD}/finding_mapping.md (hypothesis → source finding mapping — for rule 10 constituent angle check)
 - Optional fallback only if an assigned verify file is missing: {SCRATCHPAD}/hypotheses.md, {SCRATCHPAD}/chain_hypotheses.md
-- ~/.claude/rules/report-template.md (finding format and rules)
+- ~/.plamen/rules/report-template.md (finding format and rules)
 
 ## Your Task
 
@@ -471,7 +471,7 @@ Read:
 - {SCRATCHPAD}/findings_inventory.md (agent finding details)
 - {SCRATCHPAD}/finding_mapping.md (hypothesis → source finding mapping — for rule 10 constituent angle check)
 - Optional fallback only if an assigned verify file is missing: {SCRATCHPAD}/hypotheses.md, {SCRATCHPAD}/chain_hypotheses.md
-- ~/.claude/rules/report-template.md (finding format and rules)
+- ~/.plamen/rules/report-template.md (finding format and rules)
 
 For each finding, read cited source files directly when you need a code snippet.
 
@@ -524,7 +524,7 @@ Read:
 - {SCRATCHPAD}/finding_mapping.md (hypothesis → source finding mapping — for rule 10 constituent angle check)
 - assigned `verify_*.md` files only when an assigned finding explicitly references one
 - Optional fallback only if required detail is missing: {SCRATCHPAD}/hypotheses.md
-- ~/.claude/rules/report-template.md (finding format and rules)
+- ~/.plamen/rules/report-template.md (finding format and rules)
 
 For each finding, read cited source files directly when you need a code snippet.
 
@@ -604,7 +604,7 @@ Read:
 - {SCRATCHPAD}/report_critical_high.md (Critical + High sections)
 - {SCRATCHPAD}/report_medium.md (Medium section)
 - {SCRATCHPAD}/report_low_info.md (Low + Informational sections)
-- ~/.claude/rules/report-template.md (report structure template)
+- ~/.plamen/rules/report-template.md (report structure template)
 
 ## Your Task
 

@@ -114,7 +114,7 @@ Verify the fork addresses these historically exploited Curve issues:
 
 ## Output
 - Maximum 8 findings [SSC-1] through [SSC-8]
-- Use standard finding format from ~/.claude/rules/finding-output-format.md
+- Use standard finding format from ~/.plamen/rules/finding-output-format.md
 
 ## Chain Summary (MANDATORY)
 | Finding ID | Location | Root Cause (1-line) | Verdict | Severity | Precondition Type | Postcondition Type |

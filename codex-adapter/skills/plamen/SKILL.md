@@ -60,12 +60,12 @@ running inside the model/backend they chose.
 
 Codex route:
 
-```bash
-python ~/.codex/plamen/scripts/plamen_driver.py "{CONFIG_PATH}"
+```
+python /home/serge/.codex/plamen/scripts/plamen_driver.py "{CONFIG_PATH}"
 ```
 
 Fresh restart:
 
-```bash
-python ~/.codex/plamen/scripts/plamen_driver.py --fresh "{CONFIG_PATH}"
+```
+python /home/serge/.codex/plamen/scripts/plamen_driver.py --fresh "{CONFIG_PATH}"
 ```

@@ -48,7 +48,7 @@ Verify only the rows assigned to this shard by the driver's
 For each assigned row, read only:
 
 - the row in this shard's manifest
-- `~/.claude/rules/phase5-poc-execution.md`
+- `~/.plamen/rules/phase5-poc-execution.md`
 - the exact source file(s) at the row's `Location`
 - the one `Primary Artifact` named in the queue row
 

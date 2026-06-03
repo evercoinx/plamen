@@ -11,7 +11,7 @@ description: "Phase 6: L1 Report Overrides — appended to every tier writer pro
 >
 > **How to use**: The driver appends this file's content via `--append-system-prompt-file`
 > to each tier writer and assembler invocation. The standard report template
-> (`~/.claude/rules/phase6-report-prompts.md`) still applies for structure and formatting;
+> (`~/.plamen/rules/phase6-report-prompts.md`) still applies for structure and formatting;
 > this file provides L1-specific overrides only.
 
 ---
@@ -21,7 +21,7 @@ description: "Phase 6: L1 Report Overrides — appended to every tier writer pro
 ### Rule 1: Severity Matrix
 
 Use the L1 severity matrix at `docs/l1-mode/severity-matrix.md`, NOT the smart-contract
-matrix in `~/.claude/rules/report-template.md`.
+matrix in `~/.plamen/rules/report-template.md`.
 
 The L1 matrix uses different impact categories:
 - **Critical**: Network-wide consensus failure, chain halt, finality violation, >33% stake slashing

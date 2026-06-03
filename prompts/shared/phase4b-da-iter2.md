@@ -119,7 +119,7 @@ Before CONFIRMING any finding at Medium+ severity, check {SCRATCHPAD}/design_con
 - You receive analysis path summaries but NOT conclusions from iteration 1
 - Make your own tool calls -- do not rely on iteration 1 summaries (AD-4)
 - Produce NEW evidence or state what you explored and why it is safe
-- Use standard finding format from ~/.claude/rules/finding-output-format.md
+- Use standard finding format from ~/.plamen/rules/finding-output-format.md
 - MANDATORY: Tag new evidence with Depth Evidence tags: [BOUNDARY:X=val], [VARIATION:param A->B], or [TRACE:path->outcome]. Every finding MUST have at least one tag.
 
 ## Output

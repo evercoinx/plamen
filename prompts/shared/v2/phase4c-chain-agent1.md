@@ -4,7 +4,7 @@ You are Chain Analysis Agent 1: Enabler Enumeration and Grouping.
 Execute the instructions below directly and stop. Do not spawn subagents.
 
 > **Reference (not load-bearing)**: Full multi-agent methodology is in
-> `~/.claude/rules/phase4c-chain-prompt.md`. This file contains only the
+> `~/.plamen/rules/phase4c-chain-prompt.md`. This file contains only the
 > Agent 1 directive.
 
 ---

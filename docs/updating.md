@@ -34,7 +34,7 @@ These are symlinked as **individual files** — existing files update, but no ne
 | Component | Claude Code Path | Codex Path (`--codex`) |
 |-----------|------|------|
 | Agent definitions | `~/.claude/agents/depth-*.md`, `security-*.md` | `~/.codex/plamen/agents/` (same files) |
-| Rule files | `~/.claude/rules/*.md` | `~/.codex/plamen/rules/` (same files) |
+| Rule files | `~/.plamen/rules/*.md` | `~/.codex/plamen/rules/` (same files) |
 | `/plamen` command | `~/.claude/commands/plamen.md` | N/A (Codex uses `AGENTS.md` orchestrator) |
 | CLI wrapper | `~/.claude/plamen.py`, `plamen.sh`, `plamen.bat` | Same (shared CLI entry point) |
 | VERSION file | `~/.claude/VERSION` | `~/.codex/plamen/VERSION` (same file) |

@@ -51,7 +51,7 @@ description: "Launch the V2 deterministic L1 audit pipeline for Go/Rust node cli
 
 ## Orchestration Protocol
 
-**MANDATORY**: Before starting any audit work, read and apply `~/.claude/rules/orchestrator-rules.md`. It contains the AUDIT MODES table, CRITICAL RULES 1-16, and the orchestration architecture. You are the orchestrator — those rules govern how you spawn agents, manage phases, and enforce completeness.
+**MANDATORY**: Before starting any audit work, read and apply `~/.plamen/rules/orchestrator-rules.md`. It contains the AUDIT MODES table, CRITICAL RULES 1-16, and the orchestration architecture. You are the orchestrator — those rules govern how you spawn agents, manage phases, and enforce completeness.
 
 ## Step 0: L1 Audit Wizard
 
@@ -245,7 +245,7 @@ Include this block verbatim in every Thorough-mode depth agent prompt:
 >
 > The `{...}` tokens above are placeholders showing the schema — replace with REAL values from the codebase you are auditing. Do NOT copy the placeholder text verbatim. Cite real file paths from THIS audit's source tree, not from any example or prior audit.
 >
-> **One row per (skill, numbered-section) pair** for every skill listed in `template_recommendations.md` BINDING MANIFEST as `Required = YES` and routed to your role per `~/.claude/rules/skill-index.md` "Inject Into" column. Resolve the numbered sections by reading each skill's `SKILL.md` — sections start with `## N. Title`.
+> **One row per (skill, numbered-section) pair** for every skill listed in `template_recommendations.md` BINDING MANIFEST as `Required = YES` and routed to your role per `~/.plamen/rules/skill-index.md` "Inject Into" column. Resolve the numbered sections by reading each skill's `SKILL.md` — sections start with `## N. Title`.
 >
 > **Allowed `Executed` values**:
 > - `yes` — section executed; Evidence MUST contain a `file:line` token (e.g. `block.rs:L45`). The driver hard-rejects ceremonial `yes` rows without `file:line` evidence.
@@ -1091,7 +1091,7 @@ After 5.3/5.4 (and 5.5 in Thorough), write `verify_core.md` as a summary index o
 
 ## Step 6: Report
 
-Read `~/.claude/rules/phase6-report-prompts.md` for full prompt templates.
+Read `~/.plamen/rules/phase6-report-prompts.md` for full prompt templates.
 
 ### §L1-REPORT-OVERRIDES (MUST be appended verbatim to EVERY tier writer spawn prompt)
 

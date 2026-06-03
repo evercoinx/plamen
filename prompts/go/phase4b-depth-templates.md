@@ -205,7 +205,7 @@ For each hypothesis in PART 2:
    incomplete — never REFUTED by default.
 
 Use the standard finding format from
-~/.claude/rules/finding-output-format.md with Depth Evidence tags.
+~/.plamen/rules/finding-output-format.md with Depth Evidence tags.
 
 ## 6. CHAIN SUMMARY (Precondition-Postcondition Matches)
 

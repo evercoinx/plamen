@@ -111,7 +111,7 @@ Read: {SCRATCHPAD}/design_context.md
 Before CONFIRMING any finding at Medium+ severity, check {SCRATCHPAD}/design_context.md Operational Implications section. If your finding contradicts a documented operational implication, you MUST explain the contradiction or downgrade to CONTESTED.
 
 ## Finding Format
-Read and follow: ~/.claude/rules/finding-output-format.md
+Read and follow: ~/.plamen/rules/finding-output-format.md
 MANDATORY: Every finding MUST include at least one Depth Evidence tag: [BOUNDARY:X=val], [VARIATION:param A->B], or [TRACE:path->outcome]. A finding without any evidence tag is INCOMPLETE and will be flagged for re-analysis in iteration 2. Do not submit findings without tags.
 
 ## Chain Summary (MANDATORY)
@@ -144,7 +144,7 @@ Read: ~/.claude/prompts/soroban/phase4b-scanner-templates.md -- follow Scanner {
 - Source files in scope
 
 ## Finding Format
-Read and follow: ~/.claude/rules/finding-output-format.md
+Read and follow: ~/.plamen/rules/finding-output-format.md
 
 ## Output
 Write your output directly to {SCRATCHPAD}/{OUTPUT_FILE} using the Write tool.
@@ -191,7 +191,7 @@ Read: ~/.claude/agents/skills/niche/{niche_name}/SKILL.md
 - Source files in scope
 
 ## Finding Format
-Read and follow: ~/.claude/rules/finding-output-format.md
+Read and follow: ~/.plamen/rules/finding-output-format.md
 
 ## Output
 Write your output directly to {SCRATCHPAD}/niche_{niche_name}_findings.md using the Write tool.
@@ -220,7 +220,7 @@ You are the Design Stress Testing Agent. You stress-test the protocol's design l
 - Source files in scope
 
 ## Finding Format
-Read and follow: ~/.claude/rules/finding-output-format.md
+Read and follow: ~/.plamen/rules/finding-output-format.md
 Use finding IDs: [DST-1], [DST-2], ...
 
 ## Output

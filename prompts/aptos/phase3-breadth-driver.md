@@ -118,7 +118,7 @@ Instead, for each vulnerability class in your methodology:
 - Source files in scope
 
 ## Finding Format
-Read and follow: ~/.claude/rules/finding-output-format.md
+Read and follow: ~/.plamen/rules/finding-output-format.md
 
 ## Output Requirements
 Write your output directly to {SCRATCHPAD}/analysis_{focus_area}.md using the Write tool.

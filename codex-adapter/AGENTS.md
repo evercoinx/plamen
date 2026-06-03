@@ -36,17 +36,9 @@ Your methodology, prompts, and skill files live in `~/.codex/plamen/`.
 10. **MCP TIMEOUT POLICY** -- Agents that call MCP tools must NOT retry on timeout.
     Record `[MCP: TIMEOUT]` and switch to fallback.
 
-## Hard Rule
-
-Do not manually orchestrate Plamen phases. Do not spawn recon, breadth,
-depth, verification, or report agents yourself. The Python driver
-(`plamen_driver.py`) is the sole owner of phase sequencing.
-
-For new Codex launches, `config.json` must set `"cli_backend": "codex"`.
-
 ## Phase Sequence
 
-Follow the phase graph defined in the V2 driver's `plamen_types.py`:
+Follow the phase sequence defined in `scripts/plamen_types.py` (`SC_PHASES`/`L1_PHASES`):
 
 ```
 Recon (1) -> Breadth (2) -> Inventory (3) -> [Re-scan (4)] -> [Per-contract (5)]
@@ -55,7 +47,7 @@ Recon (1) -> Breadth (2) -> Inventory (3) -> [Re-scan (4)] -> [Per-contract (5)]
 ```
 
 Phases in brackets are mode-dependent. Each phase has required artifacts that
-MUST exist before proceeding to the next phase (enforced by the V2 driver's artifact gates).
+MUST exist before proceeding to the next phase (enforced by `plamen_driver.py` gate checks).
 
 ## File References
 

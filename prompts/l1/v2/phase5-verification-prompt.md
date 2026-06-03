@@ -55,7 +55,7 @@ Full hypothesis source: `{hypotheses_path}` (this will be `{scratchpad}/findings
 
 ## Impact Premise Verification (MANDATORY — HARD GATE)
 
-> Reproduced verbatim from `~/.claude/rules/phase5-poc-execution.md`. Do not skip.
+> Reproduced verbatim from `~/.plamen/rules/phase5-poc-execution.md`. Do not skip.
 
 Before writing the PoC, identify the finding's claimed HARM in one sentence — not the mechanism, but the consequence. The PoC MUST assert the HARM directly. A PoC that only proves a function can be called, a state can be reached, or a path exists is NOT a `[POC-PASS]` — it is a mechanism test, not a harm test.
 
@@ -237,7 +237,7 @@ Under NO circumstances is `[CODE-TRACE]` sufficient for CONFIRMED on a High/Crit
 **Verified**: {YES — re-ran PoC with fix applied and it no longer triggers / NO — fix not mechanically verified}
 ```
 
-> Suggested-fix rules reproduced from `~/.claude/rules/phase5-poc-execution.md`: only for mechanically-proven CONFIRMED findings; minimal diff — smallest change that eliminates the vulnerability; if non-trivial (architectural / multi-file), write `**Fix**: Architectural change required — {1-sentence description}. No inline diff provided.`; Go and Rust examples follow the standard diff format.
+> Suggested-fix rules reproduced from `~/.plamen/rules/phase5-poc-execution.md`: only for mechanically-proven CONFIRMED findings; minimal diff — smallest change that eliminates the vulnerability; if non-trivial (architectural / multi-file), write `**Fix**: Architectural change required — {1-sentence description}. No inline diff provided.`; Go and Rust examples follow the standard diff format.
 
 ### Go fix example
 
