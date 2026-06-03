@@ -1617,6 +1617,14 @@ def _rescan_manifest_exact_missing(
                     text,
                 )
             }
+            # An EXPLICIT non-COMPLETE STATUS marker (e.g. IN_PROGRESS) is a
+            # deliberate "worker not done" signal — shipping it as complete
+            # would risk delivering partial rescan output (a silent-incomplete
+            # recall loss). This is intentional protection, NOT a timing race:
+            # the genuine mid-flush race is when NO STATUS marker is present yet
+            # (the `markers and ...` guard already skips that case, deferring to
+            # presence+size+structural). So a present non-COMPLETE STATUS keeps
+            # blocking. See test_ship_8_17_rescan_exact_gate.py.
             if markers and markers.get("STATUS") != "COMPLETE":
                 missing.append(f"{name} has PLAMEN_STATUS != COMPLETE")
                 continue

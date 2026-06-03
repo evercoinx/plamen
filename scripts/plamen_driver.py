@@ -13346,19 +13346,84 @@ def main():
             active = _write_mechanical_report_index(scratchpad)
             idx_post_issues = _validate_report_index_inputs(scratchpad)
             if idx_post_issues:
-                log.error("[report_index] " + "; ".join(idx_post_issues))
-                (scratchpad / "report_index.degraded").write_text(
-                    "report_index halted: generated report_index failed validation.\n"
-                    + "\n".join(idx_post_issues) + "\n",
-                    encoding="utf-8",
+                # L1 haltless-parity (v2.8.17): mirror SC's repair-then-
+                # revalidate flow for the report_index post-write gate before
+                # any degrade decision. The severity-provenance portion of this
+                # gate is PROSE/RECALL-dependent (it flags LLM/matrix severity
+                # changes that lack a recognized Trust Adj. reason) and must NOT
+                # orphan an 11h+ audit over 1-3 mis-classified rows.
+                #
+                # Step 1: auto-repair downgrade-only provenance violations
+                # (mechanical, safe direction — under-flagging) and revalidate.
+                sev_repairs = _repair_report_index_severity_provenance(scratchpad)
+                if sev_repairs:
+                    applied = [
+                        r for r in sev_repairs
+                        if str(r.get("action", "")).startswith("applied")
+                    ]
+                    if applied:
+                        log.info(
+                            f"[report_index] auto-tagged {len(applied)} severity "
+                            f"downgrade(s) as SEVERITY_OVERRIDE(<upstream>); see "
+                            f"_severity_override_ledger.json for the ledger"
+                        )
+                    idx_post_issues = _validate_report_index_inputs(scratchpad)
+            if idx_post_issues:
+                # Step 2: partition residual issues into HARD (mechanical:
+                # missing/unverified verify file = silent-drop risk) vs SOFT
+                # (prose: severity provenance that repair could not safely
+                # resolve, e.g. inflation). HARD keeps blocking (silent-drop
+                # protection preserved). SOFT degrades-with-flag: written to a
+                # human-review artifact and the pipeline continues, matching the
+                # obligation-ledger and SC degrade-with-flag philosophy.
+                hard_post_issues = _validate_verify_files_for_queue(scratchpad)
+                if hard_post_issues:
+                    hard_post_issues = [
+                        "report_index: " + hard_post_issues[0]
+                        + " — refuse to write report_index.md"
+                    ]
+                    log.error("[report_index] " + "; ".join(hard_post_issues))
+                    (scratchpad / "report_index.degraded").write_text(
+                        "report_index halted: generated report_index failed "
+                        "validation (mechanical verify-file parity).\n"
+                        + "\n".join(hard_post_issues) + "\n",
+                        encoding="utf-8",
+                    )
+                    if "report_index" not in checkpoint.degraded:
+                        checkpoint.degraded.append("report_index")
+                    checkpoint.save(scratchpad)
+                    display.print_failure_diagnosis(
+                        phase.name, str(scratchpad), hard_post_issues, config,
+                    )
+                    sys.exit(EXIT_DEGRADED)
+                # Residual = PROSE/RECALL severity provenance. Degrade-not-halt:
+                # flag for human review, do NOT sys.exit, let the audit finish.
+                try:
+                    (scratchpad / "report_semantic_severity_repairs.md").write_text(
+                        "# Report Severity Provenance — Human Review\n\n"
+                        "Non-blocking severity-provenance telemetry (v2.8.17).\n"
+                        "The report_index severity for the rows below differs "
+                        "from the upstream verifier/queue severity and could not "
+                        "be auto-resolved as a safe downgrade (e.g. it is an "
+                        "inflation, or the Trust Adj. cell was non-empty). These "
+                        "are flagged, NOT silently dropped, and do NOT halt the "
+                        "pipeline. A human reviewer should confirm the final tier "
+                        "for each row before delivery.\n\n"
+                        + "\n".join(f"- {issue}" for issue in idx_post_issues)
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                except Exception as exc:
+                    log.warning(
+                        f"[report_index] could not write severity-repair "
+                        f"review artifact: {exc!r}"
+                    )
+                log.warning(
+                    "[report_index] severity-provenance issue(s) flagged for "
+                    "human review (report_semantic_severity_repairs.md); "
+                    "pipeline continues (degrade-not-halt): "
+                    + "; ".join(idx_post_issues)
                 )
-                if "report_index" not in checkpoint.degraded:
-                    checkpoint.degraded.append("report_index")
-                checkpoint.save(scratchpad)
-                display.print_failure_diagnosis(
-                    phase.name, str(scratchpad), idx_post_issues, config,
-                )
-                sys.exit(EXIT_DEGRADED)
             coverage_issues = _validate_report_coverage_accounting(scratchpad)
             if coverage_issues:
                 log.error("[report_index] " + "; ".join(coverage_issues))
