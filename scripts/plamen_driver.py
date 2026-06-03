@@ -13355,6 +13355,16 @@ def main():
                     phase.name, str(scratchpad), coverage_issues, config,
                 )
                 sys.exit(EXIT_DEGRADED)
+            # Degrade-not-halt: obligation-ledger retention risks are flagged
+            # for human review (report_semantic_retention_risks.md) but do NOT
+            # halt the pipeline. Emit a non-blocking warning so the operator
+            # sees the flagged obligation(s) without discarding a finished audit.
+            _risks_path = scratchpad / "report_semantic_retention_risks.md"
+            if _risks_path.exists():
+                log.warning(
+                    "[report_index] non-blocking retention risks flagged for "
+                    f"human review: {_risks_path.name} (pipeline continues)"
+                )
             if (scratchpad / "report_index.md").exists():
                 checkpoint.mark_completed(phase.name)
                 checkpoint.clear_degraded_sentinel(scratchpad, phase.name)

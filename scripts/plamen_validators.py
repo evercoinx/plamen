@@ -14521,8 +14521,24 @@ def _validate_obligation_ledger_retention(scratchpad: Path, coverage_text: str) 
         if relevant and (
             re.search(r"\b[CHMLI]-\d{1,4}\b", relevant, re.IGNORECASE)
             or re.search(
+                # Refutation / merge tokens AND non-silent deferral tokens.
+                # DEFERRED and APPENDIX_ONLY are legitimate, tracked, reasoned
+                # dispositions in report_coverage.md (see
+                # _REPORT_COVERAGE_ACK_STATUSES). An obligation the ledger
+                # explicitly carries as DEFERRED/APPENDIX_ONLY (with a reason)
+                # is accounted for, not silently dropped. DROP_* statuses are
+                # accepted only when accompanied by a reason on the same unit so
+                # a bare DROP token cannot launder a genuinely unmentioned
+                # obligation.
                 r"\b(FALSE_POSITIVE|REFUTED|INFEASIBLE|NO_REACHABLE|NO_TRACE|"
-                r"MERGE_INTO|MERGED|DUPLICATE OF|CONSOLIDATED INTO)\b",
+                r"MERGE_INTO|MERGED|DUPLICATE OF|CONSOLIDATED INTO|"
+                r"DEFERRED|APPENDIX_ONLY)\b",
+                relevant,
+                re.IGNORECASE,
+            )
+            or re.search(
+                # DROP_<X> disposition followed by some reason text on the unit.
+                r"\bDROP_[A-Z_]+\b.*\S",
                 relevant,
                 re.IGNORECASE,
             )
@@ -14530,7 +14546,8 @@ def _validate_obligation_ledger_retention(scratchpad: Path, coverage_text: str) 
             continue
         issues.append(
             f"obligation retention: active {cls} {oid} not preserved by exact "
-            "report coverage, absorbing report ID, or explicit refutation"
+            "report coverage, absorbing report ID, explicit refutation, or a "
+            "tracked deferral/appendix disposition"
         )
     return issues[:10]
 
@@ -14617,13 +14634,42 @@ def _validate_report_coverage_semantic_contract(scratchpad: Path) -> list[str]:
                 f"{candidate_facet_text.replace('|', '/').strip()} |"
             )
 
+    combined_report_text = text
+    idx_path = scratchpad / "report_index.md"
+    if idx_path.exists():
+        try:
+            combined_report_text += "\n" + idx_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    # Obligation-ledger retention is a recall/coverage-completeness check that
+    # depends on prose preservation of typed obligations. It must NOT discard a
+    # finished audit: per the v2.8.0 gate audit philosophy, prose-dependent
+    # recall gates degrade to a flagged human-review artifact rather than a hard
+    # halt. A still-unaccounted obligation is appended to
+    # report_semantic_retention_risks.md (so it is never silently dropped) but
+    # is NOT added to the hard-fail set returned to the report_index driver
+    # gate. The silent-drop protection is preserved: the obligation remains
+    # visible for human review.
+    obligation_issues = _validate_obligation_ledger_retention(
+        scratchpad, combined_report_text
+    )
+    for msg in obligation_issues:
+        risk_rows.append(
+            f"| (obligation) | Medium+ | UNACCOUNTED-OBLIGATION | "
+            f"{msg.replace('|', '/')} | obligation_ledger.json |"
+        )
+
     if risk_rows:
         try:
             (scratchpad / "report_semantic_retention_risks.md").write_text(
                 "# Report Semantic Retention Risks\n\n"
-                "Non-blocking retention telemetry. Rows below have Medium+ "
-                "semantic facets and a non-body disposition whose reason does "
-                "not name an absorbing report ID or concrete refutation token.\n\n"
+                "Non-blocking retention telemetry (human review). Rows below "
+                "have Medium+ semantic facets or typed obligations with a "
+                "non-body disposition whose reason does not name an absorbing "
+                "report ID, a concrete refutation token, or a tracked "
+                "deferral/appendix disposition. These are flagged, not "
+                "silently dropped, and do NOT halt the pipeline.\n\n"
                 "| Candidate | Severity | Status | Reason | Extracted Facets |\n"
                 "|-----------|----------|--------|--------|------------------|\n"
                 + "\n".join(risk_rows)
@@ -14632,14 +14678,10 @@ def _validate_report_coverage_semantic_contract(scratchpad: Path) -> list[str]:
             )
         except Exception:
             pass
-    combined_report_text = text
-    idx_path = scratchpad / "report_index.md"
-    if idx_path.exists():
-        try:
-            combined_report_text += "\n" + idx_path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-    issues.extend(_validate_obligation_ledger_retention(scratchpad, combined_report_text))
+
+    # Obligation issues are intentionally excluded from the returned hard-fail
+    # `issues` list (degrade-not-halt). `issues` here only carries the
+    # low-ambiguity Thorough mode-limited Medium+ contract violation.
     return issues[:10]
 
 
