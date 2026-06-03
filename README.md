@@ -67,14 +67,14 @@ build the optional vulnerability DB (~6GB RAM).
 
 **Linux / macOS:**
 ```bash
-git clone --recurse-submodules https://github.com/PlamenTSV/plamen.git ~/.plamen
+git clone --recurse-submodules https://github.com/evercoinx/plamen.git ~/.plamen
 cd ~/.plamen && python3 plamen.py install
 python3 plamen.py install --codex    # optional: add Codex CLI backend
 ```
 
 **Windows (PowerShell):**
 ```powershell
-git clone --recurse-submodules https://github.com/PlamenTSV/plamen.git $HOME\.plamen
+git clone --recurse-submodules https://github.com/evercoinx/plamen.git $HOME\.plamen
 cd $HOME\.plamen; python plamen.py install
 python plamen.py install --codex     # optional: add Codex CLI backend
 ```

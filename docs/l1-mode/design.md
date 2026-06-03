@@ -1,7 +1,7 @@
 # Plamen L1 Mode — Design Document
 
 > **Status**: Design spec v0.4 — T2/T3 in-scope (see Section 3 for tier expectations).
-> **Owner**: PlamenTSV
+> **Owner**: evercoinx
 
 ## 1. Why this mode exists
 

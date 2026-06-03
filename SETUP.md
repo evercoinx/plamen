@@ -76,13 +76,13 @@ without it, MCP-server submodules (`custom-mcp/slither-mcp/`,
 
 **Linux / macOS:**
 ```bash
-git clone --recurse-submodules https://github.com/PlamenTSV/plamen.git ~/.plamen
+git clone --recurse-submodules https://github.com/evercoinx/plamen.git ~/.plamen
 cd ~/.plamen
 ```
 
 **Windows (PowerShell):**
 ```powershell
-git clone --recurse-submodules https://github.com/PlamenTSV/plamen.git $HOME\.plamen
+git clone --recurse-submodules https://github.com/evercoinx/plamen.git $HOME\.plamen
 cd $HOME\.plamen
 ```
 
