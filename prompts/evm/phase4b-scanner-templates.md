@@ -539,7 +539,7 @@ Read:
 For each Medium+ CONFIRMED or PARTIAL finding in findings_inventory.md:
 
 1. Extract the ROOT CAUSE PATTERN in one sentence (e.g., 'state variable updated inside conditional block that can be skipped', 'paired operation asymmetry between deposit/withdraw paths')
-2. Grep ALL other functions in scope for the SAME pattern (same variable types, same code structure, same operation sequence)
+2. Grep ALL other functions AND contracts in scope for the SAME pattern (same variable types, same code structure, same operation sequence). Sweep EVERY other in-scope contract/sibling, not just sibling functions in the same contract — a repeat instance left unreported is an audit miss.
 3. For each sibling function found: does it exhibit the SAME bug?
 4. If YES and no existing finding covers it â†’ new finding [SP-N]
 

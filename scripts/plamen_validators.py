@@ -4190,28 +4190,79 @@ def _validate_confidence_iter2_mandatory(scratchpad: Path) -> list[str]:
     if not uncertain_ids:
         return []
 
+    # Severity resolution does NOT live in confidence_scores.md (it has no
+    # Severity column — only Finding ID | Evidence | Consensus | Quality | RAG
+    # | Composite | Classification). Resolving severity by ID-joining against
+    # findings_inventory.md is FAIL-OPEN: when the inventory uses a different
+    # finding-ID namespace than the scoring file (a routine condition on the
+    # Claude PTY worker-pool path), every search misses, medium_plus stays 0,
+    # and the mandated Devil's-Advocate iteration is silently skipped. Resolve
+    # severity from the depth findings files (same agent-finding ID namespace
+    # as the uncertain IDs) first, fall back to the inventory window, and FAIL
+    # CLOSED (treat as Medium+) when severity is unresolvable for an uncertain
+    # ID — recall safety. Worst case is one unnecessary DA worker; never again
+    # a silent skip of a mandated iteration.
+
+    # (1) Build id -> severity from the depth findings files (no ID-join).
+    sev_by_id: dict[str, str] = {}
+    for pattern in _DEPTH_PROMOTION_FILES:
+        for path in scratchpad.glob(pattern):
+            for blk in _parse_depth_finding_blocks(path):
+                bid = (blk.get("id") or "").strip().upper()
+                if not bid:
+                    continue
+                sev = (blk.get("severity") or "").strip()
+                if not sev:
+                    continue
+                # Keep the highest-rank severity seen for an ID.
+                if bid not in sev_by_id or _severity_rank(sev) > _severity_rank(sev_by_id[bid]):
+                    sev_by_id[bid] = sev
+
+    # (2) Inventory window fallback (still correct when namespaces align, and
+    #     covers breadth/scanner-only findings absent from depth files).
     inv = scratchpad / "findings_inventory.md"
-    if not inv.exists():
-        return []
-    try:
-        inv_text = inv.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return []
+    inv_text = ""
+    if inv.exists():
+        try:
+            inv_text = inv.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            inv_text = ""
+
+    def _severity_from_inventory(fid: str) -> str | None:
+        if not inv_text:
+            return None
+        m = re.search(re.escape(fid), inv_text)
+        if not m:
+            return None
+        window = inv_text[m.start():m.start() + 500]
+        wm = re.search(
+            r"(?i)(?:\*\*)?Severity(?:\*\*)?\s*:?\s*"
+            r"(Critical|High|Medium|Low|Informational|Info)",
+            window,
+        )
+        return wm.group(1) if wm else None
 
     medium_plus_uncertain = 0
+    below_medium = 0
+    unresolved = 0
     for fid in uncertain_ids:
-        esc = re.escape(fid)
-        m = re.search(esc, inv_text)
-        if not m:
+        sev = sev_by_id.get(fid.strip().upper())
+        if not sev:
+            sev = _severity_from_inventory(fid)
+        if not sev:
+            # FAIL CLOSED: unresolvable severity counts as Medium+ so the
+            # mandated DA iteration still fires (recall safety).
+            unresolved += 1
             continue
-        window = inv_text[m.start():m.start() + 500]
-        if re.search(
-            r"(?i)(?:\*\*)?Severity(?:\*\*)?\s*:?\s*(?:Critical|High|Medium)",
-            window,
-        ):
+        if _severity_rank(sev) >= 2:  # Medium=2, High=3, Critical=4
             medium_plus_uncertain += 1
+        else:
+            below_medium += 1
 
-    if medium_plus_uncertain == 0:
+    # Only skip iter-2 when EVERY uncertain finding resolved to a below-Medium
+    # severity (the sole case where skipping is correct per
+    # phase4-confidence-scoring.md Rule 3a).
+    if medium_plus_uncertain == 0 and unresolved == 0:
         return []
 
     # Tolerate filename drift. The driver's manifest instructs the LLM to
@@ -4246,10 +4297,16 @@ def _validate_confidence_iter2_mandatory(scratchpad: Path) -> list[str]:
     if da_files:
         return []
 
+    suffix = ""
+    if unresolved:
+        suffix = (
+            f" (+{unresolved} with unresolvable severity, treated as "
+            f"Medium+ for recall safety)"
+        )
     return [
         f"confidence_scores.md shows {medium_plus_uncertain} uncertain "
-        f"Medium+ finding(s) (composite < 0.7) but no iter2/DA artifacts "
-        f"exist — thorough mode requires iteration 2"
+        f"Medium+ finding(s) (composite < 0.7){suffix} but no iter2/DA "
+        f"artifacts exist — thorough mode requires iteration 2"
     ]
 
 

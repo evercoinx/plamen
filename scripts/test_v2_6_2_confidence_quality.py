@@ -54,6 +54,25 @@ def _write_inventory(sp: Path, findings: list[tuple[str, str]]) -> None:
     (sp / "findings_inventory.md").write_text("\n".join(lines), encoding="utf-8")
 
 
+def _write_depth_findings(sp: Path, findings: list[tuple[str, str]]) -> None:
+    """Write a depth_state_trace_findings.md with (id, severity) finding blocks.
+
+    Used to exercise severity resolution from the depth-findings namespace
+    (the same agent-finding IDs as confidence_scores.md), independent of
+    findings_inventory.md's ID namespace.
+    """
+    lines = ["# Depth State-Trace Findings\n"]
+    for fid, sev in findings:
+        lines.append(f"### Finding [{fid}]: Test finding\n")
+        lines.append(f"**Severity**: {sev}\n")
+        lines.append(f"**Location**: src/foo.rs:L42\n")
+        lines.append("**Description**: Test depth finding.\n")
+        lines.append("")
+    (sp / "depth_state_trace_findings.md").write_text(
+        "\n".join(lines), encoding="utf-8"
+    )
+
+
 # --- _validate_confidence_scores_quality ---
 
 class TestConfidenceScoresQuality:
@@ -177,10 +196,14 @@ class TestConfidenceIter2Mandatory:
         issues = _validate_confidence_iter2_mandatory(scratchpad)
         assert issues == []
 
-    def test_missing_inventory_passes(self, scratchpad: Path):
+    def test_missing_inventory_and_no_depth_fails_closed(self, scratchpad: Path):
+        # No inventory AND no depth findings -> every uncertain ID has an
+        # unresolvable severity -> fail CLOSED (fire iter-2 for recall safety)
+        # rather than silently skip the mandated iteration.
         _write_uniform_scores(scratchpad, n=5, val=0.500)
         issues = _validate_confidence_iter2_mandatory(scratchpad)
-        assert issues == []
+        assert len(issues) == 1
+        assert "unresolvable severity" in issues[0]
 
     def test_missing_scores_passes(self, scratchpad: Path):
         _write_inventory(scratchpad, [("DX-1", "High")])
@@ -216,6 +239,86 @@ class TestConfidenceIter2Mandatory:
         assert len(issues) == 1
         assert "13 uncertain Medium+" in issues[0]
         assert "iter2/DA artifacts" in issues[0]
+
+    def test_mismatched_namespace_resolves_from_depth(self, scratchpad: Path):
+        """Regression: confidence_scores uses DS-* IDs; findings_inventory uses
+        an UNRELATED INV-* namespace so the old inventory ID-join misses every
+        uncertain ID. Severity must resolve from depth_state_trace_findings.md
+        and the mandated iter-2 must fire (BEFORE this fix it silently
+        returned [] — fail-open)."""
+        lines = [
+            "| Finding ID | Evidence | Consensus | Quality | RAG | Composite | Classification |",
+            "|------------|----------|-----------|---------|-----|-----------|----------------|",
+            "| DS-1 | 0.80 | 0.30 | 1.00 | 0.30 | 0.500 | UNCERTAIN |",
+            "| DS-2 | 0.80 | 0.30 | 1.00 | 0.30 | 0.500 | UNCERTAIN |",
+        ]
+        (scratchpad / "confidence_scores.md").write_text(
+            "\n".join(lines), encoding="utf-8"
+        )
+        # Inventory uses an entirely different ID namespace -> ID-join misses.
+        _write_inventory(scratchpad, [("INV-1", "Low")])
+        # Depth findings share the DS-* namespace (lower/mixed case to lock in
+        # case-insensitive resolution).
+        _write_depth_findings(scratchpad, [("ds-1", "High"), ("DS-2", "Medium")])
+
+        issues = _validate_confidence_iter2_mandatory(scratchpad)
+        assert len(issues) == 1
+        assert "2 uncertain Medium+" in issues[0]
+
+    def test_mismatched_namespace_unresolved_fails_closed(self, scratchpad: Path):
+        """Mismatched namespace AND no depth file AND no inventory match ->
+        severity unresolvable -> fail CLOSED (fire iter-2 for recall safety)."""
+        lines = [
+            "| Finding ID | Evidence | Consensus | Quality | RAG | Composite | Classification |",
+            "|------------|----------|-----------|---------|-----|-----------|----------------|",
+            "| DS-1 | 0.80 | 0.30 | 1.00 | 0.30 | 0.500 | UNCERTAIN |",
+        ]
+        (scratchpad / "confidence_scores.md").write_text(
+            "\n".join(lines), encoding="utf-8"
+        )
+        _write_inventory(scratchpad, [("INV-1", "Low")])
+
+        issues = _validate_confidence_iter2_mandatory(scratchpad)
+        assert len(issues) == 1
+        assert "unresolvable severity" in issues[0]
+
+    def test_mismatched_namespace_all_below_medium_no_issue(self, scratchpad: Path):
+        """Mismatched namespace, depth file resolves ALL uncertain IDs to
+        below-Medium -> [] (no over-spawn; Rule 3a still respected)."""
+        lines = [
+            "| Finding ID | Evidence | Consensus | Quality | RAG | Composite | Classification |",
+            "|------------|----------|-----------|---------|-----|-----------|----------------|",
+            "| DS-1 | 0.80 | 0.30 | 1.00 | 0.30 | 0.500 | UNCERTAIN |",
+            "| DS-2 | 0.80 | 0.30 | 1.00 | 0.30 | 0.500 | UNCERTAIN |",
+        ]
+        (scratchpad / "confidence_scores.md").write_text(
+            "\n".join(lines), encoding="utf-8"
+        )
+        _write_inventory(scratchpad, [("INV-1", "Low")])
+        _write_depth_findings(scratchpad, [("DS-1", "Low"), ("DS-2", "Informational")])
+
+        issues = _validate_confidence_iter2_mandatory(scratchpad)
+        assert issues == []
+
+    def test_mismatched_namespace_medium_but_da_artifact_short_circuits(self, scratchpad: Path):
+        """Depth file resolves Medium+ AND a DA artifact exists -> [] (existing
+        da_files glob short-circuit still suppresses re-run)."""
+        lines = [
+            "| Finding ID | Evidence | Consensus | Quality | RAG | Composite | Classification |",
+            "|------------|----------|-----------|---------|-----|-----------|----------------|",
+            "| DS-1 | 0.80 | 0.30 | 1.00 | 0.30 | 0.500 | UNCERTAIN |",
+        ]
+        (scratchpad / "confidence_scores.md").write_text(
+            "\n".join(lines), encoding="utf-8"
+        )
+        _write_inventory(scratchpad, [("INV-1", "Low")])
+        _write_depth_findings(scratchpad, [("DS-1", "High")])
+        (scratchpad / "depth_da_state_trace_findings.md").write_text(
+            "# DA findings\n### Finding [DA-1]: Test\n", encoding="utf-8"
+        )
+
+        issues = _validate_confidence_iter2_mandatory(scratchpad)
+        assert issues == []
 
 
 # --- v2.8.1: stub scores above 0.7 must still force iter2 in thorough ---

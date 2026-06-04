@@ -26,6 +26,17 @@ Spawn every missing breadth agent immediately.
 
 ---
 
+## Discovery Stance (amplify, do not self-refute)
+
+Include this directive in every breadth subagent prompt you spawn.
+
+> During breadth DISCOVERY your job is to AMPLIFY candidate attacks, not filter
+> them. If an attack path looks blocked, escalate to the worst reachable variant
+> and RECORD it as a candidate with its precondition — never argue yourself out
+> of one. Refutation is the verifier/skeptic gate's job, not discovery's.
+
+---
+
 ## Post-Spawn Verification
 
 Completion is manifest-exact, not batch-exact, and disk-derived. A returned

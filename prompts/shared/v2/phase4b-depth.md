@@ -60,6 +60,14 @@ Each depth agent reads:
   expectation evidence only, not as reportable production targets)
 - Source files relevant to their domain
 
+### Discovery Stance (amplify, do not self-refute) — COPY INTO EACH OF THE 4 PROMPTS
+
+> During depth DISCOVERY your job is to AMPLIFY a candidate attack, not filter
+> it. If a path looks blocked, escalate to the worst reachable variant and
+> RECORD it as a candidate with its precondition — never argue yourself out of
+> one. Refutation is a later gate's job (e.g. the ANCHORING REJECTION LIST in
+> the language depth template), not discovery's — do not filter candidates here.
+
 ### Standard Depth Agent Semantic Proof Block (COPY INTO EACH OF THE 4 PROMPTS)
 
 When spawning `depth-token-flow`, `depth-state-trace`, `depth-edge-case`, and
