@@ -2140,10 +2140,10 @@ def test_A3_sc_phase_order_has_attention_repair_before_rag_and_chain():
           repr(names))
 
 
-def test_M1_opus_alias_pins_to_46():
+def test_M1_opus_alias_pins_to_48():
     phase = D.Phase("depth", [], [], base_timeout_s=1, model="opus")
-    check("M1 bare opus resolves to claude-opus-4-6",
-          D.phase_model(phase, "thorough") == "claude-opus-4-6",
+    check("M1 bare opus resolves to claude-opus-4-8",
+          D.phase_model(phase, "thorough") == "claude-opus-4-8",
           D.phase_model(phase, "thorough"))
 
 
@@ -3091,7 +3091,7 @@ def main():
         test_A3_semantic_dedup_candidate_packet_is_bounded,
         test_A3_semantic_dedup_prompt_is_fail_open_and_bounded,
         test_A3_sc_phase_order_has_attention_repair_before_rag_and_chain,
-        test_M1_opus_alias_pins_to_46,
+        test_M1_opus_alias_pins_to_48,
         test_M2_light_mode_still_forces_sonnet,
         test_M3_l1_verify_shards_are_cost_capped,
         test_M4_l1_verify_shards_are_severity_weighted,

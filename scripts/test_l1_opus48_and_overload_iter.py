@@ -51,8 +51,10 @@ def test_l1_light_verify_shard_sonnet():
     # Light forces sonnet for all phases regardless of promotion.
     assert T.phase_model(_phase("verify_high_b", "sonnet"), "light", {"pipeline": "l1"}) == "sonnet"
 
-def test_l1_core_depth_not_bumped():
-    assert T.phase_model(_phase("depth", "opus"), "core", {"pipeline": "l1"}) == "claude-opus-4-6"
+def test_l1_core_depth_opus_is_48():
+    # Opus is now 4.8 by default on ALL modes (the former Core 4.6 pin is gone),
+    # so L1 Core depth on the opus tier resolves to claude-opus-4-8.
+    assert T.phase_model(_phase("depth", "opus"), "core", {"pipeline": "l1"}) == "claude-opus-4-8"
 
 def test_l1_light_depth_sonnet():
     assert T.phase_model(_phase("depth", "opus"), "light", {"pipeline": "l1"}) == "sonnet"

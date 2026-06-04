@@ -358,7 +358,7 @@ def _wizard_model_summary(backend: str, mode: str = "") -> str:
         return f"Codex CLI / {opus}, {sonnet}, {haiku_label}"
     if mode == "light":
         return "Claude Code / sonnet"
-    opus = os.environ.get("PLAMEN_OPUS_MODEL", "claude-opus-4-6").strip()
+    opus = os.environ.get("PLAMEN_OPUS_MODEL", "claude-opus-4-8").strip()
     return f"Claude Code / {opus}, sonnet, haiku"
 
 
@@ -3963,7 +3963,9 @@ def estimate_cost(target: str, mode: str,
         # default; env overrides may change real billing.
         pricing = {"opus": (5.0, 30.0), "sonnet": (2.5, 15.0), "haiku": (0.20, 1.25)}
     else:
-        # Claude pricing (Opus 4.6 $5/$25, Sonnet 4.6 $3/$15, Haiku 4.5 $1/$5)
+        # Claude pricing per tier estimate (Opus 4.8 ~$5/$25, Sonnet 4.6 $3/$15,
+        # Haiku 4.5 $1/$5). Keyed by tier, not model ID, so the opus default
+        # bump to 4.8 does not affect this lookup.
         pricing = {"opus": (5.0, 25.0), "sonnet": (3.0, 15.0), "haiku": (1.0, 5.0)}
     api_cost = 0.0
     for m in ("opus", "sonnet", "haiku"):

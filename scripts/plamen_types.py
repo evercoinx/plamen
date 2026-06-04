@@ -102,10 +102,11 @@ def plamen_home() -> Path:
     return Path.home() / ".claude"
 
 
-# Pin expensive Opus phases to 4.6 by default. Claude Code's bare `opus`
-# alias tracks latest, which moved to 4.7 and materially increased usage with
-# weak marginal audit lift. Override only when explicitly benchmarking.
-PLAMEN_OPUS_MODEL = os.environ.get("PLAMEN_OPUS_MODEL", "claude-opus-4-6").strip()
+# Opus phases run on 4.8 by default (all modes). 4.8's stronger multi-step
+# instruction-following materially reduces attempt-1 misses on recon coverage
+# (enumerate-every-module), breadth/rescan fan-out, and verification rigor.
+# Override via PLAMEN_OPUS_MODEL only when explicitly benchmarking/cost-capping.
+PLAMEN_OPUS_MODEL = os.environ.get("PLAMEN_OPUS_MODEL", "claude-opus-4-8").strip()
 
 # v2.8.11: Thorough-mode promotion target. Reasoning-critical roles (discovery
 # = breadth+depth, verification shards, skeptic-judge) run on Opus 4.8 in
@@ -120,7 +121,7 @@ PLAMEN_THOROUGH_OPUS_MODEL = os.environ.get(
 def _resolve_model_alias(model: str) -> str:
     m = (model or "").strip()
     if m == "opus":
-        return PLAMEN_OPUS_MODEL or "claude-opus-4-6"
+        return PLAMEN_OPUS_MODEL or "claude-opus-4-8"
     return m or "sonnet"
 
 
