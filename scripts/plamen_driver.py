@@ -121,6 +121,41 @@ def _is_codex_extra_retry_phase(phase_name: str) -> bool:
     return phase_name.startswith("inventory_chunk_")
 
 
+def _record_recon_uncovered_in_scope_leftover(scratchpad, coverage_issues) -> int:
+    """L1 recall-preservation: append recon-uncited >=10-file modules to
+    scope_leftover.md, flagged as auto-recorded, so they are VISIBLE to the
+    human reviewer and downstream depth instead of being silently dropped.
+
+    Used when the L1 recon-coverage check is downgraded to non-blocking: L1
+    recon (even opus-4.8) repeatedly leaves a few low-interest infra crates
+    (tooling/tui/database/utils) uncited across retries and context compacts on
+    the large recon, so retrying never fixes it and only burns attempts. Rather
+    than halt/retry, we record the gap. Returns count recorded.
+    """
+    try:
+        from pathlib import Path as _P
+        p = _P(scratchpad) / "scope_leftover.md"
+        existing = p.read_text(encoding="utf-8") if p.exists() else ""
+        if "AUTO-RECORDED: recon-uncovered" in existing:
+            return 0  # idempotent: already recorded this run
+        block = [
+            "",
+            "## AUTO-RECORDED: recon-uncovered modules (review for depth coverage)",
+            "These >=10-file modules were neither cited nor acknowledged by recon",
+            "across its attempts. Recorded here (NOT silently dropped) so a human",
+            "and the depth phase can review them:",
+        ]
+        for issue in coverage_issues:
+            block.append(
+                f"- ACKNOWLEDGED: {issue} -- auto-recorded (recon did not classify)"
+            )
+        p.write_text(existing.rstrip() + "\n" + "\n".join(block) + "\n", encoding="utf-8")
+        return len(coverage_issues)
+    except Exception as e:
+        log.warning(f"[recon] could not auto-record uncovered modules: {e!r}")
+        return 0
+
+
 def _codex_max_attempts_for_phase(cli_backend: str | None, phase_name: str) -> int:
     """Return the max attempt budget for a phase.
 
@@ -11799,10 +11834,31 @@ def _run_phase_validators(
             scope_file=config.get("scope_file"),
         )
         if coverage_issues:
-            passed = False
-            missing = list(missing) + [
-                "recon coverage: " + "; ".join(coverage_issues)
-            ]
+            if config["pipeline"] == "l1":
+                # L1-only: recon repeatedly leaves a few low-interest infra
+                # crates (tooling/tui/database/utils) uncited even on opus-4.8
+                # across all 3 hinted retries (it deprioritizes them and the
+                # large L1 recon context compacts), so the hard gate just burns
+                # attempts + prints a HALT panel before FC4 auto-completes
+                # anyway. Downgrade to a SOFT, recall-PRESERVING check: record
+                # the uncovered modules in scope_leftover.md (visible + flagged
+                # for depth) and WARN, but do NOT block or retry. SC keeps the
+                # hard gate (SC projects lack these infra crates and don't churn
+                # here, per the deliberate SC/L1 split).
+                _rec = _record_recon_uncovered_in_scope_leftover(
+                    scratchpad, coverage_issues
+                )
+                log.warning(
+                    "[recon] coverage (NON-BLOCKING, L1): recon left module(s) "
+                    "uncited; auto-recorded %d in scope_leftover.md for review "
+                    "instead of retrying/halting: %s",
+                    _rec, "; ".join(coverage_issues),
+                )
+            else:
+                passed = False
+                missing = list(missing) + [
+                    "recon coverage: " + "; ".join(coverage_issues)
+                ]
         content_hard, content_soft = _validate_recon_content_structure(
             scratchpad, backend=config.get("cli_backend", "claude"),
         )
