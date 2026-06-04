@@ -122,51 +122,6 @@ def _codex_max_attempts_for_phase(cli_backend: str | None, phase_name: str) -> i
     return 2
 
 
-def _llm_report_index_is_usable(scratchpad: Path) -> bool:
-    """True iff a LLM-written report_index.md exists and is usable as-is.
-
-    "Usable" means: the file exists, is non-trivial, exposes a Master Finding
-    Index (or Excluded Findings) the parser can read, passes the unverified-
-    queue input gate, AND accounts for every verify hypothesis ID (no silent
-    dropouts per _check_index_completeness). When this returns True the LLM
-    Index Agent's STEP 1.5 root-cause consolidation output should be kept; when
-    False the deterministic mechanical builder is used as the backstop so NO
-    finding can vanish.
-    """
-    idx_path = scratchpad / "report_index.md"
-    if not idx_path.exists():
-        return False
-    try:
-        if idx_path.stat().st_size <= 200:
-            return False
-    except Exception:
-        return False
-    # Must expose at least one acknowledged ID (master or excluded), otherwise
-    # the file is a header-only stub / parse failure.
-    try:
-        master_ids, excluded_ids, _ = _collect_index_acknowledged_ids(scratchpad)
-    except Exception:
-        return False
-    if not master_ids and not excluded_ids:
-        return False
-    # Input gate: never accept an index that indexes unverified queue rows.
-    try:
-        if _validate_report_index_prewrite_inputs(scratchpad):
-            return False
-    except Exception:
-        return False
-    # Completeness gate: every verify_<ID>.md must be indexed/excluded/absorbed.
-    # write_retry_hint=False keeps this a pure read-only probe.
-    try:
-        if _check_index_completeness(
-            scratchpad, None, write_retry_hint=False
-        ):
-            return False
-    except Exception:
-        return False
-    return True
-
-
 class _PtyStop(Exception):
     def __init__(self, rc: int):
         super().__init__(rc)
@@ -13411,10 +13366,6 @@ def main():
                     + "; ".join(idx_in_issues + coverage_issues)
                 )
 
-        # FIX #4: default the L1 backstop flag so the guarded mechanical-tail
-        # `if` below is safe even on resume / refactor (it is only ever read
-        # when this iteration is an L1 report_index phase, but be explicit).
-        _run_mechanical_backstop = False
         if config["pipeline"] == "l1" and phase.name == "report_index":
             # Phase E2: refuse to mechanically write report_index when queue
             # has unverified rows. Do not validate stale report_index.md
@@ -13434,76 +13385,6 @@ def main():
                     phase.name, str(scratchpad), idx_in_issues, config,
                 )
                 sys.exit(EXIT_DEGRADED)
-            # FIX #4 (v2.8.18): let the LLM Index Agent's STEP 1.5 root-cause
-            # consolidation run FIRST for L1 (it consumes [LIKELY-DUP] hints and
-            # dedup_candidate_pairs.md, which the unconditional mechanical
-            # builder ignored). The mechanical builder is retained below as the
-            # DETERMINISTIC BACKSTOP so NO finding can ever vanish:
-            #   (a) a valid+complete LLM index already on disk  -> keep it;
-            #       fall through to the normal subprocess/artifact-recovery and
-            #       post-Index completeness gate that validate and accept it.
-            #   (b) the LLM Index subprocess has not yet had a chance this run
-            #       -> fall through so run_phase() spawns it (a one-shot disk
-            #       sentinel records that the LLM was given its turn).
-            #   (c) the LLM was given its turn but produced a missing/invalid/
-            #       incomplete index -> run the mechanical builder backstop
-            #       (the same code path L1 always used).
-            # This changes ONLY L1 report_index; SC is untouched.
-            _llm_attempted_marker = scratchpad / "report_index.llm_attempted"
-            if _llm_report_index_is_usable(scratchpad):
-                # Case (a): keep the LLM consolidation output. Clear the
-                # one-shot marker and fall through to the standard flow.
-                try:
-                    _llm_attempted_marker.unlink()
-                except (FileNotFoundError, OSError):
-                    pass
-                log.info(
-                    "[report_index] L1: valid LLM Index consolidation present "
-                    "on disk — keeping it (mechanical backstop not used)"
-                )
-            elif not _llm_attempted_marker.exists():
-                # Case (b): give the LLM Index Agent its turn. Mark the
-                # one-shot sentinel and fall through to run_phase().
-                try:
-                    _llm_attempted_marker.write_text(
-                        "LLM Index Agent given its turn for report_index "
-                        "(FIX #4 LLM-first). If the produced index is "
-                        "missing/invalid/incomplete, the mechanical builder "
-                        "backstop runs on the next pass.\n"
-                        f"Timestamp: {time.strftime('%Y-%m-%dT%H:%M:%S')}\n",
-                        encoding="utf-8",
-                    )
-                except OSError:
-                    pass
-                log.info(
-                    "[report_index] L1: deferring to LLM Index Agent for "
-                    "STEP 1.5 root-cause consolidation (mechanical builder "
-                    "retained as backstop)"
-                )
-            else:
-                # Case (c): the LLM had its turn but did not produce a usable
-                # index. Clear the one-shot sentinel and run the deterministic
-                # mechanical builder backstop so nothing vanishes.
-                try:
-                    _llm_attempted_marker.unlink()
-                except (FileNotFoundError, OSError):
-                    pass
-                log.warning(
-                    "[report_index] L1: LLM Index Agent did not produce a "
-                    "usable report_index.md — falling back to the mechanical "
-                    "builder backstop (no finding dropped)"
-                )
-                _run_mechanical_backstop = True
-
-        # FIX #4: L1 mechanical report_index backstop. Runs ONLY when the LLM
-        # Index Agent was given its turn and failed to produce a usable index
-        # (case (c) above). Guard with the flag computed in the block above so
-        # cases (a)/(b) fall through to the LLM subprocess instead.
-        if (
-            config["pipeline"] == "l1"
-            and phase.name == "report_index"
-            and _run_mechanical_backstop
-        ):
             active = _write_mechanical_report_index(scratchpad)
             idx_post_issues = _validate_report_index_inputs(scratchpad)
             if idx_post_issues:

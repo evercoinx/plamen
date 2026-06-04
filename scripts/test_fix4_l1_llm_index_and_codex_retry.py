@@ -89,122 +89,10 @@ def _write_report_index(sp: Path, rows: list[tuple[str, str, str, str]]) -> None
 
 
 # --------------------------------------------------------------------------- #
-# FIX #4 (a): _llm_report_index_is_usable detects a valid LLM index            #
-# --------------------------------------------------------------------------- #
-def test_valid_llm_index_is_usable(tmp_path: Path):
-    """A complete, parseable LLM index that accounts for every verify ID is
-    'usable' — the LLM consolidation output is kept, the mechanical backstop is
-    NOT used."""
-    sp = tmp_path
-    _write_queue(sp, [("H-01", "Medium"), ("H-02", "High")])
-    _write_verify(sp, "H-01", "Medium")
-    _write_verify(sp, "H-02", "High")
-    _write_report_index(
-        sp, [("H-01", "Medium", "-", "H-01"), ("H-02", "High", "-", "H-02")]
-    )
-    assert d._llm_report_index_is_usable(sp) is True
-
-
-# --------------------------------------------------------------------------- #
-# FIX #4 (b)/(c): missing / garbage / incomplete LLM index -> backstop          #
-# --------------------------------------------------------------------------- #
-def test_missing_llm_index_is_not_usable(tmp_path: Path):
-    sp = tmp_path
-    _write_queue(sp, [("H-01", "Medium")])
-    _write_verify(sp, "H-01", "Medium")
-    # No report_index.md at all.
-    assert d._llm_report_index_is_usable(sp) is False
-
-
-def test_garbage_llm_index_is_not_usable(tmp_path: Path):
-    sp = tmp_path
-    _write_queue(sp, [("H-01", "Medium")])
-    _write_verify(sp, "H-01", "Medium")
-    # Header-only / no parseable Master Finding Index rows.
-    (sp / "report_index.md").write_text(
-        "# Report Index\n\n(garbage, no table here)\n" + ("z" * 300),
-        encoding="utf-8",
-    )
-    assert d._llm_report_index_is_usable(sp) is False
-
-
-def test_incomplete_llm_index_dropping_a_finding_is_not_usable(tmp_path: Path):
-    """An LLM index that silently drops a verified finding must be rejected as
-    not-usable so the mechanical backstop re-includes it (no silent drop)."""
-    sp = tmp_path
-    _write_queue(sp, [("H-01", "Medium"), ("H-02", "High")])
-    _write_verify(sp, "H-01", "Medium")
-    _write_verify(sp, "H-02", "High")
-    # Index omits H-02 entirely (neither indexed nor excluded).
-    _write_report_index(sp, [("H-01", "Medium", "-", "H-01")])
-    assert d._llm_report_index_is_usable(sp) is False
-
-
-def test_mechanical_backstop_retains_all_findings_on_garbage_index(tmp_path: Path):
-    """When the LLM index is unusable, the deterministic mechanical builder is
-    the backstop and MUST retain every verified finding — nothing vanishes."""
-    sp = tmp_path
-    ids = [("H-01", "Medium"), ("H-02", "High"), ("H-03", "Low")]
-    _write_queue(sp, ids)
-    for fid, sev in ids:
-        _write_verify(sp, fid, sev)
-    (sp / "report_index.md").write_text(
-        "# Report Index\n\ngarbage\n" + ("z" * 300), encoding="utf-8"
-    )
-    assert d._llm_report_index_is_usable(sp) is False
-
-    active = d._write_mechanical_report_index(sp)
-    assert active == 3
-    text = (sp / "report_index.md").read_text(encoding="utf-8")
-    for fid, _ in ids:
-        assert fid in text, f"mechanical backstop dropped {fid}"
-
-
-# --------------------------------------------------------------------------- #
-# FIX #4 — driver wiring: LLM-first with mechanical backstop, SC untouched     #
+# Driver source probe (used by the source-grep tests below)                    #
 # --------------------------------------------------------------------------- #
 def _driver_source() -> str:
     return Path(d.__file__).read_text(encoding="utf-8")
-
-
-def test_l1_report_index_defers_to_llm_with_backstop_guard():
-    """The L1 report_index prework must no longer UNCONDITIONALLY mechanically
-    write + continue. It must (a) probe the LLM index usability, and (b) guard
-    the mechanical builder behind a backstop flag so cases (a)/(b) fall through
-    to the LLM subprocess."""
-    src = _driver_source()
-    l1_start = src.index(
-        'if config["pipeline"] == "l1" and phase.name == "report_index":'
-    )
-    l1_end = src.index('if phase.name.startswith("report_body_writer_")', l1_start)
-    region = src[l1_start:l1_end]
-    assert "_llm_report_index_is_usable" in region, (
-        "L1 report_index must probe LLM index usability (LLM-first)"
-    )
-    assert "_run_mechanical_backstop" in region, (
-        "L1 report_index must guard the mechanical builder behind a backstop flag"
-    )
-    # The mechanical builder is still present as the deterministic backstop.
-    assert "_write_mechanical_report_index" in region
-
-
-def test_sc_report_index_path_unchanged_no_backstop_flag():
-    """SC behavior must be untouched: the SC report_index repair-from-prior path
-    must NOT reference the new L1-only backstop flag."""
-    src = _driver_source()
-    sc_start = src.index(
-        'if config["pipeline"] == "sc" and phase.name == "report_index":'
-    )
-    # Bound the SC block at the L1 backstop-flag default that immediately
-    # precedes the L1 branch (the flag init line is L1-only scaffolding).
-    sc_end = src.index(
-        "# FIX #4: default the L1 backstop flag", sc_start,
-    )
-    sc_block = src[sc_start:sc_end]
-    assert "_run_mechanical_backstop" not in sc_block, (
-        "SC report_index path must not be touched by the L1 backstop flag"
-    )
-    assert "_repair_sc_report_index_from_prior" in src
 
 
 # --------------------------------------------------------------------------- #
@@ -277,45 +165,7 @@ def test_codex_extra_retry_loop_wired_into_driver():
 
 
 # --------------------------------------------------------------------------- #
-# FIX #4 — adversarial recall-safety: STEP 1.5 consolidation is NOT a drop      #
-# --------------------------------------------------------------------------- #
-def test_llm_consolidated_finding_is_usable_not_a_silent_drop(tmp_path: Path):
-    """The genuinely-new behavior FIX #4 unlocks is the LLM Index Agent's
-    STEP 1.5 root-cause consolidation. A finding the LLM merges into another
-    (recorded in the Consolidation Map) must be treated as ACCOUNTED-FOR — it
-    is still represented in the report, so the index is 'usable' and the
-    mechanical backstop must NOT fire and re-split it.
-
-    This proves the new consolidation path does not register as a silent drop
-    (which would otherwise force the backstop and defeat the whole fix)."""
-    sp = tmp_path
-    _write_queue(sp, [("H-01", "Medium"), ("H-02", "Medium")])
-    _write_verify(sp, "H-01", "Medium")
-    _write_verify(sp, "H-02", "Medium")
-    # LLM Master Index keeps H-01 as the canonical row and consolidates H-02
-    # into it via the Consolidation Map (same root cause / same fix pattern).
-    idx = [
-        "# Report Index",
-        "",
-        "## Master Finding Index",
-        "",
-        "| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis ID |",
-        "|-----------|-------|----------|----------|--------------|------------|------------------------|",
-        "| M-01 | Missing input validation | Medium | src/Mod.go:L100 | VERIFIED | - | H-01 |",
-        "",
-        "## Consolidation Map",
-        "",
-        "| Report ID | Consolidated From | Consolidation Reason |",
-        "|-----------|-------------------|----------------------|",
-        "| M-01 | H-01, H-02 | Same fix pattern: add zero-value validation |",
-    ]
-    (sp / "report_index.md").write_text("\n".join(idx) + "\n", encoding="utf-8")
-    # H-02 is absorbed, not dropped -> index is usable, backstop NOT used.
-    assert d._llm_report_index_is_usable(sp) is True
-
-
-# --------------------------------------------------------------------------- #
-# FIX #4 — shard expansion is added on BOTH L1 completion paths, L1-gated       #
+# L1 shard expansion is present on BOTH L1 completion paths, L1-gated           #
 # --------------------------------------------------------------------------- #
 def test_shard_expansion_added_on_l1_completion_paths_only():
     """FIX #4 adds expand_shard_phases() on the L1 LLM-authored completion path
