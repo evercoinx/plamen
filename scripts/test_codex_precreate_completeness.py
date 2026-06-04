@@ -183,11 +183,14 @@ def test_precreate_call_is_codex_only(tmp_path):
     assert call_count == 1, f"expected exactly one call site, found {call_count}"
 
     # That call must live after the `if backend == \"codex\":` guard and before
-    # the elif for the claude PTY branch.
+    # the claude PTY branch. After the codex depth fan-out refactor the codex
+    # branch returns early (delegating execution to _run_one_codex_exec), so
+    # the following claude branch marker is `if is_claude_pty:` (was `elif`).
+    # The precreate call must still sit inside the codex branch only.
     codex_guard = src.index('if backend == "codex":')
     call_idx = src.index("_precreate_codex_artifacts(phase, scratchpad")
-    elif_claude = src.index("elif is_claude_pty:", codex_guard)
-    assert codex_guard < call_idx < elif_claude, (
+    if_claude = src.index("if is_claude_pty:", codex_guard)
+    assert codex_guard < call_idx < if_claude, (
         "precreate call must be inside the codex backend branch only"
     )
 

@@ -9518,6 +9518,363 @@ def _ensure_rule_files_materialized() -> list[str]:
     return repaired
 
 
+def _run_one_codex_exec(
+    *,
+    prompt: str,
+    phase: Phase,
+    config: dict,
+    scratchpad: Path,
+    attempt: int,
+    label: str,
+    expected_outputs: list[str],
+    timeout: float,
+    effective_model: str,
+) -> int:
+    """Run ONE `codex exec` subprocess for a single prompt → artifact set.
+
+    Factored verbatim from the inline single-subprocess codex block in
+    run_phase so the behavior is identical when *label* == phase.name (the
+    existing single-subprocess path), and reusable once-per-job by the depth
+    fan-out (*label* == per-job agent id).
+
+    The helper is self-contained: it resolves auth, checks prompt fit, builds
+    the codex cmd (with the `_codex_skip_model` ChatGPT-auth fallback), seeds
+    the expected output files (apply_patch cannot create files), snapshots the
+    prompt as the stdin source, runs Popen with the heartbeat waiter, mirrors
+    the per-label log into the canonical `_stdio_{phase}.log` so the outer
+    driver's model-rejection/capacity/auth detectors keep working, and records
+    phase cost + orphan diagnostics.
+
+    Returns the subprocess rc (>=0 normal exit, -2 timeout, EXIT_ERROR on a
+    pre-spawn failure such as missing binary / auth / Popen error).
+    """
+    if not CODEX_BIN:
+        log.error(f"[{label}] cli_backend=codex but codex binary not found")
+        return EXIT_ERROR
+    if not _codex_auth_available():
+        log.error(
+            f"[{label}] Codex auth not found — `codex exec` will hang "
+            f"waiting for interactive login. Run `codex login` first, or set "
+            f"CODEX_API_KEY / OPENAI_API_KEY."
+        )
+        return EXIT_ERROR
+    if not _codex_prompt_fits(prompt, effective_model):
+        est_tokens = len(prompt) // 4
+        limit = _CODEX_CONTEXT_LIMITS.get(effective_model, 272_000)
+        log.warning(
+            f"[{label}] prompt ~{est_tokens:,} tokens may exceed "
+            f"{effective_model} context ({limit:,} tokens). "
+            f"Codex hard-errors on context exceed (no silent truncation)."
+        )
+
+    # Pre-create the expected artifact files so Codex's apply_patch (which
+    # cannot create new files) has valid targets.
+    def _seed(name: str) -> None:
+        target = scratchpad / name
+        if not target.exists():
+            try:
+                target.write_text("", encoding="utf-8")
+            except OSError:
+                pass
+
+    for name in expected_outputs:
+        _seed(name)
+
+    # Snapshot the prompt — doubles as the subprocess stdin source (v2.1.3).
+    snap = scratchpad / f"_prompt_{label}.attempt{attempt}.md"
+    try:
+        snap.write_text(prompt, encoding="utf-8")
+    except Exception as e:
+        log.error(
+            f"[{label}] prompt snapshot failed: {e} — cannot spawn "
+            f"subprocess (snapshot is the stdin source)"
+        )
+        return EXIT_ERROR
+
+    olm_path = str(scratchpad / f"_codex_output_{label}.attempt{attempt}.md")
+    codex_writable = [
+        scratchpad.as_posix(),
+        Path(config["project_root"]).as_posix(),
+    ]
+    if config.get("_codex_skip_model"):
+        cmd = _build_codex_cmd_no_model(
+            needs_mcp=phase.needs_mcp,
+            output_last_message=olm_path,
+            writable_dirs=codex_writable,
+        )
+    else:
+        cmd = _build_codex_cmd(
+            effective_model, needs_mcp=phase.needs_mcp,
+            output_last_message=olm_path,
+            writable_dirs=codex_writable,
+        )
+
+    log_path = scratchpad / f"_stdio_{label}.attempt{attempt}.log"
+    canonical = scratchpad / f"_stdio_{phase.name}.log"
+
+    subprocess_env = {
+        **_filtered_child_subprocess_environ(),
+        "ANTHROPIC_DISABLE_AUTOUPDATE": "1",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": PLAMEN_OPUS_MODEL,
+        "PLAMEN_SCRATCHPAD": str(scratchpad),
+        "BASH_MAX_OUTPUT_LENGTH": os.environ.get(
+            "BASH_MAX_OUTPUT_LENGTH", "30000"
+        ),
+        "MAX_MCP_OUTPUT_TOKENS": os.environ.get(
+            "MAX_MCP_OUTPUT_TOKENS", "8000"
+        ),
+    }
+    popen_kwargs: dict[str, Any] = {}
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = (
+            subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+            | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    _cli_label = "codex exec"
+    log.info(
+        f"[{label}] spawning {_cli_label} (model={effective_model}, "
+        f"timeout={timeout}s, attempt={attempt})"
+    )
+    start = time.time()
+
+    with log_path.open("w", encoding="utf-8", errors="replace") as out, \
+            snap.open("rb") as stdin_file:
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=stdin_file, stdout=out, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+                cwd=config["project_root"],
+                env=subprocess_env,
+                **popen_kwargs,
+            )
+        except Exception as e:
+            log.error(f"[{label}] Popen failed: {e}")
+            try:
+                out.write(f"Popen failed before subprocess start: {e}\n")
+                out.flush()
+            except Exception:
+                pass
+            try:
+                canonical.write_text(
+                    log_path.read_text(encoding="utf-8", errors="replace"),
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except Exception:
+                pass
+            return EXIT_ERROR
+
+        try:
+            # Behavior parity with the single-subprocess path: a whole-phase
+            # codex breadth run keeps manifest-complete early termination
+            # (label==phase.name guards against depth fan-out sub-jobs, whose
+            # label is depth_worker_* and which must run to natural exit).
+            early_complete = None
+            if phase.name == "breadth" and label == phase.name:
+                early_complete = lambda: _breadth_manifest_complete_reason(
+                    scratchpad, phase
+                )
+            rc = _wait_with_heartbeat(
+                proc, timeout, scratchpad, phase.name, start,
+                _live_protected_phase_write_patterns(
+                    scratchpad,
+                    str(config.get("pipeline", "sc")),
+                    phase.name,
+                    config.get("_active_phase_names"),
+                ),
+                early_complete=early_complete,
+            )
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(proc, grace_s=10)
+            log.warning(f"[{label}] timed out after {timeout}s")
+            rc = -2  # timeout sentinel
+
+    # Mirror per-label stdio into the canonical phase log so the outer
+    # driver's codex model-rejection / capacity / auth detectors (which read
+    # _stdio_{phase}.log) keep working. For the single-subprocess path
+    # (label == phase.name) this is the same byte content as before. For the
+    # depth fan-out it accumulates per-job output across jobs.
+    try:
+        if label == phase.name:
+            canonical.write_bytes(log_path.read_bytes())
+        else:
+            with canonical.open("ab") as agg:
+                agg.write(f"\n\n# {log_path.name}\n".encode("utf-8"))
+                agg.write(log_path.read_bytes())
+    except Exception:
+        pass
+
+    duration = time.time() - start
+    log.info(f"[{label}] codex exec exited rc={rc} after {duration:.0f}s")
+    _record_phase_cost(scratchpad, label, effective_model, attempt,
+                       log_path, duration, backend="codex")
+    try:
+        diag = detect_background_orphan(
+            log_path, scratchpad, phase.name,
+            config.get("mode", "core"),
+            config.get("pipeline", "sc"),
+            rc, backend="codex",
+            project_root=config.get("project_root"),
+        )
+        if diag:
+            _archive_orphan_stubs(scratchpad, phase.name, diag)
+    except Exception as e:
+        log.debug(f"[{label}] orphan diagnostic skipped: {e}")
+    return rc
+
+
+def _should_use_depth_codex_fanout(config: dict, scratchpad: Path) -> bool:
+    """Return True when the Codex depth phase should fan out per artifact.
+
+    Mirrors the spirit of `_should_use_depth_worker_pool` (the Claude PTY
+    worker pool) WITHOUT the is_claude_pty requirement: True iff the backend
+    is codex, the phase is depth, and `_depth_worker_jobs` yields more than
+    one job (real fan-out to do — core/thorough, both pipelines). Codex's
+    single `codex exec` turn under-fans-out and leaves never-cut scanners as
+    0-byte stubs; running one `codex exec` per job restores parity with the
+    proven Claude worker pool.
+    """
+    if config.get("cli_backend", "claude") != "codex":
+        return False
+    try:
+        return len(_depth_worker_jobs(scratchpad, config)) > 1
+    except Exception:
+        return False
+
+
+def _run_depth_codex_fanout(
+    *, phase: Phase, config: dict, scratchpad: Path, attempt: int
+) -> int:
+    """Run depth as ONE `codex exec` per depth JOB (Codex fan-out parity).
+
+    Mirrors the Claude PTY depth worker pool job decomposition so every
+    never-cut artifact (the 4 core role findings + blind_spot_a/b/c +
+    validation_sweep + design_stress + perturbation + skill_execution_gaps +
+    niche agents + confidence) is produced by its own bounded subprocess
+    instead of being dropped when a single mega-turn runs out. RECALL-
+    PRESERVING: the scanners actually run, so the depth never-cut gate (run
+    by the validator after run_phase) passes legitimately on real artifacts.
+    Resume-safe + idempotent: jobs whose output is already substantive are
+    skipped.
+    """
+    jobs = _depth_worker_jobs(scratchpad, config)
+    if not jobs:
+        log.warning("[depth] codex fan-out unavailable: no depth jobs")
+        return EXIT_ERROR
+
+    pipeline = str(config.get("pipeline", "sc"))
+    mode = str(config.get("mode", "core"))
+
+    # Write the same observability contract the PTY pool writes.
+    try:
+        (scratchpad / "_depth_worker_pool_contract.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "phase": "depth",
+                    "backend": "codex-fanout",
+                    "pipeline": pipeline,
+                    "mode": mode,
+                    "canonical_outputs": _depth_canonical_outputs(jobs),
+                    "outputs": [str(job.get("output") or "") for job in jobs],
+                    "jobs": jobs,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        log.warning(
+            f"[depth] could not write codex fan-out contract marker: {exc}"
+        )
+
+    effective_model = phase_model(phase, config["mode"], config)
+    timeout = scale_timeout(
+        phase.base_timeout_s, config["project_root"], config["language"],
+        mode=config.get("mode"), backend="codex",
+    )
+
+    log.info(
+        f"[depth] codex fan-out: {len(jobs)} job(s) "
+        f"(one `codex exec` per artifact)"
+    )
+
+    hard_failure_rc: int | None = None
+    for job in jobs:
+        output = str(job["output"])
+        agent_id = str(job.get("agent_id") or Path(output).stem)
+        # Resume-safe: skip jobs whose output is already substantive.
+        if _depth_worker_output_complete(scratchpad, phase, job):
+            log.info(f"[depth] codex fan-out: skip complete job {output}")
+            continue
+
+        def _exec_job(attempt_n: int, reasons: list[str] | None) -> int:
+            prompt = _build_depth_worker_prompt(
+                job=job,
+                scratchpad=scratchpad,
+                project_root=config["project_root"],
+                config=config,
+                attempt=attempt_n,
+                retry_reasons=reasons,
+            )
+            prompt = _translate_prompt_for_codex(
+                prompt, phase_name="depth",
+                pipeline=pipeline, mode=mode, scratchpad=scratchpad,
+            )
+            return _run_one_codex_exec(
+                prompt=prompt,
+                phase=phase,
+                config=config,
+                scratchpad=scratchpad,
+                attempt=attempt_n,
+                label=f"depth_worker_{agent_id}",
+                expected_outputs=[output],
+                timeout=timeout,
+                effective_model=effective_model,
+            )
+
+        rc = _exec_job(attempt, None)
+        # A hard codex/auth/binary failure propagates so the outer driver can
+        # apply its model-rejection / capacity / auth handling on the
+        # canonical log. A successful-but-stub output gets ONE per-job retry.
+        if rc == EXIT_ERROR:
+            hard_failure_rc = EXIT_ERROR
+            break
+        if not _depth_worker_output_complete(scratchpad, phase, job):
+            log.info(
+                f"[depth] codex fan-out: job {output} still incomplete "
+                f"after attempt {attempt}; one per-job retry"
+            )
+            rc = _exec_job(
+                attempt + 1, [f"status=incomplete", f"output={output}"]
+            )
+            if rc == EXIT_ERROR:
+                hard_failure_rc = EXIT_ERROR
+                break
+
+    # Synthesize lifecycle/scoring artifacts from disk once, mirroring the
+    # PTY pool's call when no retry reasons remain.
+    try:
+        _synthesize_depth_lifecycle_artifacts(
+            scratchpad, pipeline, force=False, mode=mode,
+        )
+    except Exception as exc:
+        log.warning(f"[depth] codex fan-out lifecycle synth skipped: {exc!r}")
+
+    if hard_failure_rc is not None:
+        return hard_failure_rc
+    # Let the existing depth gate (validator after run_phase) judge overall
+    # completeness — it now sees real artifacts, not stubs.
+    return 0
+
+
 # --- Core ---
 def run_phase(phase: Phase, config: dict, attempt: int) -> int:
     """Spawn the configured CLI backend for one phase.
@@ -9780,6 +10137,20 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
         mode=config.get("mode"), hypothesis_count=hyp_count,
         backend=backend,
     )
+    # Codex depth fan-out parity: Codex's single `codex exec` turn under-
+    # fans-out the ~15-artifact depth phase, leaving never-cut scanners as
+    # 0-byte stubs and the depth gate correctly halting. Run ONE `codex exec`
+    # per depth JOB instead — mirrors the Claude PTY worker pool so every
+    # never-cut artifact actually gets produced. ADDITIVE: gated to
+    # backend=codex + phase=depth + real fan-out; all other paths unchanged.
+    if (
+        backend == "codex"
+        and phase.name == "depth"
+        and _should_use_depth_codex_fanout(config, scratchpad)
+    ):
+        return _run_depth_codex_fanout(
+            phase=phase, config=config, scratchpad=scratchpad, attempt=attempt,
+        )
     if backend == "codex":
         prompt = _translate_prompt_for_codex(
             prompt, phase_name=phase.name,
@@ -9836,49 +10207,30 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
     effective_model = phase_model(phase, config["mode"], config)
 
     if backend == "codex":
-        if not CODEX_BIN:
-            log.error(f"[{phase.name}] cli_backend=codex but codex binary not found")
-            return EXIT_ERROR
-        if not _codex_auth_available():
-            log.error(
-                f"[{phase.name}] Codex auth not found — `codex exec` will hang "
-                f"waiting for interactive login. Run `codex login` first, or set "
-                f"CODEX_API_KEY / OPENAI_API_KEY."
-            )
-            return EXIT_ERROR
-        if not _codex_prompt_fits(prompt, effective_model):
-            est_tokens = len(prompt) // 4
-            limit = _CODEX_CONTEXT_LIMITS.get(effective_model, 272_000)
-            log.warning(
-                f"[{phase.name}] prompt ~{est_tokens:,} tokens may exceed "
-                f"{effective_model} context ({limit:,} tokens). "
-                f"Codex hard-errors on context exceed (no silent truncation)."
-            )
-        # --output-last-message captures the final agent message to a file,
-        # providing reliable output extraction independent of JSONL parsing.
-        olm_path = str(scratchpad / f"_codex_output_{phase.name}.attempt{attempt}.md")
-        codex_writable = [scratchpad.as_posix(), Path(config["project_root"]).as_posix()]
-        # Pre-create expected artifact files so Codex's apply_patch (which
-        # cannot create new files) has valid targets. The model's preamble
-        # directs it to use shell+heredoc for new files, but models don't
-        # always follow instructions — pre-seeding is defensive. Also seeds
-        # the phase's mandatory first-pass secondary artifacts (never-cut
-        # scanners/validation/confidence, triggered niches, recon shards) so
-        # Codex can fill the full first-pass set, not just the core glob.
+        # Pre-create the phase's mandatory first-pass secondary artifacts
+        # (never-cut scanners/validation/confidence, triggered niches, recon
+        # shards) so a single codex exec can fill the full first-pass set,
+        # not just the core glob. (apply_patch cannot create new files.)
+        # Done here BEFORE delegating so the single-subprocess path seeds the
+        # same full set it always has; _run_one_codex_exec also seeds its
+        # expected_outputs but here that is a subset already covered.
         _precreate_codex_artifacts(phase, scratchpad, config)
-        if config.get("_codex_skip_model"):
-            cmd = _build_codex_cmd_no_model(
-                needs_mcp=phase.needs_mcp,
-                output_last_message=olm_path,
-                writable_dirs=codex_writable,
-            )
-        else:
-            cmd = _build_codex_cmd(
-                effective_model, needs_mcp=phase.needs_mcp,
-                output_last_message=olm_path,
-                writable_dirs=codex_writable,
-            )
-    elif is_claude_pty:
+        # The inline single-subprocess codex block was factored into
+        # _run_one_codex_exec (behavior-preserving): same cmd build, snapshot,
+        # Popen, heartbeat wait, canonical-log mirror, cost + orphan
+        # diagnostics. The depth fan-out reuses the same helper once per job.
+        return _run_one_codex_exec(
+            prompt=prompt,
+            phase=phase,
+            config=config,
+            scratchpad=scratchpad,
+            attempt=attempt,
+            label=phase.name,
+            expected_outputs=[],
+            timeout=timeout,
+            effective_model=effective_model,
+        )
+    if is_claude_pty:
         session_id = str(uuid.uuid4())
         # Ship 8.16: single source of truth shared with the respawn rewrite
         # (_rewrite_argv_positional_prompt) so a continuation respawn delivers
