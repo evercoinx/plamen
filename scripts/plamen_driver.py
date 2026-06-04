@@ -11491,9 +11491,18 @@ def _run_phase_validators(
                 backend=config.get("cli_backend", "claude"),
             )
             if leftover_issues:
-                log.warning(
-                    "[scope_leftover] uncovered files (non-blocking): %s",
-                    ", ".join(leftover_issues),
+                # Non-blocking: recon legitimately defers large files to depth
+                # and records the full per-file reasons in scope_leftover.md.
+                # Log a concise INFO (count + paths only) so it does not read
+                # like a failure — the verbose reasons live in the artifact.
+                _leftover_paths = ", ".join(
+                    s.split(" (", 1)[0].strip() for s in leftover_issues
+                )
+                log.info(
+                    "[scope_leftover] %d large file(s) deferred to depth "
+                    "(non-blocking; reasons in scope_leftover.md): %s",
+                    len(leftover_issues),
+                    _leftover_paths,
                 )
 
     # --- inventory: parity + structure + evidence ---
