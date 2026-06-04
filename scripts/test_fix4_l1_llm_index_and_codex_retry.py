@@ -100,8 +100,8 @@ def _driver_source() -> str:
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
     "phase_name",
-    ["recon", "breadth", "inventory", "inventory_chunk_a", "inventory_chunk_b",
-     "inventory_chunk_c"],
+    ["recon", "breadth", "rescan", "inventory", "inventory_chunk_a",
+     "inventory_chunk_b", "inventory_chunk_c"],
 )
 def test_codex_recovering_phases_get_three_attempts(phase_name: str):
     assert d._codex_max_attempts_for_phase("codex", phase_name) == 3, (
@@ -112,7 +112,7 @@ def test_codex_recovering_phases_get_three_attempts(phase_name: str):
 
 @pytest.mark.parametrize(
     "phase_name",
-    ["recon", "breadth", "inventory", "inventory_chunk_a"],
+    ["recon", "breadth", "rescan", "inventory", "inventory_chunk_a"],
 )
 def test_all_backends_recovering_phases_get_three_attempts(phase_name: str):
     """RECOVERING phases now get the 3rd hinted retry on EVERY backend — not

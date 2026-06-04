@@ -98,16 +98,21 @@ _CODEX_EXTRA_RETRY_MAX_ATTEMPTS = 3
 _CODEX_EXTRA_RETRY_PHASES = (
     "recon",
     "breadth",
+    "rescan",
     "inventory",
 )
 
 
 def _is_codex_extra_retry_phase(phase_name: str) -> bool:
-    """True for the RECOVERING content phases eligible for the Codex-only
-    extended retry budget: recon, breadth, inventory, and inventory_chunk_*.
+    """True for the RECOVERING content phases eligible for the extended hinted
+    retry budget (all backends): recon, breadth, rescan (incl. its per-contract
+    sub-step), inventory, and inventory_chunk_*.
 
-    Phase-scoped on purpose — verify/report/skeptic/chain/depth and all other
-    phases are excluded so their existing budgets stay UNCHANGED.
+    These single-pass discovery phases under-cover on a fresh attempt (sonnet
+    recon skipping module enumeration; codex single-subprocess leaving a rescan
+    shard empty) and recover when re-prompted with the gate's exact missing-list
+    hint. Phase-scoped on purpose — verify/report/skeptic/chain/depth and all
+    other phases are excluded so their existing budgets stay UNCHANGED.
     """
     if not phase_name:
         return False
