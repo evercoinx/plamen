@@ -14,7 +14,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Optional, TextIO
 
 
 _DONE_RE = re.compile(r"\bDONE\s*:", re.IGNORECASE)
@@ -41,6 +41,18 @@ _OUTPUT_CAP_TEXT_RE = re.compile(
     r"response\s+exceeded\s+the\s+\d[\d,]*\s+output\s+token\s+maximum",
     re.IGNORECASE,
 )
+
+# Cap-LOOP window. The quiescence gate below catches the common case where a
+# turn hits the output cap and then goes silent. But Claude can also
+# auto-continue PAST the cap, generating a fresh response that hits the cap
+# again (observed: a single dedup turn ran 32 min and logged the cap error
+# twice). In that loop the transcript keeps emitting events, so last_event_time
+# never goes stale and the quiescence gate never trips. A PRODUCTIVE turn moves
+# past one cap and the error scrolls out of the recent-output buffer (resetting
+# the latch); only a stuck generate-until-cap loop keeps the cap text recurring
+# across a sustained window. If it persists this long, the turn will never
+# finish productively -> stop early and let the disk gate / recovery take over.
+_OUTPUT_CAP_LOOP_S = 120.0
 
 # Ship 8.10: the subprocess-isolation overlay payload. SINGLE source of
 # truth shared by plamen_driver (production) and preflight_pty_transports
@@ -940,6 +952,10 @@ class ClaudePtySession:
         deadline = time.time() + timeout_s
         state = TurnCompleteState(complete=False)
         last_transcript_poll = 0.0
+        # Sticky timestamp of the FIRST output-cap sighting in the current
+        # cap episode. Reset whenever the cap text is no longer present (a
+        # productive turn scrolled past it). Used by the cap-LOOP gate below.
+        first_output_cap_seen_at: Optional[float] = None
         while True:
             now = time.time()
             if now - last_transcript_poll >= transcript_poll_s:
@@ -951,15 +967,30 @@ class ClaudePtySession:
                         state.rate_limited = True
                     elif _OUTPUT_CAP_TEXT_RE.search(_recent_norm):
                         # The turn hit the model output-token cap and cannot
-                        # emit more. It will spin without new transcript
-                        # events. Only treat as terminal once the transcript
-                        # is quiescent, so a self-recovering turn is not cut
-                        # off prematurely.
+                        # emit more. Two terminal signatures:
+                        #   (a) quiescence -- the turn went silent after the
+                        #       cap (no new transcript events for
+                        #       quiescence_s). Fast path for the common case.
+                        #   (b) cap LOOP -- the turn auto-continues past the
+                        #       cap and hits it again, so events keep flowing
+                        #       and (a) never trips. If the cap text persists
+                        #       across _OUTPUT_CAP_LOOP_S, the turn is stuck
+                        #       generating-until-cap and will never finish.
+                        # A self-recovering turn scrolls past the cap (the
+                        # text leaves the recent-output buffer), resetting the
+                        # latch in the else branch -- so neither path cuts off
+                        # a productive turn prematurely.
+                        if first_output_cap_seen_at is None:
+                            first_output_cap_seen_at = now
                         if (
                             state.last_event_time is not None
                             and now - state.last_event_time >= quiescence_s
                         ):
                             state.output_truncated = True
+                        elif now - first_output_cap_seen_at >= _OUTPUT_CAP_LOOP_S:
+                            state.output_truncated = True
+                    else:
+                        first_output_cap_seen_at = None
             if on_poll:
                 on_poll(now, state)
             if state.rate_limited:

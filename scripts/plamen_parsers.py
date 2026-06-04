@@ -3661,14 +3661,23 @@ def _dedup_live_pair_cap() -> int:
 # work packet(s). Per-pair LLM judgment is retained for every admitted pair;
 # this is a context-budget bound, NOT a blind-merge cap. Overridable via
 # PLAMEN_DEDUP_LIVE_PAIR_CAP.
-_DEDUP_LIVE_PAIR_CAP_DEFAULT = 250
+# TURN-SAFE bound. semantic_dedup runs as ONE subprocess in ONE turn, so the
+# live cap is the per-turn pair budget. The previous 250 (split into 80-pair
+# "rounds") was a regression: the multi-round prompt still asks the SINGLE
+# subprocess to evaluate every round, so ~240 pairs of focus-inventory input +
+# per-pair decision output blew the 32K output-token cap AND saturated context
+# (100% context used) -> 0 decisions, hung. 50 keeps both input (focus
+# inventory) and output (decisions) well inside one turn (the long-proven safe
+# value was 24; 50 is ~2x that and ~1/5 of the overflow point). Per-round
+# SEPARATE subprocesses would let this go higher without overflow (future).
+# Overridable via PLAMEN_DEDUP_LIVE_PAIR_CAP for operators on bigger budgets.
+_DEDUP_LIVE_PAIR_CAP_DEFAULT = 50
 
-# When the live candidate count exceeds this chunk size, the live packet is
-# split into per-round sub-packets (dedup_candidate_pairs_round{N}.md +
-# dedup_focus_inventory_round{N}.md). Each round stays per-pair LLM-judged with
-# a carried exclusion list; chunking bounds each subprocess's OUTPUT (the real
-# context pressure), not the judgment.
-_DEDUP_ROUND_CHUNK = 80
+# Keep chunk == cap so len(live_pairs) <= _DEDUP_ROUND_CHUNK is ALWAYS true ->
+# exactly ONE round of <= cap pairs reaches the single subprocess. Until the
+# dedup phase re-invokes one subprocess PER round, multi-round-in-one-turn must
+# never happen.
+_DEDUP_ROUND_CHUNK = 50
 
 # Findings whose depth source-ID set exceeds this threshold are treated as
 # depth-aggregate / perturbation findings. For such findings the source-ID
