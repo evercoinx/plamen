@@ -451,6 +451,14 @@ _CODEX_RATE_LIMIT_RE = re.compile(
     r"|Error:\s*429"
     r"|selected\s+model\s+is\s+at\s+capacity"
     r"|model\s+is\s+at\s+capacity"
+    # Codex/ChatGPT usage-cap errors are NATURAL LANGUAGE, not structured
+    # tokens: e.g. {"type":"error","message":"You've hit your usage limit.
+    # Visit https://chatgpt.com/codex/settings/usage to purchase more credits
+    # or try again at 5:46 PM."}. These MUST be treated as a rate-limit pause
+    # (auto-wait + preserve state), NOT a phase failure -> retry -> halt.
+    r"|purchase\s+more\s+credits"
+    r"|chatgpt\.com/codex/settings/usage"
+    r"|(?:reached|hit)\s+your\s+(?:usage|rate|monthly)\s+limit"
     r")",
     re.IGNORECASE,
 )
@@ -1156,9 +1164,16 @@ def _detect_codex_rate_limit(log_path: Path, returncode: int) -> bool:
     if _detect_codex_auth_error(log_path):
         return False
     if returncode == 0:
-        # On success, only check for plan-cap exhaustion (not transient 429s)
-        return bool(re.search(r"usage_limit_reached|billing_hard_limit_reached",
-                              text, re.IGNORECASE))
+        # On success, only check for plan-cap exhaustion (not transient 429s).
+        # Codex can graceful-stop (rc=0) with the usage cap in-stream, and that
+        # message is NATURAL LANGUAGE — so match the plan-cap phrases too, not
+        # just the structured tokens.
+        return bool(re.search(
+            r"usage_limit_reached|billing_hard_limit_reached|insufficient_quota"
+            r"|purchase\s+more\s+credits"
+            r"|chatgpt\.com/codex/settings/usage"
+            r"|(?:reached|hit)\s+your\s+(?:usage|rate|monthly)\s+limit",
+            text, re.IGNORECASE))
     return bool(_CODEX_RATE_LIMIT_RE.search(text))
 
 
