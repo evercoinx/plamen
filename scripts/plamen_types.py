@@ -1244,7 +1244,7 @@ L1_PHASES = [
           ["recon_summary.md", "threat_model.md", "subsystem_map.md",
            "attack_surface.md", "trust_boundaries.md", "template_recommendations.md",
            "scope_leftover.md"],
-          base_timeout_s=3000, critical=True),
+          base_timeout_s=3000, model="opus", critical=True),
     Phase("breadth", ["Step 3: Breadth"],
           ["analysis_*.md"],
           base_timeout_s=10800, model="sonnet", critical=True,

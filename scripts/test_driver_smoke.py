@@ -889,8 +889,9 @@ def test_scenario_a_breadth_halt_and_resume() -> None:
 
         breadth_attempts = [c for c in call_log.read_text(encoding="utf-8").splitlines()
                             if c.startswith("breadth:")]
-        _assert(len(breadth_attempts) == 2,
-                f"A.run1: breadth should retry once (2 attempts); got {breadth_attempts}")
+        _assert(len(breadth_attempts) == 3,
+                f"A.run1: breadth is a RECOVERING phase -> 3 hinted attempts before "
+                f"degrade (all-backend extended retry budget); got {breadth_attempts}")
 
         # Run 2: resume, expect breadth retried, recon/instantiate skipped
         call_log.write_text("", encoding="utf-8")
@@ -898,8 +899,8 @@ def test_scenario_a_breadth_halt_and_resume() -> None:
         _assert(rc2 == 3, f"A.run2 exit: got {rc2}, expected 3 (still degraded)")
 
         calls2 = call_log.read_text(encoding="utf-8").splitlines()
-        _assert(len([c for c in calls2 if c.startswith("breadth:")]) == 2,
-                f"A.run2: breadth should retry; got {calls2}")
+        _assert(len([c for c in calls2 if c.startswith("breadth:")]) == 3,
+                f"A.run2: breadth (recovering) retries to 3 hinted attempts; got {calls2}")
         _assert(len([c for c in calls2 if c.startswith("recon:")]) == 0,
                 f"A.run2: recon must NOT rerun; got {calls2}")
         _assert(len([c for c in calls2 if c.startswith("instantiate:")]) == 0,
@@ -1209,8 +1210,13 @@ def test_scenario_i_phase_containment_detector() -> None:
 
         calls = call_log.read_text(encoding="utf-8").splitlines()
         inventory_calls = [c for c in calls if c.startswith("inventory:")]
+        # CONTAINMENT failures are NOT hint-recoverable, so inventory does NOT
+        # get the extra hinted retry here — it stays at 2 attempts and falls to
+        # the standard quarantine + halt path (the extended retry budget applies
+        # only to coverage/content gaps, e.g. scenario A's breadth).
         _assert(len(inventory_calls) == 2,
-                f"I: inventory should retry once; got {inventory_calls}")
+                f"I: inventory containment violation -> no extra hinted retry "
+                f"(2 attempts), straight to quarantine+halt; got {inventory_calls}")
         depth_calls = [c for c in calls if c.startswith("depth:")]
         _assert(len(depth_calls) == 0,
                 f"I: driver must halt at inventory before depth; got {depth_calls}")

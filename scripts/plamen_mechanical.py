@@ -35,6 +35,9 @@ __all__ = [
     "_ATTENTION_REPAIR_MAX_ITEMS",
     "_apply_location_recovery",
     "_apply_mechanical_dedup_from_pairs",
+    "_dedup_parse_finding_info",
+    "_dedup_survivor_superset_ok",
+    "_resolve_dedup_survivor",
     "backfill_unrouted_inventory_into_queue",
     "_assemble_report_python",
     "_build_human_review_appendix",
@@ -4265,6 +4268,427 @@ def _load_poc_demotion_caps(scratchpad: Path) -> dict[str, dict[str, str]]:
     return caps
 
 
+# ── ZERO-DATA-LOSS mechanical dedup support (v2.9 dedup throughput upgrade) ──
+#
+# The mechanical dedup paths (fallback when the LLM dedup fails twice, and the
+# supplemental pass on deferred candidate pairs) are the only places where a
+# merge can be applied WITHOUT a per-pair LLM judgment. The DEDUP_AUDIT.md
+# post-mortem proved that the worst false-merge class is the source-ID-subset /
+# PERT-lineage signal misfiring on LARGE-AGGREGATE findings (perturbation /
+# depth-aggregate findings carrying >4 depth source IDs): a single shared source
+# ID makes the subset signal fire even though the defects differ. Blind merge on
+# that signal would destroy 13+ true-positives.
+#
+# Two mechanical protections are added here and shared by BOTH paths:
+#   1. Aggregate guard  — never act on a source-ID-subset / PERT-lineage signal
+#      when EITHER finding has > _DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD source IDs.
+#   2. Survivor-superset gate — before committing a merge, the survivor's
+#      source-ID set must be a SUPERSET of the absorbed set AND its location
+#      range must subsume the absorbed location. If the proposed survivor is not
+#      the superset but the other side is, FLIP. If neither subsumes the other,
+#      KEEP SEPARATE (skip the pair). This makes the INV-013/014 outbound-path
+#      loss and INV-031/044 POC-PASS loss mechanically impossible.
+#
+# And, on every accepted merge, the survivor's TEXT/ROW is COUPLED first (the
+# absorbed finding's distinct Location(s), Impact, Recommendation, union Source
+# IDs, higher severity, strongest evidence tag are carried into the survivor)
+# BEFORE the absorbed block/row is removed — so no distinct attack path / route
+# / impact / evidence is ever dropped.
+
+# Findings with more source IDs than this are depth-aggregate / perturbation
+# findings; the source-ID-subset and PERT-lineage signals are unreliable for
+# them (a single shared source ID fires the subset test on unrelated defects).
+_DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD = 4
+
+_SEVERITY_ORDER = ("Critical", "High", "Medium", "Low", "Informational")
+
+
+def _higher_severity(a: str, b: str) -> str:
+    """Return the MORE severe (higher-tier) of two severity strings."""
+    na, nb = normalize_severity(a), normalize_severity(b)
+    try:
+        ia, ib = _SEVERITY_ORDER.index(na), _SEVERITY_ORDER.index(nb)
+    except ValueError:
+        return na
+    return na if ia <= ib else nb
+
+
+def _strongest_evidence(a: str, b: str) -> str:
+    """Return the strongest of two evidence tags (mechanical proof wins)."""
+    a = (a or "").strip()
+    b = (b or "").strip()
+    if has_mechanical_proof(a) and not has_mechanical_proof(b):
+        return a
+    if has_mechanical_proof(b) and not has_mechanical_proof(a):
+        return b
+    return a or b
+
+
+def _dedup_file_part(location: str) -> str:
+    """Return the normalized file path component of a location string.
+
+    Strips the ``:Lnn`` / ``:funcName:Lnn`` suffix so two findings can be tested
+    for same-file membership. Empty for artifact-only / unparseable locations.
+    """
+    norm = _norm_loc(location or "")
+    return re.sub(r":L?\d+.*$", "", re.sub(r":[A-Za-z_][\w]*(?=:L?\d)", "", norm)).strip()
+
+
+def _dedup_parse_finding_info(text: str) -> dict[str, dict]:
+    """Parse per-finding info from a target dedup file (SC inventory or L1 queue).
+
+    Returns ``{ID: {source_ids, location, line_range, severity, evidence,
+    title, kind, block | row}}`` covering BOTH formats:
+
+    - SC inventory: ``### Finding [INV-N]: Title`` blocks with ``**Location**``,
+      ``**Severity**``, ``**Source IDs**``, evidence-tag, ``**Impact**``,
+      ``**Recommendation**`` markdown lines.
+    - L1 queue: pipe-delimited ``| ... |`` rows whose columns carry finding id,
+      severity, location, preferred/evidence tag (header-alias tolerant).
+
+    Used by the survivor-superset gate and the coupling helpers. Findings with
+    malformed / absent Source IDs or Location parse to empty sets — the superset
+    gate then conservatively falls back to KEEP SEPARATE.
+    """
+    info: dict[str, dict] = {}
+
+    # --- SC inventory blocks ---
+    for m in re.finditer(
+        r"#{2,4}\s+(?:Finding\s+)?\[((?:INV|F)-\d+)\]:?\s*(.+?)(?:\n|$)"
+        r"((?:.*\n)*?)"
+        r"(?=#{2,4}\s+(?:Finding\s+)?\[(?:INV|F)-|\Z)",
+        text,
+    ):
+        fid = m.group(1)
+        title = m.group(2).strip()
+        body = m.group(3)
+        loc_m = re.search(r"\*\*Location\*\*:\s*(.+)", body, re.IGNORECASE)
+        sev_m = re.search(r"\*\*Severity\*\*:\s*([^\n]+)", body, re.IGNORECASE)
+        loc = loc_m.group(1).strip() if loc_m else ""
+        sev = normalize_severity(sev_m.group(1)) if sev_m else "Medium"
+        source_ids: set[str] = set()
+        for src_line in body.splitlines():
+            src_m = _SOURCE_IDS_LINE_RE.match(src_line)
+            if src_m:
+                source_ids = {t.upper() for t in _split_source_id_tokens(src_m.group(1))}
+                break
+        evidence = ""
+        ev_m = re.search(
+            r"\[(" + EVIDENCE_TAG_NAMES_RE + r")\]", body
+        )
+        if ev_m:
+            evidence = ev_m.group(0)
+        info[fid] = {
+            "source_ids": source_ids,
+            "location": loc,
+            "file": _dedup_file_part(loc),
+            "line_range": _parse_line_range(_norm_loc(loc)),
+            "severity": sev,
+            "evidence": evidence,
+            "title": title,
+            "kind": "sc",
+            "block": f"### Finding [{fid}]: {title}\n{body}".rstrip(),
+        }
+
+    # --- L1 queue rows ---
+    lines = text.splitlines()
+    header_keys: dict[int, str] | None = None
+    for raw in lines:
+        line = raw.strip()
+        if not line.startswith("|"):
+            header_keys = None
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if not cells:
+            continue
+        if all(set(c) <= {"-", ":", " "} for c in cells if c):
+            continue  # separator row
+        low = [c.lower() for c in cells]
+        if header_keys is None and any(
+            _match_canonical_header(h) == "finding id" for h in low
+        ):
+            header_keys = {}
+            for idx, h in enumerate(low):
+                canonical = _match_canonical_header(h)
+                if canonical:
+                    header_keys[idx] = canonical
+            continue
+        # data row
+        fid = ""
+        fid_m = re.search(r"\b((?:INV|F)-\d+)\b", line)
+        if fid_m:
+            fid = fid_m.group(1)
+        if not fid or fid in info:
+            continue
+        row_vals: dict[str, str] = {}
+        if header_keys:
+            for idx, cell in enumerate(cells):
+                key = header_keys.get(idx)
+                if key:
+                    row_vals[key] = cell
+        loc = row_vals.get("location", "")
+        sev = normalize_severity(row_vals.get("severity", "")) if row_vals.get("severity") else "Medium"
+        evidence = row_vals.get("preferred tag", "")
+        title = row_vals.get("title", "")
+        # Source IDs are not a standard queue column; scan the row for any
+        # bracketed source-id tokens as a best effort.
+        info[fid] = {
+            "source_ids": set(),
+            "location": loc,
+            "file": _dedup_file_part(loc),
+            "line_range": _parse_line_range(_norm_loc(loc)),
+            "severity": sev,
+            "evidence": evidence,
+            "title": title,
+            "kind": "l1",
+            "row": raw,
+        }
+    return info
+
+
+def _dedup_survivor_superset_ok(absorb: dict, keep: dict) -> bool:
+    """True iff *keep* is a safe superset survivor of *absorb*.
+
+    The survivor must subsume the absorbed finding's content along whatever
+    dimension proves the duplicate relationship:
+
+    - **Strict source-ID superset** (keep.source_ids ⊋ absorb.source_ids): the
+      survivor was discovered by every agent that found the absorbed finding,
+      plus more. This is dispositive REGARDLESS of file (a genuine cross-file
+      stub/full subset pair — e.g. the v2.6.9 backstop case — has different
+      locations but a proven source-ID superset). The absorbed finding's
+      distinct location is then COUPLED into the survivor by the caller.
+
+    - **Same-file location subsumption** (when source IDs are equal or absent):
+      the survivor's line range must contain the absorbed's, and they must be in
+      the same file. This is the same-site stub/full case and the INV-013/014
+      guard (the wider-range survivor must be chosen so the outbound path is not
+      dropped).
+
+    Returns False (→ KEEP SEPARATE) when neither relationship holds, e.g. two
+    co-located but distinct defects whose source IDs neither contain the other.
+    """
+    a_src = absorb.get("source_ids") or set()
+    k_src = keep.get("source_ids") or set()
+
+    # Dimension 1: strict source-ID superset is dispositive across files.
+    if a_src and k_src:
+        if not a_src.issubset(k_src):
+            return False
+        if a_src != k_src:
+            return True  # proper superset — survivor covers strictly more
+        # Equal sets fall through to the location test (same-site stub/full).
+
+    # Dimension 2: same-file location subsumption.
+    a_lr = absorb.get("line_range")
+    k_lr = keep.get("line_range")
+    a_file = absorb.get("file") or ""
+    k_file = keep.get("file") or ""
+    if a_lr is not None and k_lr is not None:
+        # If both carry a file part, they must match (different files cannot be
+        # subsumed by a line range alone).
+        if a_file and k_file and a_file != k_file:
+            return False
+        return k_lr[0] <= a_lr[0] and k_lr[1] >= a_lr[1]
+
+    # No dimension established subsumption → conservative KEEP SEPARATE.
+    return False
+
+
+def _dedup_info_insufficient(rec: dict | None) -> bool:
+    """True when a finding record carries neither source IDs nor a line range.
+
+    When BOTH sides of a pair are info-insufficient, the survivor-superset gate
+    cannot decide direction from finding bodies — the merge direction then rests
+    on the candidate-pair signal that already passed its own gate (aggregate
+    guard for subset/PERT; EXACT-endpoint location for the supplemental path).
+    Note: large-aggregate findings (the dangerous false-merge class) ALWAYS
+    carry many source IDs, so they are never info-insufficient — the superset
+    gate and aggregate guard always apply to them.
+    """
+    if rec is None:
+        return True
+    return not (rec.get("source_ids")) and rec.get("line_range") is None
+
+
+def _resolve_dedup_survivor(
+    id_a: str, id_b: str, proposed_absorb: str, proposed_keep: str,
+    finfo: dict[str, dict],
+) -> tuple[str, str] | None:
+    """Resolve absorb/keep so the survivor is the source-ID/location superset.
+
+    Returns (absorb, keep) if a safe merge direction exists, else None
+    (KEEP SEPARATE). If the proposed survivor is not the superset but the other
+    side is, FLIP. If neither subsumes the other, return None.
+
+    Graceful fallback: when BOTH findings are info-insufficient (no source IDs
+    AND no parseable location in their bodies — e.g. a verification queue with
+    no Location column), the gate cannot establish subsumption. In that case the
+    proposed direction is honored as-is, because the candidate-pair signal that
+    produced the pair already enforced its own gate upstream (aggregate guard +
+    EXACT-endpoint location). This preserves legitimate same-defect merges
+    without weakening the protection for the dangerous large-aggregate class,
+    which is never info-insufficient.
+    """
+    a = finfo.get(proposed_absorb)
+    k = finfo.get(proposed_keep)
+    if a is None or k is None:
+        # One side missing entirely — honor the proposed direction (the pair
+        # signal already gated it). This matches pre-gate behavior for findings
+        # that are not present in the parsed body (rare; defensive).
+        return (proposed_absorb, proposed_keep)
+    if _dedup_info_insufficient(a) and _dedup_info_insufficient(k):
+        # Neither side has source IDs or a line range — defer to the signal's
+        # proposed direction (upstream gate already applied).
+        return (proposed_absorb, proposed_keep)
+    if _dedup_survivor_superset_ok(a, k):
+        return (proposed_absorb, proposed_keep)
+    # Try the flip: keep <- absorb (the other side may be the superset).
+    if _dedup_survivor_superset_ok(k, a):
+        return (proposed_keep, proposed_absorb)
+    return None
+
+
+def _couple_absorbed_into_survivor_block(
+    block: str, absorb_id: str, absorb_info: dict, keep_info: dict,
+) -> str:
+    """Rewrite an SC survivor inventory block to ABSORB the absorbed finding's
+    distinct content BEFORE the absorbed block is removed (ZERO DATA LOSS).
+
+    Couples: absorbed Location (expanded Location list), distinct Impact /
+    Recommendation as a coupled paragraph, union Source IDs, higher Severity,
+    strongest evidence tag. Idempotent on the ``Coupled from {id}`` marker.
+    """
+    if f"Coupled from {absorb_id}" in block:
+        return block
+    lines = block.splitlines()
+    out: list[str] = []
+    a_loc = (absorb_info.get("location") or "").strip()
+    union_src = sorted(
+        (keep_info.get("source_ids") or set()) | (absorb_info.get("source_ids") or set())
+    )
+    new_sev = _higher_severity(keep_info.get("severity", ""), absorb_info.get("severity", ""))
+    new_ev = _strongest_evidence(keep_info.get("evidence", ""), absorb_info.get("evidence", ""))
+    saw_location = False
+    saw_source = False
+    saw_severity = False
+    for line in lines:
+        # Expand the Location line to include the absorbed location.
+        loc_m = re.match(r"(\s*\*\*Location\*\*:\s*)(.+)", line, re.IGNORECASE)
+        if loc_m and a_loc and a_loc.lower() not in loc_m.group(2).lower():
+            out.append(f"{loc_m.group(1)}{loc_m.group(2).rstrip()} ; {a_loc}")
+            saw_location = True
+            continue
+        # Replace Severity with the higher of the two.
+        sev_m = re.match(r"(\s*\*\*Severity\*\*:\s*)(.+)", line, re.IGNORECASE)
+        if sev_m:
+            out.append(f"{sev_m.group(1)}{new_sev}")
+            saw_severity = True
+            continue
+        # Set Source IDs to the union.
+        src_m = _SOURCE_IDS_LINE_RE.match(line)
+        if src_m and union_src:
+            out.append(f"**Source IDs**: {', '.join(union_src)}")
+            saw_source = True
+            continue
+        out.append(line)
+    # Append a coupled paragraph carrying the absorbed finding's distinct
+    # attack path / route / impact (so both paths survive in one finding).
+    coupled = [
+        "",
+        f"**Coupled from {absorb_id}: {absorb_info.get('title', '').strip()}**",
+    ]
+    if a_loc:
+        coupled.append(
+            f"Additionally affects the distinct path at {a_loc} "
+            f"(absorbed from {absorb_id}); this route must be fixed together with "
+            "the surviving finding's path."
+        )
+    if new_ev and new_ev not in "\n".join(out):
+        coupled.append(f"Evidence carried from absorbed finding: {new_ev}.")
+    out.extend(coupled)
+    # If the block had no explicit Location / Severity / Source IDs line, ensure
+    # the coupled content still records them.
+    if a_loc and not saw_location:
+        out.append(f"**Coupled Location**: {a_loc}")
+    if union_src and not saw_source:
+        out.append(f"**Source IDs**: {', '.join(union_src)}")
+    if not saw_severity:
+        out.append(f"**Severity**: {new_sev}")
+    return "\n".join(out).rstrip()
+
+
+def _couple_absorbed_into_survivor_row(
+    row: str, absorb_id: str, absorb_info: dict, keep_info: dict,
+) -> str:
+    """Rewrite an L1 survivor queue row to ABSORB the absorbed row's distinct
+    Location / evidence / severity BEFORE the absorbed row is removed.
+
+    Unions location, inherits higher severity and strongest evidence. Operates
+    on pipe-delimited cells without assuming fixed column order: it rewrites the
+    cell that currently holds the survivor's location/severity/evidence values.
+    """
+    if f"+{absorb_id}" in row:
+        return row
+    a_loc = (absorb_info.get("location") or "").strip()
+    k_loc = (keep_info.get("location") or "").strip()
+    new_sev = _higher_severity(keep_info.get("severity", ""), absorb_info.get("severity", ""))
+    new_ev = _strongest_evidence(keep_info.get("evidence", ""), absorb_info.get("evidence", ""))
+    # Is the absorbed finding's location DISTINCT from the survivor's? Only then
+    # is there a route to couple. When the absorbed location is already subsumed
+    # by the survivor's range (or identical), there is no distinct attack path —
+    # provenance lives in dedup_decisions.md (the MERGED-into row + Coupled-
+    # content column), not smeared into the queue row.
+    a_lr = absorb_info.get("line_range")
+    k_lr = keep_info.get("line_range")
+    loc_subsumed = bool(
+        a_lr and k_lr and k_lr[0] <= a_lr[0] and k_lr[1] >= a_lr[1]
+        and _norm_loc(a_loc).split(":", 1)[0] == _norm_loc(k_loc).split(":", 1)[0]
+    )
+    # A distinct location is only meaningful if it is a real CODE site (has a
+    # parseable line range). Artifact references (verify_*.md, primary-artifact
+    # filenames) and bare paths are not code routes — coupling them would just
+    # leak the absorbed ID without preserving any attack path.
+    loc_distinct = (
+        bool(a_loc) and a_lr is not None and a_loc != k_loc and not loc_subsumed
+    )
+    # Split into cells preserving the leading/trailing pipe structure.
+    cells = row.split("|")
+    coupled_loc = False
+    for i, cell in enumerate(cells):
+        cstr = cell.strip()
+        if not cstr:
+            continue
+        # Location cell: union a DISTINCT absorbed location.
+        if loc_distinct and k_loc and cstr == k_loc and a_loc not in cstr:
+            cells[i] = cell.replace(cstr, f"{k_loc} ; {a_loc} (+{absorb_id})")
+            coupled_loc = True
+            continue
+        # Severity cell: bump to the higher tier.
+        if normalize_severity(cstr) == normalize_severity(keep_info.get("severity", "")) and \
+                cstr.lower() in {s.lower() for s in _SEVERITY_ORDER}:
+            if new_sev.lower() != cstr.lower():
+                cells[i] = cell.replace(cstr, new_sev)
+            continue
+        # Evidence cell: carry the strongest evidence tag.
+        if keep_info.get("evidence") and cstr == keep_info.get("evidence", "").strip():
+            if new_ev and new_ev != cstr:
+                cells[i] = cell.replace(cstr, new_ev)
+            continue
+    new_row = "|".join(cells)
+    # If a DISTINCT location could not be unioned onto a dedicated location cell
+    # (no matching location cell present), guarantee no loss by appending a
+    # coupled-location annotation. Only fires for genuinely distinct routes.
+    if loc_distinct and not coupled_loc and f"+{absorb_id}" not in new_row:
+        ncells = new_row.split("|")
+        for j in range(len(ncells) - 1, -1, -1):
+            if ncells[j].strip():
+                ncells[j] = ncells[j].rstrip() + f" [coupled {absorb_id}: {a_loc}]"
+                break
+        new_row = "|".join(ncells)
+    return new_row
+
+
 def _apply_mechanical_dedup_from_pairs(
     scratchpad: Path,
     phase_name: str,
@@ -4299,6 +4723,31 @@ def _apply_mechanical_dedup_from_pairs(
         text = pairs_file.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return 0
+
+    # --- parse per-finding info for the aggregate guard + survivor-superset
+    #     gate + content coupling. For both fallback and supplemental the
+    #     finding bodies live in the same base file (verification_queue.md for
+    #     L1, findings_inventory.md for SC). ---
+    if phase_name == "semantic_dedup":
+        _finfo_path = scratchpad / "verification_queue.md"
+    elif phase_name == "sc_semantic_dedup":
+        _finfo_path = scratchpad / "findings_inventory.md"
+    else:
+        _finfo_path = None
+    finfo: dict[str, dict] = {}
+    if _finfo_path is not None and _finfo_path.exists():
+        try:
+            finfo = _dedup_parse_finding_info(
+                _finfo_path.read_text(encoding="utf-8", errors="replace")
+            )
+        except Exception:
+            finfo = {}
+
+    def _is_aggregate(_fid: str) -> bool:
+        rec = finfo.get(_fid)
+        if not rec:
+            return False
+        return len(rec.get("source_ids") or set()) > _DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD
 
     # --- supplemental: load IDs currently present in the target file ---
     present_ids: set[str] | None = None
@@ -4392,21 +4841,40 @@ def _apply_mechanical_dedup_from_pairs(
         # Skip pairs already evaluated by LLM dedup (live set)
         if live_pairs is not None and frozenset([id_a, id_b]) in live_pairs:
             continue
-        # Absorb direction:
+        # AGGREGATE GUARD: never act on a source-ID-subset / PERT-lineage signal
+        # when EITHER finding is a large-aggregate finding (> threshold source
+        # IDs). These signals misfire on perturbation / depth-aggregate findings
+        # (DEDUP_AUDIT.md class D). This mirrors the parser-side suppression so
+        # even a stale candidate file carrying the hint cannot drive a merge.
+        if ("subset" in signal or "pert lineage" in signal) and (
+            _is_aggregate(id_a) or _is_aggregate(id_b)
+        ):
+            continue
+        # Proposed absorb direction (a HINT only — refined by the superset gate):
         # - source-ID subset with ⊂: absorb A (the subset side) into B
         # - PERT lineage: absorb B (the PERT-sourced variant)
         # - location overlap (supplemental): absorb higher INV# into lower
         if "subset" in signal and "⊂" in signal:
-            absorb, keep = id_a, id_b
+            prop_absorb, prop_keep = id_a, id_b
         elif supplemental and "location overlap" in signal:
             num_a = int(re.search(r"\d+", id_a).group())
             num_b = int(re.search(r"\d+", id_b).group())
             if num_a > num_b:
-                absorb, keep = id_a, id_b
+                prop_absorb, prop_keep = id_a, id_b
             else:
-                absorb, keep = id_b, id_a
+                prop_absorb, prop_keep = id_b, id_a
         else:
-            absorb, keep = id_b, id_a
+            prop_absorb, prop_keep = id_b, id_a
+        # SURVIVOR-SUPERSET GATE: the survivor MUST be the source-ID / location
+        # superset. If the proposed survivor is not the superset but the other
+        # side is, FLIP. If neither subsumes the other, KEEP SEPARATE (skip).
+        # This makes the INV-013/014 outbound-path loss and INV-031/044
+        # POC-PASS loss mechanically impossible. When finding info is missing
+        # (malformed bodies), _resolve_dedup_survivor returns None → skip.
+        resolved = _resolve_dedup_survivor(id_a, id_b, prop_absorb, prop_keep, finfo)
+        if resolved is None:
+            continue
+        absorb, keep = resolved
         merge_pairs.append((absorb, keep, signal))
 
     if not merge_pairs:
@@ -4420,6 +4888,26 @@ def _apply_mechanical_dedup_from_pairs(
             continue
         absorbed_set.add(absorb)
         final_merges.append((absorb, keep, sig))
+
+    # --- compute coupled-content notes (auditable record of what was carried
+    #     into each survivor) ---
+    coupled_notes: dict[str, str] = {}
+    for absorb, keep, _sig in final_merges:
+        a = finfo.get(absorb, {})
+        k = finfo.get(keep, {})
+        bits: list[str] = []
+        a_loc = (a.get("location") or "").strip()
+        if a_loc:
+            bits.append(f"loc {a_loc}")
+        union_src = sorted((k.get("source_ids") or set()) | (a.get("source_ids") or set()))
+        if union_src:
+            bits.append(f"src {{{','.join(union_src)}}}")
+        merged_sev = _higher_severity(k.get("severity", ""), a.get("severity", ""))
+        bits.append(f"sev {merged_sev}")
+        merged_ev = _strongest_evidence(k.get("evidence", ""), a.get("evidence", ""))
+        if merged_ev:
+            bits.append(f"ev {merged_ev}")
+        coupled_notes[absorb] = "; ".join(bits) if bits else "(no distinct content)"
 
     # --- write / append dedup decisions ---
     if supplemental:
@@ -4436,16 +4924,22 @@ def _apply_mechanical_dedup_from_pairs(
             "**Status**: MECHANICAL_SUPPLEMENT",
             "",
             f"Applied {len(final_merges)} supplemental merge(s) from full "
-            "candidate pair set (location overlap + title >= 1.00 + same "
-            "severity only).",
+            "candidate pair set (survivor-superset gate + aggregate guard "
+            "enforced; absorbed content coupled into survivor).",
             "",
-            "| Action | Absorbed | Into | Signal |",
-            "|--------|----------|------|--------|",
+            "| Action | Absorbed | Into | Signal | Coupled-content |",
+            "|--------|----------|------|--------|-----------------|",
         ]
         for absorb, keep, sig in final_merges:
             supp_lines.append(
-                f"| MECHANICAL_SUPPLEMENT | {absorb} | {keep} | {sig} |"
+                f"| MECHANICAL_SUPPLEMENT | {absorb} | {keep} | {sig} "
+                f"| {coupled_notes.get(absorb, '')} |"
             )
+        # Also emit the canonical MERGED-into form so _extract_dedup_absorbed_ids
+        # and the report coverage ledger account each absorbed ID.
+        supp_lines.append("")
+        for absorb, keep, _sig in final_merges:
+            supp_lines.append(f"| {absorb} | MERGED into {keep} |")
         supp_lines.append("")
         dec_path.write_text(
             existing.rstrip("\n") + "\n" + "\n".join(supp_lines),
@@ -4459,15 +4953,22 @@ def _apply_mechanical_dedup_from_pairs(
             "",
             f"LLM dedup failed twice. Applied {len(final_merges)} conservative "
             "mechanical merge(s) from pre-computed candidate pairs "
-            "(source-ID subset or PERT lineage + same severity only).",
+            "(survivor-superset gate + aggregate guard enforced; absorbed "
+            "content coupled into survivor).",
             "",
             "## Decisions",
             "",
-            "| Action | Absorbed | Into | Signal |",
-            "|--------|----------|------|--------|",
+            "| Action | Absorbed | Into | Signal | Coupled-content |",
+            "|--------|----------|------|--------|-----------------|",
         ]
         for absorb, keep, sig in final_merges:
-            dec_lines.append(f"| MECHANICAL_MERGE | {absorb} | {keep} | {sig} |")
+            dec_lines.append(
+                f"| MECHANICAL_MERGE | {absorb} | {keep} | {sig} "
+                f"| {coupled_notes.get(absorb, '')} |"
+            )
+        dec_lines.append("")
+        for absorb, keep, _sig in final_merges:
+            dec_lines.append(f"| {absorb} | MERGED into {keep} |")
         dec_lines.append("")
         (scratchpad / "dedup_decisions.md").write_text(
             "\n".join(dec_lines), encoding="utf-8",
@@ -4500,17 +5001,92 @@ def _apply_mechanical_dedup_from_pairs(
         return len(final_merges)
 
     body = read_path.read_text(encoding="utf-8", errors="replace")
-    # Remove absorbed finding rows from pipe-delimited tables.
-    # Only check the row's primary Finding ID (first ID in the line),
-    # NOT the full line — titles/descriptions may reference other IDs.
-    absorbed_ids = {absorb for absorb, _, _ in final_merges}
+    # ZERO-DATA-LOSS coupling + removal. For each merge:
+    #   1. COUPLE the absorbed finding's distinct Location / Impact /
+    #      Recommendation / union Source IDs / higher Severity / strongest
+    #      evidence into the SURVIVOR (block for SC, row for L1).
+    #   2. THEN remove the absorbed block / row.
+    absorbed_to_keep = {absorb: keep for absorb, keep, _ in final_merges}
+    absorbed_ids = set(absorbed_to_keep.keys())
+
+    # --- Step 1: couple absorbed content into survivors ---
+    # SC inventory survivors (block-form). Rewrite each survivor block.
+    keep_blocks_sc = {
+        keep for keep in absorbed_to_keep.values()
+        if finfo.get(keep, {}).get("kind") == "sc"
+    }
+    if keep_blocks_sc:
+        def _couple_sc(match: re.Match) -> str:
+            block = match.group(0)
+            kid = match.group(1)
+            if kid not in keep_blocks_sc:
+                return block
+            new_block = block.rstrip()
+            for absorb, keep in absorbed_to_keep.items():
+                if keep != kid:
+                    continue
+                new_block = _couple_absorbed_into_survivor_block(
+                    new_block, absorb, finfo.get(absorb, {}), finfo.get(kid, {}),
+                )
+            # Preserve trailing newline structure of the original match.
+            trailing = block[len(block.rstrip()):]
+            return new_block + trailing
+        body = re.sub(
+            r"#{2,4}\s+(?:Finding\s+)?\[((?:INV|F)-\d+)\]:?[^\n]*\n"
+            r"(?:(?!#{2,4}\s+(?:Finding\s+)?\[(?:INV|F)-).*\n?)*",
+            _couple_sc,
+            body,
+        )
+
+    # L1 queue survivors (row-form). Rewrite each survivor row in place.
+    keep_rows_l1 = {
+        keep for keep in absorbed_to_keep.values()
+        if finfo.get(keep, {}).get("kind") == "l1"
+    }
+    if keep_rows_l1:
+        new_body_lines: list[str] = []
+        for line in body.splitlines():
+            if line.strip().startswith("|"):
+                rid_m = re.search(r"\b((?:INV|F)-\d+)\b", line)
+                if rid_m and rid_m.group(1) in keep_rows_l1:
+                    kid = rid_m.group(1)
+                    for absorb, keep in absorbed_to_keep.items():
+                        if keep == kid:
+                            line = _couple_absorbed_into_survivor_row(
+                                line, absorb, finfo.get(absorb, {}), finfo.get(kid, {}),
+                            )
+            new_body_lines.append(line)
+        body = "\n".join(new_body_lines)
+
+    # --- Step 2: remove absorbed blocks (SC) / rows (L1) ---
+    # SC blocks: drop the absorbed `### Finding [ID]:` block entirely.
+    absorbed_sc = {
+        a for a in absorbed_ids if finfo.get(a, {}).get("kind") == "sc"
+    }
+    if absorbed_sc:
+        def _drop_sc(match: re.Match) -> str:
+            fid = match.group(1)
+            return "" if fid in absorbed_sc else match.group(0)
+        body = re.sub(
+            r"#{2,4}\s+(?:Finding\s+)?\[((?:INV|F)-\d+)\]:?[^\n]*\n"
+            r"(?:(?!#{2,4}\s+(?:Finding\s+)?\[(?:INV|F)-).*\n?)*",
+            _drop_sc,
+            body,
+        )
+
+    # L1 / generic pipe rows: drop absorbed rows by primary Finding ID.
     out_lines: list[str] = []
     for line in body.splitlines():
         skip = False
         if line.strip().startswith("|"):
             row_id_m = re.search(r"\b((?:INV|F)-\d+)\b", line)
             if row_id_m and row_id_m.group(1) in absorbed_ids:
-                skip = True
+                # Only drop rows for absorbed findings that are NOT block-form
+                # (block-form absorbed are already removed above; a stray pipe
+                # mention of an absorbed ID inside a survivor block must NOT be
+                # dropped — but block bodies are not pipe rows, so this is safe).
+                if finfo.get(row_id_m.group(1), {}).get("kind") != "sc":
+                    skip = True
         if not skip:
             out_lines.append(line)
     deduped = "\n".join(out_lines)

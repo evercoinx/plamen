@@ -29,6 +29,7 @@ Read:
 - `{SCRATCHPAD}/confidence_scores.md` (for prioritization)
 - `{SCRATCHPAD}/attack_surface.md` (for enabler enumeration)
 - `{SCRATCHPAD}/depth_*_findings.md` (for STEP 0-pre: scan for `[CROSS-DOMAIN-DEP]` tags)
+- `{SCRATCHPAD}/dedup_absorbed_map.md` (OPTIONAL — driver-written record of semantic-dedup merges: each row is an `Absorbed ID -> Survivor ID` pair with the absorbed finding's distinct content. If present, every absorbed ID MUST be recorded as a Constituent Finding of the survivor's hypothesis row in `finding_mapping.md` and `hypotheses.md`, and the absorbed finding's distinct attack path / route / call-site / impact MUST be preserved in the survivor hypothesis description so the tier-writer Rule 10 path can couple both. Do NOT re-create the absorbed finding as its own standalone hypothesis — it is consolidated into the survivor with zero content loss.)
 
 For specific findings referenced in enabler enumeration, read the relevant source files directly.
 

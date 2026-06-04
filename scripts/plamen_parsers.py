@@ -148,6 +148,7 @@ __all__ = [
     "_match_canonical_header",
     "_merge_inventory_entries",
     "_compute_dedup_candidate_pairs",
+    "_dedup_live_pair_cap",
     "_extract_chain_summaries_compact",
     "_chain_iter2_has_no_unexplored_pairs",
     "_line_ranges_overlap",
@@ -3632,6 +3633,55 @@ def _merge_inventory_entries(entries: list[dict[str, object]]) -> list[dict[str,
     return items
 
 
+def _dedup_live_pair_cap() -> int:
+    """Resolve the live-pair cap.
+
+    The cap bounds how many candidate pairs are written into the live packet(s)
+    handed to the per-pair LLM dedup judge. It is NOT a blind-merge cap — every
+    admitted pair is still individually MERGE/KEEP judged by the dedup prompt
+    (and gated by the mechanical survivor-superset rule). Raising it only widens
+    how many genuine candidates reach the LLM; it never auto-merges.
+
+    Default 250 covers the observed 205-pair Irys L1 case in one pass. Env
+    override ``PLAMEN_DEDUP_LIVE_PAIR_CAP`` lets ops dial it down without code
+    change if a future inventory is pathologically large.
+    """
+    raw = os.environ.get("PLAMEN_DEDUP_LIVE_PAIR_CAP", "")
+    if raw.strip():
+        try:
+            val = int(raw.strip())
+            if val > 0:
+                return val
+        except (TypeError, ValueError):
+            pass
+    return _DEDUP_LIVE_PAIR_CAP_DEFAULT
+
+
+# Default cap on the number of candidate pairs admitted into the live LLM
+# work packet(s). Per-pair LLM judgment is retained for every admitted pair;
+# this is a context-budget bound, NOT a blind-merge cap. Overridable via
+# PLAMEN_DEDUP_LIVE_PAIR_CAP.
+_DEDUP_LIVE_PAIR_CAP_DEFAULT = 250
+
+# When the live candidate count exceeds this chunk size, the live packet is
+# split into per-round sub-packets (dedup_candidate_pairs_round{N}.md +
+# dedup_focus_inventory_round{N}.md). Each round stays per-pair LLM-judged with
+# a carried exclusion list; chunking bounds each subprocess's OUTPUT (the real
+# context pressure), not the judgment.
+_DEDUP_ROUND_CHUNK = 80
+
+# Findings whose depth source-ID set exceeds this threshold are treated as
+# depth-aggregate / perturbation findings. For such findings the source-ID
+# subset and PERT-lineage signals MISFIRE (a single shared source ID makes the
+# subset signal fire even though the defects differ), so those two signals are
+# SUPPRESSED as candidate-generation hints. The pair may still surface on
+# location / title / function-name signals. Heuristic from the Irys L1
+# post-mortem (INV-125/127 carried 15-element source sets).
+_DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD = 4
+
+# Back-compat alias. Historically a hard live limit of 24; retained as a name
+# so any external reference resolves, but the live cap is now resolved via
+# _dedup_live_pair_cap() (env-overridable, default 250).
 _DEDUP_LIVE_PAIR_LIMIT = 24
 
 
@@ -3650,8 +3700,25 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
     catches findings targeting the same function but at different line offsets
     (e.g., entry check vs exit path of the same function).
 
-    NEVER merges findings — only identifies candidates for LLM review.
-    Returns the number of candidate pairs written.
+    Aggregate-suppression: for any cross-file candidate where EITHER finding
+    carries more than ``_DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD`` depth source IDs
+    (depth-aggregate / perturbation findings), the source-ID-subset and
+    PERT-lineage signals are SUPPRESSED — they misfire on these large sets and
+    are the worst false-merge class. Such pairs may still surface via
+    location / title / function-name signals.
+
+    Multi-round: when the live candidate count exceeds ``_DEDUP_ROUND_CHUNK``,
+    per-round sub-packets (``dedup_candidate_pairs_round{N}.md`` +
+    ``dedup_focus_inventory_round{N}.md``) are written in addition to the
+    unified round-1 ``dedup_candidate_pairs.md`` so single-round consumers keep
+    working. The driver decides single vs multi-round. Each pair appears in
+    exactly one round.
+
+    NEVER merges findings — only identifies candidates for LLM review. The five
+    signals are candidate-generation HINTS only; this function performs no
+    auto-merge.
+
+    Returns the total number of candidate pairs written (live + deferred).
     """
     inv = scratchpad / "findings_inventory.md"
     if not inv.exists():
@@ -3766,6 +3833,9 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
     # ── Cross-file signals: source-ID subset, PERT-* lineage ──
     # These fire across ANY pair (same or different file).
     _PERT_RE = re.compile(r"^PERT-\d+$", re.IGNORECASE)
+    # Count of pairs for which the subset/PERT signals were suppressed because
+    # a side is a large-aggregate finding. Used only for the header note.
+    aggregate_suppressed_count = 0
     for i in range(len(findings)):
         for j in range(i + 1, len(findings)):
             fa, fb = findings[i], findings[j]
@@ -3775,12 +3845,32 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
 
             cross_reasons: list[str] = []
 
+            sa, sb = fa["_source_ids"], fb["_source_ids"]
+
+            # Aggregate-suppression: depth-aggregate / perturbation findings
+            # carry large source-ID sets, so the subset and PERT-lineage
+            # signals MISFIRE (a single shared source ID makes the subset
+            # signal fire even though the defects differ). When EITHER side
+            # exceeds the threshold, suppress those two false-merge-prone
+            # signals for this pair. The pair can still surface on
+            # location/title/function-name. This is the worst false-merge
+            # class per the Irys L1 post-mortem (e.g. INV-125/127 carrying
+            # 15-element source sets).
+            aggregate_suppressed = (
+                len(sa) > _DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD
+                or len(sb) > _DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD
+            )
+            # Track suppression only when the signals WOULD have fired (some
+            # shared source ID exists) so the header count reflects real
+            # suppressions, not every large-aggregate pair.
+            if aggregate_suppressed and sa and sb and (sa & sb):
+                aggregate_suppressed_count += 1
+
             # Signal 3: source-ID subset — if A's source IDs are a
             # non-empty proper subset of B's (or vice versa), A is
             # likely a partial view of the same bug that B covers
-            # more completely.
-            sa, sb = fa["_source_ids"], fb["_source_ids"]
-            if sa and sb:
+            # more completely. (Suppressed for large-aggregate findings.)
+            if sa and sb and not aggregate_suppressed:
                 if sa < sb:
                     cross_reasons.append(
                         f"source-ID subset ({', '.join(sorted(sa))} ⊂ {', '.join(sorted(sb))})"
@@ -3800,10 +3890,11 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
             # contain a PERT-* token and B's source IDs contain the
             # parent of that PERT (or vice versa), they are lineage-linked.
             # Also pair if both source sets reference overlapping depth IDs
-            # AND one contains PERT-*.
+            # AND one contains PERT-*. (Suppressed for large-aggregate
+            # findings — PERT findings are themselves the aggregate offenders.)
             pert_a = any(_PERT_RE.match(s) for s in sa) if sa else False
             pert_b = any(_PERT_RE.match(s) for s in sb) if sb else False
-            if (pert_a or pert_b) and sa & sb:
+            if (pert_a or pert_b) and sa & sb and not aggregate_suppressed:
                 cross_reasons.append("PERT lineage (shared depth source IDs)")
 
             if cross_reasons:
@@ -3858,86 +3949,213 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
         )
 
     sorted_pairs = sorted(pairs, key=_sort_key)
-    live_pairs = sorted_pairs[:_DEDUP_LIVE_PAIR_LIMIT]
 
-    # Write candidate pairs file
-    lines = [
-        "# Dedup Candidate Pairs",
-        "",
-        f"{len(live_pairs)} candidate pair(s) identified for LLM review.",
-        "Pairs are identified by five independent signals:",
-        "- **Source-ID subset**: one finding's depth source IDs are a proper subset of the other's (strongest — mechanical proof of containment)",
-        "- **PERT lineage**: perturbation finding shares depth source IDs with parent (strongest — documented derivative)",
-        "- **Location overlap**: same file + line ranges within 15 lines (primary for same-file)",
-        "- **Title overlap / shared identifiers**: same file + ≥0.50 token overlap (secondary)",
-        "- **Function-name match**: same file + same function name from Location field (tertiary)",
-        "",
-        "| Finding A | Finding B | Title Score | Signal(s) | Same Sev? |",
-        "|-----------|-----------|-------------|-----------|-----------|",
-    ]
-    if len(live_pairs) < len(pairs):
-        lines[3:3] = [
-            "",
-            f"Bounded work packet: showing top {len(live_pairs)} of {len(pairs)} candidate pair(s).",
-            "The full candidate set is preserved in `dedup_candidate_pairs_full.md`.",
-            "Treat omitted pairs as deferred, not silently discarded.",
-        ]
+    live_cap = _dedup_live_pair_cap()
+    live_pairs = sorted_pairs[:live_cap]
+    deferred_pairs = sorted_pairs[live_cap:]
 
-    for fa, fb, score, reason in live_pairs:
-        same_sev = "Yes" if fa["severity"].lower() == fb["severity"].lower() else "No"
-        lines.append(
+    findings_by_id = {f["id"]: f for f in findings}
+
+    def _pair_row(fa: dict, fb: dict, score: float, reason: str) -> str:
+        same_sev = (
+            "Yes" if fa["severity"].lower() == fb["severity"].lower() else "No"
+        )
+        return (
             f"| {fa['id']}: {fa['title'][:50]} | "
             f"{fb['id']}: {fb['title'][:50]} | "
             f"{score:.2f} | {reason} | {same_sev} |"
         )
-    lines.append("")
 
-    (scratchpad / "dedup_candidate_pairs.md").write_text(
-        "\n".join(lines), encoding="utf-8",
-    )
-    if len(live_pairs) < len(pairs):
-        full_lines = [
-            line
-            for idx, line in enumerate(lines)
-            if idx not in {3, 4, 5, 6}
+    def _signal_legend() -> list[str]:
+        legend = [
+            "Pairs are identified by five independent signals:",
+            "- **Source-ID subset**: one finding's depth source IDs are a proper subset of the other's (strongest — mechanical proof of containment)",
+            "- **PERT lineage**: perturbation finding shares depth source IDs with parent (strongest — documented derivative)",
+            "- **Location overlap**: same file + line ranges within 15 lines (primary for same-file)",
+            "- **Title overlap / shared identifiers**: same file + ≥0.50 token overlap (secondary)",
+            "- **Function-name match**: same file + same function name from Location field (tertiary)",
         ]
-        full_lines[2] = f"{len(pairs)} candidate pair(s) identified for LLM review."
-        if full_lines and full_lines[-1] == "":
-            full_lines.pop()
-        for fa, fb, score, reason in sorted_pairs[_DEDUP_LIVE_PAIR_LIMIT:]:
-            same_sev = "Yes" if fa["severity"].lower() == fb["severity"].lower() else "No"
-            full_lines.append(
-                f"| {fa['id']}: {fa['title'][:50]} | "
-                f"{fb['id']}: {fb['title'][:50]} | "
-                f"{score:.2f} | {reason} | {same_sev} |"
-            )
-        full_lines.append("")
-        (scratchpad / "dedup_candidate_pairs_full.md").write_text(
-            "\n".join(full_lines), encoding="utf-8",
+        # Aggregate-suppression note: the subset/PERT hints are unreliable for
+        # depth-aggregate / perturbation findings and were suppressed for those
+        # pairs (>4 source IDs). The LLM must NOT treat the absence of a
+        # subset/PERT signal on such pairs as evidence of distinctness, and
+        # must NEVER merge on subset/PERT hints alone.
+        legend.append(
+            "- **(aggregate-suppressed: >4 source IDs)**: for findings carrying "
+            f"more than {_DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD} depth source IDs "
+            "(depth-aggregate / perturbation findings), the source-ID-subset and "
+            "PERT-lineage hints are SUPPRESSED — they misfire on large source "
+            "sets. Such pairs surface (if at all) only via location/title/"
+            "function signals; judge them on a confirmed same-root-cause + "
+            "same-fix reading of BOTH bodies, never on a subset/PERT hint."
         )
+        if aggregate_suppressed_count:
+            legend.append(
+                f"- NOTE: {aggregate_suppressed_count} pair(s) had subset/PERT "
+                "signals suppressed under the aggregate rule."
+            )
+        return legend
 
-    focus_ids = {
-        item["id"]
-        for fa, fb, _score, _reason in live_pairs
-        for item in (fa, fb)
-    }
-    if focus_ids:
+    def _render_pairs_table(
+        title_line: str,
+        header_count: int,
+        note_lines: list[str],
+        rows: list[tuple],
+    ) -> str:
+        out = ["# Dedup Candidate Pairs", "", title_line]
+        out.extend(note_lines)
+        out.append("")
+        out.extend(_signal_legend())
+        out.append("")
+        out.append("| Finding A | Finding B | Title Score | Signal(s) | Same Sev? |")
+        out.append("|-----------|-----------|-------------|-----------|-----------|")
+        for fa, fb, score, reason in rows:
+            out.append(_pair_row(fa, fb, score, reason))
+        out.append("")
+        return "\n".join(out)
+
+    def _write_focus_inventory(path: Path, rows: list[tuple], packet_name: str) -> None:
+        focus_ids = {item["id"] for fa, fb, _s, _r in rows for item in (fa, fb)}
+        if not focus_ids:
+            return
         focus_lines = [
             "# Dedup Focus Inventory",
             "",
             "This bounded file contains the full finding bodies for the IDs "
-            "referenced by `dedup_candidate_pairs.md`. Use it for semantic "
-            "review before falling back to the full inventory.",
+            f"referenced by `{packet_name}`. Use it for semantic review before "
+            "falling back to the full inventory. The full bodies carry each "
+            "finding's distinct Location(s), Source IDs, attack path, and "
+            "impact so both sides of a candidate pair can be coupled on MERGE.",
             "",
         ]
         for f in findings:
             if f["id"] in focus_ids:
                 focus_lines.append(str(f.get("_block", "")).rstrip())
                 focus_lines.append("")
-        (scratchpad / "dedup_focus_inventory.md").write_text(
-            "\n".join(focus_lines).rstrip() + "\n",
-            encoding="utf-8",
+        path.write_text(
+            "\n".join(focus_lines).rstrip() + "\n", encoding="utf-8"
         )
+
+    # ── Determine single vs multi-round layout ──
+    # Chunk only the LIVE pairs (the per-pair judged set). Deferred pairs
+    # (beyond the cap) are written to dedup_candidate_pairs_full.md for
+    # traceability and are never silently discarded.
+    if len(live_pairs) <= _DEDUP_ROUND_CHUNK:
+        rounds: list[list[tuple]] = [live_pairs] if live_pairs else []
+    else:
+        rounds = [
+            live_pairs[i:i + _DEDUP_ROUND_CHUNK]
+            for i in range(0, len(live_pairs), _DEDUP_ROUND_CHUNK)
+        ]
+
+    n_rounds = len(rounds)
+
+    # Round 1's packet is ALSO the unified dedup_candidate_pairs.md so that
+    # existing single-round consumers (driver, validators) keep working.
+    if rounds:
+        round1 = rounds[0]
+        if n_rounds == 1:
+            title_line = (
+                f"{len(round1)} candidate pair(s) identified for LLM review."
+            )
+            note_lines: list[str] = []
+            if deferred_pairs:
+                note_lines = [
+                    "",
+                    f"Bounded work packet: showing top {len(live_pairs)} of "
+                    f"{len(pairs)} candidate pair(s) (cap={live_cap}).",
+                    "The full candidate set is preserved in "
+                    "`dedup_candidate_pairs_full.md`.",
+                    "Treat omitted pairs as deferred, not silently discarded.",
+                ]
+        else:
+            title_line = (
+                f"Round 1 of {n_rounds}: {len(round1)} candidate pair(s) for "
+                "LLM review."
+            )
+            note_lines = [
+                "",
+                f"Multi-round work packet: {len(live_pairs)} live candidate "
+                f"pair(s) (cap={live_cap}) split into {n_rounds} round(s) of "
+                f"<= {_DEDUP_ROUND_CHUNK} pairs each.",
+                "Evaluate ONLY this round's rows; later rounds are in "
+                "`dedup_candidate_pairs_round{N}.md`. Decisions are appended "
+                "across rounds and excluded pairs are not re-decided.",
+            ]
+            if deferred_pairs:
+                note_lines.append(
+                    "Pairs beyond the cap are preserved in "
+                    "`dedup_candidate_pairs_full.md` (deferred, not discarded)."
+                )
+
+        unified = _render_pairs_table(
+            title_line, len(round1), note_lines, round1
+        )
+        (scratchpad / "dedup_candidate_pairs.md").write_text(
+            unified, encoding="utf-8"
+        )
+        _write_focus_inventory(
+            scratchpad / "dedup_focus_inventory.md",
+            round1,
+            "dedup_candidate_pairs.md",
+        )
+
+        # Per-round sub-packets (only when multi-round).
+        if n_rounds > 1:
+            for ridx, round_rows in enumerate(rounds, start=1):
+                rt_line = (
+                    f"Round {ridx} of {n_rounds}: {len(round_rows)} candidate "
+                    "pair(s) for LLM review."
+                )
+                rt_notes = [
+                    "",
+                    "Evaluate ONLY this round's rows. If the driver supplies an "
+                    "`## Already-decided exclusion list`, do NOT re-decide those "
+                    "pairs. Append decisions to dedup_decisions.md.",
+                ]
+                rt_packet = f"dedup_candidate_pairs_round{ridx}.md"
+                (scratchpad / rt_packet).write_text(
+                    _render_pairs_table(
+                        rt_line, len(round_rows), rt_notes, round_rows
+                    ),
+                    encoding="utf-8",
+                )
+                _write_focus_inventory(
+                    scratchpad / f"dedup_focus_inventory_round{ridx}.md",
+                    round_rows,
+                    rt_packet,
+                )
+
+    # ── Deferred (beyond-cap) traceability file ──
+    if deferred_pairs:
+        full_lines = [
+            "# Dedup Candidate Pairs (Full Set)",
+            "",
+            f"{len(pairs)} candidate pair(s) identified for LLM review "
+            f"({len(live_pairs)} live, {len(deferred_pairs)} deferred beyond "
+            f"cap={live_cap}).",
+            "Deferred pairs are preserved for traceability and are NOT silently "
+            "discarded. Raise PLAMEN_DEDUP_LIVE_PAIR_CAP to admit more into the "
+            "live LLM-judged set.",
+            "",
+            "| Finding A | Finding B | Title Score | Signal(s) | Same Sev? |",
+            "|-----------|-----------|-------------|-----------|-----------|",
+        ]
+        for fa, fb, score, reason in sorted_pairs:
+            full_lines.append(_pair_row(fa, fb, score, reason))
+        full_lines.append("")
+        (scratchpad / "dedup_candidate_pairs_full.md").write_text(
+            "\n".join(full_lines), encoding="utf-8"
+        )
+
+    # ── Round-count marker (deterministic signal for the driver) ──
+    try:
+        (scratchpad / "dedup_round_count.txt").write_text(
+            f"{n_rounds}\n", encoding="utf-8"
+        )
+    except Exception:
+        pass
+
     return len(pairs)
 
 

@@ -17,6 +17,7 @@ FIRST. Pairs beyond the live budget are preserved (deferred) in
 decided here.
 """
 
+import os
 import re
 from pathlib import Path
 
@@ -101,7 +102,11 @@ def _read_live_rows(scratchpad: Path):
     return rows
 
 
-def test_genuine_pairs_outrank_bare_cc(tmp_path):
+def test_genuine_pairs_outrank_bare_cc(tmp_path, monkeypatch):
+    # Force a small live cap so the deferred-overflow path is exercised even
+    # though the default cap (250) would now admit all ~73 generated pairs.
+    # The re-ranking logic under test is independent of the cap value.
+    monkeypatch.setenv("PLAMEN_DEDUP_LIVE_PAIR_CAP", "24")
     _build_inventory(tmp_path)
     count = pp._compute_dedup_candidate_pairs(tmp_path)
     assert count > 0
@@ -109,13 +114,13 @@ def test_genuine_pairs_outrank_bare_cc(tmp_path):
     live_md = tmp_path / "dedup_candidate_pairs.md"
     full_md = tmp_path / "dedup_candidate_pairs_full.md"
     assert live_md.exists()
-    # We deliberately generated > limit pairs, so the full file must exist.
+    # We deliberately generated > cap pairs, so the full file must exist.
     assert full_md.exists(), "expected overflow into the full deferred file"
 
     rows = _read_live_rows(tmp_path)
     assert rows, "no live candidate pairs parsed"
-    # Live set is capped at the budget.
-    assert len(rows) <= pp._DEDUP_LIVE_PAIR_LIMIT
+    # Live set is capped at the (forced) budget.
+    assert len(rows) <= 24
 
     classes = [_classify(r[3]) for r in rows]
     genuine_idxs = [i for i, c in enumerate(classes) if c == "genuine"]
@@ -140,8 +145,9 @@ def test_genuine_pairs_outrank_bare_cc(tmp_path):
     )
 
 
-def test_no_finding_dropped_all_pairs_preserved(tmp_path):
+def test_no_finding_dropped_all_pairs_preserved(tmp_path, monkeypatch):
     """Re-ranking must not drop any pair: live + full must cover everything."""
+    monkeypatch.setenv("PLAMEN_DEDUP_LIVE_PAIR_CAP", "24")
     _build_inventory(tmp_path)
     pp._compute_dedup_candidate_pairs(tmp_path)
 

@@ -171,16 +171,46 @@ def test_large_candidate_set_is_bounded_not_skipped(tmp_path):
 
     total = P._compute_dedup_candidate_pairs(scratchpad)
     live = (scratchpad / "dedup_candidate_pairs.md").read_text(encoding="utf-8")
-    full = (scratchpad / "dedup_candidate_pairs_full.md").read_text(encoding="utf-8")
     focus = (scratchpad / "dedup_focus_inventory.md").read_text(encoding="utf-8")
     live_rows = [line for line in live.splitlines() if line.startswith("| INV-")]
-    full_rows = [line for line in full.splitlines() if line.startswith("| INV-")]
 
     assert total > 60
-    assert len(live_rows) == 24
-    assert len(full_rows) == total
-    assert "Bounded work packet" in live
-    assert "dedup_candidate_pairs_full.md" in live
+    # v2.9 dedup throughput upgrade: the live-pair cap is now 250 (env-
+    # overridable), so the FULL genuine candidate set is per-pair LLM-judged
+    # rather than truncated at 24 with the remainder deferred. With 21
+    # same-file/same-function findings, all C(21,2)=210 pairs are live and
+    # NONE are deferred -> no dedup_candidate_pairs_full.md is written.
+    assert total <= P._dedup_live_pair_cap(), (
+        "all pairs must fit under the raised live cap (no truncation)"
+    )
+    assert not (scratchpad / "dedup_candidate_pairs_full.md").exists(), (
+        "no pair is deferred under the raised cap, so the full/deferred "
+        "traceability file must NOT be written"
+    )
+
+    # Bounding is now achieved by multi-round chunking (<= _DEDUP_ROUND_CHUNK
+    # pairs per round), NOT by dropping pairs. Round 1's packet is also the
+    # unified dedup_candidate_pairs.md so single-round consumers keep working.
+    assert len(live_rows) == P._DEDUP_ROUND_CHUNK, (
+        "round-1 unified packet should carry exactly one chunk of pairs"
+    )
+    assert "Multi-round work packet" in live
+    # Every live pair appears in exactly one round; the rounds together cover
+    # the full candidate set with zero loss.
+    round_total = 0
+    ridx = 1
+    while True:
+        rfile = scratchpad / f"dedup_candidate_pairs_round{ridx}.md"
+        if not rfile.exists():
+            break
+        rtext = rfile.read_text(encoding="utf-8")
+        round_total += len([l for l in rtext.splitlines() if l.startswith("| INV-")])
+        ridx += 1
+    assert round_total == total, (
+        f"rounds must cover ALL {total} candidate pairs with no loss "
+        f"(covered {round_total})"
+    )
+
     assert "Dedup Focus Inventory" in focus
     assert "### Finding [INV-001]" in focus
 

@@ -2094,12 +2094,20 @@ def test_A3_semantic_dedup_candidate_packet_is_bounded(tmp_path):
     check("A3 semantic dedup has many total pairs",
           total > 24,
           f"total={total}")
-    check("A3 semantic dedup live pair packet capped at 24",
-          len(live_rows) == 24 and "showing top 24" in live,
-          f"rows={len(live_rows)}\n{live[:500]}")
+    # v2.8.17 dedup-throughput upgrade: the old hard 24-cap is gone. The live
+    # packet (round 1 when multi-round) is bounded by the per-round chunk size,
+    # NOT 24 — every admitted pair is still per-pair LLM-judged and the full set
+    # is preserved (deferred pairs in dedup_candidate_pairs_full.md). Recall is
+    # never reduced: more genuine candidates now reach the LLM, never fewer.
+    import plamen_parsers as _pp
+    chunk = _pp._DEDUP_ROUND_CHUNK
+    cap = D._dedup_live_pair_cap()
+    check("A3 semantic dedup live packet bounded by chunk size (not 24)",
+          0 < len(live_rows) <= max(chunk, 1) and len(live_rows) <= cap,
+          f"rows={len(live_rows)} chunk={chunk} cap={cap}\n{live[:500]}")
     check("A3 semantic dedup focus inventory only contains live IDs",
-          len(focus_ids) <= 48,
-          f"focus_ids={len(focus_ids)}")
+          len(focus_ids) <= 2 * max(chunk, 1),
+          f"focus_ids={len(focus_ids)} chunk={chunk}")
 
 
 def test_A3_semantic_dedup_prompt_is_fail_open_and_bounded():

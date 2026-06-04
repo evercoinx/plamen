@@ -30,6 +30,13 @@ from plamen_parsers import *  # noqa: F403,F401
 from plamen_validators import *  # noqa: F403,F401
 from plamen_mechanical import *  # noqa: F403,F401
 from plamen_prompt import *  # noqa: F403,F401
+# Explicit imports for underscore-prefixed dedup helpers that are NOT in the
+# source modules' __all__ (so `import *` above does not bring them in). The
+# driver's dedup multi-round orchestration + absorbed-map propagation depend on
+# these; importing them by name keeps the dependency robust regardless of the
+# producer modules' __all__ contents.
+from plamen_parsers import _dedup_live_pair_cap  # noqa: F401
+from plamen_mechanical import _extract_dedup_absorbed_ids  # noqa: F401
 import plamen_display as display
 from pty_exec import (
     SUBPROCESS_ISOLATION_PAYLOAD,
@@ -110,14 +117,20 @@ def _is_codex_extra_retry_phase(phase_name: str) -> bool:
 
 
 def _codex_max_attempts_for_phase(cli_backend: str | None, phase_name: str) -> int:
-    """Return the max attempt budget for a phase given the active backend.
+    """Return the max attempt budget for a phase.
 
-    Codex + RECOVERING content phase -> 3 attempts. Everything else (Claude,
-    any other backend, or any non-recovering phase) -> 2 (the unchanged
-    retry-once-then-degrade default).
+    RECOVERING content phases (recon/breadth/inventory/inventory_chunk_*) get
+    3 attempts on EVERY backend — not just Codex. These phases under-cover on a
+    single pass (sonnet recon skipping the enumerate-every-module step; codex's
+    single-subprocess under-fan-out) and the retry loop feeds the gate's exact
+    missing-list back as a HINT, so the 3rd (hinted) attempt near-always
+    recovers instead of halting a critical phase. Every other phase
+    (verify/report/skeptic/chain/depth/…) keeps the unchanged 2-attempt
+    retry-once-then-degrade default. The extra attempt only RE-RUNS the same
+    gated phase with a hint — it never relaxes a gate, so it cannot drop a
+    finding. (cli_backend retained for signature/call-site stability.)
     """
-    backend = (cli_backend or "claude").strip().lower()
-    if backend == "codex" and _is_codex_extra_retry_phase(phase_name):
+    if _is_codex_extra_retry_phase(phase_name):
         return _CODEX_EXTRA_RETRY_MAX_ATTEMPTS
     return 2
 
@@ -3190,6 +3203,299 @@ def _is_semantic_dedup_passthrough_failure(missing: list[Any]) -> bool:
         str(item).startswith(_SEMANTIC_DEDUP_PASSTHROUGH_PREFIX)
         for item in missing
     )
+
+
+# Regex for the LLM/mechanical absorbed->survivor relationship rows in
+# dedup_decisions.md. Two formats are recognized (mirrors
+# _extract_dedup_absorbed_ids, but captures BOTH endpoints so the survivor can
+# be propagated into finding_mapping):
+#   1. LLM semantic dedup status row:
+#        | INV-013 | MERGED into INV-014 | <coupled-content> | <notes> |
+#   2. Mechanical fallback/supplement:
+#        | MECHANICAL_MERGE | INV-013 | INV-014 | <signal> |
+#        | MECHANICAL_SUPPLEMENT | INV-013 | INV-014 | <signal> |
+_DEDUP_MERGED_INTO_RE = re.compile(
+    r"^\|\s*([A-Za-z]+-\d+)\s*\|\s*MERGED\s+into\s+([A-Za-z]+-\d+)\b"
+    r"(?:\s*\|\s*([^|]*))?",
+    re.MULTILINE | re.IGNORECASE,
+)
+_DEDUP_MECHANICAL_ROW_RE = re.compile(
+    r"^\|\s*MECHANICAL_(?:MERGE|SUPPLEMENT)\s*\|\s*([A-Za-z]+-\d+)\s*\|\s*"
+    r"([A-Za-z]+-\d+)\s*\|\s*([^|]*)",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _dedup_absorbed_survivor_mapping(
+    scratchpad: Path,
+) -> dict[str, dict[str, str]]:
+    """Return ``{absorbed_id: {"survivor": id, "coupled": text}}`` from dedup.
+
+    Parses ``dedup_decisions.md`` for both the LLM ``MERGED into`` status rows
+    and the mechanical ``MECHANICAL_MERGE/SUPPLEMENT`` rows. Captures the
+    survivor AND the coupled-content / signal cell so the absorbed finding's
+    distinct content can be recorded alongside the constituent mapping. This is
+    additive bookkeeping — it never drops a finding; it only records which
+    survivor a previously-absorbed finding was consolidated into so the
+    tier-writer Rule 10 coupling path (read finding_mapping.md, pull each source
+    finding's distinct root cause into the report finding) reaches the absorbed
+    lineage.
+    """
+    path = scratchpad / "dedup_decisions.md"
+    if not path.is_file():
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+    mapping: dict[str, dict[str, str]] = {}
+
+    def _norm(token: str) -> str:
+        return str(token or "").strip().strip("[]").upper()
+
+    for m in _DEDUP_MERGED_INTO_RE.finditer(text):
+        absorbed = _norm(m.group(1))
+        survivor = _norm(m.group(2))
+        coupled = re.sub(r"\s+", " ", (m.group(3) or "").strip())
+        if absorbed and survivor and absorbed != survivor:
+            # First writer wins (a finding is absorbed into one survivor only).
+            mapping.setdefault(
+                absorbed, {"survivor": survivor, "coupled": coupled}
+            )
+    for m in _DEDUP_MECHANICAL_ROW_RE.finditer(text):
+        absorbed = _norm(m.group(1))
+        survivor = _norm(m.group(2))
+        coupled = re.sub(r"\s+", " ", (m.group(3) or "").strip())
+        if absorbed and survivor and absorbed != survivor:
+            mapping.setdefault(
+                absorbed, {"survivor": survivor, "coupled": coupled}
+            )
+    return mapping
+
+
+def _write_dedup_absorbed_map(
+    scratchpad: Path,
+    mapping: dict[str, dict[str, str]],
+) -> int:
+    """Write the driver-owned ``dedup_absorbed_map.md`` sidecar.
+
+    Chain Agent 1 reads this file (see prompts/shared/v2/phase4c-chain-agent1.md
+    Inputs) and the mechanical chain baseline folds it into Constituent
+    Findings. Each row records an absorbed ID, its survivor, and the absorbed
+    finding's distinct coupled content so no attack path / route / impact is
+    lost when the survivor is consolidated. Returns the number of rows written.
+    """
+    scratchpad = Path(scratchpad)
+    lines = [
+        "# Dedup Absorbed Map",
+        "",
+        "**Status**: DRIVER_PROPAGATION",
+        "",
+        "Driver-written record of semantic-dedup merges. Each row is an "
+        "`Absorbed ID -> Survivor ID` consolidation. Chain Agent 1 MUST record "
+        "every Absorbed ID as a Constituent Finding of its Survivor's "
+        "hypothesis and preserve the absorbed finding's distinct attack path / "
+        "route / call-site / impact in the survivor hypothesis description so "
+        "the tier-writer Rule 10 path couples both with ZERO DATA LOSS. Do NOT "
+        "re-create an Absorbed ID as its own standalone hypothesis.",
+        "",
+        "| Absorbed ID | Survivor ID | Coupled Distinct Content |",
+        "|-------------|-------------|--------------------------|",
+    ]
+    n = 0
+    for absorbed in sorted(mapping):
+        info = mapping[absorbed]
+        survivor = info.get("survivor", "")
+        coupled = (info.get("coupled") or "").replace("|", "/").strip()
+        if not survivor:
+            continue
+        lines.append(f"| {absorbed} | {survivor} | {coupled} |")
+        n += 1
+    if n == 0:
+        lines.append("| (none) | (none) | no dedup merges recorded |")
+    (scratchpad / "dedup_absorbed_map.md").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+    return n
+
+
+def _propagate_dedup_absorbed_to_finding_mapping(scratchpad: Path) -> int:
+    """Record dedup-absorbed IDs as constituents of their survivor's hypothesis.
+
+    Runs at the dedup post-swap boundary. Two coupling paths, both additive
+    (never drops a finding):
+
+    1. ALWAYS writes the driver-owned ``dedup_absorbed_map.md`` sidecar that
+       Chain Agent 1 reads and the mechanical chain baseline folds in. This
+       guarantees the coupling reaches the report even when chain has not run
+       yet at dedup time (the normal SC/L1 ordering: dedup -> chain).
+    2. When ``finding_mapping.md`` ALREADY exists (resume after chain, or a
+       prior run), it additionally records every absorbed ID as a constituent
+       row of its survivor's hypothesis IN-PLACE, so the coupling survives even
+       if chain consolidated differently than the dedup survivor mapping.
+
+    Returns the number of absorbed->survivor relationships propagated.
+    """
+    scratchpad = Path(scratchpad)
+    mapping = _dedup_absorbed_survivor_mapping(scratchpad)
+    # Always (re)write the sidecar — even an empty one is a clear signal to the
+    # chain baseline that propagation ran and there were no merges.
+    _write_dedup_absorbed_map(scratchpad, mapping)
+    if not mapping:
+        return 0
+
+    fm_path = scratchpad / "finding_mapping.md"
+    if not fm_path.is_file():
+        # Chain has not run yet (normal ordering). The sidecar is the bridge;
+        # the chain baseline / Chain Agent 1 will fold it in. Nothing to edit
+        # in-place yet.
+        return len(mapping)
+
+    try:
+        fm_text = fm_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return len(mapping)
+
+    # Build survivor_id -> hypothesis_id from existing finding_mapping rows:
+    #   | <finding_id> | <hypothesis_id> | <status> | <notes> |
+    row_re = re.compile(
+        r"^\|\s*([A-Za-z]+-\d+)\s*\|\s*(H-\d+|CH-\d+)\s*\|", re.MULTILINE
+    )
+    survivor_to_hyp: dict[str, str] = {}
+    existing_finding_ids: set[str] = set()
+    for m in row_re.finditer(fm_text):
+        fid = m.group(1).strip().upper()
+        hid = m.group(2).strip().upper()
+        existing_finding_ids.add(fid)
+        survivor_to_hyp.setdefault(fid, hid)
+
+    new_rows: list[str] = []
+    propagated = 0
+    for absorbed, info in sorted(mapping.items()):
+        survivor = info.get("survivor", "")
+        if not survivor:
+            continue
+        if absorbed in existing_finding_ids:
+            # Already mapped (e.g., chain re-added it); leave as-is.
+            continue
+        hid = survivor_to_hyp.get(survivor)
+        if not hid:
+            # Survivor itself isn't in finding_mapping (chain dropped/renamed
+            # it). Fall back to a self-hypothesis row so the absorbed lineage
+            # is still recorded — never silently drop.
+            hid = survivor_to_hyp.get(survivor.upper()) or "H-DEDUP"
+        coupled = (info.get("coupled") or "").replace("|", "/").strip()
+        note = (
+            f"DEDUP_CONSTITUENT of {survivor}"
+            + (f"; coupled: {coupled}" if coupled else "")
+        )
+        new_rows.append(
+            f"| {absorbed} | {hid} | DEDUP_ABSORBED | {note} |"
+        )
+        propagated += 1
+
+    if new_rows:
+        addition = (
+            "\n<!-- dedup-absorbed constituents propagated by driver -->\n"
+            + "\n".join(new_rows)
+            + "\n"
+        )
+        fm_path.write_text(fm_text.rstrip("\n") + "\n" + addition, encoding="utf-8")
+    return propagated
+
+
+def _build_dedup_round_exclusion_block(scratchpad: Path) -> str:
+    """Build the ``## Already-decided exclusion list`` carry-forward block.
+
+    Reads decisions already recorded in ``dedup_decisions.md`` (from prior
+    rounds) and lists every pair/ID already decided so the next round does NOT
+    re-decide them. Per-pair judgment is preserved (each pair is decided exactly
+    once); this only prevents oscillation/double-deciding across rounds.
+    """
+    decided_ids: set[str] = set()
+    mapping = _dedup_absorbed_survivor_mapping(scratchpad)
+    for absorbed, info in mapping.items():
+        decided_ids.add(absorbed)
+        if info.get("survivor"):
+            decided_ids.add(info["survivor"])
+    # Also harvest any explicitly-decided IDs (KEEP SEPARATE / GROUP / PASS)
+    # from the decisions status table so they are not re-evaluated.
+    dec_path = scratchpad / "dedup_decisions.md"
+    if dec_path.is_file():
+        try:
+            dec_text = dec_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            dec_text = ""
+        for m in re.finditer(
+            r"^\|\s*([A-Za-z]+-\d+)\s*\|\s*"
+            r"(?:KEEP\s+SEPARATE|GROUP|PASS|MERGED\b)",
+            dec_text,
+            re.MULTILINE | re.IGNORECASE,
+        ):
+            decided_ids.add(m.group(1).strip().upper())
+    if not decided_ids:
+        return ""
+    lines = [
+        "## Already-decided exclusion list",
+        "",
+        "These finding IDs were decided in a prior dedup round. Do NOT "
+        "re-decide any pair that consists solely of IDs listed here — their "
+        "decisions are already recorded in dedup_decisions.md. Evaluate only "
+        "this round's candidate rows.",
+        "",
+    ]
+    lines += [f"- {fid}" for fid in sorted(decided_ids)]
+    lines += ["", "---", ""]
+    return "\n".join(lines) + "\n"
+
+
+def _stage_dedup_round_packet(scratchpad: Path, round_n: int) -> Optional[Path]:
+    """Stage round-N's live packet for the dedup subprocess.
+
+    Copies ``dedup_candidate_pairs_round{N}.md`` into the canonical live file
+    ``dedup_candidate_pairs.md`` (which the subprocess reads) with the
+    carry-forward ``## Already-decided exclusion list`` block prepended, and
+    likewise stages the matching focus inventory. Returns the staged live path
+    or None if the round file is absent.
+
+    This is the bounded-OUTPUT mechanism: each round's subprocess sees only
+    <=`_DEDUP_ROUND_CHUNK` candidate rows, but every pair is still per-pair
+    LLM-judged. No merge is ever applied mechanically here.
+    """
+    scratchpad = Path(scratchpad)
+    round_pairs = scratchpad / f"dedup_candidate_pairs_round{round_n}.md"
+    if not round_pairs.is_file():
+        return None
+    try:
+        body = round_pairs.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    exclusion = _build_dedup_round_exclusion_block(scratchpad)
+    live = scratchpad / "dedup_candidate_pairs.md"
+    live.write_text(exclusion + body, encoding="utf-8")
+    # Stage the matching focus inventory if present.
+    round_focus = scratchpad / f"dedup_focus_inventory_round{round_n}.md"
+    if round_focus.is_file():
+        try:
+            shutil.copy2(round_focus, scratchpad / "dedup_focus_inventory.md")
+        except Exception:
+            pass
+    return live
+
+
+def _dedup_round_files(scratchpad: Path) -> list[Path]:
+    """Return the sorted list of per-round candidate-pair packets, if any."""
+    scratchpad = Path(scratchpad)
+    files = sorted(
+        scratchpad.glob("dedup_candidate_pairs_round*.md"),
+        key=lambda p: _dedup_round_index(p.name),
+    )
+    return files
+
+
+def _dedup_round_index(name: str) -> int:
+    m = re.search(r"round(\d+)\.md$", name)
+    return int(m.group(1)) if m else 0
 
 
 def _run_verify_recovery_shard(
@@ -11431,6 +11737,27 @@ def _run_phase_validators(
         except Exception as exc:
             log.warning(f"[{phase.name}] supplemental dedup failed: {exc}")
 
+        # ZERO-DATA-LOSS bridge: record every dedup-absorbed ID as a
+        # constituent of its survivor's hypothesis so the tier-writer Rule 10
+        # coupling reaches the absorbed lineage in the final report. Runs AFTER
+        # supplemental dedup so both LLM and mechanical absorptions are
+        # captured. Always writes the dedup_absorbed_map.md sidecar (read by
+        # Chain Agent 1 and the mechanical chain baseline) and, if
+        # finding_mapping.md already exists, edits it in-place. Purely additive.
+        try:
+            n_prop = _propagate_dedup_absorbed_to_finding_mapping(scratchpad)
+            if n_prop > 0:
+                log.info(
+                    f"[{phase.name}] propagated {n_prop} dedup-absorbed ID(s) "
+                    "into dedup_absorbed_map.md (+ finding_mapping.md if "
+                    "present) as survivor constituents for report coupling"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] dedup absorbed-map propagation failed "
+                f"(non-blocking): {exc!r}"
+            )
+
     # --- recon: Slither materialization + coverage + scope_leftover ---
     if phase.name == "recon":
         # Codex apply_patch enriches recon artifact bodies without replacing
@@ -12967,9 +13294,24 @@ def main():
                     f"[sc_semantic_dedup] promoted {len(promoted)} depth "
                     "finding(s) into findings_inventory.md before dedup"
                 )
+            _dedup_cap = _dedup_live_pair_cap()
+            log.info(
+                f"[sc_semantic_dedup] dedup live-pair cap = {_dedup_cap} "
+                f"(env PLAMEN_DEDUP_LIVE_PAIR_CAP="
+                f"{os.environ.get('PLAMEN_DEDUP_LIVE_PAIR_CAP', '<default>')}); "
+                "per-pair LLM judgment retained for every admitted pair"
+            )
             n_pairs = _compute_dedup_candidate_pairs(scratchpad)
             if n_pairs:
                 log.info(f"[sc_semantic_dedup] {n_pairs} dedup candidate pair(s) written")
+            _rounds = _dedup_round_files(scratchpad)
+            if len(_rounds) > 1:
+                log.info(
+                    f"[sc_semantic_dedup] candidate set split into "
+                    f"{len(_rounds)} round(s); staging round 1 live packet "
+                    "with carry-forward exclusion list"
+                )
+                _stage_dedup_round_packet(scratchpad, _dedup_round_index(_rounds[0].name))
             dedup_issues = _validate_depth_promotion_dedup(scratchpad)
             for issue in dedup_issues:
                 log.warning(f"[sc_semantic_dedup] {issue}")
@@ -13025,6 +13367,13 @@ def main():
                     f"[verify_queue] promoted {len(promoted)} depth finding(s) "
                     "into findings_inventory.md before queue generation"
                 )
+            _dedup_cap = _dedup_live_pair_cap()
+            log.info(
+                f"[verify_queue] dedup live-pair cap = {_dedup_cap} "
+                f"(env PLAMEN_DEDUP_LIVE_PAIR_CAP="
+                f"{os.environ.get('PLAMEN_DEDUP_LIVE_PAIR_CAP', '<default>')}); "
+                "per-pair LLM judgment retained for every admitted pair"
+            )
             n_pairs = _compute_dedup_candidate_pairs(scratchpad)
             if n_pairs:
                 log.info(f"[verify_queue] {n_pairs} dedup candidate pair(s) written")
@@ -13204,6 +13553,25 @@ def main():
             _generate_verify_core_if_missing(scratchpad)
 
         if phase.name in ("semantic_dedup", "sc_semantic_dedup"):
+            # Multi-round staging: if the parser split the candidate set into
+            # per-round packets, stage round 1 into the canonical live file
+            # `dedup_candidate_pairs.md` (with a carry-forward exclusion list)
+            # so the subprocess sees a bounded, per-pair-judged packet. The live
+            # file may already be round-1 from the pre-phase staging; restaging
+            # is idempotent (round 1's exclusion list is empty on a fresh run).
+            # Subsequent rounds are handled by the post-swap _run_dedup_rounds
+            # carry-forward path. No merge is applied mechanically here.
+            _stage_rounds = _dedup_round_files(scratchpad)
+            if len(_stage_rounds) > 1:
+                staged = _stage_dedup_round_packet(
+                    scratchpad, _dedup_round_index(_stage_rounds[0].name)
+                )
+                if staged is not None:
+                    log.info(
+                        f"[{phase.name}] staged dedup round 1 of "
+                        f"{len(_stage_rounds)} into dedup_candidate_pairs.md "
+                        "(carry-forward exclusion list prepended)"
+                    )
             pairs_file = scratchpad / "dedup_candidate_pairs.md"
             focus_file = scratchpad / "dedup_focus_inventory.md"
             inv_file = scratchpad / "findings_inventory.md"
@@ -13263,16 +13631,39 @@ def main():
                 )
                 continue
             # Semantic dedup is quality-improving, but the live work must stay
-            # bounded. `_compute_dedup_candidate_pairs` normally emits a
-            # dedup_focus_inventory.md packet for large inventories. If an old
-            # or malformed run lacks that bounded packet, fail open
-            # deterministically instead of asking one LLM pass to read an
-            # unbounded inventory and then timing out.
-            if pair_rows > 24 or (inventory_count > 180 and not focus_file.exists()):
+            # bounded. `_compute_dedup_candidate_pairs` now emits the FULL
+            # candidate set up to `_dedup_live_pair_cap()` (default 250,
+            # env-overridable) and, when the live count exceeds the per-round
+            # chunk size, splits it into per-round sub-packets
+            # (dedup_candidate_pairs_round{N}.md) that the driver feeds to the
+            # subprocess one round at a time (see _run_dedup_rounds). The
+            # round-1 live file `dedup_candidate_pairs.md` is itself bounded by
+            # the chunk size, so each subprocess OUTPUT stays bounded while
+            # every pair remains per-pair LLM-judged. The old hard `> 24` guard
+            # would defeat the raised cap, so the budget guard now trips only
+            # when the LIVE round-1 packet itself exceeds the cap (a malformed
+            # run that wrote an oversized single packet) or a large inventory
+            # lacks the bounded focus packet entirely. Per-pair judgment is
+            # never short-circuited into a blind merge by this guard.
+            _dedup_cap = _dedup_live_pair_cap()
+            _round_files = sorted(
+                scratchpad.glob("dedup_candidate_pairs_round*.md")
+            )
+            _is_multiround = len(_round_files) > 0
+            # When multi-round packets exist the live file is round-1, already
+            # chunk-bounded by the parser. The guard must not fire on a normal
+            # bounded round-1 packet, but it still trips defensively if even the
+            # staged live packet exceeds the cap (a malformed/oversized run).
+            _live_over_budget = pair_rows > _dedup_cap
+            if _live_over_budget or (
+                inventory_count > 180 and not focus_file.exists()
+                and not _is_multiround
+            ):
                 reason = (
                     "semantic dedup budget guard: "
-                    f"{pair_rows} candidate pair row(s), "
-                    f"{inventory_count} inventory finding(s); preserving "
+                    f"{pair_rows} candidate pair row(s) (cap {_dedup_cap}), "
+                    f"{inventory_count} inventory finding(s), "
+                    f"multiround={_is_multiround}; preserving "
                     "upstream artifact unchanged to avoid a timeout/retry loop"
                 )
                 written = _write_semantic_dedup_skip_outputs(
@@ -15345,13 +15736,24 @@ def main():
                     config.get("cli_backend"), phase.name
                 )
                 _codex_attempt = 2  # attempts 1 + 2 already consumed above
-                while not passed and _codex_attempt < _codex_budget:
+                # Only COVERAGE/CONTENT gaps are hint-recoverable. A CONTAINMENT
+                # violation (the phase wrote foreign later-phase artifacts) is
+                # NOT — re-running with a hint cannot fix phase-scope discipline
+                # and would re-create the foreign writes and muddy quarantine.
+                # So skip the extra hinted retries for containment failures and
+                # fall straight through to the standard quarantine + degrade/halt
+                # block below (unchanged behavior for that failure class).
+                while (
+                    not passed
+                    and _codex_attempt < _codex_budget
+                    and not _has_containment_failure(list(missing))
+                ):
                     _codex_attempt += 1
                     log.warning(
-                        f"[{phase.name}] Codex extended retry budget: gate "
+                        f"[{phase.name}] extended hinted retry budget: gate "
                         f"failed after {_codex_attempt - 1} attempt(s) "
                         f"({missing}) — re-running (attempt {_codex_attempt} of "
-                        f"{_codex_budget}) before degrading"
+                        f"{_codex_budget}, with missing-list hint) before degrading"
                     )
                     # Reuse the existing delta retry-hint machinery so the
                     # re-run sees an explicit checklist, then re-snapshot the

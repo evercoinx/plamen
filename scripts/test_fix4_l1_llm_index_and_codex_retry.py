@@ -114,12 +114,14 @@ def test_codex_recovering_phases_get_three_attempts(phase_name: str):
     "phase_name",
     ["recon", "breadth", "inventory", "inventory_chunk_a"],
 )
-def test_claude_recovering_phases_keep_two_attempts(phase_name: str):
-    """Claude (and the default backend) must keep the unchanged 2-attempt
-    retry-once-then-degrade budget for the SAME phases."""
-    assert d._codex_max_attempts_for_phase("claude", phase_name) == 2
-    assert d._codex_max_attempts_for_phase(None, phase_name) == 2
-    assert d._codex_max_attempts_for_phase("", phase_name) == 2
+def test_all_backends_recovering_phases_get_three_attempts(phase_name: str):
+    """RECOVERING phases now get the 3rd hinted retry on EVERY backend — not
+    just Codex. Claude (and the default/empty backend) get 3 too, so a sonnet
+    recon that whiffs the enumerate-every-module step recovers on the hinted
+    3rd attempt instead of halting a critical phase."""
+    assert d._codex_max_attempts_for_phase("claude", phase_name) == 3
+    assert d._codex_max_attempts_for_phase(None, phase_name) == 3
+    assert d._codex_max_attempts_for_phase("", phase_name) == 3
 
 
 @pytest.mark.parametrize(
@@ -155,7 +157,7 @@ def test_codex_extra_retry_loop_wired_into_driver():
     )
     # The extra-attempt block re-runs the same gated phase and re-validates.
     loop_idx = src.index("_codex_max_attempts_for_phase(\n")
-    window = src[loop_idx:loop_idx + 3000]
+    window = src[loop_idx:loop_idx + 4000]
     assert "run_phase(phase, config, attempt=_codex_attempt)" in window, (
         "extra attempt must re-run the same phase via run_phase"
     )
@@ -228,26 +230,26 @@ def test_expand_shard_phases_is_idempotent(tmp_path: Path):
 @pytest.mark.parametrize(
     "backend,phase_name",
     [
-        # Claude on a recovering phase: budget 2 -> while-loop body unreachable.
-        ("claude", "breadth"),
-        ("claude", "recon"),
-        ("claude", "inventory_chunk_a"),
-        (None, "breadth"),
-        ("", "breadth"),
-        # Codex on a NON-recovering phase: budget 2 -> while-loop body unreachable.
+        # NON-recovering phases keep budget 2 on EVERY backend -> while-loop
+        # body unreachable (strict no-op). Recovering phases now get budget 3
+        # on all backends, so they are intentionally NOT in this list.
         ("codex", "verify"),
         ("codex", "report_index"),
         ("codex", "skeptic"),
         ("codex", "depth"),
         ("codex", "chain"),
+        ("claude", "verify"),
+        ("claude", "report_index"),
+        (None, "skeptic"),
+        ("", "depth"),
     ],
 )
 def test_extra_retry_is_strict_noop_when_budget_two(backend, phase_name):
     """When the budget resolves to 2 the while-guard `_codex_attempt(2) <
     budget(2)` is False, so the extra-attempt body NEVER executes. This proves
-    the change is a strict no-op for Claude, the default backend, and every
-    non-recovering phase even under Codex — i.e. it cannot change their
-    behavior at all."""
+    the change is a strict no-op for every NON-recovering phase on every backend
+    (verify/report/skeptic/depth/chain) — recovering phases intentionally get
+    budget 3 now and are covered by the all-backends-3-attempts test above."""
     budget = d._codex_max_attempts_for_phase(backend, phase_name)
     assert budget == 2, (
         f"{backend!r}/{phase_name} must keep the 2-attempt budget"
