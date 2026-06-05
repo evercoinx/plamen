@@ -4633,14 +4633,23 @@ def _find_existing_audit(cwd: str = "") -> "dict | None":
         config_path = os.path.join(scratchpad, "config.json")
         checkpoint_path = os.path.join(scratchpad, "_v2_checkpoint.json")
 
-        # ── Primary: config.json exists ──
+        # ── Primary: config.json exists AND parses ──
+        # A halt landing mid-write (or a partial reconstruct) can leave
+        # config.json present but TRUNCATED/corrupt. That must NOT skip the
+        # candidate: the full config is also embedded in _v2_checkpoint.json,
+        # so a corrupt config.json is recoverable exactly like a missing one.
+        # Treat a parse failure as "no usable config" and fall through to the
+        # checkpoint-reconstruction fallback below (which self-heals
+        # config.json), instead of `continue`-ing past the whole scratchpad.
+        config = None
         if os.path.isfile(config_path):
             try:
                 with open(config_path, encoding="utf-8") as f:
                     config = _json.load(f)
             except Exception:
-                continue
+                config = None
 
+        if config is not None:
             completed = []
             if os.path.isfile(checkpoint_path):
                 try:
@@ -4663,7 +4672,8 @@ def _find_existing_audit(cwd: str = "") -> "dict | None":
                 "phases_done": progress["phases_done"],
             }
 
-        # ── Fallback: scratchpad dir exists but config.json is missing ──
+        # ── Fallback: scratchpad dir exists but config.json is missing OR
+        #    corrupt (parse failed above) ──
         if not os.path.isdir(scratchpad):
             continue
 
@@ -4695,13 +4705,22 @@ def _find_existing_audit(cwd: str = "") -> "dict | None":
             except Exception:
                 pass
 
-        # Try to reconstruct config from checkpoint's embedded copy
+        # Try to reconstruct config from checkpoint's embedded copy.
+        # Atomic temp+replace: a halt during this write must never leave
+        # config.json truncated (that would re-create the corruption this
+        # recovery exists to undo). os.replace is atomic same-volume.
         if recovered_config:
             try:
-                with open(config_path, "w", encoding="utf-8") as f:
+                _tmp = config_path + ".tmp"
+                with open(_tmp, "w", encoding="utf-8") as f:
                     _json.dump(recovered_config, f, indent=2)
+                os.replace(_tmp, config_path)
             except Exception:
-                pass
+                try:
+                    if os.path.isfile(config_path + ".tmp"):
+                        os.unlink(config_path + ".tmp")
+                except Exception:
+                    pass
             progress = _resolve_resume_progress(recovered_config, completed)
             return {
                 "config_path": config_path,
@@ -4879,8 +4898,15 @@ def launch_v2(pipeline: str, mode: str, target: str, language: str,
         config["docs_path"] = docs
 
     config_path = os.path.join(scratchpad, "config.json")
-    with open(config_path, "w", encoding="utf-8") as f:
+    # Atomic temp+replace: a halt during the initial config write must never
+    # leave a truncated config.json on disk (the launcher can recover a corrupt
+    # config from the checkpoint, but only the driver writes that later -- at
+    # setup time there is no fallback yet, so the write itself must be all-or
+    # -nothing).
+    _cfg_tmp = config_path + ".tmp"
+    with open(_cfg_tmp, "w", encoding="utf-8") as f:
         _json.dump(config, f, indent=2)
+    os.replace(_cfg_tmp, config_path)
 
     driver = os.path.join(PLAMEN_HOME, "scripts", "plamen_driver.py")
     if not os.path.isfile(driver):
