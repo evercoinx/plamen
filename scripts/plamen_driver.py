@@ -9916,6 +9916,78 @@ def _run_depth_codex_fanout(
     except Exception as exc:
         log.warning(f"[depth] codex fan-out lifecycle synth skipped: {exc!r}")
 
+    # ── DA iteration 2 (Devil's Advocate) — scheduled AFTER confidence is
+    # finalized ──
+    # Mirrors the Claude PTY pool sequence (_run_depth_worker_pool ->
+    # synth -> _depth_da_job_if_required -> run). The DA job is gated on
+    # confidence_scores.md having uncertain Medium+ findings; at job-list
+    # build time (top of this function) that file did not yet exist, so on
+    # Codex the adversarial second pass was NEVER scheduled and the depth gate
+    # degraded on the missing iter2 artifact. The lifecycle synth above just
+    # (re)computed REAL per-finding confidence (replacing any formulaic stub),
+    # so re-evaluate now and actually run iter2. Thorough-only (helper gates
+    # on mode). Uses the same prompt builder as the PTY pool, which handles
+    # the `da_iter2` role.
+    if hard_failure_rc is None:
+        try:
+            da_jobs = _depth_da_job_if_required(scratchpad, config)
+        except Exception as exc:
+            log.warning(
+                f"[depth] codex fan-out: DA iter2 scheduling skipped: {exc!r}"
+            )
+            da_jobs = []
+        for da_job in da_jobs:
+            da_output = str(da_job["output"])
+            da_agent_id = str(da_job.get("agent_id") or Path(da_output).stem)
+            if _depth_worker_output_complete(scratchpad, phase, da_job):
+                continue
+            log.info(f"[depth] codex fan-out: DA iter2 job {da_output}")
+
+            def _exec_da_job(attempt_n: int, reasons: list[str] | None,
+                             _job: dict = da_job, _aid: str = da_agent_id,
+                             _out: str = da_output) -> int:
+                prompt = _build_depth_worker_prompt(
+                    job=_job, scratchpad=scratchpad,
+                    project_root=config["project_root"], config=config,
+                    attempt=attempt_n, retry_reasons=reasons,
+                )
+                prompt = _translate_prompt_for_codex(
+                    prompt, phase_name="depth", pipeline=pipeline, mode=mode,
+                    scratchpad=scratchpad,
+                )
+                return _run_one_codex_exec(
+                    prompt=prompt, phase=phase, config=config,
+                    scratchpad=scratchpad, attempt=attempt_n,
+                    label=f"depth_worker_{_aid}", expected_outputs=[_out],
+                    timeout=timeout, effective_model=effective_model,
+                )
+
+            rc = _exec_da_job(attempt, None)
+            if rc == EXIT_ERROR:
+                hard_failure_rc = EXIT_ERROR
+                break
+            if not _depth_worker_output_complete(scratchpad, phase, da_job):
+                rc = _exec_da_job(
+                    attempt + 1, ["status=incomplete", f"output={da_output}"]
+                )
+                if rc == EXIT_ERROR:
+                    hard_failure_rc = EXIT_ERROR
+                    break
+        if da_jobs and hard_failure_rc is None:
+            # Mirror the PTY pool: normalize iter2 filenames + re-synth so
+            # confidence reflects the iter2 evidence (monotonic; recompute
+            # only if still stub/missing).
+            try:
+                _canonicalize_depth_iter_filenames(scratchpad)
+            except Exception:
+                pass
+            try:
+                _synthesize_depth_lifecycle_artifacts(
+                    scratchpad, pipeline, force=False, mode=mode,
+                )
+            except Exception:
+                pass
+
     if hard_failure_rc is not None:
         return hard_failure_rc
     # Let the existing depth gate (validator after run_phase) judge overall

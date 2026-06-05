@@ -3817,6 +3817,23 @@ def _depth_artifact_is_stub(path: Path) -> Optional[str]:
                 f"{name} (stub — {len(scores)} findings all composite "
                 f"{val}, formulaic)"
             )
+        # Alignment with the depth GATE (_validate_confidence_scores_quality):
+        # it degrades depth when a thorough run has <=2 distinct composites
+        # across >=8 findings (the Codex 0.74/0.81-for-everything signature).
+        # Previously this synthesis check only caught the all-identical case
+        # (==1), so a 2-distinct formulaic stub PASSED here (never recomputed)
+        # yet FAILED the gate -> guaranteed degrade with no recovery. Use the
+        # SAME definition so the lifecycle synth mechanically recomputes real
+        # per-finding scores before the gate runs. Conservative: only the
+        # narrow low-cardinality-on-many-findings shape, never a genuinely
+        # differentiated table.
+        uniq = set(scores.values())
+        if len(scores) >= 8 and len(uniq) <= 2:
+            return (
+                f"{name} (stub — {len(scores)} findings with only "
+                f"{len(uniq)} distinct composite value(s) "
+                f"({', '.join(f'{v:.3f}' for v in sorted(uniq))}), formulaic)"
+            )
         # F2.b: DRIVER-COMPUTED `(no findings produced)` placeholder is a
         # stub ONLY when real depth findings exist on disk — a legitimate
         # clean-codebase audit can produce zero findings and that is NOT
