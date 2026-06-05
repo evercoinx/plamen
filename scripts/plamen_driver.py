@@ -3823,14 +3823,39 @@ _RUNAWAY_TOOL_RESULT_BYTES = 500_000
 _TOOL_RESULT_SCAN_INTERVAL_S = 60.0
 
 
+def _claude_project_dir_name(path) -> str:
+    """Encode an absolute cwd the way Claude Code names its
+    ``~/.claude/projects/<dir>`` session directory.
+
+    Verified against on-disk dirs: ``D:\\Programming\\...\\irys`` ->
+    ``D--Programming-...-irys``. Every non-alphanumeric char maps to a single
+    ``-`` WITHOUT collapsing runs (``D:\\`` -> ``D--``).
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(str(path)))
+
+
 def _scan_claude_tool_results_for_runaways(
-    start_time: float, already_warned: set[str]
+    start_time: float, already_warned: set[str], scratchpad: Path
 ) -> list[tuple[str, int]]:
     """Detect single tool-result blobs exceeding the runaway threshold.
 
     A subagent that issues a Bash/Glob/Read against a huge directory (e.g.
     %TEMP%, $HOME, ~/.cache) can dump multi-MB results into the claude session's
     tool-results dir, which blocks the coordinator and produces no audit value.
+
+    SCOPED to THE CURRENT RUN only. Claude keys its project dir by the
+    coordinator's cwd, which is this run's PROJECT_ROOT == ``scratchpad.parent``.
+    Earlier this scanned EVERY dir under ``~/.claude/projects/`` filtered only by
+    mtime, so a *concurrent* audit (or a Codex run, which writes its sessions
+    elsewhere entirely) would surface another run's huge tool-result and
+    misattribute it to THIS phase ("a subagent likely read outside
+    PROJECT_ROOT -- coordinator may stall"). Scoping to the current run's own
+    project dir kills that cross-run false positive: on a Codex run the current
+    run's Claude project dir has no fresh blobs (Codex doesn't write there), and
+    a sibling Claude run's blobs live under a DIFFERENT encoded dir that is no
+    longer scanned. If the current run's project dir can't be located, there are
+    no current-run tool-results to police -- scanning others is pure
+    false-positive risk with zero benefit, so return nothing.
 
     Returns list of (path, size) for newly-detected runaways. Mutates
     already_warned so each path is reported once.
@@ -3841,10 +3866,18 @@ def _scan_claude_tool_results_for_runaways(
             return []
     except Exception:
         return []
+    try:
+        target_norm = _claude_project_dir_name(Path(scratchpad).parent).casefold()
+    except Exception:
+        return []
     out: list[tuple[str, int]] = []
     try:
         for proj_dir in projects.iterdir():
             if not proj_dir.is_dir():
+                continue
+            # Only THIS run's project dir (cwd-keyed). casefold tolerates
+            # drive-letter case differences on Windows.
+            if proj_dir.name.casefold() != target_norm:
                 continue
             for sess in proj_dir.iterdir():
                 if not sess.is_dir():
@@ -4097,7 +4130,7 @@ def _wait_with_heartbeat(
             if now - last_tool_result_scan_time >= _TOOL_RESULT_SCAN_INTERVAL_S:
                 last_tool_result_scan_time = now
                 for path, size in _scan_claude_tool_results_for_runaways(
-                    start_time, tool_result_warned
+                    start_time, tool_result_warned, scratchpad
                 ):
                     log.warning(
                         f"[{phase_name}] runaway tool result detected: "
