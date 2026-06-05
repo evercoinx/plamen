@@ -94,12 +94,12 @@ def test_e_mixed_failure_with_location_recovery_returns_empty():
 
 
 def test_e_other_poc_contract_subclass_returns_empty():
-    """A different PoC-contract sub-class (mandatory-not-attempted, missing
-    ledger, EXTERNAL_DEP mock-override) must NOT trigger the targeted attempt —
-    the scoped hint would not fully repair the gate."""
-    assert V.verify_poc_contract_only_failed_ids(
-        [_POC_PREFIX + "F-2 mandatory unit PoC not attempted with valid blocker"]
-    ) == []
+    """A genuinely non-repairable PoC-contract sub-class (missing ledger,
+    EXTERNAL_DEP mock-override) must NOT trigger the targeted attempt — the
+    scoped hint would not fully repair the gate. NOTE: mandatory-not-attempted
+    is now a REPAIRABLE class on all backends (see the dedicated tests in
+    test_verify_targeted_repair_codex_fix9.py), so it is no longer listed
+    here."""
     assert V.verify_poc_contract_only_failed_ids(
         [_POC_PREFIX + "F-2 missing PoC Attempt/Execution Result ledger"]
     ) == []
@@ -110,11 +110,13 @@ def test_e_other_poc_contract_subclass_returns_empty():
 
 
 def test_e_mixed_subclass_within_combined_entry_returns_empty():
-    """One target-class sub-issue AND one other sub-class in the SAME combined
-    entry -> bail (the hint cannot fix the other sub-class)."""
+    """One target-class sub-issue AND one genuinely NON-repairable sub-class in
+    the SAME combined entry -> bail (the hint cannot fix the other sub-class).
+    Uses 'missing ledger' as the non-repairable partner since mandatory-not-
+    attempted is now itself repairable."""
     combined = _POC_PREFIX + (
         f"F-1 {_ATTEMPTED_YES_SUB}; "
-        "F-2 mandatory unit PoC not attempted with valid blocker"
+        "F-2 missing PoC Attempt/Execution Result ledger"
     )
     assert V.verify_poc_contract_only_failed_ids([combined]) == []
 

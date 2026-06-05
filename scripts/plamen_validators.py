@@ -13085,14 +13085,20 @@ def verify_poc_contract_only_failed_ids(
 
     PoC-contract-only means: every entry in ``missing`` is a combined
     ``"verify PoC contract: ..."`` entry AND every sub-issue inside it belongs
-    to a targeted-repairable class. The always-on class is the Claude-direction
-    ``"says Attempted:YES but lacks concrete Test File/Command"``. When
-    ``scratchpad`` is supplied AND ``cli_backend == "codex"``, the
-    Codex-direction ``"mandatory {class} PoC not attempted with valid blocker"``
-    class is ALSO accepted — both are repaired by the same scoped one-shot hint
-    (attempt the PoC or non-silently re-justify). If the failure mixes in any
-    other issue type (or, outside codex, the mandatory-not-attempted class),
-    return ``[]`` so the caller skips the targeted attempt and degrades as now.
+    to a targeted-repairable class. Two repairable classes, BACKEND-AGNOSTIC:
+    ``"says Attempted:YES but lacks concrete Test File/Command"`` and
+    ``"mandatory {class} PoC not attempted with valid blocker"``. Both are
+    repaired by the same scoped one-shot hint (attempt the PoC or non-silently
+    re-justify). If the failure mixes in any other issue type, return ``[]`` so
+    the caller skips the targeted attempt and degrades as now.
+
+    The mandatory-not-attempted class was originally Codex-only. It is now
+    eligible on ALL backends: a Claude DODO run degraded shards because the
+    verifier non-silently reclassified findings (exactly as the prompt asks)
+    and got only generic whole-shard retries — no precise per-finding hint — so
+    it could never converge. The repair EXECUTION path (``_write_retry_hint`` +
+    ``run_phase`` + re-validate) is backend-agnostic, so there is no reason to
+    withhold the convergence hint on Claude.
 
     NOTE: this only changes WHICH ids are eligible for the cheap one-shot repair
     path; the underlying ``_validate_poc_contract_for_rows`` gate is UNTOUCHED
@@ -13104,13 +13110,6 @@ def verify_poc_contract_only_failed_ids(
     """
     if not missing:
         return []
-    # Backend gate: the Codex-direction mandatory-not-attempted class is only
-    # eligible when the active backend is codex. Default (claude, or absent
-    # config) keeps the original Attempted:YES-only behavior unchanged.
-    codex_backend = (
-        scratchpad is not None
-        and _read_cli_backend_from_config(scratchpad) == "codex"
-    )
     fids: list[str] = []
     seen: set[str] = set()
     for entry in missing:
@@ -13128,15 +13127,14 @@ def verify_poc_contract_only_failed_ids(
                 continue
             if _VERIFY_ATTEMPTED_YES_NO_TESTFILE in sub:
                 m = re.match(r"^([A-Za-z0-9_.\[\]\-]+)\s+says\s+Attempted:YES", sub)
-            elif codex_backend and _VERIFY_MANDATORY_NOT_ATTEMPTED in sub:
-                # Codex-direction: "{fid} mandatory {poc_class} PoC not attempted
-                # with valid blocker". Isolate the leading id.
+            elif _VERIFY_MANDATORY_NOT_ATTEMPTED in sub:
+                # "{fid} mandatory {poc_class} PoC not attempted with valid
+                # blocker" (all backends). Isolate the leading id.
                 m = re.match(r"^([A-Za-z0-9_.\[\]\-]+)\s+mandatory\b", sub)
             else:
                 # A different PoC-contract sub-class (missing ledger,
-                # EXTERNAL_DEPENDENCY mock-override, ... — or the
-                # mandatory-not-attempted class outside codex) -> the targeted
-                # hint would not fully repair the gate -> bail.
+                # EXTERNAL_DEPENDENCY mock-override, ...) -> the targeted hint
+                # would not fully repair the gate -> bail.
                 return []
             if not m:
                 # Could not isolate the id from a matching-class sub-issue ->
@@ -16159,17 +16157,33 @@ def _validate_poc_contract_for_rows(
         # cited Location. The verify prompt explicitly tells the verifier to
         # CHALLENGE (not silently bypass) a wrong queue class. When the verifier
         # does so non-silently — declares `PoC Class: structural`/`integration`
-        # in its OWN ledger AND skips via STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION
-        # — honor that informed reclassification instead of hard-degrading the
-        # phase. This is an LLM-classification disagreement, which must WARN, not
-        # FAIL: the soft gate `_validate_poc_attempt_coverage` still records it as
-        # a violations.md warning. A verifier that leaves its ledger PoC Class as
-        # unit/property but skips structurally is a silent bypass and still fails.
-        if attempted_no and _poc_skip_code(content) == "STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION":
-            declared_class = (
+        # in its OWN ledger AND records a skip that is valid FOR THAT DECLARED
+        # CLASS — honor that informed reclassification instead of hard-degrading.
+        # This is an LLM-classification disagreement, which must WARN, not FAIL:
+        # the soft gate `_validate_poc_attempt_coverage` still records it as a
+        # violations.md warning.
+        #
+        # Two fixes vs the old exact-match-on-STRUCTURAL-skip-only check (both
+        # caused legitimate Claude reclassifications to degrade their shard):
+        #   #1 LEADING-TOKEN match tolerates the justification text the prompt
+        #      asks for: `PoC Class: structural  (queue said property; ...)`.
+        #      The old `declared in {"structural","integration"}` exact-match
+        #      was defeated by the trailing parenthetical -> false FAIL.
+        #   #2 Evaluate `_valid_poc_skip` against the DECLARED class, not only
+        #      the structural skip code, so a reclassify-to-`integration` +
+        #      DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL (valid for integration) is
+        #      honored — previously only the STRUCTURAL skip code was softened.
+        # Anti-gaming floor PRESERVED: a ledger that leaves PoC Class as
+        # unit/property (leading token unit/property) is a SILENT bypass and
+        # still fails — the verifier must DECLARE the reclassification — and
+        # `_valid_poc_skip` still enforces mock-feasibility / class rules for
+        # the declared class, so this opens no new bypass vector.
+        if attempted_no:
+            declared_raw = (
                 _field_from_markdown(content, ("PoC Class", "Poc Class", "PoC class")) or ""
             ).strip().lower()
-            if declared_class in {"structural", "integration"}:
+            m_decl = re.match(r"(structural|integration)\b", declared_raw)
+            if m_decl and _valid_poc_skip(content, m_decl.group(1)):
                 continue
         issues.append(f"{fid} mandatory {poc_class} PoC not attempted with valid blocker")
     return issues

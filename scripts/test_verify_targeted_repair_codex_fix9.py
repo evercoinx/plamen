@@ -91,24 +91,37 @@ def test_codex_mixed_attempted_yes_and_mandatory_both_selected():
 
 
 # ---------------------------------------------------------------------------
-# Backend gate: claude / absent config keep the ORIGINAL behavior (bail)
+# Backend-AGNOSTIC (post-Claude-DODO fix): the mandatory-not-attempted class is
+# now eligible on ALL backends. A Claude DODO run degraded shards because the
+# verifier non-silently reclassified findings (exactly as the prompt asks) and
+# got only generic whole-shard retries with no precise per-finding hint -> could
+# never converge. The repair EXECUTION path is backend-agnostic, so the hint is
+# now offered on Claude too. Gate stays exactly as hard (re-validated by the
+# same _validate_poc_contract_for_rows on the repaired file).
 # ---------------------------------------------------------------------------
 
-def test_claude_backend_does_not_select_mandatory_shape():
-    """Backend gate: under claude the mandatory-not-attempted class is NOT
-    eligible -> [] (degrade as before). Unchanged SC/Claude behavior."""
+def test_claude_backend_now_selects_mandatory_shape():
+    """Under claude the mandatory-not-attempted class is now SELECTED for the
+    cheap targeted repair (previously bailed -> guaranteed shard degrade)."""
     sp = _mkscratch("claude")
-    assert V.verify_poc_contract_only_failed_ids(_mandatory_missing("F-1"), sp) == []
+    assert V.verify_poc_contract_only_failed_ids(
+        _mandatory_missing("F-1"), sp
+    ) == ["F-1"]
 
 
-def test_absent_config_defaults_to_claude_bails_on_mandatory():
-    sp = _mkscratch(None)  # no config.json -> defaults to claude
-    assert V.verify_poc_contract_only_failed_ids(_mandatory_missing("F-1"), sp) == []
+def test_absent_config_selects_mandatory_shape():
+    sp = _mkscratch(None)  # no config.json
+    assert V.verify_poc_contract_only_failed_ids(
+        _mandatory_missing("F-1"), sp
+    ) == ["F-1"]
 
 
-def test_no_scratchpad_arg_preserves_original_behavior():
-    """No scratchpad passed (original call shape) -> mandatory class bails."""
-    assert V.verify_poc_contract_only_failed_ids(_mandatory_missing("F-1")) == []
+def test_no_scratchpad_arg_selects_mandatory_shape():
+    """No scratchpad passed (original call shape) -> mandatory class now
+    selected (backend-agnostic)."""
+    assert V.verify_poc_contract_only_failed_ids(
+        _mandatory_missing("F-1")
+    ) == ["F-1"]
 
 
 def test_codex_still_bails_on_non_poc_or_other_subclass():
