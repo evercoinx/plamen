@@ -86,11 +86,11 @@ value lost), independent of severity.
 
 **Cross-ref (cross-chain bridge/gateway callbacks)**: this §4a covers the
 native/sentinel-vs-ERC20 *token op*. A separate asset-FORM mismatch (the bridge
-delivers/expects native vs wrapped — ETH/WETH, ZETA/WZETA — and the inbound
-native↔wrapped conversion is missing) is checked in INTEGRATION_HAZARD_RESEARCH
-§0c-bis. Apply both for any `onCall`/`onRevert`/router callback: a token op can be
-type-correct yet still revert/trap funds because the delivered form was never
-reconciled.
+delivers/expects an asset that may be in a different form (native vs wrapped) —
+e.g. ETH/WETH — verify the conversion is present) is checked in
+INTEGRATION_HAZARD_RESEARCH §0c-bis. Apply both for any cross-chain bridge/gateway
+callback handler: a token op can be type-correct yet still revert/trap funds
+because the delivered form was never reconciled.
 
 **SIBLING ASYMMETRY (promote, do not bury)**: if one function guards the
 native/sentinel (or any edge) case — e.g. `if (token != _ETH_ADDRESS_) approve(...)`

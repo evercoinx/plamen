@@ -41,7 +41,7 @@ fine; a hand-off to a Borsh/BCS/Protobuf/script decoder is not.
 List every site where the EVM contract builds bytes destined for a non-EVM VM:
 `abi.encode`/`abi.encodePacked` into a cross-chain message, custom assembly byte
 writers (`mstore`/`mload` cursors), account/instruction encoders (e.g.
-`AccountEncoder`, Borsh packers), address/pubkey conversions (20-byte EVM address
+custom account-meta encoders, Borsh packers), address/pubkey conversions (20-byte EVM address
 ↔ 32-byte Solana pubkey; `bytes20` truncation of a non-EVM address), and flag
 packing (writable/signer bits, option discriminants).
 

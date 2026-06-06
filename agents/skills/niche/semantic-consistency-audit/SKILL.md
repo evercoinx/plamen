@@ -41,11 +41,13 @@ For each CHECK, execute three steps in order:
 
 ## Pre-Commit Dimension Enumeration (MANDATORY — fill BEFORE any finding)
 
-The DODO ETH-sentinel-approve regression class: this agent confirmed the
-bug for one of three sibling contracts then **self-refuted across the
-other two in the same paragraph**, because no structure forced per-sibling
-disposition. To prevent that failure mode, every audit run begins with the
-four dimension tables below. Fill them by reading recon artifacts
+**Per-sibling disposition rule**: When a finding holds for one contract in
+a sibling set, force a per-sibling disposition row; do not self-refute
+across siblings in one paragraph. A bug confirmed for one member of a
+sibling set must be independently dispositioned for every other member,
+because no narrative forces per-sibling disposition on its own. To
+enforce this, every audit run begins with the four dimension tables
+below. Fill them by reading recon artifacts
 (`contract_inventory.md`, `function_summary.md`, `caller_map.md`,
 `attack_surface.md`) — NOT from your own analysis.
 
@@ -151,7 +153,7 @@ serialize↔deserialize, or message-build↔message-parse boundary:
 | Struct/Layout A (fields) | Struct/Layout B (fields) | Same count/order/type? | Mis-read field | Finding? |
 |--------------------------|--------------------------|------------------------|----------------|----------|
 
-**Finding criteria**: a `MixSwapParams`(N fields) vs `DecodedMessage`(M≠N fields)
+**Finding criteria**: a `<EncodedParams>`(N fields) vs `<DecodedMessage>`(M≠N fields)
 mismatch, or an `abi.encode` order that differs from the `abi.decode` type list, that
 causes a token/amount/recipient field to be mis-read, is a confirmed finding
 (arbitrary/mis-validated withdrawal class). Pure off-by-layout in a non-value field is
