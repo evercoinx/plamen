@@ -216,6 +216,40 @@ Chain severity is NEVER lower than the higher of Finding A or Finding B.
 Upgrade if: combined impact > $100k AND profitability > 2x → CRITICAL
 Upgrade if: combined impact > $10k AND profitability > 2x → minimum HIGH
 
+### Chain Self-Containment Guard (MANDATORY — anti-restatement)
+
+A chain hypothesis is **INVALID** if it is merely a restatement of a single
+constituent. Before emitting ANY chain hypothesis, apply this guard:
+
+1. **Single-actor satisfiability**: If the Combined Attack Sequence is
+   satisfiable by a single constituent finding acting ALONE (i.e. Finding B's
+   step is not actually required to reach Finding A's impact, or vice versa),
+   the candidate is NOT a new finding.
+2. **Same-root-cause restatement**: If Finding A and Finding B resolve to the
+   SAME root cause / SAME fix / overlapping location (same file and function),
+   the "chain" is two descriptions of one bug, not a composition.
+
+For an INVALID candidate: do **NOT** emit a chain hypothesis. Instead record it
+in `composition_coverage.md` with `Result=SELF-CONTAINED` and leave the
+constituent(s) at their original severity.
+
+A chain may be reported at a tier **ABOVE** the highest constituent **only**
+when you state an explicit **Combined-Impact Justification**: a concrete
+loss / privilege / liveness consequence that NEITHER constituent produces
+alone, quantified per Rule 10. Absent that justification, the chain INHERITS
+the highest constituent severity and is MERGED into that constituent — emit no
+separate hypothesis.
+
+**Machine-parseable chain line (REQUIRED for every chain you DO emit)**: add
+exactly one line in that chain's section of `chain_hypotheses.md`, in this
+form:
+
+    Constituents: <A-id>,<B-id> | Severity-Upgrade-Justified: YES/NO | Combined-Impact: <one line or NONE>
+
+`Severity-Upgrade-Justified: YES` is permitted ONLY when `Combined-Impact` is a
+non-empty concrete consequence absent from both constituents. Otherwise use
+`Severity-Upgrade-Justified: NO` and `Combined-Impact: NONE`.
+
 ### Composition Coverage Map
 
 After chain matching, write a coverage map of finding pairs you considered:

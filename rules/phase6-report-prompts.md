@@ -161,6 +161,20 @@ Before assigning report IDs, consolidate hypotheses that share the same root cau
 - Merging would exceed 6 locations per finding (split into 2 findings for readability)
 - Merging would drop, blur, or overwrite a distinct branch precondition or terminal mechanism. Different branches/mechanisms stay separate unless a shared finding can state both clearly.
 
+**Chain carve-out (EXCEPTION to the tier rule)**: When one finding is a chain
+hypothesis (its constituent set is recorded in `chain_hypotheses.md` /
+`finding_mapping.md`) and the other is its sole constituent — OR its two
+constituents share file+function and the same root cause — AND the chain
+carries NO Combined-Impact justification (`Severity-Upgrade-Justified: NO`,
+missing line, or `Combined-Impact: NONE`), then **MERGE the chain INTO the
+constituent at the constituent severity** and record `CHAIN-RESTATEMENT` in the
+Consolidation Reason. A tier difference created purely by an unjustified chain
+upgrade is NOT a reason to keep them separate. Set the merged row's `Trust Adj.`
+to `CHAIN-DOWNGRADE(<chain's original severity>)` so the trail is auditable and
+a reviewer can re-promote. A chain that DOES carry a justified Combined-Impact
+is a genuine compound finding — keep it separate and record
+`CHAIN-UPGRADE(<highest constituent severity>)` with the chain ID instead.
+
 **Common consolidation patterns**: missing events, invalid admin setter values, missing staleness checks, retroactive parameter changes, and same-role trust findings when severity/root cause/fix match.
 
 **Output**: For each consolidation, record:

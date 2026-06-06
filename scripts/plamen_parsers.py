@@ -2151,13 +2151,32 @@ def _parse_hypothesis_constituents(scratchpad: Path) -> dict[str, list[str]]:
         except Exception:
             pass
 
+    # --- Source 3 (chain): ingest chain_hypotheses.md mapping so a chain row
+    # collapses with its constituent standalone rows. Run this UNCONDITIONALLY,
+    # before any early return, so it applies even when hypotheses.md is absent.
+    # Justified compound chains are excluded by _parse_chain_constituents.
+    def _merge_chain_links() -> None:
+        try:
+            chain_links = _parse_chain_constituents(scratchpad)
+        except Exception:
+            return
+        for chain_id, constituents in chain_links.items():
+            if not constituents:
+                continue
+            existing = mapping.setdefault(chain_id, [])
+            for cid in constituents:
+                if cid != chain_id and cid not in existing:
+                    existing.append(cid)
+
     # --- Source 2: hypotheses.md (section-based parse)
     hyp = scratchpad / "hypotheses.md"
     if not hyp.exists():
+        _merge_chain_links()
         return mapping
     try:
         text = _llm_norm(hyp.read_text(encoding="utf-8", errors="replace"))
     except Exception:
+        _merge_chain_links()
         return mapping
 
     # Source 2a: hypotheses.md tables. Chain hypotheses are commonly table
@@ -2205,7 +2224,122 @@ def _parse_hypothesis_constituents(scratchpad: Path) -> dict[str, list[str]]:
                 c for c in constituents if c not in mapping.get(hypo_id, [])
             )
 
+    # --- Source 3 (chain): merge chain_hypotheses.md links (see closure above).
+    _merge_chain_links()
+
     return mapping
+
+
+# Prose anchors per phase4c-chain-prompt.md "Chain Hypothesis Format":
+#   ### Blocked Finding (A)
+#   - **ID**: [XX-N], ...
+#   ### Enabler Finding (B)
+#   - **ID**: [YY-M], ...
+# plus the machine-parseable line:
+#   Constituents: <A>,<B> | Severity-Upgrade-Justified: YES/NO | Combined-Impact: ...
+_CHAIN_HYP_HEADING_RE = re.compile(
+    r"^#{1,4}\s*Chain\s+Hypothesis\s+(CH-\d+)\b",
+    re.MULTILINE | re.IGNORECASE,
+)
+_CHAIN_BLOCKED_RE = re.compile(
+    r"Blocked\s+Finding\s*\(A\)", re.IGNORECASE
+)
+_CHAIN_ENABLER_RE = re.compile(
+    r"Enabler\s+Finding\s*\(B\)", re.IGNORECASE
+)
+_CHAIN_ID_FIELD_RE = re.compile(
+    r"\*\*ID\*\*\s*:\s*\[?\s*(" + _ID_ALL_INTERNAL + r")\s*\]?",
+    re.IGNORECASE,
+)
+_CHAIN_MACHINE_LINE_RE = re.compile(
+    r"Constituents\s*:\s*(?P<ids>[^|]+)\|"
+    r"\s*Severity-Upgrade-Justified\s*:\s*(?P<just>YES|NO)\b"
+    r"(?:\s*\|\s*Combined-Impact\s*:\s*(?P<impact>.*))?",
+    re.IGNORECASE,
+)
+
+
+def _chain_severity_upgrade_justified(section: str) -> bool:
+    """True when the chain section carries an explicit, justified upgrade.
+
+    Per the STEP 3 guard, a chain is treated as a GENUINE compound finding
+    (and therefore NOT linked to its constituents for collapse) only when the
+    machine-parseable line shows `Severity-Upgrade-Justified: YES` AND a
+    non-empty `Combined-Impact` (not 'NONE'/blank).
+    """
+    m = _CHAIN_MACHINE_LINE_RE.search(section)
+    if not m:
+        return False
+    if (m.group("just") or "").strip().upper() != "YES":
+        return False
+    impact = (m.group("impact") or "").strip()
+    if not impact:
+        return False
+    if impact.strip().lower() in ("none", "n/a", "na", "-", "—"):
+        return False
+    return True
+
+
+def _parse_chain_constituents(scratchpad: Path) -> dict[str, list[str]]:
+    """Parse chain_hypotheses.md → {chain_id: [Finding A id, Finding B id]}.
+
+    Uses the 'Blocked Finding (A)' / 'Enabler Finding (B)' prose anchors from
+    phase4c-chain-prompt.md "Chain Hypothesis Format". A chain whose
+    machine-parseable line shows a justified severity upgrade with a non-empty
+    Combined-Impact is EXCLUDED from the map (genuine compound finding — kept
+    separate, never collapsed into a constituent).
+
+    Empty/unparseable file → {} (no merge = status quo, which is recall-safe).
+    """
+    chain_path = scratchpad / "chain_hypotheses.md"
+    if not chain_path.exists():
+        return {}
+    try:
+        text = _llm_norm(chain_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+
+    out: dict[str, list[str]] = {}
+    headings = list(_CHAIN_HYP_HEADING_RE.finditer(text))
+    for i, hm in enumerate(headings):
+        chain_id = hm.group(1).upper()
+        start = hm.end()
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
+        section = text[start:end]
+
+        # Genuine compound finding → do not link (keep separate).
+        if _chain_severity_upgrade_justified(section):
+            continue
+
+        constituents: list[str] = []
+
+        # Prefer the explicit Blocked/Enabler anchors (most precise).
+        for anchor_re in (_CHAIN_BLOCKED_RE, _CHAIN_ENABLER_RE):
+            am = anchor_re.search(section)
+            if not am:
+                continue
+            # The ID field appears on the next bullet after the anchor.
+            tail = section[am.end():am.end() + 400]
+            idm = _CHAIN_ID_FIELD_RE.search(tail)
+            if idm:
+                cid = idm.group(1).upper()
+                if cid != chain_id and cid not in constituents:
+                    constituents.append(cid)
+
+        # Fallback: the machine-parseable Constituents line.
+        if not constituents:
+            mm = _CHAIN_MACHINE_LINE_RE.search(section)
+            if mm:
+                for tok in re.split(r"[,\s]+", mm.group("ids") or ""):
+                    tok = tok.strip().upper()
+                    if tok and re.fullmatch(r"(?:" + _ID_ALL_INTERNAL + r")", tok, re.IGNORECASE):
+                        if tok != chain_id and tok not in constituents:
+                            constituents.append(tok)
+
+        if constituents:
+            out[chain_id] = constituents
+
+    return out
 
 
 _CHAIN_SUMMARY_HEADING_RE = re.compile(
@@ -2363,6 +2497,11 @@ def _dedup_queue_by_hypothesis(scratchpad: Path) -> int:
     # Build reverse map: constituent_id → hypothesis_id
     constituent_to_hypo: dict[str, str] = {}
     for hypo_id, constituents in mapping.items():
+        # Map the hypothesis/chain ID to ITSELF so a queue row carrying the
+        # hypothesis ID (e.g. a CH-* chain row) joins its own group rather than
+        # staying solo — otherwise an unjustified chain's inflated row survives
+        # alongside the collapsed constituent representative.
+        constituent_to_hypo.setdefault(hypo_id.upper(), hypo_id)
         for cid in constituents:
             # First mapping wins (a finding shouldn't be in two hypotheses)
             if cid not in constituent_to_hypo:
@@ -2393,10 +2532,36 @@ def _dedup_queue_by_hypothesis(scratchpad: Path) -> int:
             rep["finding id"] = hypo_id
             collapsed.append(rep)
         else:
-            # Multiple constituents — pick highest severity, merge context
-            group_rows.sort(key=lambda r: -_severity_rank(r.get("severity", "")))
-            rep = dict(group_rows[0])
-            rep["finding id"] = hypo_id
+            # Multiple constituents — pick highest severity, merge context.
+            #
+            # Chain carve-out: a CH-* hypothesis only reaches this map when it
+            # is UNJUSTIFIED (genuine compound chains are excluded upstream in
+            # _parse_chain_constituents). For an unjustified chain, the chain
+            # tier is an inflated restatement — inherit the constituent
+            # severity, NOT the highest (which would be the inflated chain
+            # severity). The constituent rows are the non-chain rows in the
+            # group; if a chain row is itself present we ignore its severity.
+            is_chain = bool(re.fullmatch(r"CH-\d+", hypo_id, re.IGNORECASE))
+            if is_chain:
+                non_chain_rows = [
+                    r for r in group_rows
+                    if not re.fullmatch(
+                        r"CH-\d+", (r.get("finding id") or "").strip(),
+                        re.IGNORECASE,
+                    )
+                ]
+                sev_rows = non_chain_rows or group_rows
+                sev_rows.sort(key=lambda r: -_severity_rank(r.get("severity", "")))
+                inherited_sev = sev_rows[0].get("severity", "")
+                group_rows.sort(key=lambda r: -_severity_rank(r.get("severity", "")))
+                rep = dict(sev_rows[0])
+                rep["finding id"] = hypo_id
+                if inherited_sev:
+                    rep["severity"] = inherited_sev
+            else:
+                group_rows.sort(key=lambda r: -_severity_rank(r.get("severity", "")))
+                rep = dict(group_rows[0])
+                rep["finding id"] = hypo_id
             # Aggregate title: use the first (highest-sev) constituent's title
             # Aggregate location: list unique locations
             locations = []

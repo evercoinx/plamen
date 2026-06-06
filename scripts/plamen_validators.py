@@ -173,6 +173,8 @@ __all__ = [
     "_validate_invariants_pass2",
     "_validate_chain_iter2",
     "_validate_chain_anti_absorption",
+    "_validate_chain_self_restatement",
+    "_generate_chain_self_restatement_retry_hint",
     "_repair_chain_anti_absorption_splits",
     "_validate_id_ledger_collisions",
     "_validate_consumer_ids_in_ledger",
@@ -192,6 +194,15 @@ __all__ = [
     "_validate_depth_exit",
     "_validate_depth_iterations",
     "_validate_semantic_gap_niche",
+    "_validate_niche_manifest_consistency",
+    "_validate_injectable_promotion",
+    "_promote_injectable_rows",
+    "_flag_derived_required_niches",
+    "_detected_flag_present",
+    "_detected_protocol_type",
+    "_NICHE_FLAG_TO_AGENT",
+    "_INJECTABLE_FLAG_TO_SKILL",
+    "_INJECTABLE_PROTOCOL_TO_SKILL",
     "_validate_depth_promotion_receipt",
     "_validate_depth_promotion_dedup",
     "_validate_graph_sweeps",
@@ -3498,6 +3509,533 @@ def _validate_semantic_gap_niche(scratchpad: Path, mode: str) -> list[str]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Niche manifest consistency (Gate 1) + injectable promotion (Gate 2)
+# ---------------------------------------------------------------------------
+#
+# Single source of truth for the recon Binding Rules flag -> niche mapping
+# (phase1-recon-prompt.md "Niche Agent Binding Rules"). This is GENERIC: it
+# maps documented detected_patterns.md FLAG TOKENS to documented niche agent
+# names. No protocol-specific or bug-specific names appear here — only the
+# flag/niche vocabulary that the recon prompt itself documents. Keeping this
+# as a module-level table means the flag-derived recall fallback (Gate 1) and
+# any future trigger derivation share one definition.
+_NICHE_FLAG_TO_AGENT: dict[str, str] = {
+    "MISSING_EVENT": "EVENT_COMPLETENESS",
+    "HAS_SIGNATURES": "SIGNATURE_VERIFICATION_AUDIT",
+    "HAS_MULTI_CONTRACT": "SEMANTIC_CONSISTENCY_AUDIT",
+    "MULTI_STEP_OPS": "MULTI_STEP_OPERATION_SAFETY",
+    "OUTCOME_CALLBACK": "CALLBACK_RECEIVER_SAFETY",
+    "HAS_DOCS": "SPEC_COMPLIANCE_AUDIT",
+    "MIXED_DECIMALS": "DIMENSIONAL_ANALYSIS",
+}
+
+# Single source of truth for the documented Injectable Skills trigger context
+# (phase1-recon-prompt.md "Injectable Skills" + skill-index.md). Maps a
+# detected_patterns.md / classification FLAG TOKEN to the injectable skill
+# name. Used by Gate 2 to detect Required=NO-while-trigger-present GENERICALLY
+# from flags rather than substring-matching skill names in the recommendation
+# file (which DOCUMENTS the trigger vocabulary verbatim — the false-fire
+# source the CROSS_VM language-gate fix guards against).
+_INJECTABLE_FLAG_TO_SKILL: dict[str, str] = {
+    "NON_EVM_TARGET": "CROSS_VM_SERIALIZATION_CONFORMANCE",
+    "NAMED_EXTERNAL_PROTOCOL": "INTEGRATION_HAZARD_RESEARCH",
+}
+
+# protocol_type classification -> injectable skill (phase1-recon-prompt.md
+# "Injectable Skills"). protocol_type lives in detected_patterns.md /
+# recon classification as `protocol_type = <value>`.
+_INJECTABLE_PROTOCOL_TO_SKILL: dict[str, str] = {
+    "vault": "VAULT_ACCOUNTING",
+    "lending": "LENDING_PROTOCOL_SECURITY",
+    "dex_integration": "DEX_INTEGRATION_SECURITY",
+    "governance": "GOVERNANCE_ATTACK_VECTORS",
+    "nft": "NFT_PROTOCOL_SECURITY",
+    "account_abstraction": "ACCOUNT_ABSTRACTION_SECURITY",
+    "outcome_determinism": "OUTCOME_DETERMINISM",
+}
+
+_INJECTABLE_PLACEHOLDER_RE = re.compile(
+    r"\[\s*LLM\s+TO\s+ENRICH\s*\]|\bTODO\b|\bTBD\b|\bFIXME\b|\bXXX\b",
+    re.IGNORECASE,
+)
+
+
+def _detected_flag_present(scratchpad: Path, flag: str) -> bool:
+    """Return True when detected_patterns.md records FLAG as present.
+
+    GENERIC flag detection mirroring `_has_non_evm_target_evidence` in the
+    driver: an explicit `FLAG = YES/TRUE` (or `: YES`) is authoritative-True,
+    an explicit NO/FALSE is authoritative-False, and a bare `FLAG detected`
+    occurrence (the prose form the recon prompt uses) counts as present. We
+    read ONLY detected_patterns.md — never template_recommendations.md, which
+    documents the flag vocabulary verbatim and would false-fire.
+    """
+    dp = scratchpad / "detected_patterns.md"
+    if not dp.exists():
+        return False
+    try:
+        text = dp.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    m = re.search(
+        rf"\b{re.escape(flag)}\b\s*(?:=|:)\s*(YES|NO|TRUE|FALSE)",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).upper() in ("YES", "TRUE")
+    # No explicit assignment: treat an affirmative prose mention as present.
+    return bool(
+        re.search(
+            rf"\b{re.escape(flag)}\b\s+(?:flag\s+)?(?:detected|present|found|"
+            r"triggered|set)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _detected_protocol_type(scratchpad: Path) -> str:
+    """Return the recon-classified protocol_type, lowercased, or ''."""
+    for name in ("detected_patterns.md", "recon_summary.md", "design_context.md"):
+        p = scratchpad / name
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        m = re.search(
+            r"protocol[_\s]*type\s*(?:=|:)\s*['\"`]?([A-Za-z_]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).strip().lower()
+    return ""
+
+
+def _flag_derived_required_niches(scratchpad: Path) -> set[str]:
+    """Recall fallback: niches whose detected_patterns.md flag is present.
+
+    Independent of template_recommendations.md so a fully-degraded
+    recommendation file cannot zero-out the required-niche set. Mirrors
+    `_semantic_gap_required` deriving the niche purely from triggers.
+    """
+    out: set[str] = set()
+    for flag, agent in _NICHE_FLAG_TO_AGENT.items():
+        if _detected_flag_present(scratchpad, flag):
+            out.add(agent)
+    return out
+
+
+def _niche_tokens_from_required_table(text: str) -> set[str]:
+    """Parse uppercase niche tokens from a `## Niche Agents` table.
+
+    Returns the niche names whose Required cell contains YES. Mirrors the
+    consumer parse in `_required_niche_worker_jobs` (plamen_driver.py) so the
+    producer and consumer agree on which rows count.
+    """
+    tokens: set[str] = set()
+    in_niche = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if re.match(r"^##+\s+Niche Agents\b", line, re.IGNORECASE):
+            in_niche = True
+            continue
+        if in_niche and re.match(r"^##+\s+", line):
+            break
+        if not in_niche or not line.startswith("|") or _is_separator_row(line):
+            continue
+        cells = [c.strip().strip("`*") for c in line.strip("|").split("|")]
+        if len(cells) < 3 or cells[0].lower().startswith("niche agent"):
+            continue
+        name = cells[0].strip()
+        # Only accept canonical uppercase-token niche names.
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]+", name):
+            continue
+        required = cells[2].upper() if len(cells) > 2 else ""
+        if "YES" not in required:
+            continue
+        tokens.add(name)
+    return tokens
+
+
+def _niche_tokens_from_binding_rules(text: str) -> set[str]:
+    """Parse the recon Addendum niche prose list (Niche Agent Binding Rules).
+
+    The recon prompt records each required niche a SECOND time as prose lines
+    of the form `<FLAG> ... -> <NICHE_AGENT> niche agent REQUIRED`. This is the
+    independent niche representation (B in the plan) we reconcile against the
+    BINDING MANIFEST table (A) and spawn_manifest table (C).
+    """
+    tokens: set[str] = set()
+    known = set(_NICHE_FLAG_TO_AGENT.values()) | {
+        "SPEC_COMPLIANCE_AUDIT",
+        "SIGNATURE_VERIFICATION_AUDIT",
+        "SEMANTIC_CONSISTENCY_AUDIT",
+        "MULTI_STEP_OPERATION_SAFETY",
+        "CALLBACK_RECEIVER_SAFETY",
+        "EVENT_COMPLETENESS",
+        "DIMENSIONAL_ANALYSIS",
+    }
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if "REQUIRED" not in line.upper():
+            continue
+        if "niche agent" not in line.lower():
+            continue
+        for tok in re.findall(r"\b[A-Z][A-Z0-9_]{3,}\b", line):
+            if tok in known:
+                tokens.add(tok)
+    return tokens
+
+
+def _rewrite_niche_required_table(text: str, required: set[str]) -> str:
+    """Rewrite (or append) a `## Niche Agents` table so its Required=YES rows
+    equal exactly `required`. Recall-safe: only the union superset is ever
+    passed in by the caller. Returns the rewritten file text.
+    """
+    rows = sorted(required)
+    header = (
+        "## Niche Agents\n"
+        "\n"
+        "| Niche Agent | Trigger | Required? | Agent ID | Expected Output |\n"
+        "|-------------|---------|-----------|----------|-----------------|\n"
+    )
+    body_lines = []
+    for name in rows:
+        slug = name.lower().replace("_", "-")
+        out = f"niche_{name.lower()}_findings.md"
+        body_lines.append(
+            f"| {name} | flag-derived (consistency repair) | YES | "
+            f"niche-{slug} | {out} |"
+        )
+    table = header + "\n".join(body_lines) + "\n"
+
+    lines = text.splitlines()
+    start = None
+    end = len(lines)
+    for i, raw in enumerate(lines):
+        if re.match(r"^##+\s+Niche Agents\b", raw.strip(), re.IGNORECASE):
+            start = i
+            for j in range(i + 1, len(lines)):
+                if re.match(r"^##+\s+", lines[j].strip()):
+                    end = j
+                    break
+            break
+    if start is None:
+        # No existing section: append.
+        return text.rstrip() + "\n\n" + table
+    new_lines = lines[:start] + table.rstrip("\n").splitlines() + lines[end:]
+    return "\n".join(new_lines) + ("\n" if text.endswith("\n") else "")
+
+
+def _validate_niche_manifest_consistency(
+    scratchpad: Path, mode: str
+) -> list[str]:
+    """Gate 1: reconcile the three niche representations and repair to the
+    recall-safe union; fail-loud only when repair is impossible.
+
+    A = required-niche tokens in template_recommendations.md `## Niche Agents`
+        BINDING MANIFEST table (Required=YES rows).
+    B = required-niche tokens in template_recommendations.md Niche Agent
+        Binding Rules prose (the recon Addendum niche list).
+    C = niche tokens in spawn_manifest.md `## Niche Agents` table.
+    flag = niches whose detected_patterns.md trigger flag is present.
+
+    Contract: spawn_manifest niche set MUST equal union(A, B, flag). If not,
+    REPAIR spawn_manifest + the BINDING MANIFEST table to the union (always the
+    superset — only ADD, never drop). If repair cannot be applied, return a
+    hard issue rather than dispatch an inconsistent/empty table.
+
+    Scoped to core/thorough like `_validate_semantic_gap_niche` so Light is
+    unaffected.
+    """
+    if mode not in ("core", "thorough"):
+        return []
+
+    tr_path = scratchpad / "template_recommendations.md"
+    sm_path = scratchpad / "spawn_manifest.md"
+
+    tr_text = ""
+    if tr_path.exists():
+        try:
+            tr_text = tr_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            tr_text = ""
+    sm_text = ""
+    if sm_path.exists():
+        try:
+            sm_text = sm_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            sm_text = ""
+
+    set_a = _niche_tokens_from_required_table(tr_text)
+    set_b = _niche_tokens_from_binding_rules(tr_text)
+    set_flag = _flag_derived_required_niches(scratchpad)
+    set_c = _niche_tokens_from_required_table(sm_text)
+
+    union = set_a | set_b | set_flag
+    if not union:
+        # Nothing is required by any source: a niche-free audit is valid.
+        return []
+    if set_c == union:
+        return []
+
+    dropped = union - set_c
+    issues: list[str] = []
+    repaired_any = False
+
+    # Repair spawn_manifest (the consumer contract) to the union.
+    if sm_path.exists() or sm_text:
+        try:
+            new_sm = _rewrite_niche_required_table(sm_text, union)
+            sm_path.write_text(new_sm, encoding="utf-8")
+            repaired_any = True
+        except Exception as exc:
+            issues.append(
+                "niche manifest consistency: spawn_manifest.md niche table "
+                f"disagrees with union {sorted(union)} and could not be "
+                f"repaired ({exc})"
+            )
+    else:
+        # No spawn_manifest yet (resume before instantiate produced it):
+        # cannot repair the consumer contract; surface as hard so the
+        # producer boundary rebuilds it rather than dispatching nothing.
+        issues.append(
+            "niche manifest consistency: spawn_manifest.md missing while "
+            f"niche union {sorted(union)} is required"
+        )
+
+    # Repair the BINDING MANIFEST table so downstream re-reads are consistent.
+    if tr_path.exists():
+        try:
+            new_tr = _rewrite_niche_required_table(tr_text, union)
+            if new_tr != tr_text:
+                tr_path.write_text(new_tr, encoding="utf-8")
+        except Exception as exc:
+            log.warning(
+                "[niche manifest consistency] could not repair BINDING "
+                "MANIFEST niche table in template_recommendations.md: %s", exc
+            )
+
+    if repaired_any:
+        log.warning(
+            "[niche manifest consistency] repaired niche manifest to "
+            "recall-safe union %s (added: %s) — spawn_manifest niche table "
+            "had %s",
+            sorted(union), sorted(dropped), sorted(set_c),
+        )
+        # Repair succeeded: do NOT block. The consumer now reads the union.
+        return []
+    return issues
+
+
+def _injectable_rows(text: str) -> list[tuple[str, str]]:
+    """Parse the `### Injectable Skills` section into (row_text, joined_cells).
+
+    Returns one entry per content line of the section (table row or bullet),
+    preserving the raw line so the promotion repair can rewrite it. The recon
+    prompt documents injectables as a bullet list, but instantiate / repaired
+    files may use a table; handle both.
+    """
+    rows: list[tuple[str, str]] = []
+    in_sec = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if re.match(r"^#{2,}\s+Injectable Skills\b", line, re.IGNORECASE):
+            in_sec = True
+            continue
+        if in_sec and re.match(r"^#{2,}\s+", line):
+            break
+        if not in_sec or not line:
+            continue
+        if line.startswith("|"):
+            if _is_separator_row(line):
+                continue
+            cells = [c.strip().strip("`*") for c in line.strip("|").split("|")]
+            if cells and cells[0].lower() in ("skill", "injectable", "injectable skill"):
+                continue
+            rows.append((raw, " | ".join(cells)))
+        elif line.startswith("-") or line.startswith("*"):
+            rows.append((raw, line.lstrip("-* ").strip()))
+    return rows
+
+
+def _validate_injectable_promotion(
+    scratchpad: Path, language: str = ""
+) -> list[str]:
+    """Gate 2: flag un-enriched or un-promoted injectable recommendations.
+
+    For each row of the `### Injectable Skills` section of
+    template_recommendations.md:
+      (a) un-resolved placeholder rationale ('[LLM TO ENRICH]', TODO, TBD,
+          empty) -> recon failure (the LLM left a stub);
+      (b) Required=NO while the injectable's trigger context IS present in
+          detected_patterns.md (derived GENERICALLY from the documented
+          flag/protocol-type trigger tables, never by substring-matching skill
+          names in the recommendation file) -> recon failure.
+
+    Language-gated exactly like the CROSS_VM driver fix: the NON_EVM_TARGET
+    trigger only counts when language is a non-EVM/foreign-VM target, so a
+    pure-EVM audit does not false-fire on the documented CROSS_VM vocabulary.
+    """
+    tr_path = scratchpad / "template_recommendations.md"
+    if not tr_path.exists():
+        return []
+    try:
+        text = tr_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+
+    rows = _injectable_rows(text)
+    if not rows:
+        return []
+
+    lang = (language or "").strip().lower()
+    issues: list[str] = []
+
+    # Build skill -> required? + rationale-empty? view from the rows.
+    for raw, joined in rows:
+        joined_low = joined.lower()
+        # Identify which injectable skill this row references (if any).
+        skill_name = ""
+        for name in list(_INJECTABLE_FLAG_TO_SKILL.values()) + list(
+            _INJECTABLE_PROTOCOL_TO_SKILL.values()
+        ):
+            if name.lower() in joined_low:
+                skill_name = name
+                break
+        if not skill_name:
+            continue
+
+        # (a) placeholder rationale anywhere in the row.
+        if _INJECTABLE_PLACEHOLDER_RE.search(raw):
+            issues.append(
+                f"injectable '{skill_name}' has an un-enriched placeholder "
+                "rationale ([LLM TO ENRICH]/TODO/TBD); recon must fill it"
+            )
+            continue
+
+        # Determine Required state from the row (table cell or prose).
+        required_no = bool(
+            re.search(r"required\??\s*(?:=|:)?\s*\|?\s*no\b", joined_low)
+            or re.search(r"\|\s*no\s*\|", joined_low)
+        )
+        required_yes = bool(
+            re.search(r"required\??\s*(?:=|:)?\s*\|?\s*yes\b", joined_low)
+            or re.search(r"\|\s*yes\s*\|", joined_low)
+        )
+        if required_yes:
+            continue
+
+        # (b) trigger-present-but-not-required (only meaningful if we can
+        # find a NO, or if the row simply recommends without promoting).
+        trigger_present = False
+        # flag-derived trigger.
+        for flag, name in _INJECTABLE_FLAG_TO_SKILL.items():
+            if name != skill_name:
+                continue
+            if flag == "NON_EVM_TARGET" and lang in ("evm", ""):
+                # language-gated: pure-EVM / unknown never recovers CROSS_VM.
+                continue
+            if _detected_flag_present(scratchpad, flag):
+                trigger_present = True
+        # protocol-type-derived trigger.
+        for ptype, name in _INJECTABLE_PROTOCOL_TO_SKILL.items():
+            if name == skill_name and _detected_protocol_type(scratchpad) == ptype:
+                trigger_present = True
+
+        if trigger_present and (required_no or not required_yes):
+            issues.append(
+                f"injectable '{skill_name}' trigger context is present in "
+                "detected_patterns.md but the row is not Required=YES; recon "
+                "must promote it"
+            )
+
+    return issues
+
+
+def _promote_injectable_rows(scratchpad: Path, language: str = "") -> int:
+    """Mechanically promote un-resolved/un-promoted injectable rows to
+    Required=YES with a derived rationale (recall-safe second-failure repair).
+
+    Returns the number of rows changed. Mirrors the recall-safe posture of
+    the niche union repair: never drop, only promote.
+    """
+    tr_path = scratchpad / "template_recommendations.md"
+    if not tr_path.exists():
+        return 0
+    try:
+        text = tr_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return 0
+    if not _validate_injectable_promotion(scratchpad, language):
+        return 0
+
+    lang = (language or "").strip().lower()
+    out_lines: list[str] = []
+    in_sec = False
+    changed = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if re.match(r"^#{2,}\s+Injectable Skills\b", line, re.IGNORECASE):
+            in_sec = True
+            out_lines.append(raw)
+            continue
+        if in_sec and re.match(r"^#{2,}\s+", line):
+            in_sec = False
+            out_lines.append(raw)
+            continue
+        if not in_sec or not line.startswith("|") or _is_separator_row(line):
+            out_lines.append(raw)
+            continue
+        cells = [c.strip() for c in raw.strip().strip("|").split("|")]
+        if cells and cells[0].strip().strip("`*").lower() in (
+            "skill", "injectable", "injectable skill"
+        ):
+            out_lines.append(raw)
+            continue
+        joined_low = raw.lower()
+        skill_name = ""
+        for name in list(_INJECTABLE_FLAG_TO_SKILL.values()) + list(
+            _INJECTABLE_PROTOCOL_TO_SKILL.values()
+        ):
+            if name.lower() in joined_low:
+                skill_name = name
+                break
+        if not skill_name:
+            out_lines.append(raw)
+            continue
+        new_cells = list(cells)
+        row_changed = False
+        for i, c in enumerate(new_cells):
+            cl = c.strip().lower()
+            if cl in ("no",):
+                new_cells[i] = "YES"
+                row_changed = True
+            if _INJECTABLE_PLACEHOLDER_RE.fullmatch(c.strip()) or _INJECTABLE_PLACEHOLDER_RE.search(c):
+                new_cells[i] = (
+                    "trigger present in detected_patterns.md "
+                    "(mechanically promoted)"
+                )
+                row_changed = True
+        if row_changed:
+            changed += 1
+            out_lines.append("| " + " | ".join(new_cells) + " |")
+        else:
+            out_lines.append(raw)
+    if changed:
+        try:
+            tr_path.write_text("\n".join(out_lines) + ("\n" if text.endswith("\n") else ""), encoding="utf-8")
+        except Exception as exc:
+            log.warning("[injectable promotion] write failed: %s", exc)
+            return 0
+    return changed
+
+
 def _validate_depth_promotion_receipt(scratchpad: Path, min_confidence: float = 0.70) -> list[str]:
     inv = scratchpad / "findings_inventory.md"
     if not inv.exists():
@@ -6212,6 +6750,211 @@ def _generate_anti_absorption_retry_hint(issues: list[str]) -> str:
         "(group inherits highest constituent severity).",
         "",
     ])
+    return "\n".join(lines)
+
+
+def _parse_inventory_finding_meta_tolerant(
+    scratchpad: Path,
+) -> dict[str, dict[str, str]]:
+    """Like _parse_inventory_finding_meta but accepts single-letter report IDs.
+
+    Chain constituents are referenced with both internal (INV-*) and
+    report-style (M-07/H-08) IDs. The base parser only matches 2-6 letter
+    prefixes; this variant matches 1-6 letter prefixes so the chain
+    self-restatement gate can resolve M-/H-/L- constituents in fixtures and
+    in post-promotion inventories.
+    """
+    inventory_path = scratchpad / "findings_inventory.md"
+    if not inventory_path.exists():
+        return {}
+    try:
+        text = inventory_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+    meta: dict[str, dict[str, str]] = {}
+    matches = list(re.finditer(
+        r"^#{2,4}\s*Finding\s*\[\s*([A-Z]{1,6}-\d+)\s*\]\s*:\s*(.+?)\s*$",
+        text,
+        re.MULTILINE,
+    ))
+    for i, m in enumerate(matches):
+        fid = m.group(1).strip().upper()
+        title = m.group(2).strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block = text[start:end]
+        sev_m = re.search(r"\*\*Severity\*\*\s*:\s*([A-Za-z]+)", block, re.IGNORECASE)
+        loc_m = re.search(
+            r"\*\*Location\*\*\s*:\s*(.+?)(?=\n\*\*|\n##|\Z)",
+            block, re.IGNORECASE | re.DOTALL,
+        )
+        rc_m = re.search(
+            r"\*\*Root\s*Cause\*\*\s*:\s*(.+?)(?=\n\*\*|\n##|\Z)",
+            block, re.IGNORECASE | re.DOTALL,
+        )
+        meta[fid] = {
+            "title": title,
+            "severity": (sev_m.group(1).strip() if sev_m else ""),
+            "location": (loc_m.group(1).strip() if loc_m else ""),
+            "root_cause": (rc_m.group(1).strip() if rc_m else title),
+        }
+    return meta
+
+
+def _validate_chain_self_restatement(scratchpad: Path, mode: str) -> list[str]:
+    """HARD-with-retry gate against UNDER-merging (chain self-restatement).
+
+    The mirror of `_validate_chain_anti_absorption` (which guards OVER-merging).
+    A chain hypothesis is a self-restatement — an inflated duplicate of a single
+    constituent re-emitted at a higher tier — when it:
+
+      (a) resolves to exactly ONE distinct constituent; OR
+      (b) has two constituents A and B that share file AND function AND have
+          root-cause Jaccard similarity >= 0.50 (same-bug restatement);
+
+      AND the chain's machine-parseable line lacks a justified severity upgrade
+      (`Severity-Upgrade-Justified: NO`, or the line is absent, or
+      `Combined-Impact` is empty/NONE).
+
+    A chain that carries `Severity-Upgrade-Justified: YES` with a non-empty
+    concrete `Combined-Impact` is a GENUINE compound finding and is NEVER
+    flagged (recall-safety: a real distinct compound finding is preserved).
+
+    Returns issue strings. Caller emits a retry hint (hard cap 1 retry) then
+    proceeds — STEP 3 collapse + STEP 4 report carve-out are the safety nets.
+    """
+    try:
+        from plamen_parsers import (
+            _parse_chain_constituents,
+            _chain_severity_upgrade_justified,
+            _CHAIN_HYP_HEADING_RE,
+        )
+        from plamen_parsers import _llm_norm as _pp_llm_norm
+    except Exception:
+        return []
+
+    if mode not in ("core", "thorough"):
+        return []
+    # Tolerant inventory meta: chain constituents are referenced with both
+    # internal (INV-*) and report-style (M-07/H-08) IDs. The shared
+    # _parse_inventory_finding_meta only recognizes 2-6 letter prefixes, so we
+    # parse with a prefix-tolerant regex here (single-letter report IDs too).
+    inventory = _parse_inventory_finding_meta_tolerant(scratchpad)
+    # Note: do NOT early-return on empty inventory — case (a) (single
+    # constituent) only needs the chain parser, not inventory metadata.
+
+    chain_path = scratchpad / "chain_hypotheses.md"
+    if not chain_path.exists():
+        return []
+    try:
+        text = _pp_llm_norm(chain_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+
+    # Build {chain_id: section_text} for justification lookup.
+    sections: dict[str, str] = {}
+    headings = list(_CHAIN_HYP_HEADING_RE.finditer(text))
+    for i, hm in enumerate(headings):
+        cid = hm.group(1).upper()
+        start = hm.end()
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
+        sections[cid] = text[start:end]
+
+    # _parse_chain_constituents already EXCLUDES justified chains; to catch a
+    # 1-constituent restatement that an over-eager agent marked YES *without*
+    # an impact, we re-parse anchors directly here for completeness.
+    issues: list[str] = []
+    for chain_id, section in sections.items():
+        # Skip genuine compound findings (justified + concrete impact).
+        if _chain_severity_upgrade_justified(section):
+            continue
+
+        # Resolve constituent IDs from this chain's anchors/machine line.
+        single = _parse_chain_constituents(scratchpad).get(chain_id, [])
+        # _parse_chain_constituents drops justified chains; for unjustified
+        # ones it returns the constituent list. Resolve metadata.
+        meta_list = [
+            (cid, inventory[cid]) for cid in single if cid in inventory
+        ]
+
+        if not single:
+            # Could not resolve any constituent — nothing to assert.
+            continue
+
+        # (a) exactly one distinct constituent → restatement
+        distinct_ids = {cid for cid in single}
+        if len(distinct_ids) == 1:
+            issues.append(
+                f"{chain_id} has a single constituent "
+                f"({next(iter(distinct_ids))}) and no Combined-Impact "
+                f"justification — chain restates one finding at a higher tier"
+            )
+            continue
+
+        # (b) two constituents, same file+function, high root-cause overlap
+        if len(meta_list) >= 2:
+            file_func_pairs = set()
+            rcs = []
+            for cid, m in meta_list:
+                f = _extract_file_name(m.get("location", ""))
+                fn = (
+                    _extract_function_name(m.get("location", ""))
+                    or _extract_function_name(m.get("root_cause", ""))
+                )
+                file_func_pairs.add((f.lower(), fn.lower()))
+                rcs.append(m.get("root_cause") or m.get("title", ""))
+            file_func_pairs.discard(("", ""))
+            same_func = len(file_func_pairs) == 1
+            rc_max_sim = 0.0
+            for i in range(len(rcs)):
+                for j in range(i + 1, len(rcs)):
+                    sim = _jaccard_token_similarity(rcs[i], rcs[j])
+                    if sim > rc_max_sim:
+                        rc_max_sim = sim
+            if same_func and rc_max_sim >= 0.50:
+                ff = next(iter(file_func_pairs))
+                issues.append(
+                    f"{chain_id} constituents "
+                    f"({', '.join(cid for cid, _ in meta_list)}) share "
+                    f"{ff[0] or '?'}:{ff[1] or '?'} with root-cause Jaccard "
+                    f"{rc_max_sim:.2f} >= 0.50 and no Combined-Impact "
+                    f"justification — chain restates a single bug"
+                )
+    return issues
+
+
+def _generate_chain_self_restatement_retry_hint(issues: list[str]) -> str:
+    """Retry hint for chain self-restatement (under-merge) violations.
+
+    Read at attempt 2 and prepended to the Chain Agent 2 prompt.
+    """
+    if not issues:
+        return ""
+    lines = [
+        "## ATTEMPT 2 RETRY — CHAIN SELF-RESTATEMENT VIOLATIONS",
+        "",
+        "Chain Agent 2 attempt 1 emitted chain hypotheses that merely RESTATE "
+        "a single constituent finding at a higher severity tier "
+        "(`phase4c-chain-prompt.md` Chain Self-Containment Guard). A chain is "
+        "NOT a new finding when it is satisfiable by one constituent alone, or "
+        "when both constituents resolve to the same bug (same file+function, "
+        "high root-cause overlap).",
+        "",
+        "For EACH violation below you MUST do ONE of:",
+        "1. DROP the chain hypothesis and record it in "
+        "`composition_coverage.md` as `Result=SELF-CONTAINED`, leaving the "
+        "constituent at its original severity; OR",
+        "2. Supply an explicit Combined-Impact Justification — a concrete "
+        "loss/privilege/liveness consequence that NEITHER constituent produces "
+        "alone, quantified per Rule 10 — and set the machine-parseable line to "
+        "`Severity-Upgrade-Justified: YES | Combined-Impact: <concrete one-line>`.",
+        "",
+        "Violations:",
+        "",
+    ]
+    for issue in issues:
+        lines.append(f"- {issue}")
+    lines.append("")
     return "\n".join(lines)
 
 

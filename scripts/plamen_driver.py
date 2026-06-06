@@ -7942,6 +7942,15 @@ def _depth_worker_jobs(scratchpad: Path, config: dict) -> list[dict[str, str]]:
         jobs.extend(dict(job) for job in _SC_DEPTH_STANDARD_JOBS)
         if mode in ("core", "thorough"):
             jobs.extend(dict(job) for job in _SC_DEPTH_CORE_SIDE_JOBS)
+            # Gate 1 (resume safety): a run that resumes past instantiate, or
+            # whose spawn_manifest niche table degraded, must still dispatch the
+            # recall-safe union of required niches. Repair the manifest BEFORE
+            # `_required_niche_worker_jobs` reads it so the consumer cannot
+            # silently dispatch an empty/inconsistent niche table.
+            try:
+                _validate_niche_manifest_consistency(scratchpad, mode)
+            except Exception:
+                pass
             seen_outputs = {str(job.get("output", "")) for job in jobs}
             for niche_job in _required_niche_worker_jobs(scratchpad):
                 if niche_job["output"] not in seen_outputs:
@@ -11687,6 +11696,40 @@ def _run_phase_validators(
 
     # --- instantiate: validate spawn_manifest.md at the producer boundary ---
     if phase.name == "instantiate" and passed:
+        # Gate 1: reconcile the three niche representations (BINDING MANIFEST
+        # table, recon Addendum binding-rules prose, spawn_manifest table) plus
+        # the detected_patterns.md flag-derived recall fallback. Repairs the
+        # spawn_manifest + BINDING MANIFEST niche tables to the recall-safe
+        # union; only hard-fails when repair is impossible.
+        niche_consistency_issues = _validate_niche_manifest_consistency(
+            scratchpad, config.get("mode", "core")
+        )
+        if niche_consistency_issues:
+            passed = False
+            missing = list(missing) + [
+                "niche manifest consistency: "
+                + "; ".join(niche_consistency_issues)
+            ]
+            _write_retry_hint(
+                scratchpad,
+                phase.name,
+                "\n".join([
+                    "## RETRY HINT - niche manifest inconsistent / unrepairable",
+                    "",
+                    "The `## Niche Agents` table in spawn_manifest.md must list "
+                    "a Required=YES row for EVERY niche that is required by the "
+                    "BINDING MANIFEST niche table, the Niche Agent Binding "
+                    "Rules prose, OR a detected_patterns.md trigger flag.",
+                    "",
+                    "Required columns: "
+                    "`Niche Agent | Trigger | Required? | Agent ID | "
+                    "Expected Output`.",
+                    "",
+                    "Gate failure:",
+                    *[f"- {issue}" for issue in niche_consistency_issues],
+                    "",
+                ]),
+            )
         manifest_issues = _validate_spawn_manifest_schema(
             scratchpad, config.get("mode", "core")
         )
@@ -12142,6 +12185,48 @@ def _run_phase_validators(
                     f"per-constituent demotion will limit blast radius"
                 )
 
+    # --- chain self-restatement (UNDER-merge) hard gate ----------------------
+    # Mirror of anti-absorption: flags a chain hypothesis that merely RESTATES
+    # a single constituent at a higher tier (DODO-class High-tier inflation).
+    # On violation: emit a retry hint and fail the gate (hard cap 1 retry); if
+    # it persists, proceed — STEP 3 collapse + STEP 4 report carve-out are the
+    # safety nets. Fires on whichever chain phase wrote chain_hypotheses.md
+    # (validator returns [] when the file is absent).
+    if phase.name in ("chain", "chain_agent2") and passed:
+        try:
+            csr_issues = _validate_chain_self_restatement(
+                scratchpad, config.get("mode", "core")
+            )
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] chain self-restatement gate skipped "
+                f"(non-blocking): {exc}"
+            )
+            csr_issues = []
+        if csr_issues:
+            already_retried = bool(_read_retry_hint(scratchpad, phase.name))
+            if not already_retried:
+                hint = _generate_chain_self_restatement_retry_hint(csr_issues)
+                if hint:
+                    _write_retry_hint(scratchpad, phase.name, hint)
+                passed = False
+                missing = list(missing) + [
+                    "chain self-restatement: " + "; ".join(csr_issues[:3])
+                    + (f" (+{len(csr_issues) - 3} more)"
+                       if len(csr_issues) > 3 else "")
+                ]
+                log.warning(
+                    f"[{phase.name}] chain self-restatement violations: "
+                    f"{len(csr_issues)} chain(s) restate a single constituent "
+                    f"— retry hint written"
+                )
+            else:
+                log.warning(
+                    f"[{phase.name}] chain self-restatement violations persist "
+                    f"after retry ({len(csr_issues)} chain(s)) — proceeding; "
+                    f"STEP 3 collapse / STEP 4 report carve-out will merge them"
+                )
+
     # --- post_verify_extract (Phase 5.5) ---
     # Same soft-only model. Common case (zero [VER-NEW-*] observations)
     # is a fast no-op write of an empty summary.
@@ -12344,6 +12429,53 @@ def _run_phase_validators(
                 "[recon] content format (non-blocking): %s",
                 "; ".join(content_soft),
             )
+        # Gate 2: injectable enrichment/promotion. Flag un-enriched placeholder
+        # rationales and Required=NO-while-trigger-present rows. Retry once so
+        # recon re-enriches/promotes; on the SECOND failure, mechanically
+        # promote the row(s) to Required=YES (recall-safe) instead of dropping.
+        injectable_issues = _validate_injectable_promotion(
+            scratchpad, config.get("language", ""),
+        )
+        if injectable_issues:
+            gate2_flag = scratchpad / "_injectable_promotion_retry.flag"
+            if gate2_flag.exists():
+                # Second failure: mechanically promote rather than halt.
+                promoted = _promote_injectable_rows(
+                    scratchpad, config.get("language", ""),
+                )
+                log.warning(
+                    "[recon] injectable promotion: recon did not resolve %d "
+                    "injectable issue(s) on retry; mechanically promoted %d "
+                    "row(s) to Required=YES (recall-safe): %s",
+                    len(injectable_issues), promoted,
+                    "; ".join(injectable_issues),
+                )
+            else:
+                try:
+                    gate2_flag.write_text("1", encoding="utf-8")
+                except Exception:
+                    pass
+                passed = False
+                missing = list(missing) + [
+                    "injectable promotion: " + "; ".join(injectable_issues)
+                ]
+                _write_retry_hint(
+                    scratchpad,
+                    phase.name,
+                    "\n".join([
+                        "## RETRY HINT - injectable skill not enriched/promoted",
+                        "",
+                        "In template_recommendations.md `### Injectable Skills`, "
+                        "every recommended injectable MUST have a filled-in "
+                        "rationale (no [LLM TO ENRICH]/TODO/TBD) and MUST be "
+                        "marked Required=YES when its trigger context is present "
+                        "in detected_patterns.md.",
+                        "",
+                        "Gate failure:",
+                        *[f"- {issue}" for issue in injectable_issues],
+                        "",
+                    ]),
+                )
         if config["pipeline"] == "l1":
             leftover_issues = _validate_scope_leftover(
                 scratchpad,
