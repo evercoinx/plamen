@@ -12437,45 +12437,24 @@ def _run_phase_validators(
             scratchpad, config.get("language", ""),
         )
         if injectable_issues:
-            gate2_flag = scratchpad / "_injectable_promotion_retry.flag"
-            if gate2_flag.exists():
-                # Second failure: mechanically promote rather than halt.
-                promoted = _promote_injectable_rows(
-                    scratchpad, config.get("language", ""),
-                )
-                log.warning(
-                    "[recon] injectable promotion: recon did not resolve %d "
-                    "injectable issue(s) on retry; mechanically promoted %d "
-                    "row(s) to Required=YES (recall-safe): %s",
-                    len(injectable_issues), promoted,
-                    "; ".join(injectable_issues),
-                )
-            else:
-                try:
-                    gate2_flag.write_text("1", encoding="utf-8")
-                except Exception:
-                    pass
-                passed = False
-                missing = list(missing) + [
-                    "injectable promotion: " + "; ".join(injectable_issues)
-                ]
-                _write_retry_hint(
-                    scratchpad,
-                    phase.name,
-                    "\n".join([
-                        "## RETRY HINT - injectable skill not enriched/promoted",
-                        "",
-                        "In template_recommendations.md `### Injectable Skills`, "
-                        "every recommended injectable MUST have a filled-in "
-                        "rationale (no [LLM TO ENRICH]/TODO/TBD) and MUST be "
-                        "marked Required=YES when its trigger context is present "
-                        "in detected_patterns.md.",
-                        "",
-                        "Gate failure:",
-                        *[f"- {issue}" for issue in injectable_issues],
-                        "",
-                    ]),
-                )
+            # Self-heal INLINE (mirror the niche-manifest consistency gate):
+            # mechanically promote the genuinely-triggered (or selected-but-
+            # unenriched) injectable row(s) to Required=YES and PASS. Do NOT
+            # fail+retry the whole recon phase. The promotion is recall-safe
+            # (`_promote_injectable_rows` only ADDS a row whose trigger is
+            # present in detected_patterns.md, never drops one), the LLM almost
+            # never flips on a re-run, and the old retry-then-promote flow read
+            # as a scary "recon gate failed, retrying" for something the gate
+            # auto-fixes anyway.
+            promoted = _promote_injectable_rows(
+                scratchpad, config.get("language", ""),
+            )
+            log.info(
+                "[recon] injectable promotion: promoted %d triggered "
+                "injectable row(s) to Required=YES inline (recall-safe, no "
+                "retry): %s",
+                promoted, "; ".join(injectable_issues),
+            )
         if config["pipeline"] == "l1":
             leftover_issues = _validate_scope_leftover(
                 scratchpad,
