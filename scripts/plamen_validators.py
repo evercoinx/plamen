@@ -3911,14 +3911,6 @@ def _validate_injectable_promotion(
         if not skill_name:
             continue
 
-        # (a) placeholder rationale anywhere in the row.
-        if _INJECTABLE_PLACEHOLDER_RE.search(raw):
-            issues.append(
-                f"injectable '{skill_name}' has an un-enriched placeholder "
-                "rationale ([LLM TO ENRICH]/TODO/TBD); recon must fill it"
-            )
-            continue
-
         # Determine Required state from the row (table cell or prose).
         required_no = bool(
             re.search(r"required\??\s*(?:=|:)?\s*\|?\s*no\b", joined_low)
@@ -3928,7 +3920,22 @@ def _validate_injectable_promotion(
             re.search(r"required\??\s*(?:=|:)?\s*\|?\s*yes\b", joined_low)
             or re.search(r"\|\s*yes\s*\|", joined_low)
         )
+        has_placeholder = bool(_INJECTABLE_PLACEHOLDER_RE.search(raw))
+
+        # (a) A *selected* injectable (Required=YES) must carry a real
+        # rationale. A placeholder on an UNSELECTED catalog row (Required=NO or
+        # unset) is the NORMAL "not applicable" state of the injectable MENU —
+        # the recon template lists ALL injectables and leaves [LLM TO ENRICH]
+        # on the ones it did not select. Flagging every placeholder fired on
+        # the whole 9-row catalog and mass-promoted every injectable; scope (a)
+        # to Required=YES rows only.
         if required_yes:
+            if has_placeholder:
+                issues.append(
+                    f"injectable '{skill_name}' is Required=YES but has an "
+                    "un-enriched placeholder rationale "
+                    "([LLM TO ENRICH]/TODO/TBD); recon must fill it"
+                )
             continue
 
         # (b) trigger-present-but-not-required (only meaningful if we can
@@ -4009,14 +4016,43 @@ def _promote_injectable_rows(scratchpad: Path, language: str = "") -> int:
         if not skill_name:
             out_lines.append(raw)
             continue
+        # Only touch a row that the validator would genuinely flag: a row whose
+        # trigger IS present in detected_patterns.md (promote NO->YES + fill
+        # rationale) or a Required=YES row left with a placeholder (fill
+        # rationale only). An UNSELECTED catalog row (Required=NO, trigger
+        # absent) is left exactly as-is — never mass-promoted.
+        required_yes = bool(
+            re.search(r"required\??\s*(?:=|:)?\s*\|?\s*yes\b", joined_low)
+            or re.search(r"\|\s*yes\s*\|", joined_low)
+        )
+        trigger_present = False
+        for flag, name in _INJECTABLE_FLAG_TO_SKILL.items():
+            if name != skill_name:
+                continue
+            if flag == "NON_EVM_TARGET" and lang in ("evm", ""):
+                continue
+            if _detected_flag_present(scratchpad, flag):
+                trigger_present = True
+        if (not trigger_present) and _detected_protocol_type(scratchpad):
+            for ptype, name in _INJECTABLE_PROTOCOL_TO_SKILL.items():
+                if name == skill_name and _detected_protocol_type(scratchpad) == ptype:
+                    trigger_present = True
+        promote_to_yes = trigger_present and not required_yes
+        fill_rationale = promote_to_yes or required_yes
+        if not promote_to_yes and not fill_rationale:
+            out_lines.append(raw)
+            continue
         new_cells = list(cells)
         row_changed = False
         for i, c in enumerate(new_cells):
             cl = c.strip().lower()
-            if cl in ("no",):
+            if promote_to_yes and cl in ("no",):
                 new_cells[i] = "YES"
                 row_changed = True
-            if _INJECTABLE_PLACEHOLDER_RE.fullmatch(c.strip()) or _INJECTABLE_PLACEHOLDER_RE.search(c):
+            elif fill_rationale and (
+                _INJECTABLE_PLACEHOLDER_RE.fullmatch(c.strip())
+                or _INJECTABLE_PLACEHOLDER_RE.search(c)
+            ):
                 new_cells[i] = (
                     "trigger present in detected_patterns.md "
                     "(mechanically promoted)"

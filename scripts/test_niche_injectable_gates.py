@@ -179,7 +179,11 @@ def test_gate1_light_mode_skipped(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 def test_gate2_injectable_placeholder_fails(tmp_path: Path):
-    """(v) injectable row with '[LLM TO ENRICH]' -> Gate 2 fails."""
+    """(v) CROSS_VM left Required=NO + [LLM TO ENRICH] while NON_EVM_TARGET is
+    present -> Gate 2 fails (the real DODO case). The corrected gate catches it
+    as trigger-present-but-not-promoted, NOT as a bare placeholder (a placeholder
+    on a non-selected catalog row is the normal menu state — see the catalog
+    regression test below)."""
     v = _load("plamen_validators")
     tr = (
         "### Injectable Skills\n"
@@ -198,7 +202,36 @@ def test_gate2_injectable_placeholder_fails(tmp_path: Path):
 
     assert issues
     assert any("CROSS_VM_SERIALIZATION_CONFORMANCE" in i for i in issues)
-    assert any("placeholder" in i for i in issues)
+    assert any(("trigger" in i.lower() or "promote" in i.lower()) for i in issues)
+
+
+def test_gate2_full_catalog_no_triggers_does_not_false_fire(tmp_path: Path):
+    """REGRESSION: the recon template lists the FULL injectable catalog with
+    [LLM TO ENRICH] on every UNSELECTED (Required=NO) row. With no triggers
+    present, Gate 2 must flag NOTHING and promote NOTHING — the prior bug fired
+    on all 9 catalog rows and mass-promoted every injectable to Required=YES."""
+    v = _load("plamen_validators")
+    skills = [
+        "VAULT_ACCOUNTING", "ACCOUNT_ABSTRACTION_SECURITY", "NFT_PROTOCOL_SECURITY",
+        "GOVERNANCE_ATTACK_VECTORS", "OUTCOME_DETERMINISM", "LENDING_PROTOCOL_SECURITY",
+        "DEX_INTEGRATION_SECURITY", "INTEGRATION_HAZARD_RESEARCH",
+        "CROSS_VM_SERIALIZATION_CONFORMANCE",
+    ]
+    rows = "".join(
+        f"| {s} | NO | depth-external | [LLM TO ENRICH] |\n" for s in skills
+    )
+    (tmp_path / "template_recommendations.md").write_text(
+        "### Injectable Skills\n\n"
+        "| Skill | Required? | Inject Into | Rationale |\n"
+        "|-------|-----------|-------------|-----------|\n" + rows,
+        encoding="utf-8",
+    )
+    (tmp_path / "detected_patterns.md").write_text(
+        "# Detected Patterns\nFLASH_LOAN = NO\nORACLE = NO\nprotocol_type: token\n",
+        encoding="utf-8",
+    )
+    assert v._validate_injectable_promotion(tmp_path, "evm") == []
+    assert v._promote_injectable_rows(tmp_path, "evm") == 0
 
 
 def test_gate2_required_no_with_trigger_absent_passes_pure_evm(tmp_path: Path):
