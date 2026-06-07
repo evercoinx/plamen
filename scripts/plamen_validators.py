@@ -7389,25 +7389,36 @@ def _validate_invariants_pass2(scratchpad: Path, mode: str) -> list[str]:
         text = inv_path.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return []
-    # Header matching is intentionally TOLERANT: the LLM writes the same
-    # heading in many shapes (## vs ### vs ####, bold `**...**`, leading
-    # whitespace, trailing qualifiers like "(Pass 2)" / ": Recursive Trace").
-    # A brittle `^###\s+Summary\s+Flags` exact-match produced a recurring false
-    # "missing subblock" warning EVERY run even when the block was present in a
-    # slightly different shape. Anchor at line-start, allow #-level/bold/ws and
-    # a word boundary instead of requiring exact heading punctuation.
+    # Pass 2 header — tolerant of shape (## vs ### vs ####, bold, leading ws,
+    # trailing qualifiers). The agent never writes this identically twice.
     _PASS2_HEADER = r"(?im)^\s{0,3}(?:#{1,4}\s*)?\*{0,3}\s*pass\s*2\b"
-    _SUMMARY_FLAGS_HEADER = r"(?im)^\s{0,3}(?:#{1,4}\s*)?\*{0,3}\s*summary\s+flags\b"
+    # Detect the niche-trigger flags by their DATA, NOT a heading. Verified
+    # against real output: agents label the block inconsistently — AWX wrote
+    # "### Summary Flags (...)", DODO wrote "### Pass 2 Summary Statistics" with
+    # the flags inside a ``` fence. A heading regex of ANY shape is the wrong
+    # signal (the prior "Summary Flags" exact-match AND its tolerant successor
+    # both missed DODO). What the SEMANTIC_GAP_INVESTIGATOR trigger actually
+    # reads is the flag VALUES; check for those tokens anywhere in the content,
+    # heading- and code-fence-agnostic.
+    _FLAG_TOKEN = re.compile(
+        r"\b(sync_gaps|accumulation_exposures|conditional_writes|cluster_gaps)\b"
+        r"\s*[:=]\s*-?\d",
+        re.IGNORECASE,
+    )
     if re.search(_PASS2_HEADER, text):
-        # Pass 2 section present. Optional further check: does it have a
-        # Summary Flags block (any heading/bold shape)? If not, warn but pass.
-        if not re.search(_SUMMARY_FLAGS_HEADER, text):
+        flags_present = len({m.group(1).lower() for m in _FLAG_TOKEN.finditer(text)})
+        # Warn ONLY when the niche-trigger flag DATA is genuinely (near-)absent,
+        # not when the heading is named differently. >=2 of the 4 canonical
+        # flags present = the trigger can be evaluated -> stay silent.
+        if flags_present < 2:
             import logging as _logging
             _logging.getLogger("plamen.validators").warning(
-                "[invariants_p2] Pass 2 section present but missing "
-                "`### Summary Flags` subblock; SEMANTIC_GAP_INVESTIGATOR "
-                "niche-agent trigger may not fire on partial flags. "
-                "Continuing — Pass 1 data alone is sufficient for depth."
+                "[invariants_p2] Pass 2 section present but the niche-trigger "
+                "flag data (sync_gaps / accumulation_exposures / "
+                "conditional_writes / cluster_gaps with values) is missing "
+                "(found %d/4); SEMANTIC_GAP_INVESTIGATOR trigger may not fire. "
+                "Continuing — Pass 1 data alone is sufficient for depth.",
+                flags_present,
             )
         return []
     # Pass 2 didn't append a section. Soft-degrade sentinel; don't halt.
