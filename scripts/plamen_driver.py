@@ -11372,7 +11372,7 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
             # Single-flag, zero-risk (Anthropic's own recommended flag).
             "--exclude-dynamic-system-prompt-sections",
             "--add-dir", config["project_root"],
-            # Agents must read ~/.claude/rules/*.md, prompts/{lang}/*.md, and
+            # Agents must read ~/.plamen/rules/*.md, prompts/{lang}/*.md, and
             # skills/**/SKILL.md. Add the Claude home explicitly so permission
             # prompts never fire. v2.3.8 DRV-2: forward-slash form to keep
             # CLI argv consistent across Windows/POSIX so MCP/path loaders

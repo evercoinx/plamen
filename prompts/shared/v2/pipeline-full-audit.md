@@ -28,7 +28,7 @@
 | `plamen-wizard.md` | 258 | V2 SC entry point |
 | `plamen-l1-wizard.md` | 288 | V2 L1 entry point |
 
-### Rules (~/.claude/rules\) — 10 files, all loaded via CLAUDE.md
+### Rules (~/.plamen/rules\) — 10 files, all loaded via CLAUDE.md
 ### V2 Prompt Templates (~/.claude/prompts\shared\v2\) — 37 files, ~3500 lines total
 ### Language-Specific Prompts (~/.claude/prompts\{evm,solana,aptos,sui,soroban,l1}\) — ~12 files per tree
 ### Agent Definitions (~/.claude/agents\) — 8 files (6 depth + security-analyzer + security-verifier)

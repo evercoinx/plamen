@@ -1,6 +1,6 @@
 """Phase B: severity-matrix enforcement tests.
 
-Per `~/.claude/rules/report-template.md`, severity is Impact x Likelihood with
+Per `~/.plamen/rules/report-template.md`, severity is Impact x Likelihood with
 three downgrade modifiers (on-chain-only, view-function-only, fully-trusted).
 
 The driver MUST mechanically apply this matrix at report-index time, overriding
