@@ -176,3 +176,157 @@ def test_retry_hint_generation(tmp_path: Path) -> None:
     assert "DA-3" in hint
     assert "OVERWRITE" in hint
     assert pv._generate_chain_baseline_regroup_retry_hint([]) == ""
+
+
+# ──────────────────── FIX 1: inline auto-map tests ────────────────────
+
+
+def _write_depth_verdict(sp: Path, name: str, items: list[tuple[str, str, str]]) -> None:
+    """items: list of (finding_id, verdict, severity)."""
+    lines = [f"# Depth Agent {name}", ""]
+    for fid, verdict, sev in items:
+        lines.append(f"### Finding [{fid}]: {fid} depth title for {fid}")
+        lines.append(f"**Verdict**: {verdict}")
+        lines.append(f"**Severity**: {sev}")
+        lines.append(f"**Location**: src/Bar.sol:L{20 + len(lines)}")
+        lines.append("")
+    (sp / f"depth_{name}_findings.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def test_automap_full_skip_self_heal(tmp_path: Path) -> None:
+    """Full-skip case: stamped scaffold + CONFIRMED DA-3 -> auto-map maps DA-3,
+    strips the MECHANICAL_BASELINE stamp, and a gate re-run returns []."""
+    pv = _pv()
+    _write_inventory(tmp_path, ["INV-1", "INV-2", "INV-3"])
+    pv._write_chain_passthrough_outputs(tmp_path, "test")  # stamped scaffold
+    _write_depth_verdict(tmp_path, "x", [("DA-3", "CONFIRMED", "High")])
+
+    # Gate fires before repair.
+    assert pv._validate_chain_baseline_not_regrouped(tmp_path, "thorough")
+
+    mapped = pv._auto_map_unmapped_depth_findings(tmp_path)
+    assert "DA-3" in mapped
+
+    fm = (tmp_path / "finding_mapping.md").read_text(encoding="utf-8")
+    hyp = (tmp_path / "hypotheses.md").read_text(encoding="utf-8")
+    assert "DA-3" in fm and "DA-3" in hyp
+    assert pv._MECHANICAL_BASELINE_STAMP not in fm
+    assert pv._MECHANICAL_BASELINE_STAMP not in hyp
+
+    # Re-run gate after repair: clean.
+    assert pv._validate_chain_baseline_not_regrouped(tmp_path, "thorough") == []
+
+
+def test_automap_partial_grouping_append(tmp_path: Path) -> None:
+    """Partial-grouping case: unstamped grouped mapping missing DA-3 ->
+    auto-map appends DA-3, gate re-run returns []."""
+    pv = _pv()
+    _write_inventory(tmp_path, ["INV-1", "INV-2"])
+    _write_grouped(
+        tmp_path,
+        [("INV-1", "GRP-1"), ("INV-2", "GRP-2")],
+        stamped=False,
+    )
+    _write_depth_verdict(tmp_path, "x", [("DA-3", "CONFIRMED", "Medium")])
+
+    assert pv._validate_chain_baseline_not_regrouped(tmp_path, "thorough")
+
+    mapped = pv._auto_map_unmapped_depth_findings(tmp_path)
+    assert mapped == ["DA-3"]
+
+    assert pv._validate_chain_baseline_not_regrouped(tmp_path, "thorough") == []
+
+
+def test_automap_refuted_skipped_residual(tmp_path: Path) -> None:
+    """A REFUTED unmapped depth finding is NOT auto-mapped. With verdict
+    filtering in CHECK 2, a REFUTED-only depth finding does not fire the gate."""
+    pv = _pv()
+    _write_inventory(tmp_path, ["INV-1", "INV-2"])
+    _write_grouped(
+        tmp_path,
+        [("INV-1", "GRP-1"), ("INV-2", "GRP-2")],
+        stamped=False,
+    )
+    _write_depth_verdict(tmp_path, "x", [("DA-9", "REFUTED", "Medium")])
+
+    # Verdict-filtered CHECK 2 does not flag a REFUTED-only depth finding.
+    assert pv._validate_chain_baseline_not_regrouped(tmp_path, "thorough") == []
+
+    mapped = pv._auto_map_unmapped_depth_findings(tmp_path)
+    assert mapped == []
+    fm = (tmp_path / "finding_mapping.md").read_text(encoding="utf-8")
+    assert "DA-9" not in fm
+
+
+def test_automap_mixed_verdicts(tmp_path: Path) -> None:
+    """Mixed bag: CONFIRMED + PARTIAL + CONTESTED auto-mapped; REFUTED skipped."""
+    pv = _pv()
+    _write_inventory(tmp_path, ["INV-1"])
+    _write_grouped(tmp_path, [("INV-1", "GRP-1")], stamped=False)
+    _write_depth_verdict(
+        tmp_path,
+        "x",
+        [
+            ("DA-1", "CONFIRMED", "High"),
+            ("DA-2", "PARTIAL", "Medium"),
+            ("DA-3", "CONTESTED", "Low"),
+            ("DA-4", "REFUTED", "Medium"),
+        ],
+    )
+    mapped = set(pv._auto_map_unmapped_depth_findings(tmp_path))
+    assert mapped == {"DA-1", "DA-2", "DA-3"}
+    fm = (tmp_path / "finding_mapping.md").read_text(encoding="utf-8")
+    assert "DA-4" not in fm
+    # Gate clean after repair (REFUTED DA-4 never required).
+    assert pv._validate_chain_baseline_not_regrouped(tmp_path, "thorough") == []
+
+
+def test_automap_title_severity_preserved(tmp_path: Path) -> None:
+    """Recall-safety: title and severity are preserved verbatim from the depth
+    block in the appended rows."""
+    pv = _pv()
+    _write_inventory(tmp_path, ["INV-1"])
+    _write_grouped(tmp_path, [("INV-1", "GRP-1")], stamped=False)
+    _write_depth_verdict(tmp_path, "x", [("DA-7", "CONFIRMED", "Critical")])
+
+    pv._auto_map_unmapped_depth_findings(tmp_path)
+    hyp = (tmp_path / "hypotheses.md").read_text(encoding="utf-8")
+    da7_row = [ln for ln in hyp.splitlines() if "DA-7" in ln]
+    assert da7_row, "DA-7 hypothesis row missing"
+    row = da7_row[0]
+    assert "Critical" in row, f"severity not preserved: {row}"
+    assert "depth title for DA-7" in row, f"title not preserved: {row}"
+
+
+def test_automap_idempotent(tmp_path: Path) -> None:
+    """Running auto-map twice does not duplicate rows."""
+    pv = _pv()
+    _write_inventory(tmp_path, ["INV-1"])
+    _write_grouped(tmp_path, [("INV-1", "GRP-1")], stamped=False)
+    _write_depth_verdict(tmp_path, "x", [("DA-5", "CONFIRMED", "Medium")])
+
+    first = pv._auto_map_unmapped_depth_findings(tmp_path)
+    assert first == ["DA-5"]
+    second = pv._auto_map_unmapped_depth_findings(tmp_path)
+    assert second == [], "second run must be a no-op"
+
+    fm = (tmp_path / "finding_mapping.md").read_text(encoding="utf-8")
+    assert fm.count("| DA-5 |") == 1, "DA-5 mapping row duplicated"
+
+
+def test_automap_healthy_noop(tmp_path: Path) -> None:
+    """Healthy fully-mapped run: auto-map is a no-op and adds no rows."""
+    pv = _pv()
+    _write_inventory(tmp_path, ["INV-1", "INV-2"])
+    _write_grouped(
+        tmp_path,
+        [("INV-1", "GRP-1"), ("INV-2", "GRP-2"), ("DA-3", "GRP-2")],
+        stamped=False,
+    )
+    _write_depth_verdict(tmp_path, "x", [("DA-3", "CONFIRMED", "Medium")])
+
+    fm_before = (tmp_path / "finding_mapping.md").read_text(encoding="utf-8")
+    mapped = pv._auto_map_unmapped_depth_findings(tmp_path)
+    assert mapped == []
+    fm_after = (tmp_path / "finding_mapping.md").read_text(encoding="utf-8")
+    assert fm_before == fm_after, "healthy run must not mutate finding_mapping.md"

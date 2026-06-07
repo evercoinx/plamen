@@ -79,6 +79,98 @@ def test_p21_title_hash_stable_across_minor_variations():
     assert _title_hash(f"Finding [GRP-01]: {base}") == h_base
 
 
+def test_fix2_title_hash_dash_family_collapses():
+    """Em/en/figure-dash and minus all normalize to ASCII hyphen (FIX 2)."""
+    base_hyphen = "GCC trusts inbound externalId verbatim - no provenance"
+    for dash in "‒–—―−":
+        variant = base_hyphen.replace("-", dash)
+        assert _title_hash(variant) == _title_hash(base_hyphen)
+
+
+def test_fix2_title_hash_backtick_and_emphasis_ignored():
+    """Code-framing/emphasis punctuation does not change identity (FIX 2)."""
+    a = "GatewayCrossChain.withdraw() is public"
+    b = "GatewayCrossChain.`withdraw()` is **public**"
+    assert _title_hash(a) == _title_hash(b)
+
+
+def test_fix2_titles_collide_false_on_dash_reword():
+    """The exact DODO cascade: em-dash reword is NOT a collision (FIX 2)."""
+    from plamen_parsers import _titles_collide
+    a = "GCC trusts inbound externalId verbatim — no provenance check"
+    b = "GCC trusts inbound externalId verbatim - no provenance check"
+    assert _titles_collide(a, b) is False
+
+
+def test_fix2_titles_collide_false_on_abbrev_expansion():
+    """Abbreviation expanded with otherwise-identical wording is same finding."""
+    from plamen_parsers import _titles_collide
+    a = "GCC trusts inbound externalId verbatim — no provenance"
+    b = "GatewayCrossChain trusts inbound externalId verbatim - no provenance"
+    assert _titles_collide(a, b) is False
+
+
+def test_fix2_titles_collide_false_on_added_trailing_detail():
+    """Added trailing detail (prefix containment) is same finding, not collision."""
+    from plamen_parsers import _titles_collide
+    a = "GatewayCrossChain trusts inbound externalId verbatim"
+    b = "GatewayCrossChain trusts inbound externalId verbatim, enabling spoof"
+    assert _titles_collide(a, b) is False
+
+
+def test_fix2_titles_collide_true_on_genuinely_different_finding():
+    """Different findings reusing an ID MUST still be a collision (recall-safe)."""
+    from plamen_parsers import _titles_collide
+    a = "GatewayTransferNative.withdraw() Is Public — Permissionless Drain"
+    b = "Missing reinitializer() function blocks upgrade"
+    assert _titles_collide(a, b) is True
+
+
+def test_fix2_register_reuses_on_cosmetic_reword(tmp_path):
+    """Ledger register: cosmetic chain reword -> REUSED, not COLLISION (FIX 2)."""
+    id_ledger_register(
+        tmp_path, finding_id="GRP-01", owner_phase="chain",
+        owner_attempt=1, owning_artifact="hypotheses.md",
+        title="GCC trusts inbound externalId verbatim — no provenance check",
+    )
+    r = id_ledger_register(
+        tmp_path, finding_id="GRP-01", owner_phase="chain",
+        owner_attempt=2, owning_artifact="hypotheses.md",
+        title="GatewayCrossChain trusts inbound externalId verbatim - no provenance check",
+    )
+    assert r["status"] == "REUSED"
+
+
+def test_fix2_register_still_collides_on_different_finding(tmp_path):
+    """Ledger register: genuinely different finding for same ID -> COLLISION."""
+    id_ledger_register(
+        tmp_path, finding_id="GRP-01", owner_phase="chain",
+        owner_attempt=1, owning_artifact="hypotheses.md",
+        title="GatewayTransferNative.withdraw() Is Public — Permissionless Drain",
+    )
+    r = id_ledger_register(
+        tmp_path, finding_id="GRP-01", owner_phase="chain",
+        owner_attempt=2, owning_artifact="hypotheses.md",
+        title="Missing reinitializer() function blocks contract upgrade",
+    )
+    assert r["status"] == "COLLISION"
+
+
+def test_fix2_collision_gate_no_false_alarm_on_chain_reword(tmp_path):
+    """End-to-end: chain retry that reworded its OWN titles does NOT collide."""
+    (tmp_path / "hypotheses.md").write_text(
+        "### GRP-01 — GCC trusts inbound externalId verbatim — no check\n",
+        encoding="utf-8",
+    )
+    assert _validate_id_ledger_collisions(tmp_path, "chain", attempt=1) == []
+    # Retry reworded the SAME finding (abbrev expanded, em-dash -> hyphen).
+    (tmp_path / "hypotheses.md").write_text(
+        "### GRP-01 - GatewayCrossChain trusts inbound externalId verbatim - no check\n",
+        encoding="utf-8",
+    )
+    assert _validate_id_ledger_collisions(tmp_path, "chain", attempt=2) == []
+
+
 def test_p21_id_prefix_of():
     """Prefix extractor handles common forms; returns '' for non-IDs."""
     assert _id_prefix_of("GRP-01") == "GRP-"

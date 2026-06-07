@@ -173,7 +173,9 @@ __all__ = [
     "_validate_invariants_pass2",
     "_validate_chain_iter2",
     "_validate_chain_anti_absorption",
+    "_declared_depth_findings",
     "_validate_chain_baseline_not_regrouped",
+    "_auto_map_unmapped_depth_findings",
     "_generate_chain_baseline_regroup_retry_hint",
     "_validate_chain_self_restatement",
     "_generate_chain_self_restatement_retry_hint",
@@ -6262,9 +6264,23 @@ def _validate_id_ledger_collisions(
     from plamen_parsers import _id_ledger_load, _id_ledger_save, id_ledger_register
 
     # Failed retries are quarantined and are not downstream truth. Do not let
-    # their same-phase allocations poison the next attempt. Cross-phase
-    # collisions still remain blocking because those indicate a real identity
-    # conflict against accepted upstream artifacts.
+    # their same-phase allocations poison the next attempt.
+    #
+    # `chain_agent2` mints CH-* whose stable identity is the ordered source-ID
+    # tuple in the row; natural-language detail around that tuple drifts freely
+    # across retries, so for chain_agent2 we PURGE its own prior-attempt
+    # allocations entirely (a re-mint is a replacement). Cross-phase collisions
+    # remain blocking.
+    #
+    # `chain` (Agent 1) owns GRP/HH/HM/... whose identity IS the title. We do
+    # NOT blind-purge those on retry — that would lose the genuine DODO
+    # collision (GRP-01 Critical-A on attempt 1 vs different Medium-B on
+    # attempt 2). Instead, retry-awareness for `chain` is content-based: the
+    # ledger's `_titles_collide` predicate treats a phase re-minting its own ID
+    # with the SAME finding (cosmetic reword: em-dash -> hyphen, abbreviation
+    # expanded, added detail) as REUSED, and only a genuinely DIFFERENT finding
+    # as COLLISION. This was the DODO/AwesomeX false-collision root cause: 36
+    # cosmetic chain rewordings tripped the strict title-hash equality check.
     if attempt > 1 and phase_name == "chain_agent2":
         try:
             ledger = _id_ledger_load(scratchpad)
@@ -6748,6 +6764,75 @@ def _validate_chain_anti_absorption(scratchpad: Path, mode: str) -> list[str]:
 _MECHANICAL_BASELINE_STAMP = "**Status**: MECHANICAL_BASELINE"
 
 
+def _declared_depth_findings(
+    depth_path: Path,
+) -> list[tuple[str, str, str, str, str]]:
+    """Parse `### Finding [ID]:` blocks from a depth_*_findings.md file.
+
+    Returns a list of (finding_id, title, severity, location, verdict) tuples,
+    one per declared finding. Used by BOTH the baseline-regroup gate (CHECK 2,
+    verdict filter) and the inline auto-map repair helper, so detection and
+    repair stay symmetric.
+
+    Uses the permissive `_INVENTORY_FINDING_HEADING_RE` + `_extract_finding_ids_from_text`
+    for ID detection (matches bare DA-N / DX-N / etc. shapes), then derives the
+    title/severity/location/verdict from the block body via `_field_from_markdown`.
+    This deliberately does NOT rely on `_parse_depth_finding_blocks`, whose
+    feeder-ID heading pattern rejects bare `DA-N`-shaped IDs.
+    """
+    try:
+        from plamen_parsers import (
+            _INVENTORY_FINDING_HEADING_RE,
+            _extract_finding_ids_from_text,
+            _field_from_markdown,
+            _normalize_finding_id,
+            _strip_md,
+        )
+    except Exception:
+        return []
+
+    try:
+        text = depth_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+
+    matches = list(_INVENTORY_FINDING_HEADING_RE.finditer(text))
+    if not matches:
+        return []
+
+    out: list[tuple[str, str, str, str, str]] = []
+    seen: set[str] = set()
+    for idx, m in enumerate(matches):
+        start = m.start()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        block = text[start:end]
+        heading_line = next(
+            (ln for ln in block.splitlines() if ln.strip()), ""
+        )
+        declared = _extract_finding_ids_from_text(heading_line)
+        if not declared:
+            continue
+        for did in sorted(declared):
+            norm = _normalize_finding_id(str(did)) or str(did).strip().upper()
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            # Title: strip the `### Finding [ID]:` prefix from the heading.
+            title = re.sub(r"^\s*###\s+Finding\s+\[[^\]]+\]:\s*", "", heading_line).strip()
+            title = _strip_md(title) or norm
+            sev = _strip_md(
+                _field_from_markdown(block, ("Severity", "Final Severity"))
+            ) or "Medium"
+            loc = _strip_md(
+                _field_from_markdown(block, ("Location", "Locations"))
+            ) or "UNKNOWN"
+            verdict = _strip_md(
+                _field_from_markdown(block, ("Verdict", "Final Verdict", "Status"))
+            )
+            out.append((norm, title, sev, loc, verdict))
+    return out
+
+
 def _validate_chain_baseline_not_regrouped(scratchpad: Path, mode: str) -> list[str]:
     """HARD-with-retry gate: Chain Agent 1 must overwrite the driver scaffold.
 
@@ -6796,7 +6881,6 @@ def _validate_chain_baseline_not_regrouped(scratchpad: Path, mode: str) -> list[
     # --- CHECK 2: every declared depth finding ID is mapped as a constituent
     try:
         from plamen_parsers import (
-            _INVENTORY_FINDING_HEADING_RE,
             _extract_finding_ids_from_text,
             _normalize_finding_id,
             _parse_hypothesis_constituents,
@@ -6838,20 +6922,18 @@ def _validate_chain_baseline_not_regrouped(scratchpad: Path, mode: str) -> list[
 
     # Collect declared depth finding IDs ONLY from `### Finding [ID]:` headings
     # in depth_*_findings.md (not from free-text cross-references), so the gate
-    # cannot false-fire on mentioned-but-not-declared IDs.
+    # cannot false-fire on mentioned-but-not-declared IDs. Only NON-REFUTED
+    # findings (CONFIRMED/PARTIAL/CONTESTED, per _is_reportable_verdict) are
+    # required to be mapped — REFUTED/FALSE_POSITIVE/DUPLICATE depth findings
+    # are legitimately excluded from grouping, so flagging them would false-fire
+    # and (post inline auto-map) leave a non-repairable residual. The same
+    # heading/ID/verdict extraction (`_declared_depth_findings`) is reused by the
+    # inline auto-map repair helper, keeping detection and repair symmetric.
     for depth_path in sorted(scratchpad.glob("depth_*_findings.md")):
-        try:
-            dtext = depth_path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
-        heading_lines = "\n".join(
-            m.group(0) for m in _INVENTORY_FINDING_HEADING_RE.finditer(dtext)
-        )
-        if not heading_lines:
-            continue
-        declared = _extract_finding_ids_from_text(heading_lines)
-        for did in sorted(declared):
-            norm = _normalize_finding_id(str(did)) or str(did).strip().upper()
+        for did, _title, _sev, _loc, verdict in _declared_depth_findings(depth_path):
+            if not _is_reportable_verdict(verdict):
+                continue
+            norm = _norm(did)
             if not norm:
                 continue
             if norm not in mapped_ids:
@@ -6864,8 +6946,169 @@ def _validate_chain_baseline_not_regrouped(scratchpad: Path, mode: str) -> list[
     return issues
 
 
+def _auto_map_unmapped_depth_findings(scratchpad: Path) -> list[str]:
+    """Inline mechanical repair for the chain baseline-regroup gate.
+
+    When `_validate_chain_baseline_not_regrouped` detects unmapped non-refuted
+    depth findings (and/or the surviving MECHANICAL_BASELINE stamp), the driver
+    repairs the condition deterministically instead of retrying Chain Agent 1
+    (which both costs a 42-min re-run AND re-mints cosmetically-reworded IDs that
+    trip `_validate_id_ledger_collisions`). This mirrors the existing inline
+    repair pattern used for anti-absorption (`_repair_chain_anti_absorption_splits`):
+    repair-then-recheck, never retry.
+
+    For each `depth_*_findings.md` finding whose verdict is reportable
+    (CONFIRMED/PARTIAL/CONTESTED — REFUTED/FALSE_POSITIVE/DUPLICATE skipped via
+    `_is_reportable_verdict`) and whose ID is NOT already mapped, append a solo
+    hypothesis row to BOTH `hypotheses.md` and `finding_mapping.md` using the
+    same scaffold row format as `_write_chain_passthrough_outputs`, preserving
+    the finding's ID, title, and severity verbatim from the depth block. Also
+    strips the `**Status**: MECHANICAL_BASELINE` stamp from both files so the
+    gate's CHECK 1 clears after repair (full-skip self-heal).
+
+    RECALL-SAFE: only ADDS rows, never removes any. Returns the list of finding
+    IDs it appended (empty if nothing to repair).
+    """
+    scratchpad = Path(scratchpad)
+    try:
+        from plamen_parsers import (
+            _extract_finding_ids_from_text,
+            _normalize_finding_id,
+            _parse_hypothesis_constituents,
+        )
+    except Exception:
+        return []
+
+    def _norm(raw: str) -> str:
+        return _normalize_finding_id(str(raw)) or str(raw).strip().upper()
+
+    def _cell(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "").replace("|", "/")).strip()
+
+    hyp_path = scratchpad / "hypotheses.md"
+    map_path = scratchpad / "finding_mapping.md"
+
+    # Rebuild the mapped-ID set using the SAME symmetric logic the gate uses
+    # (structured constituent parser + raw ID sweep of both files), so the
+    # helper repairs exactly what the gate flags.
+    mapped_ids: set[str] = set()
+    try:
+        mapping = _parse_hypothesis_constituents(scratchpad)
+    except Exception:
+        mapping = {}
+    for constituents in (mapping or {}).values():
+        for cid in constituents:
+            norm = _norm(cid)
+            if norm:
+                mapped_ids.add(norm)
+    for fpath in (map_path, hyp_path):
+        if not fpath.exists():
+            continue
+        try:
+            ftext = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for mid in _extract_finding_ids_from_text(ftext):
+            norm = _norm(mid)
+            if norm:
+                mapped_ids.add(norm)
+
+    # Collect unmapped non-refuted depth findings (id, title, severity, location).
+    to_append: list[dict[str, str]] = []
+    seen_new: set[str] = set()
+    for depth_path in sorted(scratchpad.glob("depth_*_findings.md")):
+        for did, title, sev, loc, verdict in _declared_depth_findings(depth_path):
+            if not _is_reportable_verdict(verdict):
+                continue
+            norm = _norm(did)
+            if not norm or norm in mapped_ids or norm in seen_new:
+                continue
+            seen_new.add(norm)
+            to_append.append({
+                "id": norm,
+                "title": _cell(title or norm),
+                "severity": normalize_severity(sev or "Medium"),
+                "location": _cell(loc or "UNKNOWN"),
+            })
+
+    # Strip the MECHANICAL_BASELINE stamp even when there is nothing to append,
+    # so the full-skip-with-no-unmapped-depth edge case still self-heals CHECK 1.
+    def _strip_stamp(text: str) -> str:
+        out_lines = [
+            ln for ln in text.splitlines()
+            if ln.strip() != _MECHANICAL_BASELINE_STAMP
+        ]
+        return "\n".join(out_lines)
+
+    if not to_append:
+        # Nothing to map, but still clear any surviving stamp.
+        for fpath in (hyp_path, map_path):
+            if not fpath.exists():
+                continue
+            try:
+                text = fpath.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            if _MECHANICAL_BASELINE_STAMP in text:
+                fpath.write_text(_strip_stamp(text).rstrip("\n") + "\n", encoding="utf-8")
+        return []
+
+    # Allocate fresh H-N hypothesis IDs continuing the existing sequence.
+    max_h = 0
+    for fpath in (hyp_path, map_path):
+        if not fpath.exists():
+            continue
+        try:
+            ftext = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for m in re.finditer(r"\bH-(\d+)\b", ftext):
+            try:
+                max_h = max(max_h, int(m.group(1)))
+            except ValueError:
+                continue
+
+    note = "Mechanically appended unmapped depth finding; chain composition runs downstream."
+    new_hyp_rows: list[str] = []
+    new_map_rows: list[str] = []
+    next_h = max_h
+    for entry in to_append:
+        next_h += 1
+        hid = f"H-{next_h}"
+        new_hyp_rows.append(
+            f"| {hid} | {entry['severity']} | {entry['title']} | "
+            f"{entry['id']} | {entry['location']} | {note} |"
+        )
+        new_map_rows.append(
+            f"| {entry['id']} | {hid} | AUTO_MAPPED_DEPTH | {note} |"
+        )
+
+    def _append_rows(fpath: Path, rows: list[str]) -> None:
+        try:
+            text = fpath.read_text(encoding="utf-8", errors="replace") if fpath.exists() else ""
+        except Exception:
+            text = ""
+        text = _strip_stamp(text)
+        body = text.rstrip("\n")
+        if body:
+            body += "\n"
+        body += "\n".join(rows) + "\n"
+        fpath.write_text(body, encoding="utf-8")
+
+    _append_rows(hyp_path, new_hyp_rows)
+    _append_rows(map_path, new_map_rows)
+
+    return [entry["id"] for entry in to_append]
+
+
 def _generate_chain_baseline_regroup_retry_hint(issues: list[str]) -> str:
     """Produce a chain-phase retry hint when grouping was skipped.
+
+    DEPRECATED for the chain phase: the baseline-regroup gate now repairs inline
+    via `_auto_map_unmapped_depth_findings` instead of retrying Chain Agent 1, so
+    this hint is no longer written on the chain phase. Retained because existing
+    tests reference it and to keep the retry-hint contract intact for any future
+    caller.
 
     Read at attempt 2 by build_phase_prompt and prepended to the Chain Agent 1
     prompt so it re-runs PHASE 1 grouping + PHASE 0 enabler enumeration.

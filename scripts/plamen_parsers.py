@@ -67,6 +67,7 @@ __all__ = [
     "_id_ledger_save",
     "_id_prefix_of",
     "_title_hash",
+    "_titles_collide",
     "id_ledger_register",
     "id_ledger_next_available",
     "id_ledger_lookup",
@@ -1383,24 +1384,111 @@ def _id_ledger_path(scratchpad: Path) -> Path:
     return scratchpad / _ID_LEDGER_NAME
 
 
+# Dash family: em-dash, en-dash, figure-dash, horizontal-bar, minus-sign,
+# non-breaking-hyphen, and the small/full-width variants. Cosmetic reword
+# (`—` → `-`) across retries must NOT change identity (FIX 2, validated on
+# the DODO GatewayCrossChain rewording cascade).
+_DASH_VARIANTS = "‒–—―−‑﹘﹣－"
+_DASH_TRANS = {ord(c): "-" for c in _DASH_VARIANTS}
+
+
+def _title_normalize(title: str) -> str:
+    """Canonical normalized form of a finding title for identity comparison.
+
+    Shared by `_title_hash` (exact fast-path) and `_titles_collide` (fuzzy
+    same-finding detection). Normalization is intentionally aggressive on
+    COSMETIC variation only — dash family, case, whitespace, code-framing
+    punctuation, and trailing punctuation — so a phase that re-states the
+    SAME finding with a reworded title (em-dash → hyphen, backtick changes,
+    expanded abbreviation suffix) collapses to the same/near form, while a
+    GENUINELY different finding stays distinct.
+    """
+    import re as _re
+    s = (title or "")
+    # Map every dash variant to ASCII hyphen BEFORE other steps so prefix
+    # stripping and trailing-punctuation stripping see a uniform character.
+    s = s.translate(_DASH_TRANS)
+    s = s.strip().lower()
+    # Strip leading ID-like prefixes ("GRP-01:", "Finding [HC-02]:")
+    s = _re.sub(r"^\s*(?:finding\s+)?\[?[a-z]{1,8}-\d+[a-z0-9-]*\]?\s*[:.]?\s*", "", s)
+    # Drop markdown emphasis / code framing characters entirely (not just at
+    # the edges) — `withdraw()` vs withdraw() must match.
+    s = s.replace("`", "").replace("*", "").replace("_", " ")
+    # Collapse all whitespace
+    s = _re.sub(r"\s+", " ", s)
+    # Strip residual edge punctuation that does not affect meaning.
+    s = s.strip(" -:.,;")
+    return s
+
+
 def _title_hash(title: str) -> str:
     """v2.0.6 (P2): canonical content-hash for a finding title.
 
-    Normalizes by lowercasing, collapsing whitespace, and stripping
-    common ID/punctuation framing so legitimate retry-with-same-content
-    produces an identical hash while different-content rewrites produce
-    a different hash (collision detection).
+    Normalizes by lowercasing, collapsing whitespace, mapping every dash
+    variant to ASCII hyphen, and stripping common ID/punctuation framing so
+    legitimate retry-with-same-content (including cosmetic dash/backtick
+    rewordings) produces an identical hash while different-content rewrites
+    produce a different hash (collision detection fast-path).
     """
     import hashlib
-    import re as _re
-    s = (title or "").strip().lower()
-    # Strip leading ID-like prefixes ("GRP-01:", "Finding [HC-02]:")
-    s = _re.sub(r"^\s*(?:finding\s+)?\[?[a-z]{1,8}-\d+[a-z0-9-]*\]?\s*[:.]?\s*", "", s)
-    # Collapse all whitespace
-    s = _re.sub(r"\s+", " ", s)
-    # Strip a few common punctuation chars that don't affect meaning
-    s = s.strip(" -_:`*")
+    s = _title_normalize(title)
     return "sha256:" + hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _title_tokens(title: str) -> set[str]:
+    """Content-word token set of a normalized title.
+
+    Drops short/stop tokens so that an abbreviation expanded into a full word
+    (`gcc` → `gatewaycrosschain`) and surrounding identical wording compare on
+    their shared, meaningful tokens rather than the differing label token.
+    """
+    import re as _re
+    norm = _title_normalize(title)
+    raw = [t for t in _re.split(r"[^a-z0-9]+", norm) if t]
+    # Tokens of length <= 2 (a, is, of, to) carry no identity signal.
+    return {t for t in raw if len(t) > 2}
+
+
+def _titles_collide(title_a: str, title_b: str) -> bool:
+    """Return True only when two titles denote GENUINELY DIFFERENT findings.
+
+    Recall-safe collision predicate (FIX 2). Two titles are treated as the
+    SAME finding (NOT a collision) when ANY of:
+      1. Normalized forms are identical (exact fast-path, == `_title_hash`).
+      2. One normalized form is a prefix of the other (abbreviation expanded,
+         trailing detail added: "gcc trusts inbound externalid verbatim" vs
+         "gatewaycrosschain trusts inbound externalid verbatim ...").
+      3. Token-set Jaccard similarity >= 0.6 (cosmetic reword / synonym swap
+         leaving most meaningful words intact).
+
+    Only when none of these hold is it a real different-finding ID reuse, i.e.
+    a collision. This predicate ONLY relaxes false collisions; it never turns a
+    same-content reuse into a collision (an identical title is rule 1).
+    """
+    na = _title_normalize(title_a)
+    nb = _title_normalize(title_b)
+    if na == nb:
+        return False
+    if not na or not nb:
+        # An empty title carries no identity — never assert a collision on it.
+        return False
+    # Prefix / containment: one is the other plus added detail.
+    shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
+    if longer.startswith(shorter):
+        return False
+    ta, tb = _title_tokens(title_a), _title_tokens(title_b)
+    if not ta or not tb:
+        return False
+    inter = len(ta & tb)
+    union = len(ta | tb)
+    # High token-set overlap => cosmetic reword / synonym swap / abbreviation
+    # expansion (the expanded label inflates the union but the bulk of
+    # meaningful words is shared). This threshold deliberately does NOT collapse
+    # one-word semantic swaps like "old root cause" vs "new root cause"
+    # (Jaccard 0.5), which ARE different findings.
+    if union and (inter / union) >= 0.6:
+        return False
+    return True
 
 
 def _id_ledger_load(scratchpad: Path) -> dict:
@@ -1496,6 +1584,14 @@ def id_ledger_register(
     for record in ledger.get("allocations", []):
         if record.get("id", "").upper() == finding_id:
             if record.get("title_hash") == new_hash:
+                return {"status": "REUSED", "existing": record, "current": None}
+            # Hashes differ — but a cosmetic reword (dash family, abbreviation
+            # expansion, backtick changes, added trailing detail) is NOT a
+            # collision. Only flag when the titles denote GENUINELY DIFFERENT
+            # findings. `title_preview` holds the prior full-ish title (120
+            # chars); fall back to it when no separate full title is stored.
+            prior_title = record.get("title_preview", "") or ""
+            if not _titles_collide(prior_title, title or ""):
                 return {"status": "REUSED", "existing": record, "current": None}
             return {"status": "COLLISION", "existing": record, "current": {
                 "id": finding_id,

@@ -12274,15 +12274,23 @@ def _run_phase_validators(
                     f"per-constituent demotion will limit blast radius"
                 )
 
-    # --- chain baseline-not-regrouped (scaffold-resumption) hard gate --------
+    # --- chain baseline-not-regrouped (scaffold-resumption) INLINE AUTO-MAP --
     # The driver writes a MECHANICAL_BASELINE scaffold before Chain Agent 1
     # runs. If the agent obeys the generic RESUMPTION PROTOCOL it can skip
     # PHASE 1 grouping entirely, leaving the scaffold in place — post-inventory
     # depth findings (DA-*, etc.) then never reach hypotheses.md/finding_mapping
     # and are silently dropped. Fires on the `chain` phase only (Chain Agent 1
-    # owns these files; the scaffold + skip-recovery flag are set only here).
-    # On violation: emit a retry hint and fail the gate (hard cap 1 retry); if
-    # it persists, proceed with a warning (never halt).
+    # owns these files).
+    #
+    # FIX 1 (baseline-regroup retry -> inline auto-map): instead of RETRYING
+    # Chain Agent 1 (a 42-min re-run that ALSO re-mints cosmetically-reworded
+    # IDs which then trip `_validate_id_ledger_collisions` -> false-collision
+    # HALT), repair the condition deterministically: append every unmapped
+    # NON-REFUTED depth finding as a solo hypothesis to hypotheses.md +
+    # finding_mapping.md, strip the MECHANICAL_BASELINE stamp, then PASS. This
+    # mirrors the inline anti-absorption repair above (repair-then-recheck, no
+    # retry). Because no attempt-2 chain run ever fires for this cause, the
+    # id-ledger collision cascade cannot trigger. RECALL-SAFE: only ADDS rows.
     if phase.name == "chain" and passed:
         try:
             cbr_issues = _validate_chain_baseline_not_regrouped(
@@ -12295,27 +12303,39 @@ def _run_phase_validators(
             )
             cbr_issues = []
         if cbr_issues:
-            already_retried = bool(_read_retry_hint(scratchpad, phase.name))
-            if not already_retried:
-                hint = _generate_chain_baseline_regroup_retry_hint(cbr_issues)
-                if hint:
-                    _write_retry_hint(scratchpad, phase.name, hint)
-                passed = False
-                missing = list(missing) + [
-                    "chain baseline regroup: " + "; ".join(cbr_issues[:3])
-                    + (f" (+{len(cbr_issues) - 3} more)"
-                       if len(cbr_issues) > 3 else "")
-                ]
+            try:
+                mapped = _auto_map_unmapped_depth_findings(scratchpad)
+            except Exception as exc:
                 log.warning(
-                    f"[{phase.name}] chain grouping skipped (scaffold not "
-                    f"overwritten / {len(cbr_issues)} unmapped signal(s)) — "
-                    f"retry hint written"
+                    f"[{phase.name}] chain baseline-regroup auto-map skipped "
+                    f"(non-blocking): {exc}"
                 )
-            else:
+                mapped = []
+            if mapped:
+                log.info(
+                    f"[chain] auto-mapped {len(mapped)} unmapped non-refuted "
+                    "depth finding(s) into finding_mapping.md/hypotheses.md as "
+                    "solo hypotheses; no retry"
+                )
+            # Re-run the gate once to confirm the repair cleared it. Any
+            # residual (e.g. only-REFUTED depth IDs the auto-map intentionally
+            # skipped) is tolerated — never fail or retry the chain phase here.
+            try:
+                cbr_residual = _validate_chain_baseline_not_regrouped(
+                    scratchpad, config.get("mode", "core")
+                )
+            except Exception as exc:
                 log.warning(
-                    f"[{phase.name}] chain baseline regrouping violations "
-                    f"persist after retry ({len(cbr_issues)}) — proceeding "
-                    f"(depth IDs may be dropped)"
+                    f"[{phase.name}] chain baseline-regroup recheck skipped "
+                    f"after auto-map (non-blocking): {exc}"
+                )
+                cbr_residual = []
+            if cbr_residual:
+                log.warning(
+                    f"[{phase.name}] chain baseline regroup residual after "
+                    f"inline auto-map ({len(cbr_residual)} signal(s)) — "
+                    f"proceeding without retry (auto-map only adds non-refuted "
+                    f"depth findings; residuals are intentionally excluded)"
                 )
 
     # --- chain self-restatement (UNDER-merge) hard gate ----------------------
