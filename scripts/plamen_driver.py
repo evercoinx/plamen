@@ -11539,6 +11539,95 @@ def _ensure_retry_hint(
     )
 
 
+def _reemit_percontract_self_exclusions(
+    scratchpad: Path, recovered: list[dict]
+) -> Optional[Path]:
+    """Write driver-owned re-emit artifact for per-contract candidates that were
+    self-excluded WITHOUT a real provided-list referent (BUG 2 / M-04).
+
+    Each recovered candidate becomes a standard ``## Finding [PCRE-k]`` block
+    tagged ``[RE-EMITTED: self-excluded without real referent]`` so inventory /
+    depth consume it like any normal per-contract finding. The output file
+    (``analysis_percontract_reemit.md``) is declared into ``rescan_manifest.md``
+    so the EXACT rescan gate (``_rescan_manifest_exact_missing``) continues to
+    accept it on resume instead of stranding on an undeclared file.
+
+    Returns the written path, or None if nothing was written. Idempotent: a
+    re-run overwrites the artifact with the current recovered set. Side-effect
+    only; never raises into the caller's gate result.
+    """
+    if not recovered:
+        return None
+    out = scratchpad / "analysis_percontract_reemit.md"
+    lines: list[str] = [
+        "# Per-Contract Self-Exclusion Re-Emit",
+        "",
+        "Driver-recovered candidates that a Phase 3c per-contract agent marked",
+        "as already-known/excluded WITHOUT citing a referent present in the",
+        "orchestrator-provided exclusion universe (real finding ID or file:line",
+        "from analysis_*.md / analysis_rescan_*.md). Re-emitted here so the",
+        "suppressed bug reaches inventory/depth instead of vanishing.",
+        "",
+    ]
+    for k, cand in enumerate(recovered, start=1):
+        loc = (cand.get("location") or "").strip()
+        if not loc:
+            loc = "unspecified (referent missing in provided exclusion set)"
+        sev = (cand.get("severity") or "").strip() or "Medium"
+        title = (cand.get("title") or "").strip() or (
+            "Self-excluded candidate without provided-list referent"
+        )
+        src = (cand.get("source") or "").strip()
+        own = (cand.get("own_id") or "").strip()
+        lines.extend(
+            [
+                f"## Finding [PCRE-{k}]: {title}",
+                "",
+                "**Verdict**: CONTESTED",
+                f"**Severity**: {sev}",
+                f"**Location**: {loc}",
+                "**Description**: This candidate was excluded by a per-contract "
+                "agent as 'already found' but cited no entry present in the "
+                "orchestrator-provided exclusion list, so its prior-coverage "
+                "claim is unverified. It is re-emitted for independent review "
+                "[RE-EMITTED: self-excluded without real referent].",
+                "**Impact**: If the underlying bug is real, suppressing it via a "
+                "belief-based exclusion would cause a true positive to be missed.",
+                "**Evidence**: "
+                + (f"original entry in {src}" if src else "see source")
+                + (f" (agent id {own})" if own else "")
+                + f": {cand.get('line_text', '').strip()}",
+                "",
+            ]
+        )
+    lines.append("<!-- PLAMEN_STATUS: COMPLETE -->")
+    lines.append("")
+    out.write_text("\n".join(lines), encoding="utf-8")
+
+    # Declare into rescan_manifest.md so the exact gate accepts the file.
+    manifest = scratchpad / "rescan_manifest.md"
+    try:
+        mtext = manifest.read_text(encoding="utf-8", errors="replace") if (
+            manifest.exists()
+        ) else "# Rescan Manifest\n"
+    except Exception:
+        mtext = "# Rescan Manifest\n"
+    if "analysis_percontract_reemit.md" not in mtext:
+        if not mtext.endswith("\n"):
+            mtext += "\n"
+        mtext += "- analysis_percontract_reemit.md\n"
+        try:
+            manifest.write_text(mtext, encoding="utf-8")
+        except Exception:
+            pass
+    log.warning(
+        "[rescan] re-emitted %d self-excluded per-contract candidate(s) to "
+        "analysis_percontract_reemit.md (declared into rescan_manifest.md)",
+        len(recovered),
+    )
+    return out
+
+
 def _run_phase_validators(
     phase: Phase,
     config: dict,
@@ -12183,6 +12272,50 @@ def _run_phase_validators(
                     f"[{phase.name}] anti-absorption violations persist after "
                     f"retry ({len(aab_issues)} group(s)) — proceeding; "
                     f"per-constituent demotion will limit blast radius"
+                )
+
+    # --- chain baseline-not-regrouped (scaffold-resumption) hard gate --------
+    # The driver writes a MECHANICAL_BASELINE scaffold before Chain Agent 1
+    # runs. If the agent obeys the generic RESUMPTION PROTOCOL it can skip
+    # PHASE 1 grouping entirely, leaving the scaffold in place — post-inventory
+    # depth findings (DA-*, etc.) then never reach hypotheses.md/finding_mapping
+    # and are silently dropped. Fires on the `chain` phase only (Chain Agent 1
+    # owns these files; the scaffold + skip-recovery flag are set only here).
+    # On violation: emit a retry hint and fail the gate (hard cap 1 retry); if
+    # it persists, proceed with a warning (never halt).
+    if phase.name == "chain" and passed:
+        try:
+            cbr_issues = _validate_chain_baseline_not_regrouped(
+                scratchpad, config.get("mode", "core")
+            )
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] chain baseline-regroup gate skipped "
+                f"(non-blocking): {exc}"
+            )
+            cbr_issues = []
+        if cbr_issues:
+            already_retried = bool(_read_retry_hint(scratchpad, phase.name))
+            if not already_retried:
+                hint = _generate_chain_baseline_regroup_retry_hint(cbr_issues)
+                if hint:
+                    _write_retry_hint(scratchpad, phase.name, hint)
+                passed = False
+                missing = list(missing) + [
+                    "chain baseline regroup: " + "; ".join(cbr_issues[:3])
+                    + (f" (+{len(cbr_issues) - 3} more)"
+                       if len(cbr_issues) > 3 else "")
+                ]
+                log.warning(
+                    f"[{phase.name}] chain grouping skipped (scaffold not "
+                    f"overwritten / {len(cbr_issues)} unmapped signal(s)) — "
+                    f"retry hint written"
+                )
+            else:
+                log.warning(
+                    f"[{phase.name}] chain baseline regrouping violations "
+                    f"persist after retry ({len(cbr_issues)}) — proceeding "
+                    f"(depth IDs may be dropped)"
                 )
 
     # --- chain self-restatement (UNDER-merge) hard gate ----------------------
@@ -13022,6 +13155,36 @@ def _run_phase_validators(
                 "[depth] PDE niche (non-blocking): %s",
                 "; ".join(pde_issues),
             )
+
+    if phase.name == "rescan":
+        # BUG 2 / M-04: detect belief-based per-contract self-exclusion and
+        # re-emit any candidate excluded without a real provided-list referent.
+        # SOFT diagnostic (never hard-fails); the re-emit side effect is
+        # unconditional whenever a referent-less exclusion is found so a real
+        # bug can never vanish via a self-invented exclusion.
+        try:
+            sx_warnings, sx_recovered = _validate_percontract_self_exclusion(
+                scratchpad
+            )
+        except Exception as exc:  # never let a parse bug block a clean run
+            sx_warnings, sx_recovered = [], []
+            log.warning(
+                "[rescan] per-contract self-exclusion check skipped "
+                f"(non-blocking): {exc}"
+            )
+        if sx_warnings:
+            log.warning(
+                "[rescan] per-contract self-exclusion (non-blocking): %s",
+                "; ".join(sx_warnings),
+            )
+        if sx_recovered:
+            try:
+                _reemit_percontract_self_exclusions(scratchpad, sx_recovered)
+            except Exception as exc:
+                log.warning(
+                    "[rescan] per-contract self-exclusion re-emit skipped "
+                    f"(non-blocking): {exc}"
+                )
 
     # --- canonical identity sidecars (non-mutating, no-drop) ---
     if passed and phase.name in {

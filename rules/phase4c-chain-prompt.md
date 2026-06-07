@@ -55,10 +55,15 @@ Before semantic grouping, physically create all three handoff files on disk:
 - `{SCRATCHPAD}/finding_mapping.md`
 - `{SCRATCHPAD}/enabler_results.md`
 
-If the files already contain a driver-written `MECHANICAL_BASELINE`, you may
-overwrite them as you improve the analysis. Do not merely return a summary
-saying the files were written. Only return `DONE` after all three files exist
-on disk and contain the final content for this phase.
+A `**Status**: MECHANICAL_BASELINE` stamp in `hypotheses.md` /
+`finding_mapping.md` / `enabler_results.md` is a driver-written scaffold and is
+NOT prior completion. You MUST perform PHASE 1 grouping and PHASE 0 enabler
+enumeration and OVERWRITE all three files, removing the `MECHANICAL_BASELINE`
+stamp. Returning `DONE` while any of these files still carries the
+`MECHANICAL_BASELINE` stamp is a phase failure that the driver will detect and
+retry. Do not merely return a summary saying the files were written. Only
+return `DONE` after all three files exist on disk, carry no `MECHANICAL_BASELINE`
+stamp, and contain the final grouped/enumerated content for this phase.
 
 ## PHASE 0: ENABLER ENUMERATION (Rule 12)
 

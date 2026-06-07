@@ -3807,6 +3807,12 @@ output -- do not repeat it.
 2. Any matching file >= 200 bytes is presumed COMPLETE work from a
    prior attempt. Do NOT re-spawn the subagent that would have
    produced it.
+   EXCEPTION: a file whose first ~30 lines contain the marker
+   `**Status**: MECHANICAL_BASELINE` is a driver-written scaffold/handoff
+   stub, NOT prior agent work, regardless of size. You MUST treat it as
+   MISSING for resumption purposes and produce the real artifact
+   (re-group, re-map, re-enumerate). Never skip a phase because a
+   MECHANICAL_BASELINE-stamped file exists.
 3. Only {resumption_missing_action} MISSING outputs or stubs < 200 bytes.
 4. If ALL expected outputs already exist: skip straight to your
    phase's merge/analysis step (or exit if there is no merge step).

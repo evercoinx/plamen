@@ -165,6 +165,8 @@ __all__ = [
     "_normalize_subsystem_scope",
     "_load_scope_file_paths",
     "_path_in_scope_file",
+    "_chain_severity_upgrade_justified",
+    "_parse_chain_constituents",
     "_parse_chunk_heading_inventory",
     "_parse_chunk_table_inventory",
     "_parse_hypothesis_constituents",

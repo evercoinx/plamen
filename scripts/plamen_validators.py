@@ -173,6 +173,8 @@ __all__ = [
     "_validate_invariants_pass2",
     "_validate_chain_iter2",
     "_validate_chain_anti_absorption",
+    "_validate_chain_baseline_not_regrouped",
+    "_generate_chain_baseline_regroup_retry_hint",
     "_validate_chain_self_restatement",
     "_generate_chain_self_restatement_retry_hint",
     "_repair_chain_anti_absorption_splits",
@@ -191,6 +193,7 @@ __all__ = [
     "_validate_confidence_iter2_mandatory",
     "_validate_confidence_scores_quality",
     "_validate_depth_coverage",
+    "_validate_percontract_self_exclusion",
     "_validate_depth_exit",
     "_validate_depth_iterations",
     "_validate_semantic_gap_niche",
@@ -4966,6 +4969,226 @@ def _validate_depth_coverage(scratchpad: Path, mode: str) -> list[str]:
     return []
 
 
+_PERCONTRACT_EXCLUSION_HEADING_RE = re.compile(
+    r"(?im)^\s{0,3}#{1,6}\s+.*"
+    r"(?:exclusion|already[ _-]found|already[ _-]known|not[ _-]duplicat)"
+    r".*$"
+)
+
+
+def _build_percontract_referent_universe(
+    scratchpad: Path,
+) -> tuple[set[str], set[str]]:
+    """Return ``(finding_ids, locations)`` that legitimately existed in the
+    orchestrator-provided exclusion universe for Phase 3c per-contract agents.
+
+    The universe is the union of:
+    - first-pass breadth outputs (``analysis_*.md``), EXCLUDING this phase's own
+      ``analysis_rescan_*`` and ``analysis_percontract_*`` outputs, and
+    - the additional re-scan outputs (``analysis_rescan_*.md``).
+
+    Finding IDs are normalized upper-case (e.g. ``B1-2``); locations are
+    normalized lower-case with whitespace stripped so a cited
+    ``AccountEncoder.sol:L88`` matches the universe regardless of case.
+    All parse failures degrade to empty contributions — never raise.
+    """
+    finding_ids: set[str] = set()
+    locations: set[str] = set()
+
+    sources: list[Path] = []
+    for p in sorted(scratchpad.glob("analysis_*.md")):
+        name = p.name
+        if name.startswith("analysis_rescan_") or name.startswith(
+            "analysis_percontract_"
+        ):
+            continue
+        sources.append(p)
+    sources.extend(sorted(scratchpad.glob("analysis_rescan_*.md")))
+
+    for p in sources:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for m in _FINDING_BLOCK_RE.finditer(text):
+            finding_ids.add(m.group(1).strip().upper())
+        for m in _BRACKETED_ID_RE.finditer(text):
+            finding_ids.add(m.group(1).strip().upper())
+        for m in _TABLE_LOCATION_RE.finditer(text):
+            locations.add(_norm_referent_location(m.group(1)))
+        for m in _LOCATION_RE.finditer(text):
+            for loc in _TABLE_LOCATION_RE.findall(m.group(1)):
+                locations.add(_norm_referent_location(loc))
+    return finding_ids, locations
+
+
+def _norm_referent_location(loc: str) -> str:
+    """Normalize a ``file:line`` location for set-membership comparison:
+    lower-case, drop a leading ``L`` on the line number, strip whitespace and
+    directory components so ``a/b/Foo.sol:L88`` and ``Foo.sol:88`` compare equal.
+    """
+    loc = (loc or "").strip().lower().replace("\\", "/")
+    # Keep only the final path component (basename) + line number.
+    m = re.match(r"^(.*?)([A-Za-z0-9_.\-]+\.(?:sol|rs|go|move)):l?(\d+)$", loc)
+    if m:
+        return f"{m.group(2)}:{m.group(3)}"
+    return re.sub(r":l(\d+)$", r":\1", loc)
+
+
+def _validate_percontract_self_exclusion(
+    scratchpad: Path,
+) -> tuple[list[str], list[dict]]:
+    """Soft validator for Phase 3c belief-based self-exclusion (BUG 2 / M-04).
+
+    A per-contract agent is GIVEN an orchestrator-built exclusion list (finding
+    IDs + locations from ``analysis_*.md`` + ``analysis_rescan_*.md``) and told
+    "do not re-report exclusion-list findings". Nothing constrains the PROVENANCE
+    of an exclusion, so an agent can self-generate an "## Exclusion List (Already
+    Found)" section asserting a real bug is already known when NO provided finding
+    contained it — silently dropping a true positive.
+
+    This validator builds the REFERENT UNIVERSE (real provided IDs + locations),
+    scans every ``analysis_percontract_*.md`` for exclusion/already-found
+    sections, and flags any excluded entry whose cited referent is EMPTY or
+    matches nothing in the universe. Each flagged entry is captured for
+    re-emission downstream so the suppressed bug cannot vanish.
+
+    Returns ``(warnings, recovered)`` where ``recovered`` is a list of dicts
+    with ``title``/``location``/``severity``/``source``/``line_text`` for the
+    driver side effect to re-emit.
+
+    Recall-safe by construction:
+    - No per-contract files / no exclusion section → ``([], [])``.
+    - An exclusion citing a real provided ID or location → not flagged.
+    - Parse failures / unreadable files → contribute nothing, never raise.
+    The validator ONLY ever adds candidates; it never removes/refutes findings.
+    """
+    pc_files = sorted(scratchpad.glob("analysis_percontract_*.md"))
+    # Never re-scan the driver-owned re-emit artifact.
+    pc_files = [p for p in pc_files if p.name != "analysis_percontract_reemit.md"]
+    if not pc_files:
+        return [], []
+
+    from plamen_parsers import _SEPARATOR_ROW_RE
+
+    finding_ids, locations = _build_percontract_referent_universe(scratchpad)
+
+    warnings: list[str] = []
+    recovered: list[dict] = []
+
+    for p in pc_files:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        lines = text.splitlines()
+        # Identify exclusion-intent section spans: from a matching heading until
+        # the next heading of the same-or-shallower depth (or EOF).
+        section_spans: list[tuple[int, int]] = []
+        for idx, ln in enumerate(lines):
+            if not _PERCONTRACT_EXCLUSION_HEADING_RE.match(ln):
+                continue
+            hm = re.match(r"^\s*(#{1,6})\s", ln)
+            depth = len(hm.group(1)) if hm else 6
+            end = len(lines)
+            for j in range(idx + 1, len(lines)):
+                jm = re.match(r"^\s*(#{1,6})\s", lines[j])
+                if jm and len(jm.group(1)) <= depth:
+                    end = j
+                    break
+            section_spans.append((idx + 1, end))
+        if not section_spans:
+            continue
+
+        for (start, end) in section_spans:
+            for j in range(start, end):
+                entry = lines[j]
+                stripped = entry.strip()
+                if not stripped:
+                    continue
+                # Only consider entry-like lines (list items, table rows, or
+                # lines that explicitly say EXCLUDED/duplicate). Skip plain
+                # prose / separator rows.
+                is_entry = bool(
+                    re.match(r"^\s*(?:[-*+]|\|)", entry)
+                    or re.search(
+                        r"\b(?:excluded|duplicate|already\s+(?:found|known)|"
+                        r"not\s+duplicat)\b",
+                        entry,
+                        re.IGNORECASE,
+                    )
+                )
+                if not is_entry:
+                    continue
+                if _SEPARATOR_ROW_RE.match(stripped):
+                    continue
+                # Header rows of a markdown table aren't findings.
+                if re.match(r"^\s*\|", entry) and re.search(
+                    r"\b(referent|title|location|severity|finding)\b",
+                    entry,
+                    re.IGNORECASE,
+                ) and "EXCLUDED" not in entry.upper():
+                    # likely the table header — only skip if it has no real ref
+                    pass
+
+                cited_ids = {
+                    m.group(1).strip().upper()
+                    for m in _BRACKETED_ID_RE.finditer(entry)
+                }
+                cited_locs = {
+                    _norm_referent_location(loc)
+                    for loc in _TABLE_LOCATION_RE.findall(entry)
+                }
+                # The entry's OWN [PCn-k] id is the excluded candidate, not a
+                # referent — drop ids matching the per-contract prefix from the
+                # referent set so it is not treated as a citation.
+                referent_ids = {
+                    i for i in cited_ids if not re.match(r"^PC\d", i)
+                }
+                has_real_referent = bool(
+                    (referent_ids & finding_ids)
+                    or (cited_locs & locations)
+                )
+                if has_real_referent:
+                    continue
+
+                # Referent-less exclusion → suppressed real bug. Capture it.
+                own_id = next(
+                    (i for i in cited_ids if re.match(r"^PC\d", i)),
+                    None,
+                )
+                loc = ""
+                if cited_locs:
+                    loc = sorted(cited_locs)[0]
+                title = re.sub(
+                    r"^\s*(?:[-*+]\s*|\|\s*)", "", stripped
+                ).strip().strip("|").strip()
+                sev_m = _SEVERITY_RE.search(entry)
+                severity = ""
+                if sev_m:
+                    severity = (sev_m.group(1) or sev_m.group(2) or "").title()
+                recovered.append(
+                    {
+                        "title": title or "(untitled self-excluded candidate)",
+                        "location": loc,
+                        "severity": severity,
+                        "source": p.name,
+                        "own_id": own_id or "",
+                        "line_text": stripped,
+                    }
+                )
+
+    if recovered:
+        warnings.append(
+            f"{len(recovered)} per-contract exclusion entry(ies) across "
+            f"{len(pc_files)} file(s) cite no referent present in the provided "
+            f"exclusion universe ({len(finding_ids)} IDs, {len(locations)} "
+            f"locations) — belief-based self-exclusion; re-emitting candidates "
+            f"(phase3b-rescan-prompt.md EXCLUSION SOURCE RULE)"
+        )
+    return warnings, recovered
+
+
 def _collect_scip_indexed_paths(scratchpad: Path) -> set[str]:
     """Return the set of source paths the SCIP prebake recorded.
 
@@ -6512,6 +6735,155 @@ def _validate_chain_anti_absorption(scratchpad: Path, mode: str) -> list[str]:
             f"with anti-absorption violations: {'; '.join(violations)}"
         )
     return issues
+
+
+_MECHANICAL_BASELINE_STAMP = "**Status**: MECHANICAL_BASELINE"
+
+
+def _validate_chain_baseline_not_regrouped(scratchpad: Path, mode: str) -> list[str]:
+    """HARD-with-retry gate: Chain Agent 1 must overwrite the driver scaffold.
+
+    The driver writes a one-finding-per-hypothesis MECHANICAL_BASELINE scaffold
+    (hypotheses.md / finding_mapping.md / enabler_results.md) BEFORE Chain Agent
+    1 runs (see `_write_chain_passthrough_outputs`). If the agent obeys the
+    generic RESUMPTION PROTOCOL (any >=200-byte file = complete prior work), it
+    skips PHASE 1 grouping and leaves the scaffold in place. Post-inventory
+    depth findings (Devil's-Advocate DA-*, etc.) that were not present at
+    scaffold time then never get mapped into hypotheses.md / finding_mapping.md
+    and are silently dropped from the report.
+
+    This gate fires on exactly the two observable signatures of the no-op:
+      CHECK 1 (stamp): hypotheses.md OR finding_mapping.md still carries the
+        literal `**Status**: MECHANICAL_BASELINE` stamp — only the driver
+        scaffold writes this, so its survival proves grouping was skipped.
+      CHECK 2 (unmapped depth IDs): a finding ID DECLARED via `### Finding
+        [ID]:` in any depth_*_findings.md that is ABSENT from
+        finding_mapping.md's constituent set — in a healthy grouped run every
+        declared depth finding is grouped, so this set difference is empty.
+
+    Returns issue strings. Caller emits a retry hint and re-spawns Chain Agent 1
+    on attempt 2; if violations persist, caller logs a warning and proceeds
+    (never halts).
+    """
+    if mode not in ("core", "thorough"):
+        return []
+
+    issues: list[str] = []
+
+    # --- CHECK 1: MECHANICAL_BASELINE stamp survived (scaffold not overwritten)
+    for fname in ("hypotheses.md", "finding_mapping.md"):
+        fpath = scratchpad / fname
+        if not fpath.exists():
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if _MECHANICAL_BASELINE_STAMP in text:
+            issues.append(
+                f"{fname} still carries MECHANICAL_BASELINE stamp — Chain Agent 1 "
+                "skipped PHASE 1 grouping (scaffold not overwritten)"
+            )
+
+    # --- CHECK 2: every declared depth finding ID is mapped as a constituent
+    try:
+        from plamen_parsers import (
+            _INVENTORY_FINDING_HEADING_RE,
+            _extract_finding_ids_from_text,
+            _normalize_finding_id,
+            _parse_hypothesis_constituents,
+        )
+    except Exception:
+        return issues
+
+    def _norm(raw: str) -> str:
+        return _normalize_finding_id(str(raw)) or str(raw).strip().upper()
+
+    # Build the set of constituent IDs declared anywhere in the mapping. Source
+    # both from the structured parser AND from a raw ID sweep of
+    # finding_mapping.md / hypotheses.md, using the SAME extractor as the
+    # declared-depth-ID side. This keeps the two sides symmetric so the gate
+    # cannot false-fire on ID shapes the structured constituent parser does not
+    # recognize (e.g. bare DA-3) but that are genuinely present in the mapping.
+    mapped_ids: set[str] = set()
+    try:
+        mapping = _parse_hypothesis_constituents(scratchpad)
+    except Exception:
+        mapping = {}
+    for constituents in (mapping or {}).values():
+        for cid in constituents:
+            norm = _norm(cid)
+            if norm:
+                mapped_ids.add(norm)
+    for fname in ("finding_mapping.md", "hypotheses.md"):
+        fpath = scratchpad / fname
+        if not fpath.exists():
+            continue
+        try:
+            ftext = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for mid in _extract_finding_ids_from_text(ftext):
+            norm = _norm(mid)
+            if norm:
+                mapped_ids.add(norm)
+
+    # Collect declared depth finding IDs ONLY from `### Finding [ID]:` headings
+    # in depth_*_findings.md (not from free-text cross-references), so the gate
+    # cannot false-fire on mentioned-but-not-declared IDs.
+    for depth_path in sorted(scratchpad.glob("depth_*_findings.md")):
+        try:
+            dtext = depth_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        heading_lines = "\n".join(
+            m.group(0) for m in _INVENTORY_FINDING_HEADING_RE.finditer(dtext)
+        )
+        if not heading_lines:
+            continue
+        declared = _extract_finding_ids_from_text(heading_lines)
+        for did in sorted(declared):
+            norm = _normalize_finding_id(str(did)) or str(did).strip().upper()
+            if not norm:
+                continue
+            if norm not in mapped_ids:
+                issues.append(
+                    f"depth finding {norm} declared in {depth_path.name} is absent "
+                    "from finding_mapping.md constituents — depth findings dropped "
+                    "from grouping"
+                )
+
+    return issues
+
+
+def _generate_chain_baseline_regroup_retry_hint(issues: list[str]) -> str:
+    """Produce a chain-phase retry hint when grouping was skipped.
+
+    Read at attempt 2 by build_phase_prompt and prepended to the Chain Agent 1
+    prompt so it re-runs PHASE 1 grouping + PHASE 0 enabler enumeration.
+    """
+    if not issues:
+        return ""
+    lines = [
+        "## ATTEMPT 2 RETRY — CHAIN GROUPING WAS SKIPPED",
+        "",
+        "You exited the chain phase while the driver scaffold was still in "
+        "place. The MECHANICAL_BASELINE files are NOT completed work. You MUST:",
+        "",
+        "1. Read chain_summaries_compact.md and every depth_*_findings.md.",
+        "2. Perform PHASE 1 grouping + PHASE 0 enabler enumeration.",
+        "3. OVERWRITE hypotheses.md, finding_mapping.md, enabler_results.md "
+        "removing the `**Status**: MECHANICAL_BASELINE` stamp.",
+        "4. Ensure EVERY depth finding ID below appears as a constituent in "
+        "finding_mapping.md.",
+        "",
+        "Violations detected on attempt 1:",
+        "",
+    ]
+    for issue in issues:
+        lines.append(f"- {issue}")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _highest_constituent_severity(meta_list: list[tuple[str, dict[str, str]]]) -> str:

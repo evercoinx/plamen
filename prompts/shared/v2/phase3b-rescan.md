@@ -34,6 +34,28 @@ On retry, ignore this phase's own prior outputs when building the first-pass
 exclusion set; use them only to determine which declared additional outputs are
 already substantive and can be skipped.
 
+### EXCLUSION SOURCE RULE (MANDATORY — recall-safe, no belief-based drops)
+
+You may mark a candidate as a duplicate and exclude it from your output ONLY
+when you can cite a CONCRETE entry that already exists in the provided
+exclusion universe — i.e. a real finding ID (e.g. `[B1-2]`, `[RS1-3]`) or a
+real `file:Lnnn` location that appears in the first-pass `analysis_*.md` or
+`analysis_rescan_*.md` outputs you were given.
+
+- A bug you BELIEVE is "already known" but cannot point to in the provided
+  exclusion list MUST be emitted as a new `[PCn-k]` finding. When in doubt,
+  EMIT — never drop a real bug on the assumption that someone else found it.
+- Self-generated exclusion sections (e.g. `## Exclusion List (Already Found)`,
+  "already known", "not duplicated") that assert prior knowledge WITHOUT a
+  cited provided-list referent are PROHIBITED. The provided exclusion set is
+  the only authority on what is already known; your own belief is not.
+- Every exclusion entry you do write MUST carry its referent inline, e.g.
+  `EXCLUDED [PCn-x] dup of [B1-2]` or
+  `EXCLUDED [PCn-x] dup of AccountEncoder.sol:L88`.
+
+A referent-less exclusion is treated by the driver as a suppressed real bug:
+the candidate is re-emitted downstream so it cannot vanish.
+
 ---
 
 ## Work Plan

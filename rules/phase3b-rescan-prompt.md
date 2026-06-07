@@ -265,6 +265,23 @@ If any file shows Opened: NO â€” open and analyze it before returning.
 Every finding MUST include a specific code location (file:line). Findings without code references will be discarded.
 Do NOT re-report findings from the exclusion list.
 
+### EXCLUSION SOURCE RULE (MANDATORY — recall-safe, no belief-based drops)
+You may exclude a candidate as a duplicate ONLY if you cite a CONCRETE entry that
+exists in the provided Already-Known Findings (Exclusion List) above — a real
+finding ID (e.g. `[B1-2]`, `[RS1-3]`) or a real `file:Lnnn` location drawn from
+`analysis_*.md` / `analysis_rescan_*.md`.
+- A bug you BELIEVE is "already known" but cannot point to in the provided
+  exclusion list MUST be emitted as a new `[PC{N}-k]` finding. When in doubt, EMIT.
+- Self-generated exclusion sections (e.g. `## Exclusion List (Already Found - Not
+  Duplicated)`, "already known", "not duplicated") that assert prior knowledge
+  WITHOUT a cited provided-list referent are PROHIBITED. Your belief about prior
+  coverage is NOT authoritative — only the provided exclusion set is.
+- Every exclusion entry you do write MUST carry its referent inline, e.g.
+  `EXCLUDED [PC{N}-x] dup of [B1-2]` or
+  `EXCLUDED [PC{N}-x] dup of AccountEncoder.sol:L88`.
+A referent-less exclusion is treated by the driver as a suppressed real bug and
+the candidate is re-emitted downstream so it cannot vanish.
+
 Return: 'DONE: {N} new findings in {CLUSTER_NAME}'
 ")
 ```
