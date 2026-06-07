@@ -2665,7 +2665,7 @@ Mandatory rules:
    missing, write it before returning. Never return partial completion such as
    1/2, 7/12, or 9/12 verifier files.
 10. Follow the PoC Execution Protocol and Assertion Retry Protocol from
-   `~/.claude/rules/phase5-poc-execution.md`.
+   `~/.plamen/rules/phase5-poc-execution.md`.
 """.format(manifest=shard_manifest, shard_checklist=shard_checklist)
     elif config.get("pipeline") == "l1" and phase.name in L1_VERIFY_PHASE_NAMES:
         shard_manifest = L1_VERIFY_SHARD_MANIFESTS[phase.name]

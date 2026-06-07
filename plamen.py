@@ -104,9 +104,28 @@ def _read_version() -> str:
 VERSION = _read_version()
 
 
+def _injected_claude_md_path():
+    """Return the CLAUDE.md that holds the Plamen injection.
+
+    Injection target is ~/Workspace/audit/CLAUDE.md (scoped to the audit
+    workspace). Falls back to the legacy global ~/.claude/CLAUDE.md so stale
+    pre-relocation installs are still detected by version/marker checks.
+    """
+    audit_md = os.path.expanduser("~/Workspace/audit/CLAUDE.md")
+    legacy_md = os.path.join(CLAUDE_HOME, "CLAUDE.md")
+    if os.path.isfile(audit_md):
+        try:
+            with open(audit_md, "r", encoding="utf-8") as f:
+                if _CLAUDE_MD_START in f.read():
+                    return audit_md
+        except OSError:
+            pass
+    return legacy_md
+
+
 def _check_claude_md_version():
-    """Warn if ~/.claude/CLAUDE.md has a stale Plamen injection (different version)."""
-    claude_md = os.path.join(CLAUDE_HOME, "CLAUDE.md")
+    """Warn if the injected CLAUDE.md has a stale Plamen injection (different version)."""
+    claude_md = _injected_claude_md_path()
     if not os.path.isfile(claude_md):
         return  # not installed yet
     try:
@@ -128,7 +147,7 @@ def _check_claude_md_version():
     if injected_ver != VERSION:
         w = sys.stdout.write
         w(f"\n  \033[33m⚠ Version mismatch: repo is v{VERSION} but "
-          f"~/.claude/CLAUDE.md has v{injected_ver}\033[0m\n")
+          f"{claude_md} has v{injected_ver}\033[0m\n")
         w(f"  \033[90m  Run 'plamen install' to update. Pipeline may behave "
           f"incorrectly until then.\033[0m\n\n")
 
@@ -2902,7 +2921,7 @@ def run_doctor():
         else:
             warn(f"No Plamen manifest at {manifest_path} (run `plamen install`)")
 
-        claude_md = os.path.join(CLAUDE_HOME, "CLAUDE.md")
+        claude_md = _injected_claude_md_path()
         if os.path.isfile(claude_md):
             try:
                 with open(claude_md, "r", encoding="utf-8") as f:
@@ -2913,13 +2932,13 @@ def run_doctor():
                 # never written by install, so the warn branch always fired
                 # on a healthy install).
                 if _CLAUDE_MD_START in text and _CLAUDE_MD_END in text:
-                    ok("CLAUDE.md has Plamen marker block")
+                    ok(f"CLAUDE.md has Plamen marker block ({claude_md})")
                 else:
                     warn("CLAUDE.md missing PLAMEN markers (re-run `plamen install`)")
             except OSError as e:
                 warn(f"Could not read CLAUDE.md: {e}")
         else:
-            warn("CLAUDE.md missing")
+            warn("CLAUDE.md missing (run `plamen install`)")
 
     # 5. ~/.codex install (if codex backend exists)
     if codex_bin:
@@ -3055,7 +3074,7 @@ def run_migrate():
         w(f"\n  {_C_RED}Install failed during migration.{_RST}\n\n")
         return rc
 
-    claude_md = os.path.join(CLAUDE_HOME, "CLAUDE.md")
+    claude_md = _injected_claude_md_path()
     if os.path.isfile(claude_md):
         try:
             with open(claude_md, "r", encoding="utf-8") as f:
@@ -3065,7 +3084,7 @@ def run_migrate():
         # Same marker-constant fix as run_doctor — install writes the long
         # form (`_CLAUDE_MD_START`), not the bare `<!-- PLAMEN:START -->`.
         if _CLAUDE_MD_START in text and _CLAUDE_MD_END in text:
-            w(f"  {_C_GREEN}✓{_RST} CLAUDE.md PLAMEN markers present\n")
+            w(f"  {_C_GREEN}✓{_RST} CLAUDE.md PLAMEN markers present ({claude_md})\n")
         else:
             w(f"  {_C_ORANGE}!{_RST} CLAUDE.md PLAMEN markers missing — re-run `plamen install` to inject\n")
 

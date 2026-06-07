@@ -1463,7 +1463,7 @@ def _assemble_report_python(
         medium_clean, flags=re.MULTILINE,
     ).strip()
 
-    # --- Assemble per ~/.claude/rules/report-template.md ---------------------
+    # --- Assemble per ~/.plamen/rules/report-template.md ---------------------
     auditor = header_info.get("auditor", "Automated Security Analysis (Plamen V2)")
     scope = header_info.get("scope", project_root)
     header_fields = [
@@ -1535,7 +1535,7 @@ def _assemble_report_python(
     body = _sanitize_undefined_report_references(body)
 
     # --- Mechanical sanitization (canonical-by-construction) -----------------
-    # Strip control characters per `~/.claude/rules/phase6-report-prompts.md`
+    # Strip control characters per `~/.plamen/rules/phase6-report-prompts.md`
     # quality-gate spec: form-feed, ANSI escapes, null bytes, etc.
     body = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", body)
     # Strip ANSI escape sequences if any leaked through.

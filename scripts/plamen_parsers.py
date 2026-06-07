@@ -2221,7 +2221,7 @@ def merge_report_medium_shards(scratchpad: Path) -> None:
 # This function reads the tier files + report_index.md, generates the
 # Executive Summary + Priority Remediation Order mechanically from the
 # Master Finding Index counts and rows, and assembles AUDIT_REPORT.md
-# per `~/.claude/rules/report-template.md`. Finishes in <1 second.
+# per `~/.plamen/rules/report-template.md`. Finishes in <1 second.
 #
 # The existing post-assemble quality gate (`_run_report_quality_gate`,
 # `_check_promotion_symmetry`, etc.) still runs against the Python
@@ -3964,7 +3964,7 @@ def _demote_severity_once(severity: str) -> str:
 
 
 # =============================================================================
-# Phase B: Severity Matrix Enforcement (per ~/.claude/rules/report-template.md)
+# Phase B: Severity Matrix Enforcement (per ~/.plamen/rules/report-template.md)
 #
 # Severity = Impact x Likelihood, then downgrade modifiers stack:
 #   1) on-chain-only exploit: -1 tier (only when impact is on-chain confined)

@@ -1164,7 +1164,7 @@ def run_recon_prepass(config: dict) -> Dict[str, str]:
     except Exception as e:
         return {"_mkdir_scratch": f"FAILED:{e}"}
 
-    skill_index = Path(os.path.expanduser("~/.claude/rules/skill-index.md"))
+    skill_index = Path(os.path.expanduser("~/.plamen/rules/skill-index.md"))
 
     if pipeline == "l1":
         _safe("subsystem_map.md",    lambda: _write_subsystem_map_l1(scratch, proj))
