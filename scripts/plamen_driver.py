@@ -2226,6 +2226,10 @@ def _phase_content_gate_issues(
     if phase.name == "attention_repair":
         hard, _soft = _validate_attention_repair(scratchpad, mode)
         return list(hard)
+    if phase.name == "exploration_skeptic":
+        # Soft, additive phase: validator only ever returns [], so this is
+        # always content-valid on resume — prevents a false resume-halt.
+        return list(_validate_exploration_skeptic(scratchpad, mode))
     if phase.name == "report_assemble":
         # RESUME-3: the FC4 content re-check must be SIDE-EFFECT-FREE and
         # content-only. Do NOT run _run_report_quality_gate here (it writes
@@ -12160,6 +12164,13 @@ def _run_phase_validators(
     # Same soft-only model as invariants_p2.
     if phase.name == "chain_iter2" and passed and not recovery_preflight:
         _validate_chain_iter2(scratchpad, config.get("mode", "core"))
+
+    # --- exploration_skeptic (Phase 4b.6) ---
+    # Recall-positive / additive soft phase. Validator returns [] in all
+    # branches (never halts); only writes a sentinel + warning on missing
+    # output. Same soft-dispatch idiom as invariants_p2/chain_iter2.
+    if phase.name == "exploration_skeptic" and passed and not recovery_preflight:
+        _validate_exploration_skeptic(scratchpad, config.get("mode", "core"))
 
     # --- chain (Phase 4c Agent 1) anti-absorption hard gate -------------
     # v2.x Fix 2: enforce phase4c-chain-prompt rule 6 mechanically.

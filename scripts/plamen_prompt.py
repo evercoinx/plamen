@@ -892,6 +892,7 @@ _STANDALONE_PROMPT_MAP: dict[str, str] = {
     # phase entry (see SC_PHASES / L1_PHASES `invariants_p2`).
     "invariants_p2": "phase4a5-invariants-p2.md",
     "rag_sweep": "phase4b5-rag-sweep.md",
+    "exploration_skeptic": "phase4b6-exploration-skeptic.md",
     # sc_semantic_dedup and semantic_dedup: NOT mapped here.
     # Their cost directives point the agent to read phase4e-semantic-dedup.md
     # directly. Loading it as body would leak cross-pipeline artifacts.

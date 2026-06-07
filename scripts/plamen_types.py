@@ -1085,6 +1085,19 @@ SC_PHASES = [
           ["rag_validation.md"],
           base_timeout_s=2400, needs_mcp=True, model="sonnet",
           modes={"core", "thorough"}, critical=True),
+    # Phase 4b.6: Independent exploration-completeness verifier. Thorough
+    # only. Recall-positive / ADDITIVE — may add, upgrade, or re-open
+    # findings; may never drop, merge, or downgrade. Runs AFTER the depth
+    # loop and its post-depth sub-phases (attention_repair, rag_sweep) and
+    # BEFORE dedup/chain, so any added/upgraded/re-opened finding propagates
+    # through dedup -> chain -> verify -> report. Soft phase (critical=False):
+    # a timeout/degrade continues, never halts — identical Thorough-only-soft
+    # mechanism as `skeptic`. Stays sonnet (not in the Thorough opus-promotion
+    # set, which only covers breadth/sc_verify shards/skeptic).
+    Phase("exploration_skeptic", ["Phase 4b.6: Exploration Completeness"],
+          ["exploration_skeptic_findings.md"],
+          base_timeout_s=3600, modes={"thorough"}, critical=False,
+          model="sonnet"),
     Phase("sc_semantic_dedup", ["Phase 4e: Semantic Dedup"],
           ["dedup_decisions.md", "findings_inventory_deduped.md"],
           base_timeout_s=1200, model="sonnet", critical=True),

@@ -172,6 +172,7 @@ __all__ = [
     "_validate_attention_repair",
     "_validate_invariants_pass2",
     "_validate_chain_iter2",
+    "_validate_exploration_skeptic",
     "_validate_chain_anti_absorption",
     "_declared_depth_findings",
     "_validate_chain_baseline_not_regrouped",
@@ -2874,6 +2875,10 @@ def _owned_artifact_patterns(pipeline: str, scratchpad: Optional[Path] = None) -
             "never_cut_checkpoint.md", "depth_exit.md",
         ],
         "rag_sweep": ["rag_validation.md"],
+        # Phase 4b.6: independent exploration-completeness verifier. Writes its
+        # own additive findings + coverage-record artifact; never edits prior
+        # artifacts, so ownership is exclusive to this one file.
+        "exploration_skeptic": ["exploration_skeptic_findings.md"],
         "sc_semantic_dedup": ["dedup_decisions.md", "findings_inventory_deduped.md"],
         "attention_repair": ["attention_repair_summary.md", "attention_repair_findings.md"],
         "chain": ["hypotheses.md", "finding_mapping.md", "enabler_results.md"],
@@ -5982,6 +5987,40 @@ def _validate_chain_iter2(scratchpad: Path, mode: str) -> list[str]:
     _logging.getLogger("plamen.validators").warning(
         "[chain_iter2] chain_iteration2.md missing/empty — sentinel "
         "written, pipeline continues"
+    )
+    return []
+
+
+def _validate_exploration_skeptic(scratchpad: Path, mode: str) -> list[str]:
+    """SOFT validator for Phase 4b.6 (exploration-completeness verifier).
+
+    Recall-positive / additive phase. Like chain_iter2, this validator NEVER
+    returns hard issues — it returns [] in every branch, so it can never set
+    passed=False and can never halt the pipeline. Confirms the additive
+    findings/coverage-record artifact exists and is substantial; on
+    missing/empty output it logs a warning and writes a sentinel, then lets the
+    pipeline proceed (the phase only ADDS findings, so its absence loses no
+    prior finding).
+    """
+    if mode != "thorough":
+        return []
+    out_path = scratchpad / "exploration_skeptic_findings.md"
+    if out_path.exists() and out_path.stat().st_size > 30:
+        return []
+    # Missing or near-empty output. Write sentinel; don't halt.
+    try:
+        (scratchpad / "exploration_skeptic.degraded").write_text(
+            "[EXPLORATION_SKEPTIC_DEGRADED] exploration_skeptic_findings.md "
+            "missing or <30 bytes. Pipeline continues; this phase is "
+            "additive-only, so no prior finding is lost by its absence.\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    import logging as _logging
+    _logging.getLogger("plamen.validators").warning(
+        "[exploration_skeptic] exploration_skeptic_findings.md missing/empty "
+        "— sentinel written, pipeline continues"
     )
     return []
 
