@@ -3438,9 +3438,17 @@ def _backfill_inventory_ids_into_ledger(scratchpad: Path) -> int:
     return registered
 
 
+# Accept BOTH `flag: N` (the form agents actually write, verified against real
+# DODO + AwesomeX output) AND `flag = N`. The prior `=`-only regex silently
+# returned 0 counts for every run that used the colon form, so
+# `_semantic_gap_required` evaluated False even when conditional_writes=4 /
+# cluster_gaps=2 etc. were present — the niche then fired only by recon-
+# recommendation luck, not the designed trigger. Optional bold/backtick
+# wrappers tolerated; matches inside ``` fences too (MULTILINE, line-anchored).
 _SEMANTIC_GAP_COUNTER_RE = re.compile(
-    r"^\s*[-*]?\s*(sync_gaps|accumulation_exposures|conditional_writes|cluster_gaps)"
-    r"\s*=\s*(\d+)\b",
+    r"^\s*[-*]?\s*[`*]*\s*"
+    r"(sync_gaps|accumulation_exposures|conditional_writes|cluster_gaps)"
+    r"[`*]*\s*[:=]\s*[`*]*\s*(\d+)\b",
     re.IGNORECASE | re.MULTILINE,
 )
 
