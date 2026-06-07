@@ -7389,14 +7389,19 @@ def _validate_invariants_pass2(scratchpad: Path, mode: str) -> list[str]:
         text = inv_path.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return []
-    if re.search(r"^##\s+Pass\s*2\s*[:—–-]", text, re.MULTILINE | re.IGNORECASE):
+    # Header matching is intentionally TOLERANT: the LLM writes the same
+    # heading in many shapes (## vs ### vs ####, bold `**...**`, leading
+    # whitespace, trailing qualifiers like "(Pass 2)" / ": Recursive Trace").
+    # A brittle `^###\s+Summary\s+Flags` exact-match produced a recurring false
+    # "missing subblock" warning EVERY run even when the block was present in a
+    # slightly different shape. Anchor at line-start, allow #-level/bold/ws and
+    # a word boundary instead of requiring exact heading punctuation.
+    _PASS2_HEADER = r"(?im)^\s{0,3}(?:#{1,4}\s*)?\*{0,3}\s*pass\s*2\b"
+    _SUMMARY_FLAGS_HEADER = r"(?im)^\s{0,3}(?:#{1,4}\s*)?\*{0,3}\s*summary\s+flags\b"
+    if re.search(_PASS2_HEADER, text):
         # Pass 2 section present. Optional further check: does it have a
-        # `### Summary Flags` block? If not, log a warning but still pass.
-        if not re.search(
-            r"^###\s+Summary\s+Flags",
-            text,
-            re.MULTILINE | re.IGNORECASE,
-        ):
+        # Summary Flags block (any heading/bold shape)? If not, warn but pass.
+        if not re.search(_SUMMARY_FLAGS_HEADER, text):
             import logging as _logging
             _logging.getLogger("plamen.validators").warning(
                 "[invariants_p2] Pass 2 section present but missing "
