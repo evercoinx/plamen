@@ -622,27 +622,25 @@ LOG checkpoint result to {SCRATCHPAD}/checkpoint_postdepth.md
 
 ---
 
-## THOROUGH CHECKPOINT: Pre-Depth (EVM only)
+## THOROUGH FUZZ CAMPAIGN (driver-scheduled — do NOT spawn from here)
 
-When `MODE == thorough` AND `LANGUAGE == evm`:
+In V2 the invariant/Medusa fuzz campaign is scheduled by the Python driver as a
+Thorough-only **depth fuzz sidecar worker** (one per ecosystem, plus EVM Medusa
+when `MEDUSA_AVAILABLE`). It is NOT a coordinator spawn:
 
-**Step A: Invariant Fuzz Campaign** (MANDATORY — zero budget cost)
-Read template: `~/.claude/prompts/{LANGUAGE}/phase4b-invariant-fuzz.md`
-Spawn agent. Await completion. Write results to `invariant_fuzz_results.md`.
-The template has a 5-minute timeout built in. Do NOT skip this to save time.
-
-**Step B: Medusa Campaign** (MANDATORY if MEDUSA_AVAILABLE — zero budget cost)
-Read the standalone Medusa prompt:
-`~/.claude/prompts/shared/v2/phase4b-medusa.md`.
-Spawn agent IN PARALLEL with Step A. Await completion.
-Write results to `medusa_fuzz_findings.md`.
-
-**Step C: Assert Completion**
-```
-ASSERT: invariant_fuzz_results.md exists (or COMPILATION_FAILED logged)
-ASSERT: medusa_fuzz_findings.md exists (or MEDUSA_UNAVAILABLE logged)
-IF either missing AND no failure logged -> VIOLATION: "Fuzz campaign skipped without failure reason"
-```
+- The driver emits the worker(s) per `(mode == thorough, ecosystem,
+  build_status tool flags)` and points each at the canonical per-ecosystem
+  worker prompt (`prompts/{LANGUAGE}/v2/phase4b-invariant-fuzz.md`, and EVM
+  `prompts/evm/v2/phase4b-medusa-fuzz.md`). The worker runs forge/medusa/cargo
+  /sui via Bash itself.
+- It is **additive and non-blocking**: fuzz results add `[FUZZ-N]`/`[MEDUSA-N]`
+  invariant-violation findings only. A tool-absent/failed/timed-out run writes a
+  degrade-continue results artifact (`## Result Status: TOOL_UNAVAILABLE /
+  COMPILATION_FAILED / TIMEOUT`) and never halts depth. Fuzz artifacts are NOT
+  in the depth hard gate and NOT never-cut.
+- Do **NOT** spawn a fuzz agent from this prompt, and do not ASSERT fuzz-artifact
+  existence here — the driver owns completion via the worker pool, and the
+  artifacts are intentionally outside the depth hard gate.
 
 ---
 

@@ -7979,6 +7979,15 @@ def _depth_worker_jobs(scratchpad: Path, config: dict) -> list[dict[str, str]]:
                 pass
         if mode == "thorough":
             jobs.extend(dict(job) for job in _DEPTH_THOROUGH_SIDE_JOBS)
+            # Thorough-only conditional fuzz sidecar worker(s). Additive and
+            # non-blocking: outputs are NOT in the depth hard gate nor in
+            # sc_never_cut_groups. seen_outputs dedup keeps resume/re-entry from
+            # double-adding (mirrors the niche-job dedup above).
+            seen_fuzz = {str(job.get("output", "")) for job in jobs}
+            for fuzz_job in _depth_fuzz_jobs_if_required(scratchpad, config):
+                if fuzz_job["output"] not in seen_fuzz:
+                    jobs.append(fuzz_job)
+                    seen_fuzz.add(fuzz_job["output"])
     return jobs
 
 
@@ -8252,6 +8261,89 @@ Mandatory standard-depth sections:
 - `## Chain Summary`
 {perturbation_block}
 {depth_skill_block}
+"""
+    elif category == "fuzz":
+        if role == "medusa_fuzz":
+            fuzz_prompt = (plamen_home() / _FUZZ_MEDUSA_PROMPT).as_posix()
+            fuzz_flag_name = "MEDUSA_AVAILABLE"
+        else:
+            fuzz_prompt = (
+                plamen_home()
+                / _FUZZ_INVARIANT_PROMPT_BY_LANG.get(
+                    language, "prompts/evm/v2/phase4b-invariant-fuzz.md"
+                )
+            ).as_posix()
+            fuzz_flag_name = _FUZZ_INVARIANT_FLAG_BY_LANG.get(language, "")
+        # Resolve the real build root (dir owning foundry.toml / Cargo.toml /
+        # Move.toml) — frequently a parent/sibling of the audit scope dir. The
+        # driver grants it via --add-dir (see depth-worker command builder);
+        # the worker must cd there to build/run.
+        try:
+            import importlib as _il_fz
+            import sys as _sys_fz
+            _sys_fz.path.insert(0, str(Path(__file__).parent))
+            _mv_fz = _il_fz.import_module("mechanical_verify")
+            _fz_build_root = _mv_fz._read_recon_build_root(
+                scratchpad, language
+            ) or _mv_fz._find_build_root(Path(project_root), language)
+            build_root_posix = Path(_fz_build_root).as_posix()
+        except Exception:
+            build_root_posix = Path(project_root).as_posix()
+        flag_val = None
+        if fuzz_flag_name:
+            flag_val = _read_build_status_flag(scratchpad, fuzz_flag_name)
+        if fuzz_flag_name:
+            flags_line = f"{fuzz_flag_name} = {flag_val} (from build_status.md)"
+        else:
+            flags_line = (
+                "primary tool is auto-detected by the methodology "
+                "(no build_status flag gates this ecosystem)"
+            )
+        standard_block = f"""
+This is a depth FUZZ worker. Read the fuzz methodology at
+`{fuzz_prompt}` and execute it directly. You ARE the worker — run
+forge/medusa/cargo/sui via the Bash tool yourself; do NOT spawn Task/Agent
+subagents and do NOT follow any coordinator/"spawn agent" instructions inside
+that methodology (those are legacy; you are the executor).
+
+The build root (the directory containing foundry.toml / Cargo.toml / Move.toml)
+is `{build_root_posix}` and is in your --add-dir grant. `cd` there to build and
+run. Treat any `{{PROJECT_ROOT}}` placeholder in the methodology as this build
+root, and `{{SCRATCHPAD}}` as `{scratchpad.as_posix()}`.
+
+Tool availability from build_status.md: {flags_line}. If the primary tool is
+unavailable (or the harness will not compile after the documented recovery
+attempts), follow the documented FALLBACK chain in the methodology
+(proptest / boundary-value parameterized tests). EVM medusa has NO fallback —
+if medusa is unavailable, write the degrade-continue artifact and stop.
+
+Bound your own fuzzer run so you finish well before the worker timeout:
+forge invariant uses a <=300s budget; medusa pins `--timeout 600`.
+
+### Degrade-Continue Contract (MANDATORY — silent skip is forbidden)
+
+You MUST ALWAYS write the output file, even on any failure, and it MUST contain
+a single line of the form:
+
+`## Result Status: <RAN|TOOL_UNAVAILABLE|COMPILATION_FAILED|TIMEOUT|NOT_APPLICABLE>`
+
+followed by a one-line reason. Choose:
+- `RAN` — the campaign executed. List any invariant violations as
+  `### Finding [FUZZ-N]` / `### Finding [MEDUSA-N]` rows with the
+  `[FUZZ-PASS]` / `[MEDUSA-PASS]` evidence tag and the counterexample call
+  sequence. If no violations: state "No violations detected" — that is fine.
+- `TOOL_UNAVAILABLE` — the primary tool AND all documented fallbacks are
+  absent (e.g. medusa not installed; Hardhat-only project with no invariant
+  support). Contains NO findings — that is fine.
+- `COMPILATION_FAILED` — the harness/contract did not compile after the
+  documented recovery attempts. Include the error tail. NO findings.
+- `TIMEOUT` — the fuzzer exceeded its self-bounded budget. NO findings.
+- `NOT_APPLICABLE` — the assigned fuzz concern does not apply to this codebase.
+
+A non-RAN status with NO findings is a VALID, complete artifact: the depth gate
+requires file presence and the COMPLETE marker, NOT findings. Do NOT spawn
+subagents. Do NOT inspect other workers' outputs. Do NOT advance to chain
+analysis, verification, or reporting.
 """
     elif category == "niche":
         niche_skill = _niche_skill_path_for_role(role)
@@ -8690,6 +8782,121 @@ def _run_depth_worker_batch(
     return 0, results
 
 
+def _read_build_status_flag(scratchpad: Path, flag: str) -> bool | None:
+    """Read a boolean tool-availability flag from build_status.md.
+
+    Recon (Phase 1 TASK 1) records tool availability as lines like
+    `MEDUSA_AVAILABLE: true` / `trident_available: false` /
+    `**cargo_fuzz_available**: true`. Matching is case-insensitive on the flag
+    name and tolerant of bold markers and bullet prefixes.
+
+    Returns True/False when the flag is present, or None when build_status.md is
+    missing or the flag is absent (the caller decides the default).
+    """
+    try:
+        text = (scratchpad / "build_status.md").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return None
+    m = re.search(
+        r"(?im)^[ \t>*-]*\**\s*"
+        + re.escape(flag)
+        + r"\s*\**\s*[:=]\s*\**\s*(true|false|yes|no)\b",
+        text,
+    )
+    if not m:
+        return None
+    return m.group(1).lower() in ("true", "yes")
+
+
+# Per-ecosystem canonical fuzz worker prompt paths (relative to plamen_home()).
+# Each path is the worker-shaped methodology the fuzz worker reads and executes
+# directly. The driver only decides WHETHER to emit the job (mode + ecosystem +
+# medusa flag); the prompt decides primary-vs-fallback-vs-skip from the tool
+# flag and the compile result.
+_FUZZ_INVARIANT_PROMPT_BY_LANG: dict[str, str] = {
+    "evm": "prompts/evm/v2/phase4b-invariant-fuzz.md",
+    "solana": "prompts/solana/v2/phase4b-invariant-fuzz.md",
+    "soroban": "prompts/soroban/v2/phase4b-invariant-fuzz.md",
+    "sui": "prompts/sui/v2/phase4b-invariant-fuzz.md",
+}
+_FUZZ_MEDUSA_PROMPT = "prompts/evm/v2/phase4b-medusa-fuzz.md"
+# Tool-availability flag in build_status.md that the worker self-reads to pick
+# primary-vs-fallback. Absence still emits the invariant job (the worker runs
+# the documented fallback chain) — only EVM medusa is strictly flag-gated.
+_FUZZ_INVARIANT_FLAG_BY_LANG: dict[str, str] = {
+    "evm": "",  # forge/foundry — worker self-detects foundry.toml
+    "solana": "trident_available",
+    "soroban": "cargo_fuzz_available",
+    "sui": "",  # sui move random_test — worker self-detects
+}
+
+
+def _depth_fuzz_jobs_if_required(
+    scratchpad: Path, config: dict
+) -> list[dict[str, str]]:
+    """Thorough-only, ecosystem-gated depth fuzz sidecar job plan.
+
+    Mirrors `_depth_da_job_if_required`: returns [] when not applicable, else a
+    list of conditional depth worker jobs (category=='fuzz'). The jobs run forge
+    /medusa/cargo/sui via Bash inside the depth worker pool — they never spawn
+    Task() subagents.
+
+    Gating (matrix should_run=true cells only):
+      - mode != thorough            -> []
+      - pipeline == 'l1'            -> [] (L1 uses per-finding verify fuzz tags)
+      - language == 'aptos'         -> [] (Move has no invariant fuzzer)
+      - evm                         -> invariant (always) + medusa (iff MEDUSA_AVAILABLE)
+      - solana / soroban / sui      -> invariant (always; worker self-selects
+                                       primary-vs-fallback from the tool flag)
+
+    The invariant job is ALWAYS emitted for should_run ecosystems even when the
+    primary fuzzer flag is absent, so the documented FALLBACK chain (proptest/
+    boundary) runs and the skip is LOGGED, not silent. Only the EVM medusa job
+    is strictly flag-gated because medusa has no fallback.
+    """
+    if str(config.get("mode", "core")).lower() != "thorough":
+        return []
+    if str(config.get("pipeline", "sc")).lower() == "l1":
+        return []
+    language = str(config.get("language", "")).lower().strip()
+    if language not in _FUZZ_INVARIANT_PROMPT_BY_LANG:
+        # aptos and any other ecosystem with no invariant fuzzer -> emit nothing.
+        return []
+    jobs: list[dict[str, str]] = [{
+        "agent_id": "invariant-fuzz",
+        "role": "invariant_fuzz",
+        "output": "invariant_fuzz_results.md",
+        "category": "fuzz",
+        "focus": (
+            f"Invariant fuzz campaign for {language}: derive protocol "
+            "invariants, build the harness, run the primary fuzzer (or the "
+            "documented fallback if unavailable), report violations"
+        ),
+    }]
+    if language == "evm":
+        medusa = _read_build_status_flag(scratchpad, "MEDUSA_AVAILABLE")
+        if medusa is True:
+            jobs.append({
+                "agent_id": "medusa-fuzz",
+                "role": "medusa_fuzz",
+                "output": "medusa_fuzz_findings.md",
+                "category": "fuzz",
+                "focus": (
+                    "Medusa stateful fuzz campaign: derive invariants, build "
+                    "the standalone Medusa harness, run medusa --timeout 600, "
+                    "report [MEDUSA-N] violations"
+                ),
+            })
+        else:
+            log.info(
+                "[depth] medusa fuzz job skipped: MEDUSA_AVAILABLE=%s "
+                "(no fallback for medusa)", medusa,
+            )
+    return jobs
+
+
 def _depth_da_job_if_required(scratchpad: Path, config: dict) -> list[dict[str, str]]:
     if str(config.get("mode", "core")).lower() != "thorough":
         return []
@@ -8892,8 +9099,88 @@ def _run_depth_worker_pool_pty(
         log.info(
             f"[depth] worker-pool attempt {pool_attempt} incomplete: {missing}"
         )
+    # Belt-and-suspenders: a fuzz job that produced no output after the retry
+    # budget must NOT halt depth (fuzz is additive, non-blocking). Stub any
+    # still-missing fuzz output with a TOOL_UNAVAILABLE degrade-continue
+    # artifact and re-check. Scoped to category=='fuzz' ONLY — standard depth
+    # jobs keep their strict completion.
+    stubbed_any = _stub_missing_fuzz_outputs_on_exhaustion(scratchpad, phase, jobs)
+    if stubbed_any:
+        rc = _finalize_depth_worker_pool_if_complete(
+            scratchpad=scratchpad,
+            project_root=project_root,
+            config=config,
+            phase=phase,
+            jobs=jobs,
+            base_cmd=base_cmd,
+            env=env,
+            timeout=timeout,
+            quiescence_s=quiescence_s,
+            attempt=budget + 2,
+            pool_started=pool_started,
+            retry_reasons_by_output=retry_reasons_by_output,
+        )
+        if rc is not None:
+            return rc
     log.warning("[depth] worker-pool retry budget exhausted")
     return -2
+
+
+def _stub_missing_fuzz_outputs_on_exhaustion(
+    scratchpad: Path,
+    phase: Phase,
+    jobs: list[dict[str, str]],
+) -> bool:
+    """Write a degrade-continue stub for any incomplete fuzz job after retries.
+
+    Fuzz artifacts are additive and non-blocking; a worker that crashed before
+    writing its output must not be allowed to halt depth. This writes a minimal
+    `## Result Status: TOOL_UNAVAILABLE` artifact (with the COMPLETE marker) for
+    each still-incomplete category=='fuzz' job and logs a warning. Returns True
+    when at least one stub was written. Standard/scanner/sidecar/niche jobs are
+    untouched.
+    """
+    wrote = False
+    for job in jobs:
+        if job.get("category") != "fuzz":
+            continue
+        if _depth_worker_output_complete(scratchpad, phase, job):
+            continue
+        output = str(job["output"])
+        agent_id = str(job.get("agent_id", "fuzz"))
+        path = scratchpad / output
+        reason = "fuzz worker produced no output after all retry attempts"
+        body = (
+            f"<!-- PLAMEN_ARTIFACT: {output} -->\n"
+            f"<!-- PLAMEN_OWNER: {agent_id} -->\n"
+            f"<!-- PLAMEN_STATUS: IN_PROGRESS -->\n"
+            f"<!-- PLAMEN_PHASE: depth -->\n"
+            f"<!-- PLAMEN_VERSION: 1 -->\n"
+            f"<!-- AGENT_ROW: {agent_id} -->\n"
+            f"<!-- EXPECTED_OUTPUT: {output} -->\n\n"
+            f"# Fuzz Campaign Results ({agent_id})\n\n"
+            f"## Result Status: TOOL_UNAVAILABLE\n"
+            f"Reason: {reason}.\n\n"
+            f"## No Findings\n"
+            f"The fuzz campaign did not execute, so no invariant violations "
+            f"were produced. This is a non-blocking degrade-continue artifact: "
+            f"fuzz results are additive only and never gate the depth phase.\n\n"
+            f"<!-- PLAMEN_STATUS: COMPLETE -->\n"
+        )
+        try:
+            path.write_text(body, encoding="utf-8")
+            wrote = True
+            log.warning(
+                "[depth] fuzz job %s exhausted retries — wrote "
+                "TOOL_UNAVAILABLE degrade-continue stub (%s)",
+                agent_id, output,
+            )
+        except OSError as exc:
+            log.warning(
+                "[depth] could not write fuzz degrade stub %s: %s",
+                output, exc,
+            )
+    return wrote
 
 
 # ===========================================================================
@@ -10466,9 +10753,20 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
     # Without granting the build root, the verifier literally cannot create
     # `test/<x>` and skips with NO_BUILD_ENVIRONMENT → mechanical NO_TEST_FILE →
     # degrade. Ecosystem-agnostic: _find_build_root keys on config language.
+    # Depth Thorough also needs the build root: the fuzz sidecar worker(s) build
+    # and run forge/medusa/cargo/sui in the dir owning the build manifest, which
+    # is frequently a parent/sibling of the audit scope dir. Grant is additive
+    # and harmless for non-fuzz depth workers (read-only extra dir).
+    _depth_needs_build_root = (
+        phase.name == "depth"
+        and str(config.get("mode", "core")).lower() == "thorough"
+    )
     if backend != "codex" and (
-        phase.name.startswith(("sc_verify_", "verify_"))
-        and not phase.name.endswith(("_queue", "_aggregate"))
+        (
+            phase.name.startswith(("sc_verify_", "verify_"))
+            and not phase.name.endswith(("_queue", "_aggregate"))
+        )
+        or _depth_needs_build_root
     ):
         try:
             import importlib as _il_br

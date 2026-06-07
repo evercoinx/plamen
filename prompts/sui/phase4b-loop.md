@@ -44,9 +44,13 @@ ADAPTIVE_DEPTH_LOOP(findings_inventory):
   await semantic_invariant_agent  // MUST complete before depth agents spawn (they consume its output)
 
   // â•â•â• INVARIANT FUZZ CAMPAIGN - Sui random-input tests â•â•â•
-  // Use rules/language-toolchain-registry.json. Prefer #[random_test] with
-  // `sui move test --rand-num-iters`; fall back to boundary-value tests when
-  // the invariant cannot be expressed in the Sui test harness.
+  // NOTE (V2): the fuzz campaign runs as a driver-scheduled depth fuzz sidecar
+  // worker, not a coordinator spawn. See prompts/sui/v2/phase4b-invariant-fuzz.md.
+  // The driver always emits the invariant worker in Thorough; the worker prefers
+  // #[random_test] with `sui move test --rand-num-iters` and falls back to
+  // boundary-value parameterized tests when the invariant cannot be expressed in
+  // the Sui test harness. It degrade-continues without halting depth. Do NOT
+  // spawn an agent from here.
 
   // â•â•â• ITERATION 1: Full coverage (ALWAYS) â•â•â•
   // Read template_recommendations.md for REQUIRED niche agents
