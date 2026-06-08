@@ -361,8 +361,18 @@ def claude_pty_shape_hash(argv: list[str]) -> str:
 
 
 def encode_claude_project_dir(cwd: str | Path) -> str:
-    """Return Claude Code's project-directory encoding for a working dir."""
-    return re.sub(r"[^A-Za-z0-9_-]", "-", str(Path(cwd).resolve()))
+    """Return Claude Code's project-directory encoding for a working dir.
+
+    Claude Code's real slugifier converts EVERY character that is not an ASCII
+    letter, digit, or hyphen to a hyphen -- including underscores. The
+    keep-class is ``[A-Za-z0-9-]`` (note: NO underscore). A path segment like
+    ``foo_bar`` therefore maps on disk to ``foo-bar``. The prior keep-class
+    erroneously preserved ``_``, producing a project-dir slug that did not
+    exist on disk for any underscore-containing path (e.g. non-EVM crate
+    directories), so the transcript poll watched a file that was never written
+    and the worker hung until timeout. Match the real slugifier exactly.
+    """
+    return re.sub(r"[^A-Za-z0-9-]", "-", str(Path(cwd).resolve()))
 
 
 def claude_transcript_path(
@@ -370,8 +380,30 @@ def claude_transcript_path(
     cwd: str | Path,
     claude_home: str | Path | None = None,
 ) -> Path:
+    """Resolve the on-disk transcript file for a Claude PTY session.
+
+    The encoded project-dir slug is the PRIMARY candidate. The session_id is
+    the ``.jsonl`` filename and is globally unique, so when the primary slug
+    does not exist on disk we self-heal by globbing recursively for
+    ``{session_id}.jsonl`` under ``projects/``. A SINGLE match is unambiguous
+    and is returned. Zero or multiple matches are ambiguous, so we return the
+    primary candidate unchanged -- behaviour identical to before the glob, and
+    never a guess. This makes completion detection resilient to ANY future
+    slug-encoding divergence across every ecosystem and role-name shape.
+    """
     home = Path(claude_home) if claude_home else Path.home() / ".claude"
-    return home / "projects" / encode_claude_project_dir(cwd) / f"{session_id}.jsonl"
+    primary = (
+        home / "projects" / encode_claude_project_dir(cwd) / f"{session_id}.jsonl"
+    )
+    if primary.exists():
+        return primary
+    try:
+        matches = sorted(home.glob(f"projects/**/{session_id}.jsonl"))
+    except Exception:
+        matches = []
+    if len(matches) == 1:
+        return matches[0]
+    return primary
 
 
 def _event_message(event: dict[str, Any]) -> dict[str, Any]:
@@ -719,7 +751,15 @@ class ClaudePtySession:
         self.env = env
         self.session_id = session_id
         self.prompt_path = Path(prompt_path)
-        self.transcript_path = claude_transcript_path(session_id, cwd, claude_home)
+        # Lazy transcript resolution: the on-disk transcript file may not exist
+        # at spawn time (Claude Code creates it shortly after the session
+        # starts). Store the resolver inputs and resolve on first access via
+        # the ``transcript_path`` property, which re-resolves until the real
+        # file materialises (then caches it). This guarantees the completion
+        # poll reads the real end_turn-bearing transcript for every ecosystem.
+        self._session_id = session_id
+        self._claude_home = claude_home
+        self._resolved_transcript_path: Path | None = None
         self.log_file = log_file
         self.proc: Any = None
         self._child_pid: int | None = None
@@ -729,6 +769,29 @@ class ClaudePtySession:
         self._reader_thread: threading.Thread | None = None
         self._recent_output = ""
         self._recent_output_lock = threading.Lock()
+
+    @property
+    def transcript_path(self) -> Path:
+        """Lazily resolve the session's on-disk transcript file.
+
+        Returns a cached Path once the real file has been found to exist.
+        Otherwise re-runs ``claude_transcript_path`` every access: if that
+        resolves to an existing file it is cached and returned; if not, the
+        primary encoded candidate is returned so the poll keeps watching the
+        same stable path until the file materialises, then auto-upgrades to
+        the real (possibly glob-resolved) path. Never guesses.
+        """
+        if (
+            self._resolved_transcript_path is not None
+            and self._resolved_transcript_path.exists()
+        ):
+            return self._resolved_transcript_path
+        candidate = claude_transcript_path(
+            self._session_id, self.cwd, self._claude_home
+        )
+        if candidate.exists():
+            self._resolved_transcript_path = candidate
+        return candidate
 
     def spawn(self) -> None:
         if sys.platform == "win32":

@@ -414,15 +414,15 @@ Detect the target language before anything else:
 | `*.move` files + `Move.toml` with `sui::object`/`sui::transfer`/`sui::tx_context`/`sui::coin` | **Sui Move** | `sui` |
 | `*.rs` files + `Cargo.toml` with `soroban-sdk` | **Soroban/Stellar** | `soroban` |
 
-**Detection procedure**:
-1. `ls` project root for `foundry.toml`, `hardhat.config.*`, `Anchor.toml`, `Move.toml`, `Cargo.toml`
-2. If `Move.toml` found: grep dependencies for Aptos indicators (`AptosFramework`, `aptos_framework`, `AptosStdlib`, `aptos_std`, `AptosToken`, `aptos_token`) or Sui indicators (`Sui`, `sui::object`, `sui::transfer`, `sui::tx_context`, `sui::coin`)
-3. If ambiguous Move: grep `*.move` for `use aptos_framework::` (Aptos) or `use sui::` (Sui)
-4. If `*.rs` files + `Cargo.toml`: grep `Cargo.toml` for `soroban-sdk` â†’ if found, set `LANGUAGE=soroban`
-5. If `*.rs` files + NOT soroban: grep `Cargo.toml` for `anchor-lang` or `solana-program`
-6. If still ambiguous Rust: grep `*.rs` for `#[program]` or `#[derive(Accounts)]` (Anchor markers)
-7. Set `LANGUAGE` variable: `evm`, `solana`, `aptos`, `sui`, or `soroban`
-8. Set `ANCHOR` variable: `true` or `false` (Solana only)
+**Detection procedure** (decide PRIMARILY from the dominant source EXTENSION; use manifests only to disambiguate within a language family):
+1. **Count source files recursively** under PROJECT_PATH (excluding `node_modules/`, `target/`, `build/`, `lib/`): how many `*.sol`, how many `*.rs`, how many `*.move`. The most common recognized suffix is the dominant signal.
+2. **Walk UP** from PROJECT_PATH to the nearest `Cargo.toml` / `Move.toml` — the manifest is commonly an ancestor of a scope-dir PROJECT_PATH (e.g. `.../<crate>/src/`), so a manifest grep in the literal project root alone is unreliable. Locate the manifest by ascending parent directories until found.
+3. **If `*.sol` dominant** → `LANGUAGE=evm`.
+4. **If `*.rs` dominant**: grep the located `Cargo.toml` — `soroban-sdk` → `soroban`; `anchor-lang`/`solana-program` (or `*.rs` markers `#[program]`/`#[derive(Accounts)]`) → `solana` with `ANCHOR=true`; native Rust Solana → `solana` with `ANCHOR=false`. The manifest grep ONLY disambiguates solana-vs-soroban; it never overrides the dominant-extension decision.
+5. **If `*.move` dominant**: grep the located `Move.toml` for Aptos indicators (`AptosFramework`, `aptos_framework`, `aptos_std`, `aptos_token`, `fungible_asset`) → `aptos`; Sui indicators (`sui::object`, `sui::transfer`, `sui::tx_context`, `sui::coin`) → `sui`. If still ambiguous, grep `*.move` for `use aptos_framework::` (Aptos) or `use sui::` (Sui).
+6. **Use explicit if/elif blocks** — never a chained `&&`/`||` one-liner (precedence is wrong). Do NOT silently default to `evm`: if no recognized source files are found, treat the language as **indeterminate** and confirm explicitly rather than guessing. The Python driver runs a STARTUP language<->source-extension consistency gate that HALTS the run on a definite contradiction (e.g. `language=evm` but only `*.rs` found), so a misroute is caught before breadth rather than after a multi-hour run.
+7. Set `LANGUAGE` variable: `evm`, `solana`, `aptos`, `sui`, or `soroban`.
+8. Set `ANCHOR` variable: `true` or `false` (Solana only).
 
 ## Step 1.5: Scratchpad + Artifact Folders
 

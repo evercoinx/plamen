@@ -140,24 +140,33 @@ def test_fuzz_jobs_evm_with_medusa_available(tmp_path):
     assert all(j["category"] == "fuzz" for j in jobs)
 
 
-def test_fuzz_jobs_evm_without_medusa(tmp_path):
+def test_fuzz_jobs_evm_medusa_always_on_even_when_flag_false(tmp_path):
     sp = tmp_path / ".scratchpad"
     _fresh(sp)
     _write_build_status(sp, "MEDUSA_AVAILABLE: false\n")
     cfg = {"pipeline": "sc", "mode": "thorough", "language": "evm"}
     jobs = D._depth_fuzz_jobs_if_required(sp, cfg)
-    # invariant always emitted (forge has no flag gate); medusa skipped (no fallback)
-    assert _outputs(jobs) == ["invariant_fuzz_results.md"]
+    # ALWAYS-ON: medusa is now emitted for EVM-thorough regardless of the
+    # (recon-unreliable) MEDUSA_AVAILABLE flag. The worker self-probes and
+    # scaffolds a harness from scratch; it degrade-continues if truly absent.
+    assert _outputs(jobs) == [
+        "invariant_fuzz_results.md",
+        "medusa_fuzz_findings.md",
+    ]
+    assert all(j["category"] == "fuzz" for j in jobs)
 
 
-def test_fuzz_jobs_evm_medusa_flag_missing_means_skip(tmp_path):
+def test_fuzz_jobs_evm_medusa_always_on_when_build_status_missing(tmp_path):
     sp = tmp_path / ".scratchpad"
     _fresh(sp)
-    # No build_status.md at all -> medusa flag absent -> medusa job not emitted,
-    # but invariant job still emitted so the skip is logged not silent.
+    # No build_status.md at all -> MEDUSA_AVAILABLE absent -> medusa STILL
+    # emitted (no pre-gate). The worker probes medusa itself and degrades.
     cfg = {"pipeline": "sc", "mode": "thorough", "language": "evm"}
     jobs = D._depth_fuzz_jobs_if_required(sp, cfg)
-    assert _outputs(jobs) == ["invariant_fuzz_results.md"]
+    assert _outputs(jobs) == [
+        "invariant_fuzz_results.md",
+        "medusa_fuzz_findings.md",
+    ]
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -378,4 +387,8 @@ def test_medusa_worker_prompt_points_at_medusa_canonical(tmp_path):
         attempt=1,
     )
     assert "prompts/evm/v2/phase4b-medusa-fuzz.md" in prompt
-    assert "MEDUSA_AVAILABLE" in prompt
+    # No MEDUSA_AVAILABLE pre-gate: the prompt frames medusa as self-probed and
+    # always-on (the worker scaffolds a harness from scratch when none ships).
+    assert "MEDUSA_AVAILABLE" not in prompt
+    assert "self-probed" in prompt.lower()
+    assert "Result Status:" in prompt

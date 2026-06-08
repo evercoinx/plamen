@@ -330,3 +330,90 @@ def test_breadth_row_status_rejects_cross_row_owner(tmp_path: Path):
     assert row["status"] == "structural_fail"
     assert any("PLAMEN_OWNER" in reason for reason in row["reasons"])
     assert any("AGENT_ROW" in reason for reason in row["reasons"])
+
+
+def test_early_complete_ready_fires_on_finished_owned_idle_worker(tmp_path: Path):
+    """STEP 1D: a finished, correctly-owned, disk-idle worker triggers the
+    early-complete cutover -- generically for non-EVM role-name shapes."""
+    sp = tmp_path / ".scratchpad"
+    sp.mkdir(parents=True, exist_ok=True)
+    # Non-EVM-shaped role name (suffixed, multi-word) to prove generic
+    # reconciliation via the worker's OWN markers, not a name guess.
+    name = "analysis_account_lifecycle_t22.md"
+    _complete(sp, name, "B3")
+    out_path = sp / name
+    phase = _phase()
+
+    now = 10_000.0
+    grew = now - 1.0  # last growth 1s ago: NOT yet idle past the grace window
+    ready, _idle = D._breadth_early_complete_ready(
+        out_path=out_path,
+        expected_output=name,
+        phase=phase,
+        last_growth_at=grew,
+        now=now,
+        idle_grace_s=600.0,
+    )
+    assert ready is False  # complete + owned but not yet idle long enough
+
+    # After the grace window of disk-idle, the cutover is ready.
+    idle_now = grew + 601.0
+    ready, idle_for = D._breadth_early_complete_ready(
+        out_path=out_path,
+        expected_output=name,
+        phase=phase,
+        last_growth_at=grew,
+        now=idle_now,
+        idle_grace_s=600.0,
+    )
+    assert ready is True
+    assert idle_for >= 600.0
+
+
+def test_early_complete_not_ready_when_no_complete_marker(tmp_path: Path):
+    """An unfinished worker (no COMPLETE marker) is NEVER early-completed,
+    regardless of how long it has been disk-idle."""
+    sp = tmp_path / ".scratchpad"
+    sp.mkdir(parents=True, exist_ok=True)
+    name = "analysis_cpi_external.md"
+    out_path = sp / name
+    # IN_PROGRESS only -- no terminal COMPLETE marker.
+    out_path.write_text(
+        f"<!-- PLAMEN_ARTIFACT: {name} -->\n"
+        "<!-- PLAMEN_OWNER: B4 -->\n"
+        "<!-- PLAMEN_STATUS: IN_PROGRESS -->\n"
+        "<!-- PLAMEN_PHASE: breadth -->\n"
+        f"<!-- EXPECTED_OUTPUT: {name} -->\n\n"
+        f"# {name}\n\n" + ("partial body " * 40) + "\n",
+        encoding="utf-8",
+    )
+    ready, _idle = D._breadth_early_complete_ready(
+        out_path=out_path,
+        expected_output=name,
+        phase=_phase(),
+        last_growth_at=0.0,
+        now=10_000.0,  # idle for ~10000s
+        idle_grace_s=600.0,
+    )
+    assert ready is False
+
+
+def test_early_complete_not_ready_on_ownership_mismatch(tmp_path: Path):
+    """A complete-but-mis-owned artifact (markers name a DIFFERENT output) is
+    NEVER early-completed for this row -- no false-complete."""
+    sp = tmp_path / ".scratchpad"
+    sp.mkdir(parents=True, exist_ok=True)
+    # The file on disk is fully complete and owned by a DIFFERENT expected
+    # output; this row's expected_output does not match its markers.
+    name = "analysis_pda_economics.md"
+    _complete(sp, name, "B5")
+    out_path = sp / name
+    ready, _idle = D._breadth_early_complete_ready(
+        out_path=out_path,
+        expected_output="analysis_temporal_state.md",  # mismatch
+        phase=_phase(),
+        last_growth_at=0.0,
+        now=10_000.0,
+        idle_grace_s=600.0,
+    )
+    assert ready is False

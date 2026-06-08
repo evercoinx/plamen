@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from pty_exec import (  # noqa: E402
     ClaudePtySession,
+    claude_transcript_path,
     encode_claude_project_dir,
     event_is_rate_limited,
     inspect_transcript,
@@ -46,6 +47,69 @@ def _assistant(stop_reason: str, text: str = "", usage: dict | None = None) -> d
 def test_project_dir_encoding_matches_local_claude_shape():
     encoded = encode_claude_project_dir(r"C:\Users\plmnt\.claude")
     assert encoded.endswith("C--Users-plmnt--claude")
+
+
+def test_project_dir_encoding_converts_underscore_to_hyphen(tmp_path):
+    """Claude Code's slugifier converts `_` to `-` (keep-class is
+    [A-Za-z0-9-], no underscore). A two-word underscore path segment must map
+    to the hyphenated form, matching the on-disk projects dir."""
+    p = tmp_path / "foo_bar" / "baz_qux"
+    p.mkdir(parents=True)
+    encoded = encode_claude_project_dir(p)
+    assert "_" not in encoded
+    assert encoded.endswith("foo-bar-baz-qux")
+
+
+def test_transcript_path_self_heals_via_session_id_glob(tmp_path):
+    """When the encoded primary path does NOT exist but the
+    `{session_id}.jsonl` file exists under a DIFFERENT projects subdir, the
+    single-match glob resolves it to the real file."""
+    home = tmp_path / ".claude"
+    session_id = "11111111-2222-3333-4444-555555555555"
+    # Real transcript lives under SOME projects subdir whose slug differs from
+    # the one the primary candidate would encode for the given cwd (simulating
+    # a slug-encoding divergence). Use a short manual slug to stay within
+    # Windows path limits.
+    real_dir = home / "projects" / "real-on-disk-slug"
+    real_dir.mkdir(parents=True)
+    real_file = real_dir / f"{session_id}.jsonl"
+    real_file.write_text("{}\n", encoding="utf-8")
+
+    # cwd encodes to a primary candidate dir that does NOT exist on disk.
+    cwd = tmp_path / "proj_underscore" / "src"
+    cwd.mkdir(parents=True)
+    primary = (
+        home / "projects" / encode_claude_project_dir(cwd) / f"{session_id}.jsonl"
+    )
+    assert not primary.exists()
+
+    resolved = claude_transcript_path(session_id, cwd, home)
+    assert resolved == real_file
+    assert resolved.exists()
+
+
+def test_transcript_path_returns_primary_when_glob_ambiguous(tmp_path):
+    """Zero or two glob matches => return the primary encoded candidate
+    unchanged (no guessing)."""
+    home = tmp_path / ".claude"
+    session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    cwd = tmp_path / "proj" / "src"
+    cwd.mkdir(parents=True)
+    primary = (
+        home / "projects" / encode_claude_project_dir(cwd) / f"{session_id}.jsonl"
+    )
+
+    # Zero matches: primary does not exist, no file anywhere -> primary.
+    assert claude_transcript_path(session_id, cwd, home) == primary
+
+    # Two matches: ambiguous -> still primary unchanged.
+    d1 = home / "projects" / "slug-one"
+    d2 = home / "projects" / "slug-two"
+    d1.mkdir(parents=True)
+    d2.mkdir(parents=True)
+    (d1 / f"{session_id}.jsonl").write_text("{}\n", encoding="utf-8")
+    (d2 / f"{session_id}.jsonl").write_text("{}\n", encoding="utf-8")
+    assert claude_transcript_path(session_id, cwd, home) == primary
 
 
 def test_inspect_transcript_does_not_complete_on_mid_tool_loop(tmp_path):

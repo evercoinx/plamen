@@ -181,6 +181,23 @@ class _PtyStop(Exception):
         self.rc = rc
 
 
+class _PtyEarlyComplete(_PtyStop):
+    """Clean-stop sentinel: the worker's own artifact is finished, correctly
+    owned (PLAMEN_ARTIFACT / EXPECTED_OUTPUT markers match the assigned row),
+    carries the PLAMEN_STATUS COMPLETE marker, and the worker has gone
+    disk-idle for the early-complete grace window. Distinct from a containment
+    stop so the caller can resolve the row via the normal status computation
+    (status 'complete') rather than the 'containment' label. Path-independent
+    defense-in-depth: even if transcript-path resolution ever fails again, a
+    genuinely-finished, correctly-owned worker frees its slot instead of
+    pinning to the full timeout. NEVER fires on an unfinished or mis-owned
+    worker (missing marker => not complete; ownership mismatch => not
+    complete)."""
+
+    def __init__(self) -> None:
+        super().__init__(0)
+
+
 def _format_ai_model_summary(config: dict, active_phases: list[Phase], mode: str) -> str:
     """Return a concise runtime/model summary for the startup banner."""
     backend = (config.get("cli_backend") or "claude").strip().lower()
@@ -6357,6 +6374,51 @@ When done, return exactly one line:
 """
 
 
+def _breadth_early_complete_ready(
+    *,
+    out_path: Path,
+    expected_output: str,
+    phase: Phase,
+    last_growth_at: float | None,
+    now: float,
+    idle_grace_s: float = _EARLY_COMPLETE_IDLE_GRACE_SECONDS,
+) -> tuple[bool, float]:
+    """STEP 1D triple-gate for the disk-marker early-complete cutover.
+
+    Returns ``(ready, idle_for_seconds)``. ``ready`` is True ONLY when ALL of:
+    (1) the worker's own output exists with the PLAMEN_STATUS COMPLETE marker
+        (``is_artifact_complete``),
+    (2) the file's PLAMEN_ARTIFACT / EXPECTED_OUTPUT markers match THIS assigned
+        row (``validate_breadth_artifact_ownership``) -- this matches on the
+        worker's OWN markers, not a driver-side role-name guess, so it
+        reconciles every ecosystem's role-name shapes generically, and
+    (3) the worker has been disk-idle for at least ``idle_grace_s``.
+
+    A missing/non-COMPLETE marker => not ready. An ownership mismatch => not
+    ready. So it can never falsely complete an unfinished or mis-owned worker.
+    Never raises.
+    """
+    try:
+        complete = is_artifact_complete(
+            out_path, max(phase.min_artifact_bytes, 500)
+        )
+    except Exception:
+        complete = False
+    if not complete:
+        return False, 0.0
+    try:
+        owned, _own_reasons = validate_breadth_artifact_ownership(
+            out_path, expected_output=expected_output
+        )
+    except Exception:
+        owned = False
+    if not owned:
+        return False, 0.0
+    anchor = last_growth_at if last_growth_at is not None else now
+    idle_for = max(0.0, now - anchor)
+    return (idle_for >= idle_grace_s), idle_for
+
+
 def _run_single_breadth_worker_pty(
     *,
     job: dict[str, str],
@@ -6404,8 +6466,15 @@ def _run_single_breadth_worker_pty(
     except Exception:
         known_stats = {}
 
+    # STEP 1D disk-idle tracker: timestamp of the last observed growth/mtime
+    # change in ANY tracked (non-underscore) scratchpad file. Mutable holder so
+    # the poll closure can update it. ``None`` until first observed growth.
+    _last_disk_growth_at: list[float | None] = [None]
+    out_path = scratchpad / output
+
     def _worker_poll(_now: float, _state: Any) -> None:
         try:
+            observed_growth = False
             for p in scratchpad.iterdir():
                 if p.name.startswith("_") or not p.is_file():
                     continue
@@ -6417,6 +6486,8 @@ def _run_single_breadth_worker_pty(
                     sig = (0, 0)
                 old_sig = known_stats.get(p.name)
                 known_stats[p.name] = sig
+                if old_sig != sig:
+                    observed_growth = True
                 if _worker_artifact_name_allowed(p.name, allowed_output_set):
                     continue
                 if old_sig == sig:
@@ -6444,6 +6515,32 @@ def _run_single_breadth_worker_pty(
                     p.name,
                 )
                 raise _PtyStop(-4)
+
+            if observed_growth:
+                _last_disk_growth_at[0] = _now
+
+            # STEP 1D: path-independent early-complete cutover. Anchor the idle
+            # clock to now on the first poll where no prior growth was observed
+            # (artifact already complete on disk before the first poll), so the
+            # grace window is still honoured.
+            if _last_disk_growth_at[0] is None:
+                _last_disk_growth_at[0] = _now
+            ready, idle_for = _breadth_early_complete_ready(
+                out_path=out_path,
+                expected_output=output,
+                phase=phase,
+                last_growth_at=_last_disk_growth_at[0],
+                now=_now,
+            )
+            if ready:
+                log.info(
+                    "[breadth] worker %s early-complete cutover: "
+                    "artifact present + COMPLETE marker + owned, "
+                    "disk-idle for %ds",
+                    output,
+                    int(idle_for),
+                )
+                raise _PtyEarlyComplete()
         except _PtyStop:
             raise
         except Exception:
@@ -6471,6 +6568,23 @@ def _run_single_breadth_worker_pty(
             )
             if state.rate_limited:
                 return {"output": output, "rc": 1, "status": "rate_limited"}
+            status_rows = compute_breadth_row_statuses(scratchpad, phase)
+            status = next(
+                (r for r in status_rows if r.get("name") == output),
+                {"status": "missing", "reasons": []},
+            )
+            ok = status.get("status") == "complete"
+            return {
+                "output": output,
+                "rc": 0 if ok else -2,
+                "status": status.get("status"),
+                "reasons": list(status.get("reasons") or []),
+                "log": str(log_path),
+            }
+        except _PtyEarlyComplete:
+            # Disk-marker early-complete cutover: resolve the row via the normal
+            # status computation so it lands 'complete' and frees the slot
+            # cleanly, rather than the 'containment' label.
             status_rows = compute_breadth_row_statuses(scratchpad, phase)
             status = next(
                 (r for r in status_rows if r.get("name") == output),
@@ -8265,7 +8379,11 @@ Mandatory standard-depth sections:
     elif category == "fuzz":
         if role == "medusa_fuzz":
             fuzz_prompt = (plamen_home() / _FUZZ_MEDUSA_PROMPT).as_posix()
-            fuzz_flag_name = "MEDUSA_AVAILABLE"
+            # Medusa is ALWAYS-ON for EVM-Thorough: do NOT pre-gate on a
+            # build_status flag. The worker self-probes Foundry/medusa and
+            # scaffolds a harness from scratch when none ships. Empty flag name
+            # routes to the informational flags_line below.
+            fuzz_flag_name = ""
         else:
             fuzz_prompt = (
                 plamen_home()
@@ -8294,6 +8412,13 @@ Mandatory standard-depth sections:
             flag_val = _read_build_status_flag(scratchpad, fuzz_flag_name)
         if fuzz_flag_name:
             flags_line = f"{fuzz_flag_name} = {flag_val} (from build_status.md)"
+        elif role == "medusa_fuzz":
+            flags_line = (
+                "medusa availability is self-probed by the worker; not "
+                "pre-gated. Probe `medusa --version`; if absent, attempt the "
+                "documented install once. Medusa ALWAYS runs on EVM when "
+                "Foundry can be set up"
+            )
         else:
             flags_line = (
                 "primary tool is auto-detected by the methodology "
@@ -8311,11 +8436,15 @@ is `{build_root_posix}` and is in your --add-dir grant. `cd` there to build and
 run. Treat any `{{PROJECT_ROOT}}` placeholder in the methodology as this build
 root, and `{{SCRATCHPAD}}` as `{scratchpad.as_posix()}`.
 
-Tool availability from build_status.md: {flags_line}. If the primary tool is
+Tool availability: {flags_line}. If the primary tool is
 unavailable (or the harness will not compile after the documented recovery
 attempts), follow the documented FALLBACK chain in the methodology
-(proptest / boundary-value parameterized tests). EVM medusa has NO fallback —
-if medusa is unavailable, write the degrade-continue artifact and stop.
+(proptest / boundary-value parameterized tests). For EVM medusa, the "fallback"
+is from-scratch harness scaffolding: when the project ships no harness, BUILD
+one against the in-scope contracts per the methodology, then run the campaign.
+Reserve TOOL_UNAVAILABLE for genuine impossibility (medusa cannot be installed
+AND the build root is not Foundry-usable). Only then write the degrade-continue
+artifact and stop.
 
 Bound your own fuzzer run so you finish well before the worker timeout:
 forge invariant uses a <=300s budget; medusa pins `--timeout 600`.
@@ -8847,14 +8976,20 @@ def _depth_fuzz_jobs_if_required(
       - mode != thorough            -> []
       - pipeline == 'l1'            -> [] (L1 uses per-finding verify fuzz tags)
       - language == 'aptos'         -> [] (Move has no invariant fuzzer)
-      - evm                         -> invariant (always) + medusa (iff MEDUSA_AVAILABLE)
+      - evm                         -> invariant (always) + medusa (always; worker
+                                       self-probes Foundry/medusa + scaffolds a
+                                       harness from scratch; degrade-continues)
       - solana / soroban / sui      -> invariant (always; worker self-selects
                                        primary-vs-fallback from the tool flag)
 
     The invariant job is ALWAYS emitted for should_run ecosystems even when the
     primary fuzzer flag is absent, so the documented FALLBACK chain (proptest/
-    boundary) runs and the skip is LOGGED, not silent. Only the EVM medusa job
-    is strictly flag-gated because medusa has no fallback.
+    boundary) runs and the skip is LOGGED, not silent. The EVM medusa job is now
+    ALSO always emitted (no MEDUSA_AVAILABLE pre-gate): the worker self-probes
+    Foundry/medusa, scaffolds a harness from scratch when the project ships none,
+    and degrade-continues to a logged TOOL_UNAVAILABLE/COMPILATION_FAILED stub if
+    medusa truly cannot be installed/run. Medusa is never in the depth hard gate,
+    so a missing/failed medusa artifact cannot fail the depth phase.
     """
     if str(config.get("mode", "core")).lower() != "thorough":
         return []
@@ -8876,24 +9011,25 @@ def _depth_fuzz_jobs_if_required(
         ),
     }]
     if language == "evm":
-        medusa = _read_build_status_flag(scratchpad, "MEDUSA_AVAILABLE")
-        if medusa is True:
-            jobs.append({
-                "agent_id": "medusa-fuzz",
-                "role": "medusa_fuzz",
-                "output": "medusa_fuzz_findings.md",
-                "category": "fuzz",
-                "focus": (
-                    "Medusa stateful fuzz campaign: derive invariants, build "
-                    "the standalone Medusa harness, run medusa --timeout 600, "
-                    "report [MEDUSA-N] violations"
-                ),
-            })
-        else:
-            log.info(
-                "[depth] medusa fuzz job skipped: MEDUSA_AVAILABLE=%s "
-                "(no fallback for medusa)", medusa,
-            )
+        # ALWAYS-ON: medusa runs on every EVM-Thorough audit. The worker
+        # self-probes Foundry/medusa and scaffolds a harness from scratch when
+        # the project ships none; it degrade-continues to a logged stub only if
+        # medusa truly cannot be installed AND the build root is not
+        # Foundry-usable. No MEDUSA_AVAILABLE pre-gate (recon's scope-excluded
+        # probe frequently fails to set it even when medusa IS installed).
+        jobs.append({
+            "agent_id": "medusa-fuzz",
+            "role": "medusa_fuzz",
+            "output": "medusa_fuzz_findings.md",
+            "category": "fuzz",
+            "focus": (
+                "Medusa stateful fuzz campaign: probe/provision medusa, use the "
+                "shipped harness or scaffold a standalone Medusa harness from "
+                "scratch, run medusa --timeout 600, report [MEDUSA-N] "
+                "violations; degrade-continue to a logged stub if medusa truly "
+                "cannot be installed/run"
+            ),
+        })
     return jobs
 
 
@@ -13796,6 +13932,167 @@ def _acquire_run_lock(
     return False, f"could not acquire run lock {lock}"
 
 
+# Configured-language -> expected dominant production source suffix. Mirrors the
+# recon_prepass LANG_DISPATCH suffix map. Used by the STEP 2A startup config
+# validator to catch a misrouted run (e.g. language=evm pointed at a Rust crate)
+# BEFORE any worker pool spawns, rather than after a multi-hour misroute.
+_LANG_EXPECTED_SUFFIX: dict[str, tuple[str, ...]] = {
+    "evm": (".sol",),
+    "solana": (".rs",),
+    "soroban": (".rs",),
+    "aptos": (".move",),
+    "sui": (".move",),
+}
+
+# Reverse map: a source suffix -> the languages it can indicate. Used to phrase
+# the actionable halt message ("found N .rs -> re-run with --language solana").
+_SUFFIX_TO_LANGS: dict[str, tuple[str, ...]] = {
+    ".sol": ("evm",),
+    ".rs": ("solana", "soroban"),
+    ".move": ("aptos", "sui"),
+}
+
+_LANG_GATE_IGNORE_DIRS = {
+    ".git", "node_modules", "target", "out", "build", "dist", "lib",
+    "cache", ".scratchpad", "test", "tests", "mock", "mocks", "__pycache__",
+    "artifacts", "typechain", "typechain-types", ".idea", ".vscode",
+}
+
+
+def _count_source_suffixes_under(
+    root: Path, recognized: set[str], file_cap: int
+) -> dict[str, int]:
+    """Count recognized source suffixes under a single root (bounded, pruned).
+    Never raises."""
+    counts: dict[str, int] = {s: 0 for s in recognized}
+    if not root.exists() or not root.is_dir():
+        return counts
+    seen = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [
+                d for d in dirnames
+                if d.lower() not in _LANG_GATE_IGNORE_DIRS
+                and not d.startswith(".")
+            ]
+            for fn in filenames:
+                suffix = Path(fn).suffix.lower()
+                if suffix in recognized:
+                    counts[suffix] += 1
+                    seen += 1
+                    if seen >= file_cap:
+                        return counts
+    except Exception:
+        pass
+    return counts
+
+
+def _dominant_source_suffix(
+    project_root: str | Path,
+    *,
+    max_ancestors: int = 2,
+    file_cap: int = 4000,
+) -> tuple[str | None, dict[str, int]]:
+    """Return ``(dominant_suffix, counts)`` over the recognized source suffixes
+    (.sol/.rs/.move) found under PROJECT_PATH.
+
+    PROJECT_PATH is scanned FIRST and is authoritative: the dominant-extension
+    decision uses ONLY in-tree files so an unrelated sibling project in an
+    ancestor directory can never trigger a false language contradiction.
+    Ancestors are consulted as a fallback ONLY when PROJECT_PATH itself
+    contains zero recognized source files (e.g. a near-empty scope dir), and
+    even then a contradiction can only arise from a genuine source tree above.
+    ``dominant_suffix`` is None when no recognized source file is found
+    anywhere consulted (an indeterminate signal). Bounded; never raises."""
+    base_counts: dict[str, int] = {".sol": 0, ".rs": 0, ".move": 0}
+    recognized = set(base_counts)
+    try:
+        base = Path(project_root).resolve()
+    except Exception:
+        return None, base_counts
+
+    counts = _count_source_suffixes_under(base, recognized, file_cap)
+    if any(counts.values()):
+        dominant = max(
+            (s for s in counts if counts[s] > 0), key=lambda s: counts[s]
+        )
+        return dominant, counts
+
+    # Fallback: PROJECT_PATH had no recognized source files. Consult a small
+    # number of ancestors so a scope-dir PROJECT_PATH still gets a signal.
+    anc = base
+    for _ in range(max(0, max_ancestors)):
+        parent = anc.parent
+        if parent == anc:
+            break
+        anc = parent
+        anc_counts = _count_source_suffixes_under(anc, recognized, file_cap)
+        if any(anc_counts.values()):
+            dominant = max(
+                (s for s in anc_counts if anc_counts[s] > 0),
+                key=lambda s: anc_counts[s],
+            )
+            return dominant, anc_counts
+
+    return None, base_counts
+
+
+def _validate_language_source_consistency(
+    project_root: str | Path, language: str
+) -> tuple[bool, str]:
+    """STEP 2A fail-fast config validator. Returns ``(ok, message)``.
+
+    ``ok=False`` ONLY on a definite contradiction: the configured language
+    expects suffix X, but zero X files and a positive count of a DIFFERENT
+    recognized source suffix are found. Indeterminate signals (no recognized
+    source files at all, or an unknown configured language) return ``ok=True``
+    with a warning message so the run continues with the configured language.
+    This gate fires at STARTUP only, before any worker pool runs; it prevents a
+    multi-hour misrouted run and is not a mid-pipeline halt.
+    """
+    lang = (language or "").strip().lower()
+    expected = _LANG_EXPECTED_SUFFIX.get(lang)
+    dominant, counts = _dominant_source_suffix(project_root)
+
+    if dominant is None:
+        return True, (
+            "language consistency: no recognized source files "
+            "(.sol/.rs/.move) found under PROJECT_PATH; continuing with "
+            f"configured language={lang or 'unknown'} (indeterminate signal)"
+        )
+    if expected is None:
+        # Unknown configured language: do not block on an indeterminate config.
+        return True, (
+            f"language consistency: configured language={lang or 'unknown'} "
+            "is not a recognized source language; dominant source suffix is "
+            f"{dominant}; continuing without blocking"
+        )
+
+    expected_count = sum(counts.get(s, 0) for s in expected)
+    if expected_count > 0:
+        return True, (
+            f"language consistency OK: configured language={lang} matches "
+            f"{expected_count} {'/'.join(expected)} source file(s)"
+        )
+
+    # Definite contradiction: zero expected-suffix files, dominant is a
+    # different recognized source suffix.
+    candidate_langs = _SUFFIX_TO_LANGS.get(dominant, ())
+    suggest = (
+        " or ".join(f"--language {c}" for c in candidate_langs)
+        if candidate_langs
+        else "the correct --language"
+    )
+    found_desc = ", ".join(
+        f"{c} {s}" for s, c in counts.items() if c > 0
+    )
+    return False, (
+        f"language={lang} but {found_desc} found and 0 "
+        f"{'/'.join(expected)} files under PROJECT_PATH "
+        f"({Path(project_root)}) -- re-run with {suggest}"
+    )
+
+
 def main():
     # Terminal: WARNING+ only (keep TUI clean).
     # File: everything (INFO+) for debugging via `tail -f _plamen.log`.
@@ -13844,6 +14141,24 @@ def main():
         if key not in config:
             print(f"config missing required key: {key}", file=sys.stderr)
             sys.exit(EXIT_CONFIG_MISSING)
+
+    # STEP 2A: fail-fast language<->source-extension consistency gate. Fires at
+    # STARTUP only (before any worker pool) and only on a DEFINITE contradiction
+    # between the configured language and the dominant production source suffix
+    # found under PROJECT_PATH. Indeterminate signals warn and continue. This
+    # prevents a multi-hour misrouted run (e.g. evm config pointed at a Rust
+    # crate); it is config validation, not a mid-pipeline halt.
+    try:
+        _lang_ok, _lang_msg = _validate_language_source_consistency(
+            config["project_root"], str(config.get("language", ""))
+        )
+    except Exception as _lang_exc:  # never block on a validator bug
+        _lang_ok, _lang_msg = True, f"language consistency check skipped: {_lang_exc!r}"
+    if not _lang_ok:
+        print(f"[startup] language misconfiguration: {_lang_msg}", file=sys.stderr)
+        sys.exit(EXIT_CONFIG_MISSING)
+    else:
+        log.info("[startup] %s", _lang_msg)
 
     scratchpad = Path(config["scratchpad"])
     scratchpad.mkdir(parents=True, exist_ok=True)

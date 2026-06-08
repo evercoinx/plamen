@@ -308,6 +308,37 @@ def _select_build(proj: Path, lang: str) -> Optional[str]:
         return "sui"
     return None
 
+
+# STEP 2C: non-EVM build-root resolution. PROJECT_PATH is frequently a scope dir
+# like `.../<crate>/src/` that has no build manifest; running `cargo build` /
+# `aptos move compile` there fails spuriously. Walk UP from PROJECT_PATH to the
+# nearest manifest and build there instead. Returns None when no manifest is
+# found within the ancestor bound.
+_BUILD_MANIFESTS = {
+    "solana": "Cargo.toml",
+    "soroban": "Cargo.toml",
+    "aptos": "Move.toml",
+    "sui": "Move.toml",
+}
+
+
+def _resolve_build_root(proj: Path, lang: str, max_ancestors: int = 4) -> Optional[Path]:
+    manifest = _BUILD_MANIFESTS.get(lang)
+    if not manifest:
+        return None
+    cur = proj.resolve()
+    for _ in range(max_ancestors + 1):
+        try:
+            if (cur / manifest).exists():
+                return cur
+        except Exception:
+            pass
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+    return None
+
 _MAX_RECON_FORGE_FILES = 120
 _MAX_OPENGREP_SOURCE_FILES = 300
 
@@ -362,9 +393,62 @@ def _write_build_status(scratch: Path, proj: Path, lang: str) -> str:
             # build to recon/verification.
             if sum(len(a) + 1 for a in cmd) > 7000:
                 cmd = ["forge", "build", "--threads", "1", "--no-auto-detect"]
+
+        # STEP 2C: non-EVM build parity. Give the non-EVM branches the same
+        # guards EVM has: (1) a per-language source-file presence check, and
+        # (2) build-root resolution so we never run a compile from a scope dir
+        # (e.g. `.../<crate>/src/`) that has no build manifest. All branches
+        # remain best-effort and always write build_status.md (no new halt).
+        build_cwd = proj
+        if key in ("solana", "soroban", "aptos", "sui"):
+            cfg = LANG_DISPATCH.get(key) or {}
+            suffixes = cfg.get("suffix") or ()
+            source_files = _production_source_files(proj, suffixes) if suffixes else []
+            if not source_files:
+                _write_text(scratch / "build_status.md",
+                            "# Build Status\n\n"
+                            f"**Tool**: {key}\n\n"
+                            "**Status**: SKIPPED\n\n"
+                            f"No production {'/'.join(suffixes) or 'source'} files found "
+                            "under PROJECT_PATH for bounded recon pre-pass. LLM recon may "
+                            "re-attempt with a resolved build root.\n")
+                return "WRITTEN"
+            resolved_root = _resolve_build_root(proj, key)
+            if resolved_root is None:
+                manifest = _BUILD_MANIFESTS.get(key, "manifest")
+                _write_text(scratch / "build_status.md",
+                            "# Build Status\n\n"
+                            f"**Tool**: {key}\n\n"
+                            "**Status**: SKIPPED\n\n"
+                            f"No {manifest} found at or above PROJECT_PATH; "
+                            "skipping recon pre-pass compile to avoid a spurious "
+                            "build failure from a scope dir without a build manifest. "
+                            "LLM recon should enrich build status.\n")
+                return "WRITTEN"
+            build_cwd = resolved_root
+            # Solana: a host-target `cargo build --release` of an on-chain
+            # program is misleading. Prefer the on-chain build toolchain when
+            # available; otherwise skip the compile and let LLM recon enrich.
+            if key == "solana":
+                if shutil.which("cargo-build-sbf") or shutil.which("cargo"):
+                    if shutil.which("anchor") and (resolved_root / "Anchor.toml").exists():
+                        cmd = ["anchor", "build"]
+                    elif shutil.which("cargo-build-sbf"):
+                        cmd = ["cargo", "build-sbf"]
+                    else:
+                        _write_text(scratch / "build_status.md",
+                                    "# Build Status\n\n"
+                                    "**Tool**: solana\n\n"
+                                    "**Status**: SKIPPED\n\n"
+                                    "Neither `anchor` nor `cargo build-sbf` is available; a "
+                                    "host-target `cargo build` of an on-chain Solana program "
+                                    "is misleading, so the recon pre-pass compile is skipped. "
+                                    "LLM recon should enrich build status.\n")
+                        return "WRITTEN"
+
         timed_out = False
         try:
-            proc = subprocess.run(cmd, cwd=str(proj), timeout=timeout,
+            proc = subprocess.run(cmd, cwd=str(build_cwd), timeout=timeout,
                                   capture_output=True, text=True,
                                   encoding="utf-8", errors="replace")
             rc, so, se = proc.returncode, proc.stdout or "", proc.stderr or ""
@@ -383,7 +467,7 @@ def _write_build_status(scratch: Path, proj: Path, lang: str) -> str:
             "# Build Status\n\n"
             f"**Tool**: {key}\n"
             f"**Command**: `{' '.join(cmd)}`\n"
-            f"**CWD**: `{proj}`\n"
+            f"**CWD**: `{build_cwd}`\n"
             f"**Timeout**: {timeout}s\n"
             f"**Exit Code**: {rc}\n"
             f"**Status**: {status}\n\n"
