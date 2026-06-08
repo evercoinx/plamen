@@ -134,8 +134,13 @@ __all__ = [
     "_extract_ids_from_text",
     "_extract_report_ids_from_body",
     "_extract_severity_inputs",
+    "_field_anywhere",
+    "_negation_governs_keyword",
+    "_niche_heading_match",
+    "_niche_required_cell_yes",
     "_field_from_markdown",
     "_field_or_section",
+    "parse_plamen_signals",
     "_find_report_index_cut_for_active_recovery",
     "_first_heading_title",
     "_inventory_blocks",
@@ -1970,6 +1975,66 @@ def ensure_sc_verify_shard_manifests(scratchpad: Path) -> dict[str, list[dict[st
     return shards
 
 
+_POC_KW_BOUNDARY_CACHE: dict[str, re.Pattern] = {}
+
+
+def _poc_kw_present(pattern: str, *texts: str) -> bool:
+    """Word-boundary + negation-aware keyword presence for PoC classification.
+
+    Replaces the legacy bare `pattern in text` substring test (which produced
+    two failure modes the plan calls out):
+
+      * NO WORD BOUNDARY — a narrow-unit keyword like `overflow` matched inside
+        an unrelated longer word, and broad nouns matched substrings.
+      * NO NEGATION AWARENESS — "no overflow check" / "without overflow" hit the
+        `overflow` keyword and routed the finding to `narrow_unit`, demanding an
+        impossible single-call unit harness for what is actually a MISSING-check
+        bug. When the keyword is governed by a negation in its own clause, the
+        keyword is NOT asserting the mechanism is present, so it must not drive
+        the testable-class routing.
+
+    A keyword that itself contains a space/hyphen (a multi-word phrase, already
+    specific) is matched as a tolerant substring (whitespace/hyphen-insensitive)
+    — these never over-fired on a single-word boundary. Single bare-word
+    keywords are matched with `\\b` boundaries.
+
+    Recall-direction: suppressing a NEGATED narrow-unit/property keyword routes
+    the finding toward `structural` (the default), which never demands a
+    mandatory unit/property PoC — so this can only RELAX an over-strict PoC
+    demand, never drop a finding or add an unwinnable retry.
+    """
+    rx = _POC_KW_BOUNDARY_CACHE.get(pattern)
+    if rx is None:
+        has_space = " " in pattern or "-" in pattern
+        if has_space:
+            # Tolerant phrase match: a space/hyphen in the pattern matches any
+            # run of spaces/hyphens in the text, so "off-by-one" matches
+            # "off by one" and vice versa. Boundary-anchored at both ends.
+            # Build from the RAW pattern (split on space/hyphen, re.escape each
+            # word, rejoin with a space/hyphen class) to avoid replacement-string
+            # escaping hazards.
+            words = [w for w in re.split(r"[\s\-]+", pattern) if w]
+            inner = r"[\s\-]+".join(re.escape(w) for w in words)
+            rx = re.compile(r"(?<!\w)" + inner + r"(?!\w)", re.IGNORECASE)
+        else:
+            # Whole-word stem: "overflow" matches "overflow"/"overflows" but not
+            # an embedded substring inside an unrelated word.
+            rx = re.compile(r"(?<!\w)" + re.escape(pattern) + r"\w*", re.IGNORECASE)
+        _POC_KW_BOUNDARY_CACHE[pattern] = rx
+    for text in texts:
+        if not text:
+            continue
+        km = rx.search(text)
+        if not km:
+            continue
+        # Negation guard: if the keyword occurrence is governed by a negation in
+        # its clause, it is not asserting the mechanism is present.
+        if _negation_governs_keyword(text, re.compile(re.escape(km.group(0)), re.IGNORECASE)):
+            continue
+        return True
+    return False
+
+
 def classify_poc_testability(bug_class: str, preferred_tag: str, title: str, severity: str) -> str:
     """Classify a finding's testability for PoC routing.
 
@@ -2023,9 +2088,17 @@ def classify_poc_testability(bug_class: str, preferred_tag: str, title: str, sev
         "fee", "rounding", "share", "deposit", "withdraw", "approve",
         "allowance", "transferfrom", "transfer from",
     ]
-    narrow_unit_hit = any(p in bc or p in title_lc for p in narrow_unit_patterns)
-    broad_unit_hit = any(p in bc or p in title_lc for p in broad_unit_nouns)
-    property_hit = any(p in bc or p in title_lc for p in property_patterns)
+    # Word-boundary + negation-aware matching for the TESTABLE-class keyword
+    # scans (narrow-unit / broad-unit / property). A negated mechanism keyword
+    # ("no overflow check", "without reentrancy") must NOT route the finding to
+    # an impossible unit/property harness — it falls through to structural,
+    # which is recall-safe (structural never demands a mandatory PoC). The
+    # structural_patterns scan above is INTENTIONALLY left as substring match:
+    # several of its patterns ARE negated phrases ("no event", "missing setter")
+    # that legitimately describe structural bugs.
+    narrow_unit_hit = any(_poc_kw_present(p, bc, title_lc) for p in narrow_unit_patterns)
+    broad_unit_hit = any(_poc_kw_present(p, bc, title_lc) for p in broad_unit_nouns)
+    property_hit = any(_poc_kw_present(p, bc, title_lc) for p in property_patterns)
     if narrow_unit_hit:
         return "unit"
     if broad_unit_hit:
@@ -3502,6 +3575,531 @@ def _norm_key(text: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+# ── L1: PLAMEN_SIGNALS machine-readable channel (regex-fragility plan §4) ────
+#
+# Extends the proven `<!-- PLAMEN_X: value -->` HTML-comment channel
+# (driver `re.finditer(r"<!--\s*PLAMEN_([A-Z_]+):\s*([^>]+?)\s*-->", text)`)
+# with a `PLAMEN_SIGNALS` family carrying single-line JSON:
+#
+#     <!-- PLAMEN_SIGNALS: {"sync_gaps":5,"conditional_writes":2} -->
+#
+# JSON inside an HTML comment is deterministic by construction; no markdown
+# shape variance is possible. This is the L1 authoritative source — when the
+# block is present and parseable, the driver trusts it over any L2 prose
+# extraction. When it is missing or malformed, the parser returns {} and LOGS
+# (never raises, never silently fabricates a signal). Multiple blocks merge
+# left-to-right (a later block overrides an earlier key); this matches the
+# existing STATUS/ARTIFACT channel's last-wins convention.
+_PLAMEN_SIGNALS_BLOCK_RE = re.compile(
+    r"<!--\s*PLAMEN_SIGNALS\s*:\s*(\{.*?\})\s*-->",
+    re.DOTALL,
+)
+
+
+def parse_plamen_signals(text: str) -> dict:
+    """Parse all ``<!-- PLAMEN_SIGNALS: {json} -->`` blocks out of *text*.
+
+    Returns the merged JSON object (later blocks override earlier keys).
+    Tolerant of:
+      - missing block        -> {} (no log; absence is normal, not an error)
+      - malformed/partial JSON inside an otherwise well-formed block
+                             -> that block is skipped + a WARNING is logged
+                                (zero-harvest-with-evidence tripwire)
+      - non-object JSON (list/scalar) inside a block
+                             -> skipped + WARNING
+      - None / empty text    -> {}
+
+    Never raises. The HTML-comment delimiter is matched format-invariantly
+    (whitespace-tolerant, DOTALL so the JSON may legally contain newlines),
+    mirroring the driver's existing PLAMEN_X channel parser.
+    """
+    if not text:
+        return {}
+    s = _llm_norm(text)
+    out: dict = {}
+    saw_block = False
+    bad_block = False
+    for m in _PLAMEN_SIGNALS_BLOCK_RE.finditer(s):
+        saw_block = True
+        raw = m.group(1).strip()
+        try:
+            obj = json.loads(raw)
+        except (ValueError, TypeError):
+            bad_block = True
+            continue
+        if not isinstance(obj, dict):
+            bad_block = True
+            continue
+        out.update(obj)
+    if bad_block and not out:
+        # Zero-harvest tripwire: a PLAMEN_SIGNALS block was present (evidence)
+        # yet nothing parsed. This is the strictly-worse-than-no-gate signature
+        # — surface it instead of silently returning {}.
+        log.warning(
+            "parse_plamen_signals: PLAMEN_SIGNALS block(s) present but no "
+            "valid JSON object harvested (malformed channel) — falling back "
+            "to prose extraction"
+        )
+    elif bad_block and out:
+        log.warning(
+            "parse_plamen_signals: %d key(s) harvested but at least one "
+            "PLAMEN_SIGNALS block was malformed and skipped",
+            len(out),
+        )
+    _ = saw_block  # documented: presence-without-harvest handled above
+    return out
+
+
+# ── L2: one shared tolerant field extractor (regex-fragility plan §4 L2) ─────
+#
+# Converges the ~15 scattered raw `**Field**:` / `Field:` / table-cell regexes
+# onto the existing tolerant toolkit (`_llm_norm`, `_field_from_markdown`,
+# `_split_markdown_table_row`, `_is_separator_row`). The single capability it
+# ADDS over `_field_from_markdown` is **table-cell key/value extraction**
+# (`| Field | value |`, the #1 live miss) plus an opt-in **clause-scoped
+# negation guard** (fixing the `_valid_poc_skip` cross-sentence false-fire).
+#
+# STRICT-SUPERSET CONTRACT (the one rule): for every input the legacy
+# extractors accepted, `_field_anywhere` returns a value-identical result.
+# It only ever matches MORE shapes, never fewer.
+
+# Negation tokens for the clause-scoped guard. Word-boundary anchored at the
+# call site so `id` != `invalid`, `covered` != `uncovered`.
+_NEGATION_TOKENS: tuple[str, ...] = (
+    "not", "no", "never", "without", "n't", "cannot", "can't",
+    "isn't", "wasn't", "aren't", "doesn't", "don't", "didn't",
+    "false", "absent", "lacking", "lacks", "missing",
+)
+_NEGATION_GUARD_RE = re.compile(
+    r"(?i)(?<!\w)(?:" + "|".join(re.escape(t) for t in _NEGATION_TOKENS) + r")(?!\w)"
+)
+
+# Clause boundary: sentence end, list-item break, table-cell pipe, or a hard
+# newline. Used to scope the negation guard to the trigger's own clause rather
+# than the failed 80-char DOTALL proximity window.
+_CLAUSE_SPLIT_RE = re.compile(r"[.;!?\n]|(?:\s\|\s)")
+
+
+def _clause_around(text: str, start: int, end: int) -> str:
+    """Return the clause (sentence/list-item/table-cell) that spans
+    [start, end) within *text*. Boundaries are sentence punctuation, hard
+    newlines, or table-cell pipes — NOT a fixed character window."""
+    left = 0
+    for m in _CLAUSE_SPLIT_RE.finditer(text, 0, start):
+        left = m.end()
+    right = len(text)
+    rm = _CLAUSE_SPLIT_RE.search(text, end)
+    if rm is not None:
+        right = rm.start()
+    return text[left:right]
+
+
+def _negation_in_clause(text: str, start: int, end: int) -> bool:
+    """True if a negation token shares the same clause as the [start,end)
+    trigger. Word-boundary matched so `id` does not trip on `invalid`."""
+    clause = _clause_around(text, start, end)
+    return bool(_NEGATION_GUARD_RE.search(clause))
+
+
+def _negation_governs_keyword(text: str, keyword_re) -> bool:
+    """True iff ANY occurrence of *keyword_re* in *text* shares its clause
+    (sentence / list-item / table-cell — NOT a fixed character window) with a
+    negation token.
+
+    This is the clause-scoped replacement for the legacy `.{0,80}` DOTALL
+    proximity rule used by `_valid_poc_skip`'s mock-feasibility blocker. The old
+    rule fired whenever a negation appeared within 80 characters of `mock`,
+    even across sentence boundaries (e.g. "...used a Mock harness. The address
+    does not exist." wrongly suppressed). Clause scoping suppresses ONLY when
+    the negation governs the same clause as the keyword — strictly recall-safe
+    for the PoC-skip decision: the old rule OVER-rejected valid skips, so the
+    narrower clause guard can only let MORE valid skips through, never drop a
+    finding.
+
+    The keyword occurrence itself is blanked inside its clause before the
+    negation scan so a keyword that happens to contain or abut a negation
+    substring cannot self-trigger.
+    """
+    if not text:
+        return False
+    s = _llm_norm(text)
+    if isinstance(keyword_re, str):
+        keyword_re = re.compile(keyword_re, re.IGNORECASE)
+    for km in keyword_re.finditer(s):
+        clause = _clause_around(s, km.start(), km.end())
+        # Blank the matched keyword span within the clause so the keyword text
+        # cannot be misread as a negation source.
+        kw_local_start = clause.find(km.group(0))
+        if kw_local_start >= 0:
+            blanked = (
+                clause[:kw_local_start]
+                + " " * len(km.group(0))
+                + clause[kw_local_start + len(km.group(0)):]
+            )
+        else:
+            blanked = clause
+        if _NEGATION_GUARD_RE.search(blanked):
+            return True
+    return False
+
+
+def _table_cell_field(
+    text: str,
+    norm_labels: tuple[str, ...],
+    *,
+    short_labels: frozenset,
+) -> str:
+    """Scan markdown tables for a `| label | value |` key/value pair.
+
+    Handles two table renderings the LLM uses interchangeably:
+      (a) header/row:   a header row naming the label as a column, with the
+                        value in the aligned cell of a following data row
+                        (`| Impact | Likelihood |` / `| High | Medium |`).
+                        Detected when a separator row (`|---|---|`) immediately
+                        follows the candidate header.
+      (b) vertical kv:  a 2-(or-more)-column row whose first cell is the label
+                        and whose next non-empty cell is the value
+                        (`| Severity | High |`). Used when the row is NOT a
+                        separator-confirmed header.
+
+    Header/row is tried first (separator-confirmed) so a 2-column matrix header
+    like `| Impact | Likelihood |` is not misread as a vertical kv pair. Then
+    vertical-kv is tried. Separator rows are never values. Returns "" if no
+    match.
+    """
+    # Parse into (is_sep, cells) keeping document order; non-table lines reset
+    # the local table context.
+    rows: list[tuple[bool, list[str]]] = []
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s.startswith("|"):
+            rows.append((False, []))  # context break sentinel (empty cells)
+            continue
+        if _is_separator_row(s):
+            rows.append((True, []))
+            continue
+        cells = _split_markdown_table_row(s)
+        rows.append((False, cells))
+
+    def _label_columns(cells: list[str]) -> dict[int, str]:
+        out: dict[int, str] = {}
+        for i, cell in enumerate(cells):
+            ck = _norm_key(cell)
+            if not ck:
+                continue
+            for lbl in norm_labels:
+                if lbl in short_labels:
+                    if re.search(r"(?<!\w)" + re.escape(lbl) + r"(?!\w)", ck):
+                        out[i] = lbl
+                        break
+                elif lbl in ck:
+                    out[i] = lbl
+                    break
+        return out
+
+    # ── Pass (a): separator-confirmed header/row ──
+    for idx, (is_sep, cells) in enumerate(rows):
+        if is_sep or not cells:
+            continue
+        # A header is a row whose NEXT non-empty table row is a separator.
+        nxt = idx + 1
+        if nxt >= len(rows):
+            continue
+        nxt_sep, nxt_cells = rows[nxt]
+        if not nxt_sep:
+            continue
+        cols = _label_columns(cells)
+        if not cols:
+            continue
+        # Read the aligned value cell from the first data row after the
+        # separator.
+        for j in range(idx + 2, len(rows)):
+            d_sep, d_cells = rows[j]
+            if d_sep:
+                continue
+            if not d_cells:
+                break  # context break -> no data row
+            for ci in sorted(cols):
+                if ci < len(d_cells):
+                    v = d_cells[ci].strip()
+                    if v:
+                        return v
+            break
+
+    # ── Pass (b): vertical kv (first cell is the label) ──
+    for is_sep, cells in rows:
+        if is_sep or not cells:
+            continue
+        first_key = _norm_key(cells[0])
+        if first_key in norm_labels:
+            for cell in cells[1:]:
+                v = cell.strip()
+                if v:
+                    return v
+
+    return ""
+
+
+_FIELD_ANYWHERE_HEADING_RE_CACHE: dict[str, re.Pattern] = {}
+
+
+def _heading_field(text: str, labels: tuple[str, ...]) -> str:
+    """Extract a value rendered as a markdown heading `#{1,6} Label: value`
+    or `#{1,6} Label` followed by the next non-blank line's content.
+
+    `_field_from_markdown` already handles the inline `# Label: value` form;
+    this adds the `# Label` / next-line-value form used by some agents."""
+    for label in labels:
+        m = re.search(
+            rf"(?im)^\s*#{{1,6}}\s+(?:\*\*)?{re.escape(label)}(?:\*\*)?\s*$",
+            text,
+        )
+        if m:
+            tail = text[m.end():].lstrip("\n")
+            for ln in tail.splitlines():
+                if ln.strip():
+                    return ln.strip().strip("`").strip()
+    return ""
+
+
+def _field_anywhere(
+    text: str,
+    labels,
+    *,
+    value_pattern: Optional[str] = None,
+    table_ok: bool = True,
+    negation_guard: bool = False,
+    first_match: bool = True,
+) -> tuple[str, str]:
+    """Single shared tolerant field extractor (regex-fragility plan §4 L2).
+
+    Returns ``(value, shape_tag)`` where ``shape_tag`` is one of
+    ``{"kv", "bullet", "bold", "backtick", "table", "heading", "none"}`` —
+    callers may ignore the tag. ``value`` is ``""`` when nothing matched.
+
+    Tolerance (strict superset of every legacy single-shape regex):
+      - `_llm_norm` normalizes CRLF / smart quotes / HTML entities / zero-width
+        BEFORE matching (so a new rendering variant cannot break a parser).
+      - kv / bullet / bold(`**Field**:` and `**Field:**`) / backtick label
+        forms with `:` / `-` / `=` separators -> delegated to
+        `_field_from_markdown` (legacy behavior preserved verbatim).
+      - table-cell kv (`| Field | value |`) and header/row tables -> ADDED via
+        `_table_cell_field` (the #1 live miss; only matched when table_ok).
+      - heading-as-value (`# Field` then next line) -> ADDED.
+      - case-insensitive throughout; label aliases longest-first; word-boundary
+        match for short (<=3 char) aliases so `id` != `invalid`.
+      - ``value_pattern`` (optional): the extracted value must contain a match
+        for this regex, else that candidate is rejected and the search
+        continues. Lets callers constrain to e.g. a severity enum.
+      - ``negation_guard`` (optional): suppress a match when a negation token
+        shares the *same clause* as the matched label (NOT an 80-char proximity
+        window). Recall-safe narrowing per plan §4.
+      - ``first_match`` (default True): return the first accepted value.
+
+    Zero-harvest tripwire: when *text* clearly contains one of the labels yet
+    nothing is harvested, a WARNING is logged (the strictly-worse-than-no-gate
+    signature). Detection-only — never raises, never drops a candidate.
+    """
+    if not text:
+        return ("", "none")
+    if isinstance(labels, str):
+        labels = (labels,)
+    labels = tuple(l for l in labels if l)
+    if not labels:
+        return ("", "none")
+
+    s = _llm_norm(text)
+
+    # Longest-first so a long alias wins over a short substring of it
+    # (`location` before `loc`), mirroring `_match_canonical_header`.
+    ordered = sorted(set(labels), key=len, reverse=True)
+    norm_labels = tuple(_norm_key(l) for l in ordered)
+    short_labels = frozenset(nl for nl in norm_labels if len(nl) <= 3)
+
+    vpat = re.compile(value_pattern, re.IGNORECASE) if value_pattern else None
+
+    def _accept(value: str) -> bool:
+        if not value:
+            return False
+        if vpat is not None and not vpat.search(value):
+            return False
+        return True
+
+    # ── Pass 1: inline kv / bullet / bold / backtick (legacy superset) ──
+    # `_field_from_markdown` already covers `:`/`-`/`=`, `**bold**`,
+    # `**label:**`, backtick, leading bullet, `#{1,6}` heading-inline, and
+    # parenthetical-suffix labels. We reproduce its core match here so we can
+    # apply the negation guard and value_pattern per-candidate.
+    for label in ordered:
+        for m in re.finditer(
+            # The label group tolerates wrappers on BOTH sides, including the
+            # `**label:**` form where the separator colon is INSIDE the closing
+            # bold/backtick markers. The closing-wrapper-with-inner-colon branch
+            # (`open`) only fires when the label was OPENED with a wrapper, so a
+            # bold VALUE like `Severity: **High**` is not mis-consumed.
+            rf"(?im)^\s*(?:[-*]\s*|#{{1,6}}\s+)?"
+            rf"(?P<lbl>(?P<open>\*\*|`|_|\[)?\s*{re.escape(label)})\s*"
+            rf"(?:\s*\([^)]*\))?"
+            rf"(?:(?(open)(?::|-|=)?\s*(?:\*\*|`|_|\])\s*(?::|-|=)?|(?!x)x)"
+            rf"|\s*(?::|-|=))"
+            rf"\s*(?P<val>.+)$",
+            s,
+        ):
+            # Value cleanup mirrors legacy `_field_from_markdown` (strip
+            # backticks) plus balanced bold; brackets are MEANINGFUL (e.g.
+            # `[POC-PASS]`) and are NOT stripped.
+            value = m.group("val").strip()
+            if value.startswith("**") and value.endswith("**") and len(value) > 4:
+                value = value[2:-2].strip()
+            value = value.strip("`").strip()
+            if not _accept(value):
+                continue
+            # Negation guard is scoped to the LABEL clause (the trigger), NOT
+            # the whole captured value — fixing the `_valid_poc_skip`
+            # cross-sentence false-fire where a negation in a later sentence of
+            # the value wrongly suppressed a valid field.
+            if negation_guard and _negation_in_clause(
+                s, m.start("lbl"), m.end("lbl")
+            ):
+                continue
+            # shape tag: best-effort classification of the matched line
+            line = m.group(0)
+            lbl_txt = m.group("lbl")
+            if line.lstrip().startswith(("-", "*")) and not lbl_txt.lstrip().startswith("*"):
+                tag = "bullet"
+            elif "**" in lbl_txt:
+                tag = "bold"
+            elif "`" in lbl_txt:
+                tag = "backtick"
+            else:
+                tag = "kv"
+            if first_match:
+                return (value, tag)
+
+    # ── Pass 2: table-cell kv / header-row (the ADDED capability) ──
+    if table_ok:
+        tv = _table_cell_field(s, norm_labels, short_labels=short_labels)
+        if _accept(tv):
+            ok = True
+            if negation_guard:
+                idx = s.find(tv)
+                if idx >= 0 and _negation_in_clause(s, idx, idx + len(tv)):
+                    ok = False
+            if ok:
+                return (tv, "table")
+
+    # ── Pass 3: heading-as-value (`# Field` then next line) ──
+    hv = _heading_field(s, ordered)
+    if _accept(hv):
+        if not (negation_guard and (lambda i: i >= 0 and _negation_in_clause(s, i, i + len(hv)))(s.find(hv))):
+            return (hv, "heading")
+
+    # ── Zero-harvest tripwire ──
+    # Evidence = a label clearly appears in the text, yet we harvested nothing.
+    label_present = False
+    for nl in norm_labels:
+        if not nl:
+            continue
+        if nl in short_labels:
+            if re.search(r"(?<!\w)" + re.escape(nl) + r"(?!\w)", _norm_key(s)):
+                label_present = True
+                break
+        elif nl in _norm_key(s):
+            label_present = True
+            break
+    if label_present:
+        log.warning(
+            "_field_anywhere: label(s) %r present in text but no value "
+            "harvested (table_ok=%s, value_pattern=%r, negation_guard=%s) — "
+            "possible shape miss, falling back",
+            list(labels), table_ok, value_pattern, negation_guard,
+        )
+    return ("", "none")
+
+
+# ── Site 2 (regex-fragility plan): niche spawn-manifest tolerance ────────────
+#
+# Two sibling parsers read the `## Niche Agents` manifest table and decide which
+# niche analysis lanes spawn: `_required_niche_worker_jobs` (driver, the
+# consumer) and `_niche_tokens_from_required_table` (validators, the producer
+# reconciler). A MISSED Required row means a whole analysis lane never spawns —
+# a silent recall hole. Both used:
+#   * an EXACT `## Niche Agents` heading (`re.match(r"^##+\s+Niche Agents\b")`),
+#     missing `# Niche Agents` / synonym renderings; and
+#   * a literal `YES` substring in the Required cell, missing `Required` / `Y` /
+#     the `✓`/`✔` check glyphs the LLM uses interchangeably.
+# These two helpers are the shared, fixture-hardened tolerance both call.
+
+# Heading synonyms for the niche manifest section. The matcher below is
+# `#{1,6}` tolerant (strict superset of the old `##+`) and accepts the
+# documented synonym renderings.
+_NICHE_HEADING_SYNONYMS: tuple[str, ...] = (
+    "Niche Agents",
+    "Niche Agent Manifest",
+    "Niche Analysis Agents",
+    "Niche Depth Agents",
+)
+_NICHE_HEADING_RE = re.compile(
+    r"^\s*#{1,6}\s+(?:\*\*|`)?\s*(?:"
+    + "|".join(re.escape(s) for s in _NICHE_HEADING_SYNONYMS)
+    + r")\b",
+    re.IGNORECASE,
+)
+
+# Affirmative tokens for a manifest Required cell. Matched with word boundaries
+# (so `Y` does not fire on `YET`, `Required` does not fire on `not required`'s
+# negation — guarded below). The check glyphs are bare-codepoint matched.
+_NICHE_REQUIRED_AFFIRMATIVE: tuple[str, ...] = (
+    "yes", "required", "y", "true", "mandatory",
+)
+_NICHE_REQUIRED_WORD_RE = re.compile(
+    r"(?<!\w)(?:" + "|".join(_NICHE_REQUIRED_AFFIRMATIVE) + r")(?!\w)",
+    re.IGNORECASE,
+)
+_NICHE_REQUIRED_GLYPHS: frozenset = frozenset({"✓", "✔", "☑", "✅"})
+
+
+def _niche_heading_match(line: str) -> bool:
+    """True iff `line` is a niche-manifest section heading (any level/synonym)."""
+    return bool(_NICHE_HEADING_RE.match(_llm_norm(line)))
+
+
+def _niche_required_cell_yes(cell: str) -> bool:
+    """True iff a manifest Required cell affirmatively marks the row required.
+
+    Strict superset of the legacy `"YES" in cell.upper()`:
+      * `YES` (legacy) still matches.
+      * `Required` / `Y` / `True` / `Mandatory` newly match (word-boundary, so
+        `Y` does not fire on `MAYBE`/`YET`, and a longer word is not partially
+        matched).
+      * check glyphs `✓ ✔ ☑ ✅` newly match.
+    A clause-scoped negation guard suppresses an affirmative governed by a
+    negation in the same cell (`not required`, `no` → row is NOT required),
+    mirroring the Site 5 recall-safe negation discipline. Recall-direction:
+    this only ever marks MORE rows required (more lanes spawn), except the
+    negation guard which removes a FALSE affirmative — both are recall-safe for
+    the spawn decision (a falsely-required lane wastes a slot; a falsely-skipped
+    lane silently drops findings, the worse error this widening prevents).
+    """
+    if not cell:
+        return False
+    s = _llm_norm(cell)
+    if any(g in s for g in _NICHE_REQUIRED_GLYPHS):
+        return True
+    m = _NICHE_REQUIRED_WORD_RE.search(s)
+    if not m:
+        return False
+    # Negation guard: if a negation token shares the cell-clause with the
+    # affirmative, the cell is asserting the row is NOT required. Blank the
+    # affirmative token itself first so e.g. "required" is not read as a
+    # negation source; then look for an EXTERNAL negation in the cell-clause.
+    clause = _clause_around(s, m.start(), m.end())
+    blanked = clause.replace(m.group(0), " " * len(m.group(0)), 1)
+    if _NEGATION_GUARD_RE.search(blanked):
+        return False
+    return True
+
+
 _SUFFIX_STRIP_RE = re.compile(r"(tion|ing|ness|ment|able|ible|ful|less|ous|ive|ed|er|ly|es|s)$")
 
 
@@ -3613,21 +4211,31 @@ def _parse_source_findings_for_ids(path: Path) -> list[dict[str, str]]:
     except Exception:
         return []
     findings: list[dict[str, str]] = []
-    cur: Optional[dict[str, str]] = None
-    for line in text.splitlines():
-        s = line.strip()
-        m = re.match(r"^###\s+Finding\s+\[([A-Z][A-Z0-9]{0,6}-\d+)\]", s)
-        if m:
-            if cur:
-                findings.append(cur)
-            cur = {"id": m.group(1), "title": s, "location": ""}
-            continue
-        if cur:
-            m = re.match(r"^\*\*Location\*\*:\s*(.+)$", s, re.IGNORECASE)
-            if m:
-                cur["location"] = _norm_loc(m.group(1))
-    if cur:
-        findings.append(cur)
+    # Heading tolerance (Tier C): accept `#{2,6} Finding [ID]` instead of the
+    # H3-exact `^###` form (strict superset — every old H3 still matches). The
+    # per-block Location is harvested with the shared `_field_anywhere`
+    # extractor, which accepts bold (`**Location**:`), plain, bullet,
+    # `**Location:**`, backtick, `=`-separated, and TABLE-CELL renderings — the
+    # old literal `^**Location**:` regex missed all but the bold-colon form.
+    heading_re = re.compile(
+        r"(?im)^\s*#{2,6}\s+Finding\s+\[([A-Z][A-Z0-9]{0,6}-\d+)\]"
+    )
+    matches = list(heading_re.finditer(text))
+    for i, m in enumerate(matches):
+        fid = m.group(1)
+        start = m.end()
+        # title = the heading line as written (preserve legacy "title" value:
+        # the stripped heading line).
+        line_end = text.find("\n", m.start())
+        title = text[m.start():(line_end if line_end != -1 else len(text))].strip()
+        block_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block = text[start:block_end]
+        loc_val, _ = _field_anywhere(block, ("Location", "Locations"), table_ok=True)
+        findings.append({
+            "id": fid,
+            "title": title,
+            "location": _norm_loc(loc_val) if loc_val else "",
+        })
     return findings
 
 
@@ -4014,10 +4622,21 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
         inv_id = m.group(1)
         title = m.group(2).strip()
         body = m.group(3)
-        loc_m = re.search(r"\*\*Location\*\*:\s*(.+)", body, re.IGNORECASE)
-        sev_m = re.search(r"\*\*Severity\*\*:\s*(\w+)", body, re.IGNORECASE)
-        loc = loc_m.group(1).strip() if loc_m else ""
-        sev = sev_m.group(1).strip() if sev_m else ""
+        # Location / Severity via the shared tolerant extractor: accepts
+        # bold (`**Location**:`), plain (`Location:`), bullet, `**Location:**`,
+        # backtick, `=`-separated, and TABLE-CELL (`| Location | ... |`)
+        # renderings. The old `**Location**:` / `**Severity**:`-exact regexes
+        # missed every non-bold form, silently dropping dedup-pair candidates
+        # (recall hole). Strict superset — every bold form still matches.
+        loc, _ = _field_anywhere(body, ("Location", "Locations"), table_ok=True)
+        sev_val, _ = _field_anywhere(body, ("Severity", "Final Severity"), table_ok=True)
+        loc = loc.strip()
+        # Legacy `**Severity**:\s*(\w+)` captured only the first word token;
+        # preserve that value-identity.
+        sev = ""
+        if sev_val:
+            sm = re.match(r"\s*\**\s*(\w+)", sev_val)
+            sev = sm.group(1) if sm else sev_val.strip()
         norm = _norm_loc(loc)
         file_part = re.sub(r":L?\d+.*$", "", norm)
         line_range = _parse_line_range(norm)
@@ -5454,23 +6073,59 @@ _MATRIX_ONCHAIN_RE = re.compile(
 )
 
 
+# Severity enum for the matrix axes. Impact may also be "Informational"/"Info"
+# (the `_MATRIX_IMPACT_RE` accept set); Likelihood is High/Medium/Low only. The
+# leading-word extractor below mirrors the legacy regexes' group(1) — it returns
+# the FIRST enum word of a value like `High (direct fund loss)` so the table and
+# kv forms yield a value-identical result to the old leading-key regex.
+_MATRIX_IMPACT_ENUM = r"\b(?:High|Medium|Low|Informational|Info)\b"
+_MATRIX_LIKELIHOOD_ENUM = r"\b(?:High|Medium|Low)\b"
+_MATRIX_IMPACT_ENUM_RE = re.compile(_MATRIX_IMPACT_ENUM, re.IGNORECASE)
+_MATRIX_LIKELIHOOD_ENUM_RE = re.compile(_MATRIX_LIKELIHOOD_ENUM, re.IGNORECASE)
+
+
+def _matrix_axis(text: str, labels, enum_re: re.Pattern, enum_pat: str):
+    """Extract a severity-matrix axis (Impact / Likelihood) from *text*.
+
+    Routes through the shared `_field_anywhere` tolerant extractor
+    (regex-fragility plan Site 3) so the axis is found in EVERY shape:
+    leading-key (`Impact: High`), bold/backtick/bullet, AND — the live miss —
+    the matrix TABLE forms (`| Impact | Likelihood |` header/row and
+    `| Impact | High |` vertical kv). `value_pattern=enum_pat` constrains the
+    accepted value to the severity enum (so a `Impact: TBD` line is skipped and
+    the search continues, just like the legacy regex would not match it).
+
+    Returns the leading enum WORD (group(1)-equivalent: `High` from
+    `High (direct fund loss)`), preserving value-identity with the legacy
+    `_MATRIX_*_RE.group(1)`. Returns None when no axis value is present.
+    """
+    value, _shape = _field_anywhere(
+        text, labels, value_pattern=enum_pat, table_ok=True
+    )
+    if not value:
+        return None
+    m = enum_re.search(value)
+    return m.group(0) if m else None
+
+
 def _extract_severity_inputs(verify_text: str) -> dict:
     """Parse Impact, Likelihood, and modifier flags from a verify_*.md body.
 
-    Only literal Impact/Likelihood lines on a leading-key form (`Impact: High`)
-    are recognized. Modifier flags are detected by phrase scan in the body --
-    these are advisory tags emitted by the verifier methodology, not formal
-    fields. Missing data returns empty / None values for graceful fallback.
+    Impact/Likelihood are extracted via the shared `_field_anywhere` tolerant
+    extractor (Site 3): the legacy leading-key form (`Impact: High`) PLUS the
+    previously table-blind matrix renderings (`| Impact | Likelihood |` header
+    row + aligned data row, and `| Impact | High |` vertical kv). Modifier flags
+    are detected by phrase scan in the body -- these are advisory tags emitted
+    by the verifier methodology, not formal fields. Missing data returns
+    empty / None values for graceful fallback.
     """
     text = verify_text or ""
-    impact = None
-    likelihood = None
-    m = _MATRIX_IMPACT_RE.search(text)
-    if m:
-        impact = m.group(1)
-    m = _MATRIX_LIKELIHOOD_RE.search(text)
-    if m:
-        likelihood = m.group(1)
+    impact = _matrix_axis(
+        text, ("Impact",), _MATRIX_IMPACT_ENUM_RE, _MATRIX_IMPACT_ENUM
+    )
+    likelihood = _matrix_axis(
+        text, ("Likelihood",), _MATRIX_LIKELIHOOD_ENUM_RE, _MATRIX_LIKELIHOOD_ENUM
+    )
     modifiers = {
         "onchain_only": bool(_MATRIX_ONCHAIN_RE.search(text)),
         "view_function": bool(_MATRIX_VIEW_FN_RE.search(text)),
@@ -6020,14 +6675,65 @@ _TABLE_SOURCE_ID_RE = re.compile(r"(?im)\b([A-Z][A-Z0-9]{0,6}-\d+)\b")
 _TABLE_LOCATION_RE = re.compile(r"([A-Za-z0-9_./\\-]+\.(?:sol|rs|go|move):L?\d+)")
 
 
+# Site 5 (regex-fragility plan, RECALL-CRITICAL): the non-reportable markers.
+# A match forces severity -> Informational and verdict -> REFUTED, so a
+# FALSE-fire here silently DEMOTES a real finding. The negation-blind substring
+# form wrongly fired on `NOT a duplicate`, `not refuted`, `this is not a false
+# positive` — demoting genuine findings. The fix scopes a clause-level negation
+# guard to each matched marker: when a negation token (`not`/`no`/`never`/…)
+# shares the SAME clause as the marker word, that match is suppressed (it is the
+# verifier asserting the finding is NOT non-reportable). Word boundaries already
+# prevented `id`!=`invalid`-style false hits; the markers below keep them.
+#
+# Recall-safety: the guard only ever SUPPRESSES a non-reportable match, i.e. it
+# can only KEEP a finding reportable that the old rule would have demoted. It can
+# never newly demote a finding the old rule kept. Same direction as the
+# `_valid_poc_skip` narrowing — strictly recall-positive.
+#
+# Each individual marker alternative that itself encodes a negation
+# (`not applicable`, `not reportable`, `no finding`) is a TRUE non-reportable
+# signal, so its own leading `not`/`no` must NOT trip the guard. We therefore
+# strip the marker span before scanning its clause for an OUTSIDE negation.
+_NON_REPORTABLE_MARKER_RE = re.compile(
+    r"\b(?:refuted|false[_\s-]*positive|infeasible|not\s+applicable|"
+    r"absorbed(?:\s+into)?|deduplicated|not\s+reportable|no\s+finding|"
+    # Disposition-SENSE only for the two adjective-prone terms. Bare 'duplicate'
+    # / 'merged' word-sense (e.g. 'merged-pool', 'duplicate entry') must NOT
+    # demote a real finding (recall-safe). Accept: 'duplicate of', 'is/as/marked
+    # (a) duplicate', standalone duplicate at field-end/before-ID; 'merged
+    # into/with/to/under', 'is/was merged', standalone merged at field-end/before-ID.
+    r"duplicate[ds]?\s+of\b|(?:is|as|marked)(?:\s+a)?(?:\s+as)?\s+duplicate\b|"
+    r"\bduplicates?\b(?=\s*[.;,)\]]|\s*$|\s+[A-Z]{1,4}-\d)|"
+    r"merged\s+(?:in|into|with|to|under)\b|(?:is|was)\s+merged\b|"
+    r"\bmerged\b(?=\s*[.;,)\]]|\s*$|\s+[A-Z]{1,4}-\d))",
+    re.IGNORECASE,
+)
+
+
 def _non_reportable_marker(text: str) -> bool:
-    return bool(re.search(
-        r"\b(?:refuted|false[_\s-]*positive|infeasible|not\s+applicable|"
-        r"absorbed(?:\s+into)?|duplicate|deduplicated|merged(?:\s+into)?|"
-        r"not\s+reportable|no\s+finding)\b",
-        text or "",
-        re.IGNORECASE,
-    ))
+    s = text or ""
+    for m in _NON_REPORTABLE_MARKER_RE.finditer(s):
+        # Scope the negation check to the marker's own clause, with the marker
+        # span itself blanked out so a marker that legitimately contains its own
+        # negation (`not applicable`/`not reportable`/`no finding`) is not
+        # self-suppressed. Only an EXTERNAL negation governing the marker
+        # (e.g. "this is NOT a duplicate") suppresses it.
+        clause = _clause_around(s, m.start(), m.end())
+        # Blank the marker span inside the clause so a marker that legitimately
+        # contains its own negation is not self-suppressed.
+        marker_text = m.group(0)
+        idx = clause.find(marker_text)
+        if idx >= 0:
+            masked = clause[:idx] + (" " * len(marker_text)) + clause[idx + len(marker_text):]
+        else:
+            masked = clause
+        if _NEGATION_GUARD_RE.search(masked):
+            # An external negation governs this marker -> it is asserting the
+            # finding is NOT non-reportable. Suppress this match and keep
+            # scanning (another, ungoverned marker may still be present).
+            continue
+        return True
+    return False
 
 
 def _ambiguous_na_marker(text: str) -> bool:
@@ -6648,8 +7354,16 @@ def _strip_fenced_code_blocks(text: str) -> str:
             out.append(line)
     return "\n".join(out)
 
+# Site 4 (regex-fragility plan): heading-LEVEL tolerant. The completion gate
+# `_structural_completeness_ok` calls `_NO_FINDINGS_HEADING_RE.search` to decide
+# whether a complete-marked artifact carries an explicit negative-result
+# rationale. The old `^##` H2-exact form false-FAILED a complete artifact that
+# rendered the rationale as H1/H3 drift (`# No Findings` / `### No Findings`).
+# `#{1,6}` is a strict superset of `##` — every H2 match still matches, and H1
+# /H3..H6 drift is newly accepted. Recall-safe: this gate can only now PASS more
+# complete artifacts, never fail one it previously passed.
 _NO_FINDINGS_HEADING_RE = re.compile(
-    r"^##\s+.*\b(No\s+Findings|Negative\s+Result)\b",
+    r"^#{1,6}\s+.*\b(No\s+Findings|Negative\s+Result)\b",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -6666,8 +7380,14 @@ _OBLIGATION_RECEIPTS_HEADING_RE = re.compile(
 # after "Finding"), so the two regexes are disjoint.
 # Ship D: single source of truth in plamen_types (H2/H3, captures the ID).
 _FINDING_BLOCK_HEADING_RE = FINDING_BLOCK_HEADING_RE
+# Site 4 (regex-fragility plan): heading-LEVEL tolerant `#{1,6}` (strict
+# superset of `##`). An agent that renders the findings section as `# Findings`
+# or `### Findings` must not false-FAIL the completion gate. `_FINDING_BLOCK_*`
+# disjointness is preserved: "Findings\b" still requires the word boundary after
+# "Findings", so a `## Finding [ID]` block heading (no trailing 's') never
+# collides with this section heading.
 _FINDINGS_SECTION_RE = re.compile(
-    r"^##\s+Findings\b",
+    r"^#{1,6}\s+Findings\b",
     re.MULTILINE | re.IGNORECASE,
 )
 

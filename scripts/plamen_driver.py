@@ -3069,11 +3069,23 @@ def _is_valid_inventory_chunk_output(path: Path) -> bool:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    if not re.search(r"(?m)^###\s+Finding\s+\[CC-", text):
+    # CC-N chunk-row heading (mandatory). Tolerant `#{2,4}` + optional `:` after
+    # the bracketed ID so `### Finding [CC-1]` and `#### Finding [CC-1]: title`
+    # both match (strict superset of the old `^###\s+Finding\s+\[CC-`).
+    if not re.search(r"(?im)^\s*#{2,6}\s+Finding\s+\[CC-", _llm_norm(text)):
         return False
-    if not re.search(r"(?m)^\*\*Impact\*\*:", text):
+    # Impact + Source-ID presence via the shared tolerant extractor: accepts
+    # bold/bullet/plain/table-cell renderings, `:`/`-`/`=`/em-dash separators,
+    # and the `Source ID` singular alias — fixing the futile chain-chunk retries
+    # the old literal `^**Impact**:` / `^**Source IDs**:` regexes caused on
+    # complete-but-differently-rendered chunks.
+    impact_val, _ = _field_anywhere(text, ("Impact",), table_ok=True)
+    if not impact_val:
         return False
-    if not re.search(r"(?m)^\*\*Source IDs\*\*:", text):
+    src_val, _ = _field_anywhere(
+        text, ("Source IDs", "Source ID", "Source Finding IDs"), table_ok=True
+    )
+    if not src_val:
         return False
     return True
 
@@ -8022,18 +8034,21 @@ def _required_niche_worker_jobs(scratchpad: Path) -> list[dict[str, str]]:
     in_niche = False
     for raw_line in text.splitlines():
         line = raw_line.strip()
-        if re.match(r"^##+\s+Niche Agents\b", line, re.IGNORECASE):
+        # Site 2 (regex-fragility plan): `#{1,6}` + heading-synonym tolerant.
+        if _niche_heading_match(line):
             in_niche = True
             continue
-        if in_niche and re.match(r"^##+\s+", line):
+        if in_niche and re.match(r"^#{1,6}\s+", line):
             break
         if not in_niche or not line.startswith("|") or _is_separator_row(line):
             continue
         cells = [c.strip().strip("`") for c in line.strip("|").split("|")]
         if len(cells) < 5 or cells[0].lower().startswith("niche agent"):
             continue
-        required = cells[2].upper()
-        if "YES" not in required:
+        # Site 2: Required-cell alias table (YES/Required/Y/True/✓...) + clause
+        # negation guard, replacing the literal `"YES" in cell.upper()`. A
+        # missed Required row = a whole analysis lane never spawns.
+        if not _niche_required_cell_yes(cells[2]):
             continue
         skill = cells[0]
         agent_id = cells[3] or f"niche-{_niche_slug_from_name(skill)}"

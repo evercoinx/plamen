@@ -3483,6 +3483,19 @@ def _semantic_gap_trigger_counts(scratchpad: Path) -> dict[str, int]:
     }
     for key, value in _SEMANTIC_GAP_COUNTER_RE.findall(text):
         counts[key.lower()] = max(counts.get(key.lower(), 0), int(value))
+    # Table-cell rendering (`| sync_gaps | 5 |` or a header/row matrix) is a
+    # shape the line-anchored counter regex above is blind to. Harvest it via
+    # the shared tolerant extractor, constrained to a numeric value. Strict
+    # superset: the `:`/`=` forms are already captured above; this only ADDS
+    # the pipe-as-separator form (recall up, no value-identity regression).
+    for key in list(counts.keys()):
+        cell_val, _shape = _field_anywhere(
+            text, (key,), value_pattern=r"\d+", table_ok=True
+        )
+        if cell_val:
+            m_num = re.search(r"\d+", cell_val)
+            if m_num:
+                counts[key] = max(counts.get(key, 0), int(m_num.group(0)))
     # Some invariant artifacts mention the flags without the summary footer.
     # Treat explicit CONFIRMED flag occurrences as a conservative trigger.
     fallback_flags = {
@@ -3648,6 +3661,39 @@ def _flag_derived_required_niches(scratchpad: Path) -> set[str]:
     return out
 
 
+def _signal_declared_required_niches(scratchpad: Path) -> set[str]:
+    """Site 2 L1 authoritative source (regex-fragility plan §4 L1): niches the
+    recon phase declared via a deterministic
+    `<!-- PLAMEN_SIGNALS: {"required_niches": ["EVENT_COMPLETENESS", ...]} -->`
+    block in template_recommendations.md (or detected_patterns.md).
+
+    The HTML-comment JSON channel has no markdown shape variance, so a niche
+    listed here is shape-independent and cannot be lost to a table/heading
+    rendering drift. This set is UNIONED into the required-niche reconciliation
+    (recall-safe: it can only ADD niches, mirroring the always-superset repair
+    in `_validate_niche_manifest_consistency`). Only canonical uppercase tokens
+    are accepted; anything else is ignored.
+    """
+    out: set[str] = set()
+    for fname in ("template_recommendations.md", "detected_patterns.md"):
+        p = scratchpad / fname
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        signals = parse_plamen_signals(text)
+        raw = signals.get("required_niches")
+        if isinstance(raw, str):
+            raw = [raw]
+        if isinstance(raw, (list, tuple)):
+            for tok in raw:
+                if isinstance(tok, str) and re.fullmatch(r"[A-Z][A-Z0-9_]+", tok.strip()):
+                    out.add(tok.strip())
+    return out
+
+
 def _niche_tokens_from_required_table(text: str) -> set[str]:
     """Parse uppercase niche tokens from a `## Niche Agents` table.
 
@@ -3659,10 +3705,13 @@ def _niche_tokens_from_required_table(text: str) -> set[str]:
     in_niche = False
     for raw_line in text.splitlines():
         line = raw_line.strip()
-        if re.match(r"^##+\s+Niche Agents\b", line, re.IGNORECASE):
+        # Site 2 (regex-fragility plan): `#{1,6}` + heading-synonym tolerant,
+        # kept in lockstep with the consumer `_required_niche_worker_jobs`
+        # (sibling-sweep) so producer and consumer agree on which rows count.
+        if _niche_heading_match(line):
             in_niche = True
             continue
-        if in_niche and re.match(r"^##+\s+", line):
+        if in_niche and re.match(r"^#{1,6}\s+", line):
             break
         if not in_niche or not line.startswith("|") or _is_separator_row(line):
             continue
@@ -3673,8 +3722,9 @@ def _niche_tokens_from_required_table(text: str) -> set[str]:
         # Only accept canonical uppercase-token niche names.
         if not re.fullmatch(r"[A-Z][A-Z0-9_]+", name):
             continue
-        required = cells[2].upper() if len(cells) > 2 else ""
-        if "YES" not in required:
+        # Site 2: Required-cell alias table (YES/Required/Y/True/✓...) + clause
+        # negation guard, replacing the literal `"YES" in cell.upper()`.
+        if len(cells) <= 2 or not _niche_required_cell_yes(cells[2]):
             continue
         tokens.add(name)
     return tokens
@@ -3762,8 +3812,11 @@ def _validate_niche_manifest_consistency(
         Binding Rules prose (the recon Addendum niche list).
     C = niche tokens in spawn_manifest.md `## Niche Agents` table.
     flag = niches whose detected_patterns.md trigger flag is present.
+    signal = niches the recon phase declared via the deterministic
+        `<!-- PLAMEN_SIGNALS: {"required_niches": [...]} -->` L1 channel.
 
-    Contract: spawn_manifest niche set MUST equal union(A, B, flag). If not,
+    Contract: spawn_manifest niche set MUST equal union(A, B, flag, signal).
+    If not,
     REPAIR spawn_manifest + the BINDING MANIFEST table to the union (always the
     superset — only ADD, never drop). If repair cannot be applied, return a
     hard issue rather than dispatch an inconsistent/empty table.
@@ -3793,9 +3846,10 @@ def _validate_niche_manifest_consistency(
     set_a = _niche_tokens_from_required_table(tr_text)
     set_b = _niche_tokens_from_binding_rules(tr_text)
     set_flag = _flag_derived_required_niches(scratchpad)
+    set_signal = _signal_declared_required_niches(scratchpad)  # Site 2 L1
     set_c = _niche_tokens_from_required_table(sm_text)
 
-    union = set_a | set_b | set_flag
+    union = set_a | set_b | set_flag | set_signal
     if not union:
         # Nothing is required by any source: a niche-free audit is valid.
         return []
@@ -6111,6 +6165,53 @@ def _jaccard_token_similarity(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
+def _parse_inventory_finding_meta_blocks(
+    text: str, *, prefix_min: int = 2
+) -> dict[str, dict[str, str]]:
+    """Shared block-meta extractor for findings_inventory.md.
+
+    Builds ``{finding_id: {title, severity, location, root_cause}}`` from
+    `#{2,4} Finding [ID]: Title` blocks. *prefix_min* sets the minimum ID prefix
+    length (2 for the base parser, 1 for the report-ID-tolerant twin).
+
+    Per-block fields are harvested through the shared `_field_anywhere` tolerant
+    extractor so the severity / location / root-cause values are recognized in
+    bold (`**Severity**: High`), plain (`Severity: High`), bullet
+    (`- Severity: High`), `=`-separated, and TABLE-CELL (`| Severity | High |`)
+    renderings — a strict superset of the legacy `**Field**:`-exact regexes,
+    which silently lost every field a uniform-tabular inventory rendered.
+    """
+    meta: dict[str, dict[str, str]] = {}
+    matches = list(re.finditer(
+        r"^#{2,4}\s*Finding\s*\[\s*([A-Z]{" + str(prefix_min)
+        + r",6}-\d+)\s*\]\s*:\s*(.+?)\s*$",
+        text,
+        re.MULTILINE,
+    ))
+    for i, m in enumerate(matches):
+        fid = m.group(1).strip().upper()
+        title = m.group(2).strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block = text[start:end]
+        sev_val, _ = _field_anywhere(block, ("Severity", "Final Severity"), table_ok=True)
+        # Legacy severity regex captured only the first alpha word; preserve that
+        # value-identity (e.g. "High (direct loss)" -> "High").
+        sev_word = ""
+        if sev_val:
+            sm = re.match(r"\s*\**\s*([A-Za-z]+)", sev_val)
+            sev_word = sm.group(1).strip() if sm else sev_val.strip()
+        loc_val, _ = _field_anywhere(block, ("Location", "Locations"), table_ok=True)
+        rc_val, _ = _field_anywhere(block, ("Root Cause", "Root-Cause"), table_ok=True)
+        meta[fid] = {
+            "title": title,
+            "severity": sev_word,
+            "location": loc_val.strip(),
+            "root_cause": (rc_val.strip() if rc_val else title),
+        }
+    return meta
+
+
 def _parse_inventory_finding_meta(scratchpad: Path) -> dict[str, dict[str, str]]:
     """Build {finding_id: {title, severity, location, root_cause}} from
     findings_inventory.md. Used by anti-absorption gate.
@@ -6122,35 +6223,7 @@ def _parse_inventory_finding_meta(scratchpad: Path) -> dict[str, dict[str, str]]
         text = inventory_path.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return {}
-    meta: dict[str, dict[str, str]] = {}
-    # Find ### Finding [INV-NNN]: Title blocks
-    matches = list(re.finditer(
-        r"^#{2,4}\s*Finding\s*\[\s*([A-Z]{2,6}-\d+)\s*\]\s*:\s*(.+?)\s*$",
-        text,
-        re.MULTILINE,
-    ))
-    for i, m in enumerate(matches):
-        fid = m.group(1).strip().upper()
-        title = m.group(2).strip()
-        start = m.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        block = text[start:end]
-        sev_m = re.search(r"\*\*Severity\*\*\s*:\s*([A-Za-z]+)", block, re.IGNORECASE)
-        loc_m = re.search(
-            r"\*\*Location\*\*\s*:\s*(.+?)(?=\n\*\*|\n##|\Z)",
-            block, re.IGNORECASE | re.DOTALL,
-        )
-        rc_m = re.search(
-            r"\*\*Root\s*Cause\*\*\s*:\s*(.+?)(?=\n\*\*|\n##|\Z)",
-            block, re.IGNORECASE | re.DOTALL,
-        )
-        meta[fid] = {
-            "title": title,
-            "severity": (sev_m.group(1).strip() if sev_m else ""),
-            "location": (loc_m.group(1).strip() if loc_m else ""),
-            "root_cause": (rc_m.group(1).strip() if rc_m else title),
-        }
-    return meta
+    return _parse_inventory_finding_meta_blocks(text, prefix_min=2)
 
 
 def _parse_hypothesis_id_title_pairs(text: str) -> list[tuple[str, str]]:
@@ -7474,34 +7547,10 @@ def _parse_inventory_finding_meta_tolerant(
         text = inventory_path.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return {}
-    meta: dict[str, dict[str, str]] = {}
-    matches = list(re.finditer(
-        r"^#{2,4}\s*Finding\s*\[\s*([A-Z]{1,6}-\d+)\s*\]\s*:\s*(.+?)\s*$",
-        text,
-        re.MULTILINE,
-    ))
-    for i, m in enumerate(matches):
-        fid = m.group(1).strip().upper()
-        title = m.group(2).strip()
-        start = m.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        block = text[start:end]
-        sev_m = re.search(r"\*\*Severity\*\*\s*:\s*([A-Za-z]+)", block, re.IGNORECASE)
-        loc_m = re.search(
-            r"\*\*Location\*\*\s*:\s*(.+?)(?=\n\*\*|\n##|\Z)",
-            block, re.IGNORECASE | re.DOTALL,
-        )
-        rc_m = re.search(
-            r"\*\*Root\s*Cause\*\*\s*:\s*(.+?)(?=\n\*\*|\n##|\Z)",
-            block, re.IGNORECASE | re.DOTALL,
-        )
-        meta[fid] = {
-            "title": title,
-            "severity": (sev_m.group(1).strip() if sev_m else ""),
-            "location": (loc_m.group(1).strip() if loc_m else ""),
-            "root_cause": (rc_m.group(1).strip() if rc_m else title),
-        }
-    return meta
+    # Collapsed onto the shared block-meta extractor (prefix_min=1 accepts the
+    # single-letter report IDs M-/H-/L-). The previous near-duplicate body is
+    # gone — one extractor path, table-cell tolerant.
+    return _parse_inventory_finding_meta_blocks(text, prefix_min=1)
 
 
 def _validate_chain_self_restatement(scratchpad: Path, mode: str) -> list[str]:
@@ -7701,7 +7750,22 @@ def _validate_invariants_pass2(scratchpad: Path, mode: str) -> list[str]:
         re.IGNORECASE,
     )
     if re.search(_PASS2_HEADER, text):
-        flags_present = len({m.group(1).lower() for m in _FLAG_TOKEN.finditer(text)})
+        present_flags = {m.group(1).lower() for m in _FLAG_TOKEN.finditer(text)}
+        # Pipe-blindness fix (Tier C noise): the same flags are commonly
+        # rendered as table cells (`| sync_gaps | 5 |`). The `[:=]`-only token
+        # regex misses those, undercounting and emitting a false soft-WARN. Add
+        # the table-cell form via the shared tolerant extractor (numeric value).
+        # Strict superset — union with the colon/equals matches above.
+        for _flag in (
+            "sync_gaps", "accumulation_exposures",
+            "conditional_writes", "cluster_gaps",
+        ):
+            if _flag in present_flags:
+                continue
+            _cell, _ = _field_anywhere(text, (_flag,), value_pattern=r"-?\d", table_ok=True)
+            if _cell:
+                present_flags.add(_flag)
+        flags_present = len(present_flags)
         # Warn ONLY when the niche-trigger flag DATA is genuinely (near-)absent,
         # not when the heading is named differently. >=2 of the 4 canonical
         # flags present = the trigger can be evaluated -> stay silent.
@@ -7992,8 +8056,15 @@ def _validate_attention_repair(
         callbacks. The strict relation parser still protects non-SAFE and
         finding/report rows; this helper prevents valid SAFE_REASON rows from
         becoming brittle wording traps.
+
+        Tier C noise fix: a rich depth-evidence-tag closure
+        (`[TRACE: ...]` / `[VARIATION: ...]` / `[BOUNDARY: ...]`) that names BOTH
+        queued fields is an equally valid closure form — the prompt does not
+        force the rigid `SAFE_REASON:<ENUM>` token. Accepting it removes a
+        false soft-WARN without weakening the field-pair requirement (the
+        closure must STILL mention both fields). Soft-class only.
         """
-        if not safe_reason_re.search(unit):
+        if not (safe_reason_re.search(unit) or _DEPTH_EVIDENCE_TAG_RE.search(unit)):
             return False
         low = unit.lower()
         terms_a = _binding_terms(a)
@@ -8026,6 +8097,11 @@ def _validate_attention_repair(
         r"(?:EXPLICIT_EQUALITY|EXPLICIT_BINDING_CHECK|UNREACHABLE_PATH|IMPOSSIBLE_PAIR)\b",
         re.IGNORECASE,
     )
+    # A rich depth-evidence-tag closure is an accepted alternative to the rigid
+    # SAFE_REASON:<ENUM> token (Tier C noise fix). These tags are the same
+    # closure vocabulary depth agents already emit, so a SAFE row that proves
+    # its pair via `[TRACE: ... → revert at L120]` / `[VARIATION: ...]` /
+    # `[BOUNDARY: ...]` is a valid, non-vague closure — not a wording trap.
     unsafe_asset_safe_re = re.compile(
         r"\b(?:atomic(?:ally)?|self[-\s]*punishing|"
         r"no\s+(?:normal\s+)?(?:balance|accumulation|residual|leftover)|"
@@ -8041,10 +8117,15 @@ def _validate_attention_repair(
         combined = context + "\n" + findings_blob
         safe_reason_pair = _safe_reason_closes_pair(context, field_a, field_b)
         if re.search(r"\bSAFE\b", context, re.IGNORECASE):
-            if not safe_reason_re.search(context):
+            # Accept EITHER the rigid SAFE_REASON:<ENUM> token OR a rich
+            # depth-evidence-tag closure that names both queued fields
+            # (`safe_reason_pair`, which now also recognizes [TRACE]/[VARIATION]/
+            # [BOUNDARY] closures). Tier C noise fix — fewer false soft-WARNs.
+            if not safe_reason_re.search(context) and not safe_reason_pair:
                 asset_pair_issues.append(
                     f"row {row_no} {rid} ({field_a} <-> {field_b}) marks SAFE "
-                    "without SAFE_REASON:<EXPLICIT_EQUALITY|EXPLICIT_BINDING_CHECK|UNREACHABLE_PATH|IMPOSSIBLE_PAIR>"
+                    "without SAFE_REASON:<EXPLICIT_EQUALITY|EXPLICIT_BINDING_CHECK|UNREACHABLE_PATH|IMPOSSIBLE_PAIR> "
+                    "or a field-pair-naming [TRACE]/[VARIATION]/[BOUNDARY] closure"
                 )
                 continue
             if unsafe_asset_safe_re.search(context):
@@ -8304,6 +8385,41 @@ def _synthesize_step_execution_trace(
         return False
 
 
+def _step_trace_evidence_has_citation(ev: str) -> bool:
+    """Shared step-trace evidence citation contract (sibling-sweep aligned).
+
+    A step-trace Evidence cell satisfies the file:line contract when it carries
+    ANY of the citation forms the depth agents emit across backends. This is the
+    single source of truth for BOTH `_step_trace_has_ceremonial_yes` (which
+    previously accepted ONLY the strict `file:L42` form and so wrongly rejected
+    `file lines 42` / `file L42` / `[TRACE: ...]` traces, forcing needless
+    synthesis) and the validator twin in `_ensure_step_execution_traces`. The
+    accepted set is the UNION of both twins (strict superset of the old strict
+    form):
+      * `file.ext:L42` / `file.ext:42`            (strict colon form)
+      * `file.ext, lines 42` / `file.ext lines 42`(prose "line N" form)
+      * `file.ext L42`                            (space before L)
+      * `<has a .ext token> AND <has a digit>`     (lenient file+line co-mention)
+      * a depth/PoC evidence tag `[TRACE: ...]` etc.
+      * the explicit `(general)` no-file-applicable marker
+    """
+    ev = (ev or "").strip()
+    if not ev or ev == "-":
+        return False
+    return bool(
+        re.search(r"[A-Za-z0-9_./\-]+\.[a-z]+:L?\d+", ev)
+        or re.search(r"[A-Za-z0-9_./\-]+\.[a-z]+,?\s*lines?\s*\d+", ev, re.IGNORECASE)
+        or re.search(r"[A-Za-z0-9_./\-]+\.[a-z]+\s+L\d+", ev)
+        or (re.search(r"\.[a-z]+\b", ev) and re.search(r"\d+", ev))
+        or re.search(
+            r"\[(BOUNDARY|VARIATION|TRACE|CROSS-DOMAIN-DEP|REGRESS|"
+            r"PERTURBATION|MEDUSA-PASS|POC-PASS|POC-FAIL)[:\]]",
+            ev,
+        )
+        or ev.startswith("(general)")
+    )
+
+
 def _step_trace_has_ceremonial_yes(trace_path: Path) -> bool:
     """Return True when a step trace claims Executed=yes without file:line.
 
@@ -8312,6 +8428,13 @@ def _step_trace_has_ceremonial_yes(trace_path: Path) -> bool:
     case the deterministic synthesized trace is safer than preserving the
     malformed trace, because it projects file:line evidence from the actual
     depth finding body.
+
+    Sibling-sweep (Tier C): now uses the SHARED
+    `_step_trace_evidence_has_citation` contract — previously it accepted only
+    the strict `file:L42` form, so a richer agent-emitted trace using
+    `file lines 42` / `file L42` / `[TRACE: ...]` was wrongly judged ceremonial
+    and needlessly re-synthesized (an internal inconsistency with the twin in
+    `_ensure_step_execution_traces`).
     """
     try:
         text = trace_path.read_text(encoding="utf-8", errors="replace")
@@ -8323,12 +8446,7 @@ def _step_trace_has_ceremonial_yes(trace_path: Path) -> bool:
     for row in rows:
         if row.get("executed", "").strip().lower() != "yes":
             continue
-        ev = row.get("evidence", "").strip()
-        if (
-            not ev
-            or ev == "-"
-            or not re.search(r"[A-Za-z0-9_./\-]+\.[a-z]+:L?\d+", ev)
-        ):
+        if not _step_trace_evidence_has_citation(row.get("evidence", "")):
             return True
     return False
 
@@ -8407,21 +8525,12 @@ def _check_step_execution_traces(
             continue
         for row in _parse_step_trace_rows(text):
             if row.get("executed", "").lower() == "yes":
-                ev = row.get("evidence", "").strip()
-                # Reject empty, just '-', or pure prose without file:line.
-                # v2.6.2: also accept comma-separated and "line N" formats
-                # (GPT models cite evidence differently from Claude).
-                has_citation = bool(
-                    ev
-                    and ev != "-"
-                    and (
-                        re.search(r"[A-Za-z0-9_./]+\.[a-z]+:L?\d+", ev)
-                        or re.search(r"[A-Za-z0-9_./]+\.[a-z]+,?\s*lines?\s*\d+", ev, re.IGNORECASE)
-                        or re.search(r"[A-Za-z0-9_./]+\.[a-z]+\s+L\d+", ev)
-                        or (re.search(r"\.[a-z]+\b", ev) and re.search(r"\d+", ev))
-                        or re.search(r"\[(BOUNDARY|VARIATION|TRACE|CROSS-DOMAIN-DEP|REGRESS|PERTURBATION|MEDUSA-PASS|POC-PASS|POC-FAIL)[:\]]", ev)
-                        or ev.startswith("(general)")
-                    )
+                # Shared citation contract (sibling-sweep aligned with
+                # _step_trace_has_ceremonial_yes): accepts strict `file:L42`,
+                # comma/"line N", space-L, lenient file+digit, depth-tag, and
+                # `(general)` forms. GPT and Claude cite evidence differently.
+                has_citation = _step_trace_evidence_has_citation(
+                    row.get("evidence", "")
                 )
                 if not has_citation:
                     cere_count += 1
@@ -9253,17 +9362,25 @@ def _missing_perturbation_block_ids(text: str) -> list[str]:
     for i, (start, fid) in enumerate(findings):
         end = findings[i + 1][0] if i + 1 < len(findings) else len(text)
         block = text[start:end]
-        verdict_m = re.search(
-            r"\*\*Verdict\*\*:\s*(\w+)", block, re.IGNORECASE,
+        # Verdict / Severity via the shared tolerant extractor so the bullet,
+        # plain-colon, `**label:**`, and table-cell renderings are seen — the
+        # literal `**Verdict**:` / `**Severity**:` regexes UNDER-warned (they
+        # skipped any finding rendered differently, silently passing it). This
+        # is a soft (WARNING-class) gate; catching more findings only raises
+        # coverage, never halts.
+        verdict_val, _ = _field_anywhere(
+            block, ("Verdict", "Final Verdict", "Status"), table_ok=True
         )
-        sev_m = re.search(
-            r"\*\*Severity\*\*:\s*(\w+)", block, re.IGNORECASE,
+        sev_val, _ = _field_anywhere(
+            block, ("Severity", "Final Severity"), table_ok=True
         )
-        if not verdict_m or not sev_m:
+        verdict_word = re.match(r"\s*\**\s*(\w+)", verdict_val or "")
+        sev_word = re.match(r"\s*\**\s*(\w+)", sev_val or "")
+        if not verdict_word or not sev_word:
             continue
-        if verdict_m.group(1).upper() != "CONFIRMED":
+        if verdict_word.group(1).upper() != "CONFIRMED":
             continue
-        if sev_m.group(1).capitalize() not in ("Critical", "High", "Medium"):
+        if sev_word.group(1).capitalize() not in ("Critical", "High", "Medium"):
             continue
         if not _PERTURBATION_BLOCK_RE.search(block):
             missing_blocks.append(fid)
@@ -16655,14 +16772,24 @@ def _validate_inventory_structure(scratchpad: Path) -> list[str]:
         return issues
 
     def _has_field(block: str, *labels: str) -> bool:
-        """Check if block contains any of the given field labels (format-tolerant)."""
-        block_lc = block.lower()
-        for label in labels:
-            if re.search(
-                r"\*{0,2}" + re.escape(label.lower()) + r"\*{0,2}\s*:", block_lc
-            ):
-                return True
-        return False
+        """True iff `block` carries any of `labels` as a real field.
+
+        Site 1 (regex-fragility plan): routed through the shared
+        `_field_anywhere(table_ok=True)` extractor so a UNIFORM-TABULAR
+        inventory (`| Severity | High |`, header/row tables) — which the old
+        `label*:` colon-only regex could not see — is recognized as having the
+        field. Previously a fully-valid tabular inventory tripped the >40%
+        missing-fields HARD issue and HALTED the run.
+
+        Strict superset: every colon-form the old regex accepted
+        (`Severity:`, `**Severity**:`) is a kv/bold shape `_field_anywhere`
+        also accepts, plus `=`, backtick, bullet, and the table forms. This is
+        a presence check, so a non-empty harvested VALUE means the field is
+        present. Detection-only: this helper only relaxes a gate (more fields
+        seen -> fewer false HALTs), never tightens it.
+        """
+        value, _shape = _field_anywhere(block, list(labels), table_ok=True)
+        return bool(value)
 
     missing_fields = 0
     # Preserve the legacy smoke/resume tolerance for titleless stub findings
@@ -16683,8 +16810,36 @@ def _validate_inventory_structure(scratchpad: Path) -> list[str]:
         if not (has_source_ids and has_severity and has_location and has_tag):
             missing_fields += 1
 
+    # Site 1 L1 authoritative source (regex-fragility plan §4 L1): if the
+    # inventory phase emitted a `<!-- PLAMEN_SIGNALS: {...} -->` block asserting
+    # field-presence completeness, that deterministic machine signal OVERRIDES
+    # the prose-derived `missing_fields` count. JSON-in-HTML-comment has no
+    # shape variance, so when the producer affirms completeness we trust it over
+    # any prose extraction (the L1>L2 precedence the plan mandates). Recognized
+    # keys (any one present-and-true suffices):
+    #   "inventory_fields_complete": true
+    #   "inventory_missing_fields": 0
+    signals = parse_plamen_signals(text)
+    l1_complete = False
+    if signals:
+        if signals.get("inventory_fields_complete") is True:
+            l1_complete = True
+        mf = signals.get("inventory_missing_fields")
+        if isinstance(mf, (int, float)) and int(mf) == 0:
+            l1_complete = True
+
     checked_count = len(field_checked_blocks)
-    if checked_count and missing_fields > max(2, int(checked_count * 0.40)):
+    if l1_complete:
+        # L1 says complete: never hard-fail on the prose count. Surface a soft
+        # note if prose disagrees so a producer bug is still visible.
+        if checked_count and missing_fields > max(2, int(checked_count * 0.40)):
+            log.warning(
+                "[_validate_inventory_structure] PLAMEN_SIGNALS asserts inventory "
+                "fields complete, but prose extraction flagged %d/%d blocks "
+                "missing fields — trusting L1 signal (no HALT)",
+                missing_fields, checked_count,
+            )
+    elif checked_count and missing_fields > max(2, int(checked_count * 0.40)):
         issues.append(
             f"inventory structure: {missing_fields}/{checked_count} finding blocks "
             "are missing one or more required fields (Source IDs / Severity / "
@@ -17530,16 +17685,19 @@ def _valid_poc_skip(content: str, poc_class: str) -> bool:
         return False
     if poc_class == "unit" and skip_code == "DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL":
         return False
+    # Mock-feasibility blocker (THE intentional recall-safe narrowing): an
+    # EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS skip is invalid when the verifier's
+    # OWN prose says the dependency could not be mocked. The legacy rule fired
+    # whenever a negation token appeared within 80 chars (DOTALL) of `mock` —
+    # which crossed sentence boundaries and made the gate UNWINNABLE for valid
+    # skips ("...used a Mock harness. The on-chain address does not exist."). We
+    # now scope the negation to the SAME CLAUSE as the `mock` keyword via the
+    # shared `_negation_governs_keyword` helper. This suppresses FEWER valid
+    # skips than the old rule, so it is strictly recall-safe (it can only let
+    # MORE valid skips through, never drop a finding).
     if skip_code == "EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS" and re.search(
         r"\bmock\w*\b", content, re.IGNORECASE
-    ) and re.search(
-        r"\b(?:missing|no|not|cannot|can't|does\s+not|doesn't|unavailable|"
-        r"lack\w*)\b.{0,80}\bmock\w*\b|\bmock\w*\b.{0,80}\b(?:missing|"
-        r"not|cannot|can't|does\s+not|doesn't|unavailable|lack\w*|"
-        r"implement|replicate)\b",
-        content,
-        re.IGNORECASE | re.DOTALL,
-    ):
+    ) and _negation_governs_keyword(content, re.compile(r"\bmock\w*\b", re.IGNORECASE)):
         return False
     if skip_code == "CROSS_VM_ENCODING_NO_RUNTIME":
         return bool(re.search(
@@ -17554,8 +17712,42 @@ def _valid_poc_skip(content: str, poc_class: str) -> bool:
     return True
 
 
-def _poc_contract_required(row: dict[str, str], mode: str) -> bool:
+def _poc_contract_required(
+    row: dict[str, str], mode: str, content: Optional[str] = None
+) -> bool:
+    """Whether a mandatory unit/property PoC is contractually required for *row*.
+
+    The queue `poc class` is an LLM estimate derived from the finding TITLE
+    before the code was read. The verify prompt instructs the verifier to
+    CHALLENGE a wrong queue class and DECLARE the corrected class as a
+    `PoC Class:` ledger field in its own output. When the verifier has
+    non-silently reclassified the finding to a non-testable class
+    (`structural`/`integration`/`spec`/`docs`), the contract requirement is
+    driven by THAT declared class, not the stale queue estimate — otherwise the
+    gate demands a unit/property PoC the verifier already (correctly) showed is
+    not the right test class, which is an unwinnable retry.
+
+    The reclassification is read via the shared `_field_anywhere` tolerant
+    extractor (table-cell / bold / bullet / colon forms), with a LEADING-TOKEN
+    match so the justification text the prompt asks for
+    (`PoC Class: structural  (queue said property; ...)`) is honored. A ledger
+    that leaves the declared class at unit/property does NOT downgrade the
+    requirement (anti-gaming floor preserved — silently leaving it testable
+    still requires the PoC).
+    """
     poc_class = (row.get("poc class") or "structural").strip().lower()
+    if content:
+        declared_raw, _shape = _field_anywhere(
+            content, ("PoC Class", "Poc Class"), table_ok=True
+        )
+        m_decl = re.match(r"\s*([A-Za-z_]+)", declared_raw or "")
+        if m_decl:
+            declared = m_decl.group(1).lower()
+            # Only a reclassification AWAY from a locally-testable class relaxes
+            # the requirement; a declared unit/property never tightens or
+            # loosens beyond the queue estimate (recall-safe).
+            if declared in {"structural", "integration", "spec", "docs"}:
+                poc_class = declared
     if poc_class not in {"unit", "property"}:
         return False
     mode_l = (mode or "core").lower()
@@ -17584,6 +17776,8 @@ def _validate_poc_contract_for_rows(
     # on disk at gate time, which includes this shard's own outputs.
     mock_feasible, mock_example = _project_mock_feasible(scratchpad)
     for row in rows:
+        # First-pass cheap gate on the queue class (no I/O): if not even the
+        # queue estimate makes this testable, skip without reading the file.
         if not _poc_contract_required(row, mode):
             continue
         fid = (row.get("finding id") or "").strip()
@@ -17595,6 +17789,14 @@ def _validate_poc_contract_for_rows(
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
         except Exception:
+            continue
+        # Second-pass gate using the verifier's DECLARED PoC Class ledger field:
+        # if the verifier non-silently reclassified this finding to a
+        # non-testable class (structural/integration/spec/docs), the mandatory
+        # unit/property contract no longer applies — demanding the PoC anyway is
+        # an unwinnable retry. The anti-gaming floor is preserved inside
+        # `_poc_contract_required` (a declared unit/property does NOT relax).
+        if not _poc_contract_required(row, mode, content):
             continue
         has_poc_section, has_exec_section = _has_poc_ledger_sections(content)
         if not has_poc_section or not has_exec_section:
