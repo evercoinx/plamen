@@ -105,3 +105,183 @@ def test_resolve_build_root_move_manifest(tmp_path: Path):
     (root / "Move.toml").write_text("[package]\nname='x'\n", encoding="utf-8")
     resolved = RP._resolve_build_root(root / "sources", "aptos")
     assert resolved == root.resolve()
+
+
+# ---- Mechanical ecosystem detector (_detect_ecosystem) -------------------
+
+
+def _manifest(p: Path, content: str) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+
+
+def test_detect_evm_from_sol_only(tmp_path: Path):
+    proj = tmp_path / "contracts"
+    _touch(proj / "Vault.sol")
+    _touch(proj / "Token.sol")
+    lang, conf, sig = D._detect_ecosystem(proj)
+    assert (lang, conf) == ("evm", "high")
+    assert sig["counts"][".sol"] >= 2
+
+
+def test_detect_solana_from_anchor_lang_cargo(tmp_path: Path):
+    proj = tmp_path / "program"
+    _touch(proj / "src" / "lib.rs")
+    _manifest(
+        proj / "Cargo.toml",
+        "[dependencies]\nanchor-lang = \"0.30\"\n",
+    )
+    lang, conf, _sig = D._detect_ecosystem(proj)
+    assert (lang, conf) == ("solana", "high")
+
+
+def test_detect_soroban_from_soroban_sdk_cargo(tmp_path: Path):
+    proj = tmp_path / "contract"
+    _touch(proj / "src" / "lib.rs")
+    _manifest(
+        proj / "Cargo.toml",
+        "[dependencies]\nsoroban-sdk = \"21\"\n",
+    )
+    lang, conf, _sig = D._detect_ecosystem(proj)
+    assert (lang, conf) == ("soroban", "high")
+
+
+def test_detect_solana_from_anchor_toml_presence(tmp_path: Path):
+    proj = tmp_path / "program"
+    _touch(proj / "programs" / "p" / "src" / "lib.rs")
+    # Anchor.toml present anywhere => solana filename-marker, even with a bare
+    # Cargo.toml that carries no rust dependency markers.
+    _manifest(proj / "Anchor.toml", "[provider]\ncluster = \"localnet\"\n")
+    _manifest(proj / "Cargo.toml", "[workspace]\n")
+    lang, conf, _sig = D._detect_ecosystem(proj)
+    assert (lang, conf) == ("solana", "high")
+
+
+def test_detect_rust_medium_default_when_no_markers(tmp_path: Path):
+    proj = tmp_path / "crate"
+    _touch(proj / "src" / "lib.rs")
+    _manifest(proj / "Cargo.toml", "[package]\nname = \"x\"\n")
+    lang, conf, sig = D._detect_ecosystem(proj)
+    assert (lang, conf) == ("solana", "medium")
+    assert "no manifest" in sig["reason"]
+
+
+def test_detect_rust_conflict_returns_none(tmp_path: Path):
+    """Both anchor-lang AND soroban-sdk present => CONFLICT => keep configured.
+    Recall-safety: never pick a winner by magnitude."""
+    proj = tmp_path / "crate"
+    _touch(proj / "src" / "lib.rs")
+    _manifest(
+        proj / "Cargo.toml",
+        "[dependencies]\nanchor-lang = \"0.30\"\nsoroban-sdk = \"21\"\n",
+    )
+    lang, conf, sig = D._detect_ecosystem(proj)
+    assert (lang, conf) == (None, "none")
+    assert "conflict" in sig["reason"].lower()
+
+
+def test_detect_sui_from_sui_framework(tmp_path: Path):
+    proj = tmp_path / "pkg"
+    _touch(proj / "sources" / "m.move")
+    _manifest(
+        proj / "Move.toml",
+        "[dependencies]\nSui = { local = \"x\" }\nsui-framework = \"1\"\n",
+    )
+    lang, conf, _sig = D._detect_ecosystem(proj)
+    assert (lang, conf) == ("sui", "high")
+
+
+def test_detect_aptos_from_aptos_framework(tmp_path: Path):
+    proj = tmp_path / "pkg"
+    _touch(proj / "sources" / "m.move")
+    _manifest(
+        proj / "Move.toml",
+        "[dependencies]\naptos-framework = { git = \"x\" }\n",
+    )
+    lang, conf, _sig = D._detect_ecosystem(proj)
+    assert (lang, conf) == ("aptos", "high")
+
+
+def test_detect_move_conflict_returns_none(tmp_path: Path):
+    proj = tmp_path / "pkg"
+    _touch(proj / "sources" / "m.move")
+    _manifest(
+        proj / "Move.toml",
+        "[dependencies]\nsui-framework = \"1\"\naptos-framework = \"1\"\n",
+    )
+    lang, conf, _sig = D._detect_ecosystem(proj)
+    assert (lang, conf) == (None, "none")
+
+
+def test_detect_none_when_no_sources(tmp_path: Path):
+    proj = tmp_path / "iso_a" / "iso_b" / "iso_c" / "empty"
+    proj.mkdir(parents=True)
+    (proj / "README.md").write_text("docs\n", encoding="utf-8")
+    lang, conf, _sig = D._detect_ecosystem(proj)
+    assert (lang, conf) == (None, "none")
+
+
+def test_detect_move_medium_default_when_no_markers(tmp_path: Path):
+    proj = tmp_path / "pkg"
+    _touch(proj / "sources" / "m.move")
+    _manifest(proj / "Move.toml", "[package]\nname = \"x\"\n")
+    lang, conf, _sig = D._detect_ecosystem(proj)
+    assert (lang, conf) == ("sui", "medium")
+
+
+# ---- Startup auto-correct integration ------------------------------------
+
+
+def _write_config(tmp_path: Path, project_root: Path, language: str) -> Path:
+    import json
+    cfg = {
+        "project_root": str(project_root),
+        "scratchpad": str(project_root / ".scratchpad"),
+        "language": language,
+        "mode": "core",
+        "pipeline": "sc",
+        "extra_key": "preserved",
+    }
+    cp = tmp_path / "config.json"
+    cp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    return cp
+
+
+def test_autocorrect_overrides_and_persists(tmp_path: Path):
+    """config.language='evm' but a Solana source tree => in-memory override to
+    'solana', config.json rewritten, other keys preserved, NO sys.exit."""
+    import json
+    proj = tmp_path / "program"
+    _touch(proj / "src" / "lib.rs")
+    _manifest(proj / "Cargo.toml", "[dependencies]\nanchor-lang = \"0.30\"\n")
+    cp = _write_config(tmp_path, proj, "evm")
+
+    config = json.loads(cp.read_text(encoding="utf-8"))
+    detected, conf, _sig = D._detect_ecosystem(config["project_root"])
+    assert (detected, conf) == ("solana", "high")
+    # Simulate the startup auto-correct flow.
+    config["language"] = detected
+    persisted = D._persist_corrected_language(cp, config, detected)
+    assert persisted is True
+    assert config["language"] == "solana"  # in-memory authoritative
+    on_disk = json.loads(cp.read_text(encoding="utf-8"))
+    assert on_disk["language"] == "solana"
+    assert on_disk["extra_key"] == "preserved"  # other keys + order preserved
+
+
+def test_autocorrect_conflict_keeps_configured(tmp_path: Path):
+    """config.language='solana' + conflicting rust markers => detection is
+    none, configured value UNCHANGED, no override."""
+    proj = tmp_path / "crate"
+    _touch(proj / "src" / "lib.rs")
+    _manifest(
+        proj / "Cargo.toml",
+        "[dependencies]\nanchor-lang = \"0.30\"\nsoroban-sdk = \"21\"\n",
+    )
+    detected, conf, _sig = D._detect_ecosystem(proj)
+    assert (detected, conf) == (None, "none")
+    # The startup branch only overrides on high/medium; here it keeps configured.
+    configured = "solana"
+    override = detected is not None and conf in ("high", "medium") \
+        and detected != configured
+    assert override is False

@@ -13987,6 +13987,101 @@ def _count_source_suffixes_under(
     return counts
 
 
+def _scan_manifests_for_markers(
+    base: Path,
+    manifest_names: set[str],
+    markers_by_lang: dict[str, tuple[str, ...]],
+    *,
+    max_files: int = 200,
+    max_bytes: int = 200_000,
+) -> dict[str, int]:
+    """Deterministically scan build manifests under ``base`` and count, per
+    language, how many DISTINCT markers appear in manifest content.
+
+    This is the SECOND deterministic signal used to disambiguate the ambiguous
+    source suffixes (.rs -> solana|soroban, .move -> sui|aptos). It is NOT an
+    LLM decision: it lowercases manifest content and substring-matches a fixed
+    marker vocabulary keyed off language build systems (dependency/framework
+    names), satisfying the no-overfit rule (no protocol/token/contract names).
+
+    Mirroring ``_dominant_source_suffix``: ``base`` is scanned FIRST and is
+    authoritative; up to 2 ancestors are consulted as a fallback ONLY when
+    ``base`` itself yields zero matching manifests (a scope-dir PROJECT_PATH
+    whose manifest lives above it).
+
+    ``Anchor.toml`` is special-cased: its mere presence anywhere counts as a
+    solana filename-marker (Anchor projects are Solana programs).
+
+    Bounded by ``max_files`` (manifests read) and ``max_bytes`` (per file).
+    Wrapped in try/except; never raises. Returns ``{lang: distinct_marker_count}``.
+    """
+    result: dict[str, int] = {lang: 0 for lang in markers_by_lang}
+    wanted = {n.lower() for n in manifest_names}
+
+    def _scan_root(root: Path) -> tuple[dict[str, set[str]], bool]:
+        """Return (matched_markers_by_lang, saw_any_manifest)."""
+        matched: dict[str, set[str]] = {lang: set() for lang in markers_by_lang}
+        saw_manifest = False
+        read_count = 0
+        anchor_seen = False
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d.lower() not in _LANG_GATE_IGNORE_DIRS
+                    and not d.startswith(".")
+                ]
+                for fn in filenames:
+                    fn_lower = fn.lower()
+                    # Anchor.toml presence => solana filename-marker.
+                    if fn_lower == "anchor.toml":
+                        saw_manifest = True
+                        anchor_seen = True
+                    if fn_lower not in wanted:
+                        continue
+                    saw_manifest = True
+                    if read_count >= max_files:
+                        continue
+                    read_count += 1
+                    try:
+                        content = (Path(dirpath) / fn).read_text(
+                            encoding="utf-8", errors="ignore"
+                        )[:max_bytes].lower()
+                    except Exception:
+                        continue
+                    for lang, markers in markers_by_lang.items():
+                        for marker in markers:
+                            if marker and marker.lower() in content:
+                                matched[lang].add(marker.lower())
+        except Exception:
+            pass
+        if anchor_seen and "solana" in matched:
+            matched["solana"].add("anchor.toml")
+        return matched, saw_manifest
+
+    try:
+        root = Path(base).resolve()
+    except Exception:
+        return result
+
+    matched, saw_manifest = _scan_root(root)
+
+    if not saw_manifest:
+        anc = root
+        for _ in range(2):
+            parent = anc.parent
+            if parent == anc:
+                break
+            anc = parent
+            matched, saw_manifest = _scan_root(anc)
+            if saw_manifest:
+                break
+
+    for lang in result:
+        result[lang] = len(matched.get(lang, set()))
+    return result
+
+
 def _dominant_source_suffix(
     project_root: str | Path,
     *,
@@ -14093,6 +14188,177 @@ def _validate_language_source_consistency(
     )
 
 
+def _resolve_family(
+    counts: dict[str, int],
+    hits: dict[str, int],
+    *,
+    primary: str,
+    secondary: str,
+    default: str,
+    family: str,
+) -> tuple[str | None, str, dict]:
+    """Apply the confidence + disambiguation rule for an ambiguous
+    source-suffix family (.rs or .move). Pure, deterministic, never raises.
+
+    Recall-safety: a CONFLICT (both family marker sets fire) returns
+    ``(None, 'none', ...)`` — we NEVER compare magnitudes to pick a winner."""
+    p_hits = int(hits.get(primary, 0))
+    s_hits = int(hits.get(secondary, 0))
+    base_signals = {"counts": counts, "manifest_hits": hits}
+
+    # CONFLICT: both families have markers -> ambiguous, keep configured.
+    if p_hits > 0 and s_hits > 0:
+        return (
+            None,
+            "none",
+            {**base_signals, "reason": "conflicting manifest markers"},
+        )
+    # Exactly one family has markers -> high confidence.
+    if p_hits > 0 and s_hits == 0:
+        return (
+            primary,
+            "high",
+            {**base_signals, "reason": f"{family} + {primary} manifest markers"},
+        )
+    if s_hits > 0 and p_hits == 0:
+        return (
+            secondary,
+            "high",
+            {**base_signals,
+             "reason": f"{family} + {secondary} manifest markers"},
+        )
+    # No manifest signal at all -> common-case default, medium confidence.
+    return (
+        default,
+        "medium",
+        {**base_signals, "reason": "suffix-only, no manifest disambiguation"},
+    )
+
+
+def _detect_ecosystem(
+    project_root: str | Path,
+) -> tuple[str | None, str, dict]:
+    """MECHANICAL ecosystem auto-detector (no LLM). Returns
+    ``(language, confidence, signals)`` where:
+
+    - ``language`` in {evm, solana, soroban, aptos, sui, None}
+    - ``confidence`` in {'high', 'medium', 'none'}
+    - ``signals`` is a diagnostics dict {counts, manifest_hits, reason}
+
+    Reuses the EXISTING bounded ``_dominant_source_suffix`` for the suffix
+    signal (already prunes ignore-dirs, ancestor-aware, never raises) and the
+    NEW ``_scan_manifests_for_markers`` for build-manifest disambiguation.
+
+    RECALL-SAFETY GUARANTEE: a wrong auto-correct is worse than the status quo,
+    so on ANY conflicting signal the detector returns ``(None, 'none', ...)`` —
+    it NEVER compares marker magnitudes to pick a "winner" within a language
+    family. Only an unambiguous suffix (.sol -> evm) or a suffix plus EXACTLY
+    ONE family's manifest markers present (other family at zero) yields 'high'.
+    A suffix with no manifest signal yields 'medium' with the family's common
+    default; medium still auto-corrects because the suffix alone already
+    contradicts a wrong configured language across families. The only case that
+    returns a non-None language from a guessed family member is this no-manifest
+    medium case; a within-family conflict always returns None.
+    """
+    dominant, counts = _dominant_source_suffix(project_root)
+    if dominant is None:
+        return (
+            None,
+            "none",
+            {"counts": counts, "manifest_hits": {},
+             "reason": "no recognized sources"},
+        )
+
+    # .sol is unambiguous: evm is the only language that maps to it.
+    if dominant == ".sol":
+        return (
+            "evm",
+            "high",
+            {"counts": counts, "manifest_hits": {},
+             "reason": ".sol dominant -> evm (unambiguous suffix)"},
+        )
+
+    # .rs => disambiguate solana vs soroban via Cargo.toml / Anchor.toml.
+    if dominant == ".rs":
+        hits = _scan_manifests_for_markers(
+            Path(project_root),
+            {"Cargo.toml"},
+            {
+                "solana": ("anchor-lang", "solana-program"),
+                "soroban": ("soroban-sdk",),
+            },
+        )
+        return _resolve_family(
+            counts, hits,
+            primary="solana", secondary="soroban",
+            default="solana", family=".rs",
+        )
+
+    # .move => disambiguate sui vs aptos via Move.toml.
+    if dominant == ".move":
+        hits = _scan_manifests_for_markers(
+            Path(project_root),
+            {"Move.toml"},
+            {
+                "sui": ("sui-framework", "sui =", "sui-move"),
+                "aptos": (
+                    "aptos-framework", "aptosframework",
+                    "aptosstdlib", "aptos-std", "aptos =",
+                ),
+            },
+        )
+        return _resolve_family(
+            counts, hits,
+            primary="sui", secondary="aptos",
+            default="sui", family=".move",
+        )
+
+    # Unknown dominant suffix (should not happen given recognized set).
+    return (
+        None,
+        "none",
+        {"counts": counts, "manifest_hits": {},
+         "reason": f"unhandled dominant suffix {dominant}"},
+    )
+
+
+def _persist_corrected_language(
+    config_path: str | Path,
+    config: dict,
+    detected: str,
+) -> bool:
+    """Re-read config.json and atomically rewrite it with the corrected
+    ``language``, preserving all other keys and their order. Returns True on a
+    successful persist. Wrapped in try/except: a write failure logs a WARNING
+    but does NOT block — the in-memory ``config`` is already corrected, which is
+    what every downstream consumer reads."""
+    try:
+        cp = Path(config_path)
+        try:
+            on_disk = json.loads(cp.read_text(encoding="utf-8"))
+        except Exception:
+            on_disk = dict(config)
+        on_disk["language"] = detected
+        tmp = cp.with_name(
+            f"{cp.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:12]}"
+        )
+        tmp.write_text(
+            json.dumps(on_disk, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, cp)
+        return True
+    except Exception as exc:  # never block on a persist failure
+        try:
+            log.warning(
+                "[startup] could not persist corrected language to %s: %r",
+                config_path, exc,
+            )
+        except Exception:
+            pass
+        return False
+
+
 def main():
     # Terminal: WARNING+ only (keep TUI clean).
     # File: everything (INFO+) for debugging via `tail -f _plamen.log`.
@@ -14107,10 +14373,25 @@ def main():
         handlers=[_stderr_handler],
     )
 
+    # STEP 5: shared mechanical detector entrypoint for the wizard. Prints
+    # "<language>\t<confidence>" (or "indeterminate\tnone") and exits. This is
+    # the SINGLE source of truth for ecosystem detection so the wizard and the
+    # driver never duplicate the logic in prose/bash.
+    if "--detect-language" in sys.argv[1:]:
+        _det_args = [a for a in sys.argv[1:] if a != "--detect-language"]
+        _det_root = _det_args[0] if _det_args else "."
+        try:
+            _lang, _conf, _sig = _detect_ecosystem(_det_root)
+        except Exception:
+            _lang, _conf = None, "none"
+        print(f"{_lang or 'indeterminate'}\t{_conf}")
+        sys.exit(0)
+
     if len(sys.argv) < 2:
         print(
             "usage: plamen_driver.py <config.json> "
-            "[--force] [--no-sleep|--no-hibernate]",
+            "[--force] [--no-sleep|--no-hibernate]\n"
+            "       plamen_driver.py --detect-language <project_root>",
             file=sys.stderr,
         )
         sys.exit(EXIT_CONFIG_MISSING)
@@ -14142,23 +14423,51 @@ def main():
             print(f"config missing required key: {key}", file=sys.stderr)
             sys.exit(EXIT_CONFIG_MISSING)
 
-    # STEP 2A: fail-fast language<->source-extension consistency gate. Fires at
-    # STARTUP only (before any worker pool) and only on a DEFINITE contradiction
-    # between the configured language and the dominant production source suffix
-    # found under PROJECT_PATH. Indeterminate signals warn and continue. This
-    # prevents a multi-hour misrouted run (e.g. evm config pointed at a Rust
-    # crate); it is config validation, not a mid-pipeline halt.
+    # STARTUP AUTO-CORRECT: mechanically detect the ecosystem from source-suffix
+    # counts + build-manifest markers and SELF-HEAL a wrong configured language
+    # instead of halting. Fires at STARTUP only (before any worker pool). A
+    # correct language deterministically fixes every language-keyed
+    # template/skill/role/prompt path downstream (the recall win). Recall-safe:
+    # only high/medium-confidence detection overrides, and a genuinely ambiguous
+    # or conflicting signal (confidence='none') keeps the configured value. There
+    # is NO sys.exit for a correctable language mismatch.
     try:
-        _lang_ok, _lang_msg = _validate_language_source_consistency(
-            config["project_root"], str(config.get("language", ""))
+        _detected, _conf, _signals = _detect_ecosystem(config["project_root"])
+    except Exception as _det_exc:  # never block on a detector bug
+        _detected, _conf, _signals = None, "none", {
+            "reason": f"detector error: {_det_exc!r}"
+        }
+    _configured = str(config.get("language", "")).strip().lower()
+    _det_reason = (_signals or {}).get("reason", "")
+
+    if _detected is not None and _conf in ("high", "medium") \
+            and _detected != _configured:
+        config["language"] = _detected
+        _persist_corrected_language(config_path, config, _detected)
+        _correct_msg = (
+            f"[startup] auto-detected ecosystem={_detected} "
+            f"(confidence={_conf}) from signals={_det_reason}; "
+            f"corrected config.language {_configured or 'unset'} -> {_detected}"
         )
-    except Exception as _lang_exc:  # never block on a validator bug
-        _lang_ok, _lang_msg = True, f"language consistency check skipped: {_lang_exc!r}"
-    if not _lang_ok:
-        print(f"[startup] language misconfiguration: {_lang_msg}", file=sys.stderr)
-        sys.exit(EXIT_CONFIG_MISSING)
+        log.info(_correct_msg)
+        # Also surface on the clean TUI (WARNING-level handler) so the user sees
+        # the correction without tailing the file log.
+        log.warning(_correct_msg)
+        print(_correct_msg, file=sys.stderr)
+    elif _detected is not None and _detected == _configured:
+        log.info(
+            "[startup] ecosystem detection confirms configured "
+            "language=%s (confidence=%s, %s)",
+            _configured, _conf, _det_reason,
+        )
     else:
-        log.info("[startup] %s", _lang_msg)
+        # confidence == 'none' (no sources OR conflicting signals): NEVER
+        # override on ambiguity, NEVER exit. Keep the configured value and warn.
+        log.warning(
+            "[startup] ecosystem detection ambiguous (%s); keeping "
+            "configured language=%s",
+            _det_reason or "indeterminate", _configured or "unset",
+        )
 
     scratchpad = Path(config["scratchpad"])
     scratchpad.mkdir(parents=True, exist_ok=True)

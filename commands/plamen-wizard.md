@@ -166,63 +166,32 @@ AskUserQuestion(questions=[{
 After all questions are answered, write the config to the project's scratchpad:
 
 ```python
-Before writing config, detect the language. Decide PRIMARILY from the dominant
-production source-file EXTENSION found recursively under PROJECT_PATH (count
-files; the most common recognized suffix wins). Walk UP to the nearest
-`Cargo.toml` / `Move.toml` (the manifest is often an ancestor of a scope-dir
-PROJECT_PATH such as `.../<crate>/src/`) and use the manifest grep ONLY to
-disambiguate solana-vs-soroban and aptos-vs-sui — never as the primary signal.
-Use explicit if/elif blocks (no chained `&&`/`||` one-liner — its precedence is
-wrong). Do NOT silently default to `evm`; if no recognized source files are
-found, emit `indeterminate` and let the driver's startup language-consistency
-gate surface it.
+Before writing config, detect the language using the driver's MECHANICAL
+ecosystem detector — the SAME deterministic code path the driver uses at
+startup, so the wizard and driver share ONE source of truth (no LLM-prose or
+hand-rolled bash if/elif). Do NOT ask the user when detection is confident.
 
 ```bash
-cd "{PROJECT_PATH}"
-
-# 1. Count dominant source extension recursively (production dirs only).
-SOL=$(find . -name "*.sol" -not -path "*/node_modules/*" -not -path "*/lib/*" 2>/dev/null | wc -l)
-RS=$(find . -name "*.rs" -not -path "*/target/*" 2>/dev/null | wc -l)
-MOVE=$(find . -name "*.move" -not -path "*/build/*" 2>/dev/null | wc -l)
-
-# 2. Locate the nearest manifest by walking UP from PROJECT_PATH.
-find_up() {
-  local name="$1" dir
-  dir="$(pwd)"
-  while [ -n "$dir" ] && [ "$dir" != "/" ]; do
-    if [ -f "$dir/$name" ]; then echo "$dir/$name"; return 0; fi
-    dir="$(dirname "$dir")"
-  done
-  return 1
-}
-CARGO=$(find_up Cargo.toml)
-MOVETOML=$(find_up Move.toml)
-
-# 3. Decide by dominant extension; manifest disambiguates only within a family.
-if [ "$SOL" -gt 0 ] && [ "$SOL" -ge "$RS" ] && [ "$SOL" -ge "$MOVE" ]; then
-  echo "evm"
-elif [ "$RS" -gt 0 ] && [ "$RS" -ge "$MOVE" ]; then
-  if [ -n "$CARGO" ] && grep -rq "anchor" "$CARGO" 2>/dev/null; then
-    echo "solana"
-  elif [ -n "$CARGO" ] && grep -rq "soroban" "$CARGO" 2>/dev/null; then
-    echo "soroban"
-  else
-    echo "solana"
-  fi
-elif [ "$MOVE" -gt 0 ]; then
-  if [ -n "$MOVETOML" ] && grep -rq "AptosFramework\|aptos" "$MOVETOML" 2>/dev/null; then
-    echo "aptos"
-  else
-    echo "sui"
-  fi
-else
-  echo "indeterminate"
-fi
+# Single source of truth: the driver's mechanical detector. Prints
+# "<language>\t<confidence>" where confidence is high | medium | none.
+python ~/.claude/scripts/plamen_driver.py --detect-language "{PROJECT_PATH}"
+# Example outputs:
+#   evm      high     (.sol dominant — unambiguous)
+#   solana   high     (.rs + anchor-lang/solana-program or Anchor.toml)
+#   soroban  high     (.rs + soroban-sdk)
+#   sui      high     (.move + sui-framework)
+#   aptos    high     (.move + aptos-framework)
+#   solana   medium   (.rs only, no manifest marker — common-case default)
+#   sui      medium   (.move only, no manifest marker — common-case default)
+#   indeterminate  none   (no recognized sources OR conflicting markers)
 ```
 
-Set `LANGUAGE` to the output. If the output is `indeterminate`, ask the user to
-confirm the language explicitly before writing config (the driver will halt at
-startup on a definite source/language contradiction).
+Parse the two tab-separated fields as `DETECTED` and `CONFIDENCE`:
+- If `CONFIDENCE` is `high` or `medium` → set `LANGUAGE=DETECTED` and do NOT
+  prompt the user.
+- If `CONFIDENCE` is `none` (no sources, or genuinely conflicting manifest
+  markers) → fall back to the existing `AskUserQuestion` confirm and let the
+  user pick the language explicitly.
 
 ```python
 config = {
@@ -242,6 +211,12 @@ config = {
 ```
 
 Write this JSON to `{PROJECT_PATH}/.scratchpad/config.json` (create .scratchpad/ if needed).
+
+> Note: even if the language ends up wrong, the driver **auto-corrects** a wrong
+> `language` at startup from the same mechanical detector (and rewrites
+> config.json) — it does NOT halt and ask you to re-run. You only confirm the
+> language when detection is genuinely ambiguous (no recognized sources or
+> conflicting build-manifest markers).
 
 Before launching, print the pre-launch message so the user knows what to expect:
 
