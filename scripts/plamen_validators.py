@@ -15241,6 +15241,48 @@ def _validate_inventory_chunk_structure(scratchpad: Path, phase_name: str) -> li
                     match.group(1), ", ".join(missing),
                 )
 
+    # Mechanical-default pass: a tiny set of fields have an unambiguous
+    # pre-verify default, so a chunk that merely omitted them should be
+    # auto-filled IN PLACE rather than burning a whole-chunk retry. Only
+    # `Preferred Tag` qualifies: a not-yet-verified inventory finding is
+    # `[CODE-TRACE]` by definition (the value verify assigns absent a PoC).
+    # Content fields (Source IDs, Severity, Location, Description, Impact) have
+    # NO safe default and still trigger a retry below. Recall-safe: this only
+    # ADDS a labeled field that was already implied; it never edits content.
+    _DEFAULTABLE = {"Preferred Tag": "[CODE-TRACE]"}
+    inserts_at: list[tuple[int, str]] = []
+    for idx, match in enumerate(detail_matches):
+        start = match.end()
+        end = detail_matches[idx + 1].start() if idx + 1 < len(detail_matches) else len(text)
+        block = text[start:end]
+        lines = []
+        for field, default in _DEFAULTABLE.items():
+            group = next((g for g in required_field_groups if g[0] == field), None)
+            if group and not any(has_field(block, alias) for alias in group):
+                lines.append(f"**{field}**: {default}")
+        if lines:
+            inserts_at.append((end, "\n" + "\n".join(lines) + "\n"))
+    if inserts_at:
+        new_text = text
+        for pos, snippet in sorted(inserts_at, key=lambda p: p[0], reverse=True):
+            new_text = new_text[:pos] + snippet + new_text[pos:]
+        try:
+            out.write_text(new_text, encoding="utf-8")
+            for field in _DEFAULTABLE:
+                field_miss_counts.pop(field, None)
+            log.info(
+                "[_validate_inventory_chunk_structure] mechanically defaulted "
+                "%d block(s) missing %s to its pre-verify value — no retry needed",
+                len(inserts_at), "/".join(_DEFAULTABLE),
+            )
+        except OSError as exc:
+            # Could not rewrite; fall through to the normal pervasive check so
+            # the field is not silently lost (it will retry instead).
+            log.warning(
+                "[_validate_inventory_chunk_structure] could not write "
+                "defaulted chunk (%s); leaving to pervasive-drift retry", exc,
+            )
+
     # Pervasive-drift promotion: if ANY required field is missing from
     # >= 30% of detail blocks, promote to a hard retry-hint. The LLM's
     # next attempt will see the explicit instruction to emit the field
