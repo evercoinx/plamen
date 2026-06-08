@@ -6,12 +6,23 @@ via arrow-key selection menus, then hands off to Claude Code.
 """
 import sys, os, shutil, glob, subprocess, re, sqlite3
 
-# Windows: enable VT100 + force UTF-8 stdout before anything loads
-if sys.platform == "win32":
+# Windows: enable VT100 + force UTF-8 stdout before anything loads.
+# Guard against pytest/captured/non-buffer streams: rewrapping a capture object's
+# buffer detaches it and crashes pytest's teardown ("I/O operation on closed
+# file"). Only rewrap a real, buffer-backed, not-already-UTF-8 stream, never under
+# pytest. This keeps the terminal UI correct while letting plamen.py be imported
+# in tests cleanly.
+if sys.platform == "win32" and "pytest" not in sys.modules:
     import io
     os.system("")
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+    for _name in ("stdout", "stderr"):
+        _s = getattr(sys, _name, None)
+        _buf = getattr(_s, "buffer", None)
+        if _buf is not None and (getattr(_s, "encoding", "") or "").lower().replace("-", "") != "utf8":
+            try:
+                setattr(sys, _name, io.TextIOWrapper(_buf, encoding="utf-8"))
+            except Exception:
+                pass
 
 # ── Bootstrap: auto-install core deps on first run ──────────
 _BREAK_SYSTEM_PACKAGES_NOTICE_SHOWN = False
@@ -4629,6 +4640,13 @@ def _find_existing_audit(cwd: str = "") -> "dict | None":
         os.path.join(cwd, "contracts", ".scratchpad"),
     ]
 
+    # First configless-but-artifacts stub seen. Only used as a LAST resort if NO
+    # candidate yields a valid/recoverable config. This stops a configless stub
+    # in a PARENT dir (e.g. cwd/.scratchpad, created when the wizard is launched
+    # from a parent and the audit is scoped to a subdir) from masking the real
+    # audit in cwd/contracts/.scratchpad or cwd/src/.scratchpad.
+    best_missing = None
+
     for scratchpad in scratchpad_dirs:
         config_path = os.path.join(scratchpad, "config.json")
         checkpoint_path = os.path.join(scratchpad, "_v2_checkpoint.json")
@@ -4735,22 +4753,28 @@ def _find_existing_audit(cwd: str = "") -> "dict | None":
                 "recovered": True,
             }
 
-        # Last resort: scratchpad has artifacts but no recoverable config.
-        # We know an audit happened but can't reconstruct its settings.
-        return {
-            "config_path": None,
-            "scratchpad": scratchpad,
-            "mode": "?",
-            "pipeline": "?",
-            "language": "?",
-            "target": os.path.dirname(scratchpad),
-            "last_phase": completed[-1] if completed else "(unknown)",
-            "next_phase": "(unknown)",
-            "phases_done": len(completed),
-            "config_missing": True,
-        }
+        # Artifacts but no recoverable config. Do NOT return immediately — a
+        # LATER candidate (e.g. cwd/contracts/.scratchpad) may hold the real
+        # config + checkpoint. Remember the FIRST such stub only as a last-resort
+        # fallback and keep scanning the remaining candidates.
+        if best_missing is None:
+            best_missing = {
+                "config_path": None,
+                "scratchpad": scratchpad,
+                "mode": "?",
+                "pipeline": "?",
+                "language": "?",
+                "target": os.path.dirname(scratchpad),
+                "last_phase": completed[-1] if completed else "(unknown)",
+                "next_phase": "(unknown)",
+                "phases_done": len(completed),
+                "config_missing": True,
+            }
+        continue
 
-    return None
+    # No candidate had a valid/recoverable config; fall back to the first
+    # configless stub (if any) so the user still gets a Clean-up/Cancel choice.
+    return best_missing
 
 
 def _resume_audit_prompt(info: dict) -> str:
