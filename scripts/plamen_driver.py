@@ -14170,6 +14170,7 @@ def main():
     display.print_banner(
         config["pipeline"], mode, config["project_root"],
         remaining_count, completed_count, str(scratchpad), ai_model,
+        ecosystem=config.get("language", ""),
     )
 
     prev_phase: Optional[str] = None

@@ -174,18 +174,25 @@ def _elapsed_str(start: float) -> str:
 
 def print_banner(pipeline: str, mode: str, project_root: str,
                  remaining: int, completed: int, scratchpad: str,
-                 ai_model: str = ""):
-    """Print the startup banner with pipeline info."""
+                 ai_model: str = "", ecosystem: str = ""):
+    """Print the startup banner with pipeline info.
+
+    `ecosystem` is the detected language/ecosystem (e.g. "evm", "solana") from
+    config["language"]; shown as a dedicated row when provided. Purely UI/UX.
+    """
     global _pipeline_start, _total_phases, _completed_phases
     _pipeline_start = time.time()
     _total_phases = remaining + completed
     _completed_phases = completed
+    eco = (ecosystem or "").strip().upper()
 
     if not RICH_AVAILABLE:
         ai_line = f"  AI Model: {ai_model}\n" if ai_model else ""
+        eco_line = f"  Ecosystem: {eco}\n" if eco else ""
         print(
             f"\n{'=' * 60}\n"
             f"  PLAMEN V2 DRIVER -- {pipeline.upper()} / {mode.upper()}\n"
+            f"{eco_line}"
             f"  Project:  {project_root}\n"
             f"{ai_line}"
             f"  Phases:   {remaining + completed} total ({remaining} remaining)\n"
@@ -202,6 +209,8 @@ def print_banner(pipeline: str, mode: str, project_root: str,
     table.add_column(style="dim", width=12)
     table.add_column()
     table.add_row("Pipeline", f"[bold]{pipeline.upper()}[/] / [bold]{mode.upper()}[/]")
+    if eco:
+        table.add_row("Ecosystem", f"[bold #7030FF]{eco}[/]")
     table.add_row("Project", f"[white]{project_root}[/]")
     if ai_model:
         table.add_row("AI Model", f"[white]{escape(ai_model)}[/]")
