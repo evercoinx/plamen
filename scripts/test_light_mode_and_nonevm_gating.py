@@ -5,11 +5,15 @@ is a Core/Thorough recall protection. Light deliberately runs 3-4 breadth
 agents (AUDIT MODES table), so the floor must NOT false-fail a correctly-sized
 Light manifest. Core/Thorough keep the floor unchanged.
 
-FIX 2 — NON_EVM_TARGET false-fire: CROSS_VM_SERIALIZATION_CONFORMANCE recovery
-must only fire for a genuine EVM->non-EVM serializer audit. Pure-EVM
-(language='evm') and legacy/unknown ('') runs must NOT recover the binding
-(the DODO Solidity false-positive). The detected_patterns.md NON_EVM_TARGET
-flag is authoritative; template_recommendations.md (which documents the
+FIX 2 — CROSS_VM_SERIALIZATION_CONFORMANCE is an EVM-SIDE skill (it audits
+Solidity that serializes OUTBOUND for a non-EVM VM, e.g. an AccountEncoder/Borsh
+packer in a bridge — the DODO gap it was built for). It must fire on an EXPLICIT
+EVM audit (language='evm') that has non-EVM-target evidence, and must NOT fire on
+a NATIVE non-EVM audit (solana/aptos/sui/soroban) — no EVM-side serialization
+there — nor on legacy/unknown ('') runs we cannot confirm are EVM. The
+detected_patterns.md NON_EVM_TARGET flag is authoritative (the evidence guard,
+not a language exclusion, prevents a pure-EVM-no-bridge false-positive);
+template_recommendations.md (which documents the
 trigger pattern) is excluded from the substring heuristic. Recovery warnings
 are deduplicated to at most once per run via a scratchpad marker.
 """
@@ -124,11 +128,35 @@ def _write_heuristic_evidence(sp: Path) -> None:
     )
 
 
-def test_pure_evm_language_no_cross_vm_recovery(tmp_path):
-    """language='evm' -> CROSS_VM recovery does NOT fire even with evidence."""
+def _flag_yes(sp: Path) -> None:
+    (sp / "detected_patterns.md").write_text(
+        "## Detected Patterns\n\nNON_EVM_TARGET = YES\n", encoding="utf-8"
+    )
+
+
+def test_evm_with_nonevm_target_fires_cross_vm(tmp_path):
+    """language='evm' + non-EVM-target evidence -> CROSS_VM DOES fire. This is the
+    EVM->non-EVM serializer case the skill exists for (the DODO AccountEncoder
+    gap it was created to close)."""
     _nonevm_manifest(tmp_path)
     _write_heuristic_evidence(tmp_path)
+    _flag_yes(tmp_path)
     breadth, depth = D._parse_sc_skill_bindings(tmp_path, "evm")
+    allskills = (
+        {s for v in breadth.values() for s in v}
+        | {s for v in depth.values() for s in v}
+    )
+    assert "CROSS_VM_SERIALIZATION_CONFORMANCE" in allskills
+
+
+def test_native_nonevm_language_no_cross_vm(tmp_path):
+    """language='solana' + NON_EVM_TARGET=YES -> CROSS_VM does NOT fire. It is an
+    EVM-SIDE serialization skill; a native Solana program has no EVM-side
+    serialization. This is the exact mis-injection the gating fix closes."""
+    _nonevm_manifest(tmp_path)
+    _write_heuristic_evidence(tmp_path)
+    _flag_yes(tmp_path)
+    breadth, depth = D._parse_sc_skill_bindings(tmp_path, "solana")
     allskills = (
         {s for v in breadth.values() for s in v}
         | {s for v in depth.values() for s in v}
@@ -186,26 +214,26 @@ def test_template_recommendations_not_a_heuristic_source(tmp_path):
     assert "CROSS_VM_SERIALIZATION_CONFORMANCE" not in allskills
 
 
-def test_genuine_non_evm_recovery_still_happens(tmp_path):
-    """detected_patterns NON_EVM_TARGET=YES + non-EVM language -> recovery
-    still fires (preserves genuine cross-VM like DODO/ZetaChain)."""
+def test_genuine_evm_recovery_still_happens(tmp_path):
+    """detected_patterns NON_EVM_TARGET=YES + EVM audit -> recovery fires (the
+    genuine EVM->non-EVM serializer case, e.g. the DODO AccountEncoder)."""
     _nonevm_manifest(tmp_path)
     (tmp_path / "detected_patterns.md").write_text(
         "## Detected Patterns\n\nNON_EVM_TARGET: YES\n", encoding="utf-8"
     )
-    breadth, depth = D._parse_sc_skill_bindings(tmp_path, "solana")
+    breadth, depth = D._parse_sc_skill_bindings(tmp_path, "evm")
     assert "CROSS_VM_SERIALIZATION_CONFORMANCE" in breadth.get(
         "cross_chain_message_integrity", []
     )
     assert "CROSS_VM_SERIALIZATION_CONFORMANCE" in depth.get("external", [])
 
 
-def test_genuine_non_evm_recovery_via_heuristic_fallback(tmp_path):
-    """No NON_EVM_TARGET flag but positive heuristic + non-EVM language ->
+def test_genuine_evm_recovery_via_heuristic_fallback(tmp_path):
+    """No NON_EVM_TARGET flag but positive heuristic + EVM audit ->
     recovery fires via the substring fallback."""
     _nonevm_manifest(tmp_path)
     _write_heuristic_evidence(tmp_path)  # no detected_patterns.md flag
-    breadth, depth = D._parse_sc_skill_bindings(tmp_path, "solana")
+    breadth, depth = D._parse_sc_skill_bindings(tmp_path, "evm")
     assert "CROSS_VM_SERIALIZATION_CONFORMANCE" in breadth.get(
         "cross_chain_message_integrity", []
     )
@@ -221,7 +249,7 @@ def test_recovery_warning_deduplicated_across_many_calls(tmp_path, caplog):
     )
     with caplog.at_level(logging.WARNING):
         for _ in range(20):
-            D._parse_sc_skill_bindings(tmp_path, "solana")
+            D._parse_sc_skill_bindings(tmp_path, "evm")
     recovered = [
         r for r in caplog.records
         if "recovered CROSS_VM_SERIALIZATION_CONFORMANCE" in r.getMessage()

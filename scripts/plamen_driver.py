@@ -7896,13 +7896,17 @@ def _parse_sc_skill_bindings(
                         f = agent_focus.get(aid.group(1), "")
                 if f:
                     _add(breadth, f, skill)
-    # The CROSS_VM_SERIALIZATION_CONFORMANCE recovery only applies when the
-    # audit target is a non-EVM VM serializer (EVM -> Solana/BTC/foreign-VM).
-    # Gate it on language: pure-EVM audits (language=='evm') and legacy/unknown
-    # runs (language=='') must NOT recover this binding — that was the
-    # false-fire source on pure-Solidity audits like DODO.
+    # CROSS_VM_SERIALIZATION_CONFORMANCE is an EVM-SIDE skill: it audits Solidity
+    # code that SERIALIZES outbound for a non-EVM VM (EVM -> Solana/BTC/Move) --
+    # e.g. an AccountEncoder / Borsh packer in a bridge (this skill was added for
+    # exactly the DODO AccountEncoder gap). It fires on an EXPLICIT EVM audit that
+    # has non-EVM-target evidence, and must NOT fire on NATIVE non-EVM audits
+    # (solana/aptos/sui/soroban) — there is no EVM-side serialization there — nor
+    # on legacy/unknown ('') runs we cannot confirm are EVM. The
+    # `_has_non_evm_target_evidence()` check (NOT a language exclusion) is what
+    # prevents a pure-EVM-with-no-bridge false-positive.
     lang = (language or "").strip().lower()
-    if lang not in ("evm", "") and _has_non_evm_target_evidence():
+    if lang == "evm" and _has_non_evm_target_evidence():
         # This injectable is load-bearing for EVM -> Solana/BTC/foreign-VM
         # serialization bugs. If recon saw the evidence but instantiate omitted
         # the row, recover mechanically instead of silently losing recall.

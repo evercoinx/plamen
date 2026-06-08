@@ -3963,8 +3963,11 @@ def _validate_injectable_promotion(
         for flag, name in _INJECTABLE_FLAG_TO_SKILL.items():
             if name != skill_name:
                 continue
-            if flag == "NON_EVM_TARGET" and lang in ("evm", ""):
-                # language-gated: pure-EVM / unknown never recovers CROSS_VM.
+            if flag == "NON_EVM_TARGET" and lang != "evm":
+                # CROSS_VM is an EVM-side (outbound-serialization) skill: it
+                # triggers only on an EXPLICIT EVM audit that targets a non-EVM
+                # VM, NOT on native non-EVM (solana/aptos/sui/soroban) or
+                # legacy/unknown audits. Skip the flag for any non-EVM language.
                 continue
             if _detected_flag_present(scratchpad, flag):
                 trigger_present = True
@@ -4047,7 +4050,9 @@ def _promote_injectable_rows(scratchpad: Path, language: str = "") -> int:
         for flag, name in _INJECTABLE_FLAG_TO_SKILL.items():
             if name != skill_name:
                 continue
-            if flag == "NON_EVM_TARGET" and lang in ("evm", ""):
+            if flag == "NON_EVM_TARGET" and lang != "evm":
+                # EVM-side skill: only an explicit EVM audit serializes on the
+                # EVM side; skip the flag for any non-EVM language (see driver gate).
                 continue
             if _detected_flag_present(scratchpad, flag):
                 trigger_present = True

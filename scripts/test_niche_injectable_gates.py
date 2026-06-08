@@ -198,7 +198,7 @@ def test_gate2_injectable_placeholder_fails(tmp_path: Path):
         "NON_EVM_TARGET = YES\n", encoding="utf-8"
     )
 
-    issues = v._validate_injectable_promotion(tmp_path, "solana")
+    issues = v._validate_injectable_promotion(tmp_path, "evm")
 
     assert issues
     assert any("CROSS_VM_SERIALIZATION_CONFORMANCE" in i for i in issues)
@@ -276,7 +276,7 @@ def test_gate2_mechanical_promotion_sets_required_yes(tmp_path: Path):
         "NON_EVM_TARGET = YES\n", encoding="utf-8"
     )
 
-    changed = v._promote_injectable_rows(tmp_path, "solana")
+    changed = v._promote_injectable_rows(tmp_path, "evm")
 
     assert changed >= 1
     after = (tmp_path / "template_recommendations.md").read_text(
@@ -284,4 +284,4 @@ def test_gate2_mechanical_promotion_sets_required_yes(tmp_path: Path):
     )
     assert "[LLM TO ENRICH]" not in after
     # No longer flagged after mechanical promotion.
-    assert v._validate_injectable_promotion(tmp_path, "solana") == []
+    assert v._validate_injectable_promotion(tmp_path, "evm") == []
