@@ -52,9 +52,24 @@ real `file:Lnnn` location that appears in the first-pass `analysis_*.md` or
 - Every exclusion entry you do write MUST carry its referent inline, e.g.
   `EXCLUDED [PCn-x] dup of [B1-2]` or
   `EXCLUDED [PCn-x] dup of AccountEncoder.sol:L88`.
+- Every exclusion entry MUST ALSO carry the EXCLUDED CANDIDATE'S OWN content:
+  its concrete `file:Lnnn` location, the mechanism (WHAT is wrong), and a
+  one-line harm (WHAT goes wrong if real). Example:
+  `EXCLUDED [PCn-x] encoder byte-width mismatch at AccountEncoder.sol:L412 —
+  truncates the high byte so a crafted account passes validation → asset
+  mis-routing; dup of [B1-2]`.
+  A bare `EXCLUDED [PCn-x] already known` with no location and no harm is a
+  CONTENT-LESS stub: if its referent is also missing it cannot be dedup'd or
+  resolved, and downstream it is routed to an APPENDIX-only disposition — it
+  will NOT reach the client body. Carry real content so a genuinely-unique
+  excluded bug can be resolved into a concrete finding instead of an
+  unverifiable stub.
 
 A referent-less exclusion is treated by the driver as a suppressed real bug:
-the candidate is re-emitted downstream so it cannot vanish.
+the candidate is re-emitted downstream so it cannot vanish. A content-BEARING
+re-emit (own location + harm) is dedup'd against existing findings or resolved
+normally; a CONTENT-LESS re-emit is kept at Informational in the appendix for
+human review (downgraded, never dropped).
 
 ---
 

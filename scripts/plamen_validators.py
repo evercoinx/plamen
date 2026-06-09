@@ -84,6 +84,7 @@ __all__ = [
     "_collect_judge_unresolved_ids",
     "_collect_obligation_receipts",
     "_collect_report_coverage_acknowledged_ids",
+    "_collect_report_index_seed_ids",
     "_collect_report_promoted_ids",
     "_collect_scip_indexed_paths",
     "_collect_verify_hypothesis_ids",
@@ -5109,6 +5110,60 @@ def _norm_referent_location(loc: str) -> str:
     return re.sub(r":l(\d+)$", r":\1", loc)
 
 
+# Mechanism / harm vocabulary used to decide whether a re-emitted self-excluded
+# candidate carries its OWN content (concrete enough to dedup against an existing
+# finding OR resolve into a concrete finding) versus being a content-less stub
+# (bare "already known" assertion with no location and no harm). A content-less
+# stub must NOT be promoted to a Medium body finding — it routes to a
+# LOW-confidence appendix disposition instead. This is a ROOT FIX for the latent
+# recall hazard where a self-excluded UNIQUE bug re-emits as an unverifiable
+# Medium body stub. Recall-safe: content-less stubs are KEPT (appendix), never
+# dropped; content-bearing ones flow through normal dedup/resolution.
+_PERCONTRACT_HARM_RE = re.compile(
+    r"\b(?:"
+    r"loss|lose|lost|steal|stol|drain|lock(?:ed|s|ing)?|frozen|freeze|"
+    r"overflow|underflow|insolven|brick|dos|denial|revert|griefing|"
+    r"mint|inflat|deflat|manipulat|bypass|escalat|unauthor|"
+    r"reentran|front[-\s]*run|sandwich|double[-\s]*(?:spend|count)|"
+    r"corrupt|mismatch|stale|incorrect|wrong|drift|desync|"
+    r"fund|asset|collateral|debt|reward|fee|share|balance|"
+    r"attacker|exploit|profit|extract|skim"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _percontract_candidate_is_content_bearing(
+    title: str, location: str, line_text: str
+) -> bool:
+    """Return True when a re-emitted self-excluded candidate carries its OWN
+    content — enough to dedup against an existing finding OR resolve into a
+    concrete finding.
+
+    A candidate is content-bearing when it has BOTH:
+      1. a concrete location (a real ``file:line`` token), AND
+      2. a mechanism/harm signal (vocabulary indicating WHAT goes wrong).
+
+    A bare "already known" / "duplicate" assertion with no location and no harm
+    is content-LESS: an unfalsifiable stub. Such stubs are still recovered (so
+    the suppressed candidate is never dropped) but the driver re-emits them at
+    Informational severity with a ``[CONTENT-LESS]`` marker so report_index
+    routes them to a LOW-confidence appendix disposition rather than promoting
+    them to a Medium body finding (DODO M-14/M-15 root fix).
+
+    Recall-safe: this only DOWNGRADES a content-less stub's body-promotion; it
+    never removes the candidate from the re-emit set.
+    """
+    haystack = " ".join((title or "", line_text or ""))
+    # Concrete location: a real file:line token (the validator already extracts
+    # ``location`` from _TABLE_LOCATION_RE, so a non-empty location is concrete).
+    has_location = bool((location or "").strip()) or bool(
+        _TABLE_LOCATION_RE.search(haystack)
+    )
+    has_harm = bool(_PERCONTRACT_HARM_RE.search(haystack))
+    return has_location and has_harm
+
+
 def _validate_percontract_self_exclusion(
     scratchpad: Path,
 ) -> tuple[list[str], list[dict]]:
@@ -5241,6 +5296,9 @@ def _validate_percontract_self_exclusion(
                 severity = ""
                 if sev_m:
                     severity = (sev_m.group(1) or sev_m.group(2) or "").title()
+                content_bearing = _percontract_candidate_is_content_bearing(
+                    title, loc, stripped
+                )
                 recovered.append(
                     {
                         "title": title or "(untitled self-excluded candidate)",
@@ -5249,15 +5307,21 @@ def _validate_percontract_self_exclusion(
                         "source": p.name,
                         "own_id": own_id or "",
                         "line_text": stripped,
+                        "content_bearing": content_bearing,
                     }
                 )
 
     if recovered:
+        content_less = sum(
+            1 for c in recovered if not c.get("content_bearing")
+        )
         warnings.append(
             f"{len(recovered)} per-contract exclusion entry(ies) across "
             f"{len(pc_files)} file(s) cite no referent present in the provided "
             f"exclusion universe ({len(finding_ids)} IDs, {len(locations)} "
             f"locations) — belief-based self-exclusion; re-emitting candidates "
+            f"({content_less} content-less → appendix disposition, "
+            f"{len(recovered) - content_less} content-bearing → dedup/resolve) "
             f"(phase3b-rescan-prompt.md EXCLUSION SOURCE RULE)"
         )
     return warnings, recovered
@@ -6050,6 +6114,131 @@ def _validate_chain_iter2(scratchpad: Path, mode: str) -> list[str]:
     return []
 
 
+# Wording that asserts an axis was TOUCHED rather than naming + locating the
+# specific instance that was verified. A NO-GAP whose evidence cell is only
+# such wording is the coarse rubber-stamp this gate exists to catch: it clears
+# the whole axis on the strength of "something adjacent was explored" without
+# resolving THIS instance to a finding or a concrete safe-locus.
+_EXPLORATION_RUBBERSTAMP_WORDING_RE = re.compile(
+    r"\b(?:explored|covered|touched|examined|considered|reviewed|"
+    r"checked|looked\s+at|analy[sz]ed|addressed\s+elsewhere|"
+    r"same\s+pattern|similar)\b",
+    re.IGNORECASE,
+)
+
+
+def _exploration_evidence_has_concrete_locus(evidence: str) -> bool:
+    """Return True when *evidence* names a concrete verification locus.
+
+    A concrete locus is either a file:line / function reference (the place the
+    instance was found safe) or a prior finding ID (the finding that already
+    captures the instance). This is the bar a NO-GAP / ASSESSED row must clear
+    so the instance is provably resolved, not merely "explored somewhere".
+    """
+    if not evidence:
+        return False
+    text = _llm_norm(evidence).strip()
+    if not text:
+        return False
+    # file:line (e.g. Foo.sol:L120, src/foo.rs:88, foo.move:12-30)
+    if re.search(r"[A-Za-z0-9_./\\-]+\.(?:sol|move|rs|go|cairo|fc|tact)\b", text, re.IGNORECASE):
+        return True
+    # bare line reference (Lnn / line nn) or a function-call locus name(
+    if re.search(r"\bL\d+\b|\bline\s+\d+\b", text, re.IGNORECASE):
+        return True
+    if re.search(r"\b[a-zA-Z_][a-zA-Z0-9_]*\s*\(", text):
+        return True
+    # prior finding ID reference (B1-2, RS3-1, PC2-4, EN-5, H-03, M-1, ...)
+    try:
+        if _INTERNAL_FINDING_ID_RE.search(text):
+            return True
+    except Exception:
+        pass
+    if re.search(r"\b[A-Z]{1,5}-?\d+(?:-\d+)?\b", text):
+        return True
+    return False
+
+
+def _scan_exploration_instance_gaps(text: str) -> list[dict[str, str]]:
+    """Parse the per-instance coverage record and return the rows whose
+    disposition CLEARS an instance (NO-GAP / ASSESSED) without naming the
+    specific instance + a concrete evidence locus.
+
+    These are the rubber-stamp rows: an axis declared covered without the
+    instance being resolved to a finding or a concrete safe-locus. Each
+    returned dict carries {finding, axis, instance, disposition, evidence}
+    for observability. This is a READ-ONLY scan — it never mutates findings;
+    the caller treats every hit as recall-positive (an instance that should be
+    re-surfaced as an ADD, never a drop).
+    """
+    norm = _llm_norm(text)
+    # Locate the coverage-record header row to map columns by name. Fall back
+    # to positional columns (Finding|Axis|Instance|Disposition|Evidence) when
+    # no recognizable header is present.
+    col_idx: dict[str, int] | None = None
+    hits: list[dict[str, str]] = []
+    clearing = {"no-gap", "nogap", "no gap", "assessed"}
+    for raw in norm.splitlines():
+        line = raw.strip()
+        if not line.startswith("|"):
+            continue
+        if _is_separator_row(line):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if not cells:
+            continue
+        lowered = [c.lower() for c in cells]
+        # Header detection: a row that names the schema columns.
+        if col_idx is None and "disposition" in lowered:
+            col_idx = {}
+            for want in ("finding", "axis", "instance", "disposition", "evidence"):
+                for i, c in enumerate(lowered):
+                    if want in c:
+                        col_idx[want] = i
+                        break
+            continue
+        # Resolve column positions.
+        if col_idx is not None and "disposition" in col_idx:
+            def _get(name: str) -> str:
+                i = col_idx.get(name, -1)
+                return cells[i] if 0 <= i < len(cells) else ""
+            finding = _get("finding")
+            axis = _get("axis")
+            instance = _get("instance")
+            disposition = _get("disposition")
+            evidence = _get("evidence")
+        elif len(cells) >= 5:
+            # Positional fallback: Finding|Axis|Instance|Disposition|Evidence
+            finding, axis, instance, disposition, evidence = cells[:5]
+        else:
+            continue
+        disp = disposition.lower().strip()
+        # Tolerate dispositions wrapped in backticks/bold/parentheses.
+        disp_core = re.sub(r"[`*()_]", "", disp).strip()
+        if disp_core not in clearing:
+            continue
+        # A clearing row is a rubber-stamp when the instance is unnamed OR the
+        # evidence is missing/only touch-wording without a concrete locus.
+        inst_named = bool(instance.strip()) and instance.strip().lower() not in (
+            "direction", "similar-mechanism", "neighbour", "neighbor", "n/a", "-", "—",
+        )
+        ev_concrete = _exploration_evidence_has_concrete_locus(evidence)
+        ev_only_wording = bool(
+            evidence.strip()
+            and not ev_concrete
+            and _EXPLORATION_RUBBERSTAMP_WORDING_RE.search(evidence)
+        )
+        if (not inst_named) or (not ev_concrete) or ev_only_wording:
+            hits.append({
+                "finding": finding,
+                "axis": axis,
+                "instance": instance,
+                "disposition": disposition,
+                "evidence": evidence,
+            })
+    return hits
+
+
 def _validate_exploration_skeptic(scratchpad: Path, mode: str) -> list[str]:
     """SOFT validator for Phase 4b.6 (exploration-completeness verifier).
 
@@ -6060,27 +6249,78 @@ def _validate_exploration_skeptic(scratchpad: Path, mode: str) -> list[str]:
     missing/empty output it logs a warning and writes a sentinel, then lets the
     pipeline proceed (the phase only ADDS findings, so its absence loses no
     prior finding).
+
+    Additionally (root fix for the axis-level rubber-stamp), it scans the
+    per-instance coverage record for `NO-GAP` / `ASSESSED` rows that CLEAR an
+    instance without naming the specific instance + a concrete evidence locus.
+    Those are the coarse "axis was touched somewhere" passes that falsely close
+    an unexamined neighbour/direction/sub-mechanism. Each such row is WARNING-
+    only and recall-positive: it is written to an `.instance_gap` sentinel so a
+    human / downstream pass can re-surface it as an ADD. It NEVER halts and
+    NEVER drops or downgrades a finding.
     """
     if mode != "thorough":
         return []
     out_path = scratchpad / "exploration_skeptic_findings.md"
-    if out_path.exists() and out_path.stat().st_size > 30:
-        return []
-    # Missing or near-empty output. Write sentinel; don't halt.
-    try:
-        (scratchpad / "exploration_skeptic.degraded").write_text(
-            "[EXPLORATION_SKEPTIC_DEGRADED] exploration_skeptic_findings.md "
-            "missing or <30 bytes. Pipeline continues; this phase is "
-            "additive-only, so no prior finding is lost by its absence.\n",
-            encoding="utf-8",
+    if not (out_path.exists() and out_path.stat().st_size > 30):
+        # Missing or near-empty output. Write sentinel; don't halt.
+        try:
+            (scratchpad / "exploration_skeptic.degraded").write_text(
+                "[EXPLORATION_SKEPTIC_DEGRADED] exploration_skeptic_findings.md "
+                "missing or <30 bytes. Pipeline continues; this phase is "
+                "additive-only, so no prior finding is lost by its absence.\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        import logging as _logging
+        _logging.getLogger("plamen.validators").warning(
+            "[exploration_skeptic] exploration_skeptic_findings.md missing/empty "
+            "— sentinel written, pipeline continues"
         )
+        return []
+
+    # Artifact present. Scan the coverage record for instance-level
+    # rubber-stamps (axis cleared without a named instance + concrete locus).
+    try:
+        body = out_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        pass
-    import logging as _logging
-    _logging.getLogger("plamen.validators").warning(
-        "[exploration_skeptic] exploration_skeptic_findings.md missing/empty "
-        "— sentinel written, pipeline continues"
-    )
+        body = ""
+    try:
+        gap_rows = _scan_exploration_instance_gaps(body)
+    except Exception:
+        gap_rows = []
+    if gap_rows:
+        import logging as _logging
+        _logging.getLogger("plamen.validators").warning(
+            "[exploration_skeptic] %d coverage-record row(s) clear an instance "
+            "(NO-GAP/ASSESSED) without a named instance + concrete evidence "
+            "locus — each is recall-positive and should be re-surfaced as an "
+            "ADD, not treated as resolved. Sentinel written, pipeline continues.",
+            len(gap_rows),
+        )
+        lines = [
+            "[EXPLORATION_SKEPTIC_INSTANCE_GAP] The following coverage-record",
+            "rows cleared an instance (NO-GAP/ASSESSED) without naming the",
+            "specific instance and citing a concrete evidence locus (file:line,",
+            "function, or prior finding ID). Per the NO-GAP Evidence Rule these",
+            "are unexplored instances, NOT resolved ones. This is WARNING-only",
+            "and recall-positive: nothing is dropped or downgraded; each row",
+            "below should be re-surfaced as an ADD by a human or later pass.",
+            "",
+        ]
+        for r in gap_rows:
+            lines.append(
+                f"- finding={r['finding']!r} axis={r['axis']!r} "
+                f"instance={r['instance']!r} disposition={r['disposition']!r} "
+                f"evidence={r['evidence']!r}"
+            )
+        try:
+            (scratchpad / "exploration_skeptic.instance_gap").write_text(
+                "\n".join(lines) + "\n", encoding="utf-8"
+            )
+        except OSError:
+            pass
     return []
 
 
@@ -10077,6 +10317,54 @@ def _collect_report_coverage_acknowledged_ids(scratchpad: Path) -> set[str]:
     return acknowledged
 
 
+def _collect_report_index_seed_ids(scratchpad: Path) -> set[str]:
+    """Return every Finding/Hyp ID enumerated in report_index_coverage_seed.md.
+
+    This is the AUTHORITATIVE completeness superset for the report_index phase:
+    it unions every ID from the bounded ledgers (verification queue, severity
+    binding, finding_mapping, dedup absorbed->survivor). The reconciliation gate
+    requires each of these IDs to receive exactly one disposition in the merged
+    report_index.md, so a sharded index can never let a finding fall between
+    shards. Empty when the seed is absent (gate then falls back to verify IDs).
+    """
+    scratchpad = Path(scratchpad)
+    seed = scratchpad / "report_index_coverage_seed.md"
+    if not seed.is_file():
+        return set()
+    try:
+        text = seed.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return set()
+    ids: set[str] = set()
+    in_table = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("|"):
+            in_table = False
+            continue
+        lowered = line.lower()
+        if "finding/hyp id" in lowered and "expected severity" in lowered:
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if re.fullmatch(r"\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?", line):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if not cells:
+            continue
+        first = cells[0]
+        if not first or first.lower() in {"(none)", "finding/hyp id"}:
+            continue
+        m = (
+            _INTERNAL_FINDING_ID_RE.fullmatch(first)
+            or _INTERNAL_FINDING_ID_RE.search(first)
+        )
+        if m:
+            ids.add(m.group(1).upper())
+    return ids
+
+
 def _ensure_report_consolidation_map(
     scratchpad: Path, project_root: str
 ) -> int:
@@ -10601,8 +10889,17 @@ def _check_index_completeness(
     re-doing the same enumeration that just failed.
     """
     verify_ids = _collect_verify_hypothesis_ids(scratchpad)
-    if not verify_ids:
-        return []  # No verify outputs = nothing to validate against
+    # TASK C reconciliation backbone: the driver-written coverage seed is the
+    # AUTHORITATIVE completeness superset (it unions verify IDs + finding_mapping
+    # + dedup + severity-binding IDs). When the report_index is sharded by tier,
+    # this is what guarantees no finding falls BETWEEN shards: every seed ID must
+    # receive exactly one disposition in the merged report_index.md. The seed is
+    # a strict superset of verify_ids, so reconciling against (verify ∪ seed)
+    # only ever ADDS coverage requirements — it can never hide a real dropout.
+    seed_ids = _collect_report_index_seed_ids(scratchpad)
+    reference_ids = set(verify_ids) | set(seed_ids)
+    if not reference_ids:
+        return []  # No verify outputs / no seed = nothing to validate against
     master_ids, excluded_ids, master_list = _collect_index_acknowledged_ids(
         scratchpad
     )
@@ -10651,18 +10948,26 @@ def _check_index_completeness(
     def _zn(s: str) -> str:
         return re.sub(r"-0+(\d)", r"-\1", s)
 
-    norm_verify = {_zn(v): v for v in verify_ids}
+    # TASK C: reconcile against the union of verify IDs and the coverage-seed
+    # superset. The seed enumerates every finding/hypothesis the report MUST
+    # account for across tier shards; reconciling against it (not just verify
+    # IDs) is what mechanically guarantees a sharded index drops nothing
+    # between shards.
+    norm_ref = {_zn(v): v for v in reference_ids}
     coverage_ids = _collect_report_coverage_acknowledged_ids(scratchpad)
     norm_indexed = {_zn(i) for i in (master_ids | excluded_ids | absorbed_ids | coverage_ids)}
-    dropped_norm = sorted(set(norm_verify) - norm_indexed)
-    dropped = [norm_verify[n] for n in dropped_norm]
+    dropped_norm = sorted(set(norm_ref) - norm_indexed)
+    dropped = [norm_ref[n] for n in dropped_norm]
     if not dropped:
         return issues
+    src_label = (
+        "verify_*.md / coverage-seed" if seed_ids else "verify_*.md"
+    )
     if not write_retry_hint:
         sample = ", ".join(dropped[:5])
         more = f" (+{len(dropped)-5} more)" if len(dropped) > 5 else ""
         issues.append(
-            f"index dropout: {len(dropped)} verify_*.md hypothesis ID(s) "
+            f"index dropout: {len(dropped)} {src_label} finding ID(s) "
             f"absent from Master Finding Index, Excluded Findings, Consolidation Map, and report_coverage.md: "
             f"{sample}{more}. See report_index{_RETRY_HINT_SUFFIX}."
         )
@@ -10674,18 +10979,19 @@ def _check_index_completeness(
         body = (
             "## v2.2.2 — Index completeness retry hint\n\n"
             f"The previous report_index attempt indexed {len(norm_indexed)} "
-            "hypothesis IDs but the filesystem has "
-            f"{len(verify_ids)} verify_*.md files. Specifically, these "
-            f"{len(dropped)} hypothesis ID(s) appear on disk as "
-            "`verify_<ID>.md` but are NEITHER in the Master Finding "
+            "hypothesis IDs but the bounded ledgers (verify_*.md files + "
+            f"report_index_coverage_seed.md) enumerate {len(reference_ids)} "
+            f"finding/hypothesis ID(s). Specifically, these "
+            f"{len(dropped)} ID(s) are present in the coverage seed / appear "
+            "on disk as `verify_<ID>.md` but are NEITHER in the Master Finding "
             "Index, Excluded Findings table, Consolidation Map, nor report_coverage.md:\n\n"
             + "\n".join(f"- `{i}`" for i in dropped)
             + "\n\n"
-            "Read each missing `verify_<ID>.md` and either (a) assign "
-            "it a report ID in the Master Finding Index, or (b) place "
-            "it in the Excluded Findings table with a stated reason "
-            "(FALSE_POSITIVE / DUPLICATE OF X-NN / CONSOLIDATED INTO "
-            "X-NN). Silent omission is a workflow violation.\n"
+            "Read each missing finding (`verify_<ID>.md` when present, else the "
+            "coverage-seed row) and either (a) assign it a report ID in the "
+            "Master Finding Index, or (b) place it in the Excluded Findings "
+            "table with a stated reason (FALSE_POSITIVE / DUPLICATE OF X-NN / "
+            "CONSOLIDATED INTO X-NN). Silent omission is a workflow violation.\n"
         )
         hint_path.write_text(body, encoding="utf-8")
     except Exception:
@@ -10694,7 +11000,7 @@ def _check_index_completeness(
     sample = ", ".join(dropped[:5])
     more = f" (+{len(dropped)-5} more)" if len(dropped) > 5 else ""
     issues.append(
-        f"index dropout: {len(dropped)} verify_*.md hypothesis ID(s) "
+        f"index dropout: {len(dropped)} {src_label} finding ID(s) "
             f"absent from Master Finding Index, Excluded Findings, Consolidation Map, and report_coverage.md: "
         f"{sample}{more}. See report_index{_RETRY_HINT_SUFFIX}."
     )
@@ -15731,6 +16037,74 @@ def _severity_from_report_cell(value: str, fallback_letter: str = "") -> str:
     }.get(letter, "")
 
 
+def _chain_justified_upgrade_ids(scratchpad: Path) -> set[str]:
+    """Return the set of chain IDs in chain_hypotheses.md that are GENUINE
+    compound findings (machine line `Severity-Upgrade-Justified: YES` with a
+    concrete non-empty `Combined-Impact`).
+
+    These chains are NEVER eligible for CHAIN-RESTATEMENT exemption: dropping
+    one without a body home is a genuinely-lost compound finding and must stay
+    flagged. NO-upgrade / absorbed chains are not in this set and may be
+    exempted (they are absorbed into their body constituents).
+
+    Reuses the canonical `_chain_severity_upgrade_justified` /
+    `_CHAIN_HYP_HEADING_RE` helpers so the YES/NO semantics match the chain
+    self-restatement and anti-absorption gates exactly. Missing/unparseable
+    file → empty set (no chain is treated as justified, the recall-safe
+    default for this gate's exemption path).
+    """
+    try:
+        from plamen_parsers import (
+            _chain_severity_upgrade_justified,
+            _CHAIN_HYP_HEADING_RE,
+        )
+        from plamen_parsers import _llm_norm as _pp_llm_norm
+    except Exception:
+        return set()
+    chain_path = scratchpad / "chain_hypotheses.md"
+    if not chain_path.exists():
+        return set()
+    try:
+        text = _pp_llm_norm(chain_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return set()
+    justified: set[str] = set()
+    headings = list(_CHAIN_HYP_HEADING_RE.finditer(text))
+    for i, hm in enumerate(headings):
+        cid = hm.group(1).upper()
+        start = hm.end()
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
+        section = text[start:end]
+        if _chain_severity_upgrade_justified(section):
+            justified.add(cid)
+    return justified
+
+
+def _reason_is_chain_restatement(reason: str) -> bool:
+    """True when an Excluded Findings reason cites CHAIN-RESTATEMENT.
+
+    Per report-template / phase6a-report-index rules, a NO-upgrade chain that
+    is absorbed into a body constituent is recorded with `CHAIN-RESTATEMENT`
+    (Consolidation Reason) and/or `CHAIN-DOWNGRADE` (Trust Adj.). Both are
+    legitimate non-body dispositions equivalent to CONSOLIDATED. We also accept
+    the prose form `absorbed into <body finding>` when it co-occurs with a
+    chain marker, so a human-phrased reason is not falsely flagged.
+    """
+    reason_norm = re.sub(r"[\s\-]+", "_", (reason or "").upper())
+    if "CHAIN_RESTATEMENT" in reason_norm or "CHAIN_DOWNGRADE" in reason_norm:
+        return True
+    text = _llm_norm(reason or "").lower()
+    if not text:
+        return False
+    # Prose form: an absorbed/merged chain restatement. Require BOTH a chain
+    # marker and an absorption verb so generic "absorbed" prose for a
+    # non-chain row does not slip through (those are handled by CONSOLIDATED /
+    # MERGE_INTO / DUPLICATE in the main allowed set).
+    has_chain = bool(re.search(r"\bchain\b", text)) or bool(re.search(r"\bch-\d+\b", text))
+    has_absorb = bool(re.search(r"\b(?:absorb(?:ed)?|restat\w*|merg(?:ed|e)\s+into)\b", text))
+    return has_chain and has_absorb
+
+
 def _validate_report_index_triage_safety(scratchpad: Path) -> list[str]:
     """Reject unsafe client-worthiness triage for Medium+ findings."""
     idx_path = scratchpad / "report_index.md"
@@ -15781,6 +16155,14 @@ def _validate_report_index_triage_safety(scratchpad: Path) -> list[str]:
         "CONSOLIDATED",
         "APPENDIX_ONLY",
         "AUTO_EXCLUDED",
+        # Driver re-emit marker for a content-LESS self-excluded stub (no
+        # concrete location or harm). An unfalsifiable stub routed to appendix
+        # is a legitimate non-body disposition (it is KEPT, not dropped). A
+        # content-BEARING re-emit does NOT carry this marker, so it still
+        # requires a real evidence/dedup reason to leave the body (negative
+        # control preserved). DODO M-14/M-15 root fix.
+        "CONTENT_LESS",
+        "CONTENTLESS",
     )
 
     def _medium_plus_exclusion_allowed(reason: str) -> bool:
@@ -15813,6 +16195,8 @@ def _validate_report_index_triage_safety(scratchpad: Path) -> list[str]:
         ))
         return evidence_failure
 
+    justified_chains = _chain_justified_upgrade_ids(scratchpad)
+
     unsafe: list[str] = []
     for row in rows:
         sev = normalize_severity(_cell(row, "severity"))
@@ -15821,8 +16205,26 @@ def _validate_report_index_triage_safety(scratchpad: Path) -> list[str]:
         raw_id = _cell(row, "internal id", "internal hypothesis id", "finding id", "id")
         fid = _normalize_finding_id(raw_id) or raw_id or "unknown"
         reason = _cell(row, "exclusion reason", "reason", "verdict", "status")
-        if not _medium_plus_exclusion_allowed(reason):
-            unsafe.append(f"{fid}:{sev}:{reason or 'missing reason'}")
+        if _medium_plus_exclusion_allowed(reason):
+            continue
+        # CHAIN-RESTATEMENT carve-out: a NO-upgrade chain absorbed into its
+        # body constituent is a legitimate non-body disposition (equivalent to
+        # CONSOLIDATED). BUT a chain that chain_hypotheses.md marks as a
+        # justified-upgrade compound (Severity-Upgrade-Justified: YES +
+        # concrete Combined-Impact) is a genuine distinct finding — excluding
+        # it without a body home is a dropped compound finding and STAYS
+        # flagged. So we exempt only when the cited chain is NOT a justified
+        # upgrade (or no such chain exists in the chain file).
+        if _reason_is_chain_restatement(reason):
+            chain_ids = {m.group(0).upper() for m in re.finditer(r"\bCH-\d+\b", (raw_id or "") + " " + (reason or ""), re.IGNORECASE)}
+            # Restatement is only credible for a NON-justified chain. If ANY
+            # referenced chain ID is a justified-upgrade compound, do not
+            # exempt (negative control). If no chain ID parses, fall back to
+            # "no justified chain matches" → exempt, since the reason itself
+            # is an explicit NO-upgrade restatement disposition.
+            if not (chain_ids & justified_chains):
+                continue
+        unsafe.append(f"{fid}:{sev}:{reason or 'missing reason'}")
     if not unsafe:
         return []
     sample = "; ".join(unsafe[:5])

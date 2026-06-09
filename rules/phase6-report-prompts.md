@@ -55,6 +55,37 @@ Forbidden inputs:
 Verification verdicts from orchestrator:
 {PASTE_VERDICTS}
 
+## Working-Set Discipline — PROCESS ONE TIER-BATCH PER TURN (MANDATORY)
+
+On a large audit, building the WHOLE Master Finding Index — all-tier STEP 1.5
+consolidation plus all-tier STEP 5/5.5 coverage — in a single turn is the
+context-collapse trigger that has frozen this phase for tens of minutes. Do NOT
+hold every finding's working set at once.
+
+The driver pre-partitions the coverage seed into bounded per-tier shards:
+
+- `report_index_seed_critical_high.md` (Critical + High IDs)
+- `report_index_seed_medium.md` (Medium IDs)
+- `report_index_seed_low_info.md` (Low + Informational IDs)
+
+Process the index **one tier-batch at a time**, in this order: Critical+High →
+Medium → Low+Info. For each tier-batch:
+
+1. Read ONLY that tier's seed shard (a small, bounded ID list).
+2. Run STEP 1.5 (root-cause consolidation) and STEP 5/5.5 (coverage) over
+   THOSE IDs only. Consolidation never crosses tiers (the consolidation test
+   already requires same-severity tier), so per-tier batching loses nothing.
+3. Append that tier's rows to the Master Finding Index, Excluded Findings,
+   Consolidation Map, and `report_coverage.md`, then move to the next tier.
+
+Every ID in EVERY shard MUST receive exactly one disposition (a report ID, an
+exclusion row, or a consolidation-absorbed entry). The union of the three
+shards equals the full `report_index_coverage_seed.md`; the driver reconciles
+the merged `report_index.md` against the FULL seed after you finish, so an ID
+that falls between tier-batches is mechanically detected and a retry hint names
+it. Cross-tier chains/cross-references are recorded once in the Cross-Reference
+Map after all tiers are written.
+
 ## Your Task
 
 ### Severity Authority Contract (READ BEFORE TIERING)
@@ -223,9 +254,12 @@ Example: If chain hypothesis CH-1 (now C-01) references standalone hypothesis H-
 
 ### STEP 5: Verify Completeness (MANDATORY)
 
-Enumerate the full ID set from `report_index_coverage_seed.md` when present (it
-already lists EVERY finding/hypothesis ID with its source). When the seed is
-absent, derive the full ID set from `verification_queue.md` + `verify_core.md` +
+Enumerate the per-tier ID set from the tier seed shards
+(`report_index_seed_critical_high.md`, `report_index_seed_medium.md`,
+`report_index_seed_low_info.md`) — one shard per tier-batch — whose union is
+the full `report_index_coverage_seed.md`. When the shards are absent, fall back
+to the full `report_index_coverage_seed.md`; when that too is absent, derive the
+full ID set from `verification_queue.md` + `verify_core.md` +
 `finding_mapping.md` — these bounded sources contain every hypothesis and every
 standalone finding ([VS-*], [BLIND-*], [SE-*], [EN-*], [SLITHER-*]) ID. Do NOT
 re-derive the ID set by bulk-reading `hypotheses.md` or `findings_inventory.md`.

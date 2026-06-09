@@ -3454,7 +3454,13 @@ def _write_report_index_coverage_seed(scratchpad: Path) -> int:
         sev_map = {}
 
     # 2. Per-finding verdict + mapped hypothesis from the verification queue.
+    #    Also capture the raw queue Severity column as a routing fallback: the
+    #    severity-matrix sev_map can return a conservative default (Low) when a
+    #    verify file is missing, but the queue Severity is the always-present
+    #    bounded signal. Tier-shard routing prefers the matrix severity when set
+    #    and falls back to the queue severity so shards stay accurately partitioned.
     verdict_map: dict[str, str] = {}
+    queue_sev_map: dict[str, str] = {}
     try:
         for row in parse_verification_queue_rows(scratchpad):
             fid = (row.get("finding id") or "").strip().upper()
@@ -3466,6 +3472,9 @@ def _write_report_index_coverage_seed(scratchpad: Path) -> int:
                 or row.get("preferred verification")
                 or ""
             ).strip()
+            qsev = (row.get("severity") or "").strip()
+            if qsev:
+                queue_sev_map[fid] = qsev
     except Exception:
         pass
 
@@ -3540,7 +3549,146 @@ def _write_report_index_coverage_seed(scratchpad: Path) -> int:
     (scratchpad / "report_index_coverage_seed.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8"
     )
+
+    # R3/R4 (TASK C): tier-shard the coverage seed so the report_index LLM can
+    # process one tier-batch at a time and NEVER hold the whole working set in
+    # a single turn (the context-collapse trigger that froze DODO ~27min).
+    # Completeness stays guaranteed mechanically because every seed row lands in
+    # exactly one tier shard (full seed == union of shards, zero drops) and the
+    # post-phase reconciliation gate (_check_index_completeness) validates the
+    # merged report_index.md against the FULL seed superset.
+    try:
+        _write_report_index_seed_shards(
+            scratchpad,
+            seed_rows=[
+                {
+                    "id": fid,
+                    "severity": sev_map.get(fid, ""),
+                    # Routing severity: take the MORE-SEVERE of the matrix sev_map
+                    # and the raw queue Severity. The matrix defaults to Low when
+                    # a verify file is absent; the queue Severity is the always-
+                    # present bounded signal. Routing UP never drops a finding
+                    # (the gate reconciles the full seed regardless of tier), so
+                    # using the max keeps a Critical/High finding in its tier even
+                    # if the matrix conservatively reported Low.
+                    "route_severity": _more_severe_label(
+                        sev_map.get(fid, ""), queue_sev_map.get(fid, "")
+                    ),
+                    "verdict": verdict_map.get(fid, ""),
+                    "hyp": hyp_map.get(fid, ""),
+                    "absorbed_map": absorbed_map,
+                }
+                for fid in sorted(all_ids, key=lambda x: x.upper())
+            ],
+        )
+    except Exception as exc:  # best-effort: shards are a convenience layer
+        log.warning(f"[report_index] seed-shard partition skipped: {exc!r}")
     return n
+
+
+# Coverage-seed tier shards. Each shard is a BOUNDED subset of
+# report_index_coverage_seed.md restricted to one report tier-batch, so the
+# Index Agent processes STEP 1.5 consolidation + STEP 5/5.5 coverage over a
+# small ID list per turn instead of the full set. The driver owns the
+# partition (severity -> tier) and the post-phase reconciliation, so the LLM
+# can never let a finding fall between shards.
+_REPORT_INDEX_TIER_SHARDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("critical_high", ("Critical", "High")),
+    ("medium", ("Medium",)),
+    ("low_info", ("Low", "Informational", "Info")),
+)
+
+
+def _more_severe_label(a: str, b: str) -> str:
+    """Return whichever severity label is MORE severe (recall-safe routing).
+
+    Used to pick a tier-shard routing severity from two bounded signals (the
+    severity-matrix map and the raw queue Severity). Routing a finding to a
+    higher tier never drops it — the completeness gate reconciles the full seed
+    regardless of which shard a row landed in — so taking the max keeps a
+    Critical/High finding in its tier even when one signal is conservative.
+    """
+    ra, rb = severity_rank(a), severity_rank(b)
+    if rb > ra:
+        return b
+    return a or b
+
+
+def _report_index_tier_for_severity(severity: str) -> str:
+    """Map an expected severity string to its coverage-seed tier-shard key.
+
+    Unknown / blank severities route to ``low_info`` so an under-classified row
+    is never dropped from the shard partition — it still gets exactly one
+    disposition and the reconciliation gate over the full seed catches drift.
+    """
+    sev = (severity or "").strip().lower()
+    for tier, names in _REPORT_INDEX_TIER_SHARDS:
+        if any(sev == n.lower() for n in names):
+            return tier
+    return "low_info"
+
+
+def _write_report_index_seed_shards(
+    scratchpad: Path, seed_rows: list[dict]
+) -> dict[str, int]:
+    """Partition the coverage seed into per-tier shard files.
+
+    Returns {tier_key: row_count}. Every seed row lands in exactly ONE shard
+    (partition, not overlap), so ``union(shards) == full seed`` mechanically.
+    The Index Agent reads one shard per turn; the driver assembles the merged
+    report_index.md and reconciles it against the FULL seed afterward.
+    """
+    scratchpad = Path(scratchpad)
+    buckets: dict[str, list[dict]] = {t: [] for t, _ in _REPORT_INDEX_TIER_SHARDS}
+    for row in seed_rows:
+        route_sev = row.get("route_severity") or row.get("severity", "")
+        tier = _report_index_tier_for_severity(route_sev)
+        buckets[tier].append(row)
+
+    counts: dict[str, int] = {}
+    for tier, _names in _REPORT_INDEX_TIER_SHARDS:
+        rows = buckets[tier]
+        lines = [
+            f"# Report Index Coverage Seed — Tier Shard: {tier}",
+            "",
+            "**Status**: DRIVER_ENUMERATED",
+            "",
+            "Bounded per-tier slice of report_index_coverage_seed.md. Process "
+            "this shard's IDs in ONE turn: run STEP 1.5 consolidation and STEP "
+            "5/5.5 coverage over THESE IDs only, then move to the next tier "
+            "shard. Do NOT hold every tier's working set at once — that is the "
+            "context-collapse trigger this partition removes. Every ID below "
+            "MUST receive exactly one disposition (report ID, exclusion, or "
+            "consolidation) in report_index.md.",
+            "",
+            "| Finding/Hyp ID | Expected Severity | Verdict | Mapped Hypothesis | Dedup Relation |",
+            "|----------------|-------------------|---------|-------------------|----------------|",
+        ]
+        for row in rows:
+            fid = row["id"]
+            absorbed_map = row.get("absorbed_map") or {}
+            relation = ""
+            if fid in absorbed_map:
+                surv = (absorbed_map[fid] or {}).get("survivor", "")
+                relation = f"ABSORBED into {surv}" if surv else ""
+            else:
+                absorbed_into_this = [
+                    a for a, info in absorbed_map.items()
+                    if (info or {}).get("survivor", "").upper() == fid.upper()
+                ]
+                if absorbed_into_this:
+                    relation = "SURVIVOR of " + ",".join(sorted(absorbed_into_this))
+            lines.append(
+                f"| {fid} | {row.get('severity', '')} | {row.get('verdict', '')} "
+                f"| {row.get('hyp', '')} | {relation} |"
+            )
+        if not rows:
+            lines.append("| (none) | | | | no IDs in this tier |")
+        (scratchpad / f"report_index_seed_{tier}.md").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+        counts[tier] = len(rows)
+    return counts
 
 
 def _propagate_dedup_absorbed_to_finding_mapping(scratchpad: Path) -> int:
@@ -12189,26 +12337,61 @@ def _reemit_percontract_self_exclusions(
     ]
     for k, cand in enumerate(recovered, start=1):
         loc = (cand.get("location") or "").strip()
-        if not loc:
-            loc = "unspecified (referent missing in provided exclusion set)"
-        sev = (cand.get("severity") or "").strip() or "Medium"
         title = (cand.get("title") or "").strip() or (
             "Self-excluded candidate without provided-list referent"
         )
         src = (cand.get("source") or "").strip()
         own = (cand.get("own_id") or "").strip()
+        # ROOT FIX (DODO M-14/M-15): a content-LESS re-emit (no concrete
+        # location AND no mechanism/harm signal) is an unfalsifiable stub. It
+        # must NOT default to Medium and reach the report body — it routes to a
+        # LOW-confidence appendix disposition. A content-BEARING re-emit keeps
+        # its own severity so it can be genuinely dedup'd against an existing
+        # finding OR resolved into a concrete finding. Recall-safe: BOTH are
+        # kept (re-emitted), neither is dropped.
+        content_bearing = bool(cand.get("content_bearing"))
+        if content_bearing:
+            sev = (cand.get("severity") or "").strip() or "Medium"
+            disposition = ""
+            if not loc:
+                loc = "unspecified (referent missing in provided exclusion set)"
+            description = (
+                "This candidate was excluded by a per-contract agent as "
+                "'already found' but cited no entry present in the "
+                "orchestrator-provided exclusion list, so its prior-coverage "
+                "claim is unverified. It carries its own location and "
+                "mechanism, so dedup it against existing findings or resolve "
+                "it into a concrete finding "
+                "[RE-EMITTED: self-excluded without real referent]."
+            )
+        else:
+            # Content-less: pin to Informational + explicit marker so the
+            # report-index triage routes it to APPENDIX_ONLY (LOW confidence),
+            # not a Medium body finding. The candidate is still surfaced for
+            # human review — it is downgraded, not dropped.
+            sev = "Informational"
+            disposition = " [CONTENT-LESS: APPENDIX_ONLY — no concrete location or harm]"
+            if not loc:
+                loc = "unspecified (content-less self-exclusion stub)"
+            description = (
+                "This candidate was excluded by a per-contract agent as "
+                "'already found' but cited no entry present in the "
+                "orchestrator-provided exclusion list AND carries no concrete "
+                "location or harm of its own — an unfalsifiable stub. It is "
+                "re-emitted at Informational for appendix-only human review so "
+                "the suppressed candidate is not silently dropped; it must NOT "
+                "be promoted to a body finding "
+                "[RE-EMITTED: self-excluded without real referent]"
+                "[CONTENT-LESS: APPENDIX_ONLY]."
+            )
         lines.extend(
             [
-                f"## Finding [PCRE-{k}]: {title}",
+                f"## Finding [PCRE-{k}]: {title}{disposition}",
                 "",
                 "**Verdict**: CONTESTED",
                 f"**Severity**: {sev}",
                 f"**Location**: {loc}",
-                "**Description**: This candidate was excluded by a per-contract "
-                "agent as 'already found' but cited no entry present in the "
-                "orchestrator-provided exclusion list, so its prior-coverage "
-                "claim is unverified. It is re-emitted for independent review "
-                "[RE-EMITTED: self-excluded without real referent].",
+                f"**Description**: {description}",
                 "**Impact**: If the underlying bug is real, suppressing it via a "
                 "belief-based exclusion would cause a true positive to be missed.",
                 "**Evidence**: "

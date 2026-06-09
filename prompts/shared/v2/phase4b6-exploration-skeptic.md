@@ -129,18 +129,67 @@ RE-OPEN the finding.
 
 ---
 
+## Per-Instance Enumeration (MANDATORY — instance-level, not axis-level)
+
+Completeness is judged at the INSTANCE level, never at the axis level. The
+failure mode this phase exists to prevent is declaring an entire axis "covered"
+because *some* adjacent artifact was touched, when the SPECIFIC neighbour,
+direction, or sub-mechanism in question was never resolved to a finding.
+
+For EACH (input finding × axis) pair you must FIRST ENUMERATE the concrete
+instances that axis generates for that finding, THEN give EACH enumerated
+instance its own verdict. You may not collapse multiple instances into a single
+blanket judgement.
+
+- **Direction axis**: enumerate EACH direction of the stateful or paired
+  operation independently (e.g. the increase direction AND the decrease
+  direction; the forward transform AND its inverse; the open path AND the close
+  path). Each direction is one instance.
+- **Similar-Mechanism axis**: enumerate EACH other in-scope occurrence of the
+  same construct or operation. Each occurrence is one instance.
+- **Neighbour axis**: enumerate EACH paired, adjacent, or sibling path of the
+  analyzed path (and EACH other in-scope contract/function sharing the found
+  pattern). Each neighbour is one instance.
+
+If an axis genuinely generates exactly one instance for a finding (the operation
+is not paired, the construct occurs once, the path has no sibling), say so
+explicitly and name the single instance — that is a valid one-instance
+enumeration, not a blanket pass.
+
 ## Gap-Filling Procedure
 
-For each gap you detect along any axis:
+For each enumerated instance:
 
-1. Perform the missing analysis directly against the source.
-2. Emit the result as one of: a NEW finding, an UPGRADE of an existing finding,
-   or a RE-OPEN of a dismissed/downgraded finding.
+1. Determine whether that SPECIFIC instance is resolved — i.e. either it already
+   maps to a prior finding, or your own analysis of it produces a definite
+   safe/unsafe verdict grounded in the source.
+2. If the instance is unsafe and not already captured by a prior finding, this
+   is a GAP. Perform the missing analysis directly against the source and emit
+   the result as one of: a NEW finding, an UPGRADE of an existing finding, or a
+   RE-OPEN of a dismissed/downgraded finding.
 3. Never emit a gap as a deletion, a merge, or a downgrade.
+4. If the instance is safe (or already captured), you may record it NO-GAP — but
+   ONLY with a named instance and concrete evidence (see the NO-GAP evidence
+   rule below).
 
-If completeness analysis confirms there is no gap for a given finding-axis pair,
-record that as NO-GAP in the coverage record. A confirmed absence of a gap is a
-valid and useful output; it is not a reason to alter the existing finding.
+### NO-GAP Evidence Rule (HARD — bans the rubber-stamp)
+
+A `NO-GAP` disposition is VALID only when its coverage-record row NAMES the
+specific instance verified AND CITES concrete evidence — either the file:line
+(or function) where the instance was found to be safe, or the prior finding ID
+that already captures it.
+
+A blanket `NO-GAP` that does not name the specific instance + its evidence is
+PROHIBITED. Wording like "direction explored", "boundary shift explored",
+"pattern explored elsewhere", or "covered somewhere" is NOT evidence — it
+asserts the axis was touched, not that THIS instance was resolved. When you
+cannot name the instance and cite where it was verified, the instance is by
+definition UNEXPLORED: emit it as an ADD (a NEW finding or RE-OPEN) at the
+inherited severity, never as a NO-GAP.
+
+When in doubt between NO-GAP and ADD, choose ADD. This phase is additive-only;
+an extra ADD is recoverable downstream, a falsely-cleared instance is a missed
+vulnerability.
 
 ---
 
@@ -153,20 +202,39 @@ Write everything to `exploration_skeptic_findings.md`.
    clearly for each whether it is a NEW finding, an UPGRADE (and of which prior
    finding), or a RE-OPEN (and of which prior finding).
 
-2. **Coverage Record**: Write a table accounting for each input finding against
-   each of the three completeness axes. For every (input finding x axis) cell,
-   record exactly one disposition:
+2. **Coverage Record**: Write a per-INSTANCE table. There is one ROW per
+   enumerated instance, NOT one row per axis. Use exactly these columns:
 
-   - `ASSESSED` — the axis was already covered completely by prior analysis.
-   - `GAP-FILLED` — a gap existed; the missing analysis was performed and emitted
-     as a new finding or upgrade.
-   - `RE-OPENED` — the axis assessment justified re-opening a
-     dismissed/downgraded finding.
-   - `NO-GAP` — the axis does not apply to this finding, or completeness was
-     confirmed with nothing to add.
+   ```
+   | Finding | Axis | Instance | Disposition | Evidence |
+   |---------|------|----------|-------------|----------|
+   ```
 
-   The coverage record lets downstream gating confirm that completeness was
-   audited across every input finding and every axis.
+   - **Finding**: the input finding ID this instance derives from.
+   - **Axis**: `Direction`, `Similar-Mechanism`, or `Neighbour`.
+   - **Instance**: the NAMED concrete instance (e.g. the specific direction,
+     the specific sibling path, the specific other occurrence). Never blank,
+     never a generic axis label.
+   - **Disposition**: exactly one of:
+     - `ASSESSED` — this instance was already covered completely by prior analysis.
+     - `GAP-FILLED` — a gap existed for this instance; the missing analysis was
+       performed and emitted as a NEW finding or UPGRADE.
+     - `RE-OPENED` — the instance assessment justified re-opening a
+       dismissed/downgraded finding.
+     - `NO-GAP` — completeness for THIS instance was confirmed with nothing to
+       add (valid ONLY with named instance + evidence per the NO-GAP Evidence
+       Rule above).
+   - **Evidence**: for `NO-GAP` and `ASSESSED`, the concrete file:line (or
+     function) where the instance was verified safe, OR the prior finding ID
+     that captures it. For `GAP-FILLED`/`RE-OPENED`, the emitted finding ID. A
+     `NO-GAP` row whose Evidence cell is blank, or contains only "explored" /
+     "covered" / "touched"-style wording without a named locus, is a contract
+     violation and will be re-surfaced downstream as an unexplored instance.
+
+   The per-instance coverage record lets downstream gating confirm that
+   completeness was audited at the INSTANCE level — every enumerated neighbour,
+   direction, and sub-mechanism — not merely that each axis was touched
+   somewhere.
 
 ---
 

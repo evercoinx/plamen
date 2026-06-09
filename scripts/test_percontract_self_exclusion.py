@@ -257,6 +257,145 @@ def test_gate_acceptance_after_reemit_non_fresh(tmp_path):
     assert passed, f"gate_passes(rescan) failed: {gmissing}"
 
 
+# --------------------------------------------------------------------------
+# TASK E ROOT FIX (DODO M-14/M-15): content-less re-emit must NOT reach the
+# Medium body — it routes to a LOW-confidence appendix disposition. A
+# content-bearing re-emit keeps its severity for dedup/resolution. Both are
+# KEPT (re-emitted); neither is dropped.
+# --------------------------------------------------------------------------
+
+def test_e_flaw_resolved_contentless_reemit_routes_to_appendix_not_medium(tmp_path):
+    """FP/flaw-now-resolved: a content-LESS self-exclusion stub (no concrete
+    location, no harm) must re-emit at Informational with an APPENDIX_ONLY
+    marker — NOT default to a Medium body finding (the DODO M-14/M-15 flaw)."""
+    _write(tmp_path, "analysis_1.md", PROVIDED_BREADTH)
+    # Bare "already known" assertion: no concrete file:line, no mechanism/harm.
+    _write(
+        tmp_path,
+        "analysis_percontract_1.md",
+        "# PC 1\n\n## Findings\n\n## Exclusion List (Already Found)\n\n"
+        "- EXCLUDED [PC1-7] some thing already known\n",
+    )
+    warnings, recovered = _validate_percontract_self_exclusion(tmp_path)
+    assert recovered, "content-less stub must still be recovered (never dropped)"
+    assert recovered[0]["content_bearing"] is False, (
+        "no location + no harm → content-less"
+    )
+
+    out = D._reemit_percontract_self_exclusions(tmp_path, recovered)
+    assert out is not None and out.exists()
+    body = out.read_text(encoding="utf-8")
+    # The flaw was: defaulted to **Severity**: Medium → reached body. Root fix
+    # pins content-less stubs to Informational + APPENDIX_ONLY routing.
+    assert "**Severity**: Informational" in body
+    assert "**Severity**: Medium" not in body
+    assert "CONTENT-LESS" in body and "APPENDIX_ONLY" in body
+    # Kept, not dropped: the candidate is present for human review.
+    assert "[PCRE-1]" in body
+
+
+def test_e_negative_control_contentbearing_reemit_keeps_severity_for_dedup(tmp_path):
+    """NEGATIVE CONTROL: a content-BEARING re-emit (own location + harm) must
+    keep its own severity so it can be dedup'd against existing findings or
+    resolved into a concrete finding — the fix must NOT rubber-stamp every
+    re-emit to Informational/appendix."""
+    _write(tmp_path, "analysis_1.md", PROVIDED_BREADTH)
+    # Carries its OWN content: concrete location + mechanism/harm vocabulary.
+    _write(
+        tmp_path,
+        "analysis_percontract_1.md",
+        "# PC 1\n\n## Findings\n\n## Exclusion List (Already Found)\n\n"
+        "- EXCLUDED [PC1-9] Medium reward accounting drains funds at "
+        "Vault.sol:L412 — stale balance lets attacker steal rewards\n",
+    )
+    warnings, recovered = _validate_percontract_self_exclusion(tmp_path)
+    assert recovered, "content-bearing stub must be recovered"
+    assert recovered[0]["content_bearing"] is True, (
+        "concrete location + harm vocabulary → content-bearing"
+    )
+
+    out = D._reemit_percontract_self_exclusions(tmp_path, recovered)
+    body = out.read_text(encoding="utf-8")
+    # NOT downgraded to Informational/appendix: severity preserved (Medium here)
+    # so it flows through normal dedup/resolution rather than being buried.
+    assert "**Severity**: Medium" in body
+    assert "CONTENT-LESS" not in body
+    assert "Vault.sol:L412".lower() in body.lower()
+
+
+def test_e_mixed_contentless_and_contentbearing_routed_separately(tmp_path):
+    """Both kinds coexist: content-less → Informational/appendix, content-bearing
+    → severity preserved. Neither is dropped."""
+    _write(tmp_path, "analysis_1.md", PROVIDED_BREADTH)
+    _write(
+        tmp_path,
+        "analysis_percontract_1.md",
+        "# PC 1\n\n## Findings\n\n## Exclusion List (Already Found)\n\n"
+        "- EXCLUDED [PC1-1] already known nothing concrete\n"
+        "- EXCLUDED [PC1-2] High overflow drains funds at Token.sol:L77 "
+        "— mint inflation lets attacker steal\n",
+    )
+    warnings, recovered = _validate_percontract_self_exclusion(tmp_path)
+    assert len(recovered) == 2
+    by_id = {c["own_id"]: c for c in recovered}
+    assert by_id["PC1-1"]["content_bearing"] is False
+    assert by_id["PC1-2"]["content_bearing"] is True
+
+    out = D._reemit_percontract_self_exclusions(tmp_path, recovered)
+    body = out.read_text(encoding="utf-8")
+    # Content-less → Informational; content-bearing without a labeled severity
+    # → default Medium (NOT downgraded to Informational/appendix). Both present.
+    assert "**Severity**: Informational" in body
+    assert "**Severity**: Medium" in body
+    assert "CONTENT-LESS" in body  # only the content-less one is marked
+    assert body.count("CONTENT-LESS") <= 4  # not stamped on the content-bearing
+    # Both candidates surfaced — recall preserved.
+    assert "[PCRE-1]" in body and "[PCRE-2]" in body
+
+
+def test_e_triage_allows_contentless_marker_for_medium_plus_exclusion():
+    """report_index triage: a content-less PCRE row kept at Medium+ in Excluded
+    Findings with a CONTENT_LESS reason is an allowed appendix disposition (it
+    is KEPT, not dropped). A content-bearing PCRE row excluded at Medium+ with
+    NO evidence/dedup reason is STILL flagged (negative control)."""
+    import re
+    src = (
+        Path(__file__).resolve().parent / "plamen_validators.py"
+    ).read_text(encoding="utf-8")
+    # The allowed-token set must include the content-less marker.
+    assert "CONTENT_LESS" in src
+
+    from plamen_validators import _validate_report_index_triage_safety
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        sp = Path(d)
+        # A content-less PCRE excluded at Medium with CONTENT_LESS reason → allowed.
+        (sp / "report_index.md").write_text(
+            "# Report Index\n\n"
+            "## Excluded Findings\n\n"
+            "| Internal ID | Severity | Title | Exclusion Reason |\n"
+            "|---|---|---|---|\n"
+            "| PCRE-1 | Medium | content-less stub | APPENDIX_ONLY CONTENT_LESS no concrete location |\n",
+            encoding="utf-8",
+        )
+        assert _validate_report_index_triage_safety(sp) == []
+
+        # NEGATIVE CONTROL: a real Medium finding excluded with a non-evidence
+        # "not client worthy" reason must STILL be flagged (no rubber-stamp).
+        (sp / "report_index.md").write_text(
+            "# Report Index\n\n"
+            "## Excluded Findings\n\n"
+            "| Internal ID | Severity | Title | Exclusion Reason |\n"
+            "|---|---|---|---|\n"
+            "| H-3 | Medium | reward drain | not client worthy |\n",
+            encoding="utf-8",
+        )
+        issues = _validate_report_index_triage_safety(sp)
+        assert issues, "non-evidence Medium+ exclusion must still be flagged"
+
+
 if __name__ == "__main__":
     import pytest
 

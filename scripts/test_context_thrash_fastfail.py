@@ -220,6 +220,155 @@ def test_real_wait_loop_no_early_exit_without_thrash(tmp_path, monkeypatch):
     assert not getattr(state, "context_thrash", False)
 
 
+# ── DODO QUIET-VARIANT regression + slow-progress negative control ───────────
+#
+# The committed loud-only fast-fail (_CONTEXT_OVERFLOW_TEXT_RE) keyed ONLY on
+# the explicit overflow string ("Autocompact is thrashing" / "too large for the
+# context"). The DODO report_index live flaw thrashed ~27 min with a transcript
+# frozen ~124 lines carrying 14 "compact" + 3 "until auto-compact" markers but
+# ZERO explicit overflow string -> the loud-only check NEVER matched the QUIET
+# repeated-compaction variant, so the fast-fail never fired. These two real-loop
+# fixtures pin both directions of the dual-signal root fix:
+#   (1) the QUIET DODO variant (compaction fingerprint, NO overflow text,
+#       frozen productive count) MUST fast-fail; and
+#   (2) a slow-but-PROGRESSING compacting turn (productive_event_count advances
+#       intermittently during the wait) must NEVER be cut off.
+
+# A DODO-shaped quiet transcript: repeated compaction-summary text events, with
+# the "until auto-compact" marker -- and crucially NO overflow string. Every
+# event is a compaction-summary text block, so event_is_productive() returns
+# False for all of them -> productive_event_count is FROZEN at 0 across polls.
+_QUIET_DODO_TRANSCRIPT = "".join(
+    '{"type":"assistant","message":{"content":'
+    f'[{{"type":"text","text":"{txt}"}}]}}}}\n'
+    for txt in (
+        "compacting conversation (summary block 1)",
+        "compacting conversation (summary block 2) until auto-compact",
+        "compacting conversation (summary block 3)",
+    )
+)
+
+
+def test_quiet_dodo_variant_fast_fails_without_overflow_text(tmp_path, monkeypatch):
+    """ROOT-FIX REGRESSION: the QUIET DODO variant the loud-only check missed.
+
+    No explicit overflow string anywhere (recent output is benign-looking
+    compaction churn, transcript has zero overflow text). The ONLY signal is the
+    compaction fingerprint (repeated 'compact' + 'until auto-compact') paired
+    with a frozen productive_event_count. The dual-signal gate MUST still fire.
+    """
+    import pty_exec as px
+    # Prove the precondition: the committed loud-only regex does NOT match this
+    # quiet variant -- it is exactly the gap that let DODO thrash for 27 min.
+    rx, _ = _consts()
+    assert not rx.search(px._normalized_pty_text(_QUIET_DODO_TRANSCRIPT)), (
+        "the quiet DODO transcript must carry NO explicit overflow string -- "
+        "that is the whole point of the regression"
+    )
+    # But it IS a compaction fingerprint via the second signal.
+    qfile = Path(tmp_path) / "quiet.jsonl"
+    qfile.write_text(_QUIET_DODO_TRANSCRIPT, encoding="utf-8")
+    assert px.transcript_shows_compaction(qfile), (
+        "repeated 'compact' + 'until auto-compact' must be a compaction signature"
+    )
+
+    monkeypatch.setattr(px, "_CONTEXT_THRASH_LOOP_S", 0.4, raising=False)
+    # recent_text is deliberately NON-overflow: the gate must rely on the
+    # transcript compaction signature, not on overflow text in recent output.
+    sess = _FakeSession(
+        tmp_path,
+        recent_text="reading findings_inventory.md ...",
+        transcript_text=_QUIET_DODO_TRANSCRIPT,
+    )
+    bound = px.ClaudePtySession.wait_for_turn_complete.__get__(sess, _FakeSession)
+    t0 = time.time()
+    state = bound(timeout_s=30.0, quiescence_s=8.0, poll_s=0.05,
+                  transcript_poll_s=0.05)
+    elapsed = time.time() - t0
+    assert getattr(state, "context_thrash", False), (
+        "the QUIET DODO variant (compaction fingerprint + frozen productive "
+        "count, NO overflow text) must trip the dual-signal fast-fail"
+    )
+    assert elapsed < 10.0, (
+        f"quiet-variant fast-fail must return well before the 30s deadline; "
+        f"took {elapsed:.1f}s"
+    )
+
+
+class _GrowingTranscriptSession:
+    """A compacting session whose transcript APPENDS a new productive event
+    slowly during the wait. Mirrors a real slow-but-progressing turn: it IS
+    compacting (compaction fingerprint present every poll) but it keeps making
+    genuine forward progress -- each appended tool_use event advances
+    productive_event_count -> the thrash latch resets -> never cut off.
+    """
+
+    def __init__(self, tmp_path, progress_interval_s):
+        import threading
+        self.transcript_path = Path(tmp_path) / "growing.jsonl"
+        # Seed with a compaction-summary event (frozen-productive baseline).
+        self.transcript_path.write_text(
+            '{"type":"assistant","message":{"content":'
+            '[{"type":"text","text":"compacting conversation until auto-compact"}]}}\n',
+            encoding="utf-8",
+        )
+        self._recent_output = "compacting conversation until auto-compact"
+        self._recent_output_lock = threading.Lock()
+        self._t0 = time.time()
+        self._progress_interval_s = progress_interval_s
+        self._appended = 0
+
+    def _maybe_append_progress(self):
+        # Append a NEW productive tool_use event every progress_interval_s.
+        n = int((time.time() - self._t0) / self._progress_interval_s)
+        while self._appended < n:
+            self._appended += 1
+            with self.transcript_path.open("a", encoding="utf-8") as f:
+                f.write(
+                    '{"type":"assistant","message":{"content":'
+                    '[{"type":"tool_use","name":"Write","input":{}}]}}\n'
+                )
+
+    def is_alive(self):
+        # The wait loop calls is_alive() every poll; piggyback transcript
+        # growth here so productive_event_count advances as wall-time passes.
+        self._maybe_append_progress()
+        return True
+
+
+def test_slow_but_progressing_compacting_turn_is_never_cut_off(tmp_path, monkeypatch):
+    """NEGATIVE CONTROL: real, productive work must NOT be fast-failed.
+
+    The turn is compacting the whole time (compaction fingerprint present every
+    poll) but makes genuine forward progress every ~0.1s -- well faster than the
+    0.4s thrash window. The frozen-count latch resets on each new productive
+    event, so context_thrash must NEVER be set even though we run far longer
+    than _CONTEXT_THRASH_LOOP_S. This is the guard that the dual-signal gate
+    does not become a productive-work killer.
+    """
+    import pty_exec as px
+    monkeypatch.setattr(px, "_CONTEXT_THRASH_LOOP_S", 0.4, raising=False)
+    sess = _GrowingTranscriptSession(tmp_path, progress_interval_s=0.1)
+    bound = px.ClaudePtySession.wait_for_turn_complete.__get__(
+        sess, _GrowingTranscriptSession
+    )
+    # Run ~3x the thrash window. A broken gate (overflow-only or no progress
+    # reset) would flag context_thrash; the dual-signal gate must not.
+    state = bound(timeout_s=1.5, quiescence_s=8.0, poll_s=0.02,
+                  transcript_poll_s=0.02)
+    assert not getattr(state, "context_thrash", False), (
+        "a slow-but-progressing compacting turn (productive_event_count keeps "
+        "advancing) must NEVER be fast-failed -- the dual-signal frozen-count "
+        "guard protects genuine forward progress"
+    )
+    # Sanity: the turn really did make progress during the wait (otherwise this
+    # would be a vacuous pass -- a frozen transcript that happened not to trip).
+    assert sess._appended >= 2, (
+        "the negative-control session must actually advance productive events "
+        "during the wait, else the test is vacuous"
+    )
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

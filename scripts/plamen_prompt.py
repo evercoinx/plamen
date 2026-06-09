@@ -2894,14 +2894,26 @@ ledgers, not a re-read of raw finding prose):
 - Open an individual `verify_<ID>.md` or a SINGLE finding's body ONLY when one
   of the bounded ledgers above leaves THAT finding ambiguous, contested, or
   cross-referenced — never as a bulk scan, never the whole inventory.
+- WORKING-SET DISCIPLINE — PROCESS ONE TIER-BATCH PER TURN: building the WHOLE
+  index (all-tier STEP 1.5 consolidation + all-tier STEP 5/5.5 coverage) in one
+  turn is the context-collapse trigger that froze this phase. The driver
+  pre-partitions the coverage seed into bounded per-tier shards
+  (`report_index_seed_critical_high.md`, `report_index_seed_medium.md`,
+  `report_index_seed_low_info.md`). Process the index ONE tier-batch at a time
+  (Critical+High -> Medium -> Low+Info): read ONLY that tier's shard, run
+  STEP 1.5 + STEP 5/5.5 over THOSE IDs, append that tier's rows, then move on.
+  Consolidation never crosses tiers, so batching loses nothing.
 - STEP 1.5 (root-cause consolidation): drive consolidation from
   `dedup_candidate_pairs.md` / `dedup_absorbed_map.md` / `dedup_decisions.md`
   + `candidate_semantic_facets.md` — NOT from the raw inventory.
-- STEP 5 / 5.5 (completeness + coverage ledger): enumerate the full ID set
-  from `report_index_coverage_seed.md` (or, if absent, from
-  `verification_queue.md` + `verify_core.md` + `finding_mapping.md`). These
-  bounded sources contain every finding/hypothesis ID; the completeness gate
-  is satisfied without re-deriving the ID set from finding prose.
+- STEP 5 / 5.5 (completeness + coverage ledger): enumerate the per-tier ID set
+  from the tier seed shards (their union is `report_index_coverage_seed.md`;
+  if shards/seed absent, fall back to `verification_queue.md` + `verify_core.md`
+  + `finding_mapping.md`). These bounded sources contain every finding/
+  hypothesis ID; the completeness gate is satisfied without re-deriving the ID
+  set from finding prose. Every seed ID MUST get exactly one disposition (report
+  ID, exclusion, or consolidation) — the driver reconciles the merged index
+  against the FULL seed, so an ID that falls between tier-batches is detected.
 - Severity authority order:
   1. `skeptic_judge_decisions.md`
   2. `verify_core.md`
