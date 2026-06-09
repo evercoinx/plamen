@@ -110,7 +110,7 @@ qualitative read, not a contract.
   skip, you'd see roughly the same precision.
 - **Cost**: roughly the same dollar envelope as v1.1.8 at equivalent
   modes. The pipeline spawns more agents than v1, but the model cap is
-  **Sonnet for breadth + Opus 4.6 for depth** — Opus 4.7 was tested,
+  **Sonnet for breadth + Opus 4.8 for depth** — Opus 4.7 was tested,
   showed diminishing returns on the audit corpus, and burned tokens
   faster than the recall gain justified. See the cost table in
   `README.md` and `docs/audit-modes.md` for per-mode ranges.
