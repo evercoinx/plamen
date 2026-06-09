@@ -99,16 +99,16 @@ def plamen_home() -> Path:
     return Path.home() / ".claude"
 
 
-# Pin expensive Opus phases to 4.6 by default. Claude Code's bare `opus`
-# alias tracks latest, which moved to 4.7 and materially increased usage with
+# Pin expensive Opus phases to 4.8 by default. Claude Code's bare `opus`
+# alias tracks latest, which moved to 4.8 and materially increased usage with
 # weak marginal audit lift. Override only when explicitly benchmarking.
-PLAMEN_OPUS_MODEL = os.environ.get("PLAMEN_OPUS_MODEL", "claude-opus-4-6").strip()
+PLAMEN_OPUS_MODEL = os.environ.get("PLAMEN_OPUS_MODEL", "claude-opus-4-8").strip()
 
 
 def _resolve_model_alias(model: str) -> str:
     m = (model or "").strip()
     if m == "opus":
-        return PLAMEN_OPUS_MODEL or "claude-opus-4-6"
+        return PLAMEN_OPUS_MODEL or "claude-opus-4-8"
     return m or "sonnet"
 
 

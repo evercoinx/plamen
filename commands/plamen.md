@@ -555,7 +555,7 @@ This file survives compaction (read from disk). After any compaction event, the 
 |-------|----------|--------|-------|------|----------|
 | **Phase 1** | Recon Agent(s) | Artifacts + templates | 2 sonnet (no RAG/fork) | 4 agents | 4 agents |
 | **Phase 2** | Orchestrator | Instantiated prompts | All | All | All |
-| **Phase 3** | Breadth Agents | Findings files | 3-4 sonnet | 5-9 claude-opus-4-6 | 5-9 claude-opus-4-6 |
+| **Phase 3** | Breadth Agents | Findings files | 3-4 sonnet | 5-9 claude-opus-4-8 | 5-9 claude-opus-4-8 |
 | **Phase 3b** | Re-Scan + Per-Contract | Masked findings | Skip | Skip | Thorough only |
 | **Phase 4a** | Inventory Agent | Findings inventory | 1 sonnet | 1 sonnet | 1 sonnet |
 | **Phase 4a.5** | Semantic Invariant Agent | Write-sites + invariants | Skip | Pass 1 | Pass 1+2 |
@@ -572,7 +572,7 @@ When `MODE == light`, the orchestrator applies these overrides:
 
 1. **All agents use Sonnet or Haiku** " no Opus spawns. Use `model="sonnet"` for all analysis/verification agents, `model="haiku"` for assembler only.
 2. **Recon**: Spawn 2 sonnet agents (not 4). Agent L1 = build + static analysis + tests (Tasks 1,2,8,9). Agent L2 = docs + patterns + surface + templates (Tasks 3,4,5,6,7,10). Skip RAG meta-buffer (Task 0) and fork ancestry entirely.
-3. **Breadth**: Cap at 3-4 sonnet agents (not 5-9 claude-opus-4-6). Use same merge hierarchy.
+3. **Breadth**: Cap at 3-4 sonnet agents (not 5-9 claude-opus-4-8). Use same merge hierarchy.
 4. **Semantic Invariants**: Skip entirely. Depth agents read `state_variables.md` directly.
 5. **Depth Loop**: Spawn 4 merged sonnet agents " (a) combined token-flow + state-trace, (b) combined edge-case + external, (c) combined scanner A+B+C, (d) validation sweep. No niche agents, no injectable investigation agents. Iteration 1 only, no confidence scoring. **Note**: Merges (a) and (c) are deliberate exceptions to the standard merge hierarchy " token-flow + state-trace and 3-scanner compression reduce agent count at the cost of per-domain attention depth. This is a known tradeoff accepted for Pro plan rate limit compliance.
 6. **Chain Analysis**: Single sonnet agent performs both enabler enumeration and chain matching in one pass.
@@ -606,9 +606,9 @@ Replace placeholders: `{path}`, `{scratchpad}`, `{docs_path_or_url_if_provided}`
 | Agent | Spawn | Model | Await? |
 |-------|-------|-------|--------|
 | **1A (RAG)** | `run_in_background: true` | sonnet | **NO** " fire-and-forget |
-| **1B (Docs + External)** | foreground | claude-opus-4-6 (Core/Thorough) or sonnet (Light) | YES |
+| **1B (Docs + External)** | foreground | claude-opus-4-8 (Core/Thorough) or sonnet (Light) | YES |
 | **2 (Build + Slither)** | foreground | sonnet | YES |
-| **3 (Patterns + Surface)** | foreground | claude-opus-4-6 (Core/Thorough) or sonnet (Light) | YES |
+| **3 (Patterns + Surface)** | foreground | claude-opus-4-8 (Core/Thorough) or sonnet (Light) | YES |
 
 **Agent 1A is FIRE-AND-FORGET**: spawn in background, never block on it. If it hasn't returned when 1B/2/3 finish, write fallback `meta_buffer.md` and proceed.
 
@@ -1144,8 +1144,8 @@ Read `{SCRATCHPAD}/hypotheses.md` (first 100 lines ONLY " hypothesis table). Cou
 | Mode | Scope |
 |------|-------|
 | Light | ALL Medium+ (all sonnet) |
-| Core | ALL Medium+ (claude-opus-4-6 for High/Chain, sonnet for Medium) |
-| Thorough | ALL severities (claude-opus-4-6 for High/Chain, sonnet for Medium, sonnet for Low/Info) + fuzz variants |
+| Core | ALL Medium+ (claude-opus-4-8 for High/Chain, sonnet for Medium) |
+| Thorough | ALL severities (claude-opus-4-8 for High/Chain, sonnet for Medium, sonnet for Low/Info) + fuzz variants |
 
 **Step 5.0.1: Crash resume " skip already-verified hypotheses**
 
@@ -1159,12 +1159,12 @@ If total verifiers to spawn **> 8**: split into severity-tier batches. Spawn eac
 
 | Batch | Contains | Model | Max parallel agents |
 |-------|----------|-------|---------------------|
-| A | Chain hypotheses (CH-*) + High standalone | claude-opus-4-6 | all (typically 7-10) |
+| A | Chain hypotheses (CH-*) + High standalone | claude-opus-4-8 | all (typically 7-10) |
 | B | Medium (first half, up to 6) | sonnet | 6 |
 | C | Medium (second half) | sonnet | 6 |
 | D | Low + Info (single agent covering ALL) | sonnet | 1 |
 
-> **Batch sizing**: If a tier has â‰¤ 6 hypotheses, it fits in one batch. If > 6, split into sub-batches of â‰¤ 6. Chains + High are always in the same batch (both claude-opus-4-6, rarely > 10 combined).
+> **Batch sizing**: If a tier has â‰¤ 6 hypotheses, it fits in one batch. If > 6, split into sub-batches of â‰¤ 6. Chains + High are always in the same batch (both claude-opus-4-8, rarely > 10 combined).
 
 > **Between batches**: Do NOT read the `verify_*.md` files written by the completed batch. Only note the short return message from each agent. Detailed output lives on disk " the orchestrator does not need it until Phase 5.5/6.
 

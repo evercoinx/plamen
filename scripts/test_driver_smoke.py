@@ -1161,12 +1161,12 @@ def test_scenario_j_breadth_model_override() -> None:
     import plamen_driver as _pd
     phase = next(p for p in _pd.L1_PHASES if p.name == "breadth")
     model = _pd.phase_model(
-        phase, "thorough", {"breadth_model_override": "claude-opus-4-6"}
+        phase, "thorough", {"breadth_model_override": "claude-opus-4-8"}
     )
-    _assert(model == "claude-opus-4-6",
+    _assert(model == "claude-opus-4-8",
             f"J: breadth override should win; got {model}")
     light_model = _pd.phase_model(
-        phase, "light", {"breadth_model_override": "claude-opus-4-6"}
+        phase, "light", {"breadth_model_override": "claude-opus-4-8"}
     )
     _assert(light_model == "sonnet",
             f"J: light mode must still force sonnet; got {light_model}")
