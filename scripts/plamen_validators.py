@@ -6532,6 +6532,25 @@ def _validate_consumer_ids_in_ledger(
         if trace:
             synthetic_traces[ref] = trace
             continue
+        # Prefix-AGNOSTIC produced-artifact backstop: an ID-shaped token that is
+        # not in the minted ledger AND not traced through the (prefix-keyed)
+        # synthetic path above is NOT contamination if it demonstrably APPEARS
+        # in a produced upstream artifact (findings_inventory / analysis_* /
+        # chain_* / depth_* / verify_* / hypotheses / etc.). Legitimate
+        # agent-source / chain namespaces (CMI-, CC-, CCT-, CR-, DEX-, TF-, ...)
+        # are minted by breadth/depth/recon workers that the ledger does not
+        # track, so requiring a ledger entry mis-reads them as contamination.
+        # We do NOT enumerate prefixes — presence in a real artifact is the
+        # signal. RECALL-SAFE: a hallucinated / stale-cross-run ID present in NO
+        # produced artifact (and not in the ledger) is still flagged.
+        present = _id_present_in_produced_artifact(scratchpad, ref, artifact_name)
+        if present:
+            synthetic_traces[ref] = {
+                "id": ref,
+                "source_artifact": present,
+                "source_kind": "produced-artifact-presence",
+            }
+            continue
         unregistered.add(ref)
     if synthetic_traces:
         _write_id_ledger_synthetic_map(
@@ -6677,6 +6696,80 @@ def _trace_synthetic_consumer_id(
                 "source_artifact": path.name,
                 "source_kind": "synthetic-local-id",
             }
+    return None
+
+
+# Produced-artifact families a consumer-referenced ID may legitimately have been
+# minted into by an upstream breadth/depth/recon/chain worker. Prefix-agnostic:
+# membership is decided by token PRESENCE, not by the ID's prefix. The consumer's
+# own artifact is excluded by the caller so an ID does not "register itself".
+_PRODUCED_ARTIFACT_GLOBS: tuple[str, ...] = (
+    "findings_inventory*.md",
+    "analysis_*.md",
+    "chain_*.md",
+    "chain_hypotheses.md",
+    "hypotheses.md",
+    "depth_*.md",
+    "blind_spot_*.md",
+    "niche_*.md",
+    "validation_sweep_findings.md",
+    "design_stress_findings.md",
+    "perturbation_findings.md",
+    "verify_*.md",
+    "verify_core.md",
+    "verification_queue.md",
+    "enabler_results.md",
+)
+
+
+# Ledger-OWNED minting namespaces: hypothesis / severity-group / chain / driver
+# inventory IDs. Their identity is the MINT (chain Agent 1 / inventory), so they
+# MUST trace to `_id_ledger.json` — artifact presence alone does NOT register
+# them (a stale `hypotheses.md` HM-NN from a prior attempt would otherwise
+# launder a collision). Everything else (agent-source / breadth-worker
+# namespaces like CMI-/CC-/CCT-/CR-/DEX-/TF-/...) is minted by workers the ledger
+# does not track, so artifact presence is the legitimate registration signal.
+_LEDGER_OWNED_ID_RE = re.compile(
+    r"^(?:H-\d+|H[CHMLI]-\d+|GRP-\d+|CH-\d+|INV-\d+)$",
+    re.IGNORECASE,
+)
+
+
+def _id_present_in_produced_artifact(
+    scratchpad: Path, ref: str, exclude_artifact: str | None = None
+) -> str | None:
+    """Return the name of a produced artifact that contains *ref*, or None.
+
+    Prefix-agnostic backstop for the id-ledger consumer gate: an ID-shaped
+    token that ACTUALLY APPEARS (as a whole token) in a real upstream artifact
+    is a legitimate agent-source/chain ID, not contamination — regardless of its
+    prefix. The consumer's own output (`exclude_artifact`) is skipped so a
+    self-reference cannot launder a hallucinated ID. Ledger-OWNED minting
+    namespaces (`_LEDGER_OWNED_ID_RE`) are NOT accepted via this path — they must
+    trace to the ledger so a stale artifact cannot launder a mint collision.
+    """
+    ref = (ref or "").strip().upper()
+    if not ref:
+        return None
+    if _LEDGER_OWNED_ID_RE.match(ref):
+        return None
+    token_re = re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(ref)}(?![A-Za-z0-9_-])")
+    seen: set[str] = set()
+    for pattern in _PRODUCED_ARTIFACT_GLOBS:
+        for path in sorted(scratchpad.glob(pattern)):
+            if not path.is_file():
+                continue
+            if exclude_artifact and path.name == exclude_artifact:
+                continue
+            if path.name in seen:
+                continue
+            seen.add(path.name)
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if token_re.search(text):
+                return path.name
     return None
 
 
@@ -8112,16 +8205,71 @@ def _validate_attention_repair(
     revert_only_safe_re = re.compile(r"\b(?:revert(?:s|ed|ing)?|reverted)\b", re.IGNORECASE)
     asset_pair_issues: list[str] = []
     findings_blob = "\n".join(summary_outputs[1:])
+    def _row_substantive_closure_text(row_context: str, base_blob: str) -> str:
+        """Full closure text for a row: receipt context + findings blob + any
+        escalated finding records the row references (ATT-N / INV-N / ...)."""
+        text = row_context + "\n" + base_blob
+        for ref in sorted(set(
+            m.group(0).upper()
+            for m in existing_finding_ref_re.finditer(row_context)
+        )):
+            text += "\n" + _referenced_record_text(ref)
+        return text
+
+    closure_class_kw_re = re.compile(
+        r"\b(?:EXPLICIT_EQUALITY|EXPLICIT_BINDING_CHECK|"
+        r"UNREACHABLE_PATH|IMPOSSIBLE_PAIR)\b",
+        re.IGNORECASE,
+    )
+
+    def _has_substantive_closure(closure_text: str, a: str, b: str) -> bool:
+        """A row is substantively closed when its closure text carries ANY of:
+        (1) a depth-evidence tag ([TRACE]/[VARIATION]/[BOUNDARY]),
+        (2) a SAFE_REASON:<ENUM> token,
+        (3) a bare closure-class enum keyword
+            (EXPLICIT_EQUALITY/EXPLICIT_BINDING_CHECK/UNREACHABLE_PATH/
+            IMPOSSIBLE_PAIR), or
+        (4) an explicit field-PAIR relation claim — a relation phrase that names
+            BOTH queued fields in one local claim.
+        Branches 1-3 are inherently substantive closure forms (per
+        phase5/attention-repair contract), so they do not require naming both
+        fields. Branch 4 requires the pair so that an ADJACENT single-field
+        claim (e.g. "executedAsset is not validated", which names only one side)
+        is NOT mistaken for closure. Recall-safe: a row with NONE of these is
+        treated as unclosed and still warns."""
+        if _DEPTH_EVIDENCE_TAG_RE.search(closure_text):
+            return True
+        if safe_reason_re.search(closure_text):
+            return True
+        if closure_class_kw_re.search(closure_text):
+            return True
+        return any(
+            _unit_closes_pair(unit, a, b)
+            for unit in _local_claim_units(closure_text)
+        )
+
     for row_no, (rid, field_a, field_b) in asset_binding_rows.items():
         context = receipt_context.get(row_no, "")
         combined = context + "\n" + findings_blob
         safe_reason_pair = _safe_reason_closes_pair(context, field_a, field_b)
         if re.search(r"\bSAFE\b", context, re.IGNORECASE):
-            # Accept EITHER the rigid SAFE_REASON:<ENUM> token OR a rich
-            # depth-evidence-tag closure that names both queued fields
-            # (`safe_reason_pair`, which now also recognizes [TRACE]/[VARIATION]/
-            # [BOUNDARY] closures). Tier C noise fix — fewer false soft-WARNs.
-            if not safe_reason_re.search(context) and not safe_reason_pair:
+            # Accept the rigid SAFE_REASON:<ENUM> token, a field-pair-naming
+            # depth-evidence closure (`safe_reason_pair`), OR — root noise fix —
+            # ANY substantive closure on the row (a depth-evidence tag, a
+            # SAFE_REASON token, or an explicit relation claim such as
+            # `EXPLICIT_EQUALITY confirmed` / `identical expression`). The
+            # custody/value guards below (revert/no-balance, revert-only) still
+            # apply, so this only relaxes the bare "no SAFE_REASON token" wording
+            # trap. RECALL-SAFE: a SAFE row with no closure of any kind still
+            # warns.
+            if (
+                not safe_reason_re.search(context)
+                and not safe_reason_pair
+                and not _has_substantive_closure(
+                    _row_substantive_closure_text(context, findings_blob),
+                    field_a, field_b,
+                )
+            ):
                 asset_pair_issues.append(
                     f"row {row_no} {rid} ({field_a} <-> {field_b}) marks SAFE "
                     "without SAFE_REASON:<EXPLICIT_EQUALITY|EXPLICIT_BINDING_CHECK|UNREACHABLE_PATH|IMPOSSIBLE_PAIR> "
@@ -8141,9 +8289,27 @@ def _validate_attention_repair(
                 )
                 continue
         if not _exact_pair_closed(combined, field_a, field_b):
-            asset_pair_issues.append(
-                f"row {row_no} {rid} ({field_a} <-> {field_b}) lacks exact field-pair closure"
-            )
+            # Root noise fix: the exact-pair matcher demands the closure
+            # literally NAME both queued field tokens in one local claim. A
+            # CONFIRMED row whose escalated finding proves the gap with a rich
+            # depth-evidence trace (e.g. `[TRACE: onCall(zrc20=USDC, ...) ->
+            # _handleEvmOrSolanaWithdraw(targetZRC20=WZETA) -> ...]`) names the
+            # CONCRETE values/symbols, not the abstract queued field labels
+            # (`context.asset`), so the literal-pair match misses even though
+            # the row is substantively closed. Accept ANY substantive closure
+            # on the row — a depth-evidence tag ([TRACE]/[VARIATION]/[BOUNDARY]),
+            # a SAFE_REASON token, OR an explicit field-pair relation claim — as
+            # sufficient to suppress this soft WARN. This is prose-quality
+            # judgment on an enrichment phase, so over-strict wording must not
+            # warn. RECALL-SAFE: a row with NONE of these (no tag, no
+            # SAFE_REASON, no relation claim anywhere in its closure context)
+            # STILL warns — the check is not made vacuous.
+            closure_text = _row_substantive_closure_text(context, findings_blob)
+            if not _has_substantive_closure(closure_text, field_a, field_b):
+                asset_pair_issues.append(
+                    f"row {row_no} {rid} ({field_a} <-> {field_b}) lacks any substantive closure "
+                    "(no field-pair claim, SAFE_REASON, or depth-evidence tag)"
+                )
     if asset_pair_issues:
         # Prose-quality judgment of how the agent worded a SAFE justification
         # ("vague or adjacent", revert/no-balance wording, field-pair closure
@@ -17712,6 +17878,45 @@ def _valid_poc_skip(content: str, poc_class: str) -> bool:
     return True
 
 
+def _effective_poc_class(
+    queue_class: str, content: Optional[str] = None
+) -> str:
+    """Resolve the effective PoC class, honoring a verifier reclassification.
+
+    The queue `poc class` is an LLM estimate derived from the finding TITLE
+    before the code was read. Per `~/.plamen/rules/phase5-poc-execution.md` the
+    verifier MAY non-silently reclassify the finding and DECLARE the corrected
+    class as a `PoC Class:` ledger field in its own `verify_<id>.md` output.
+
+    When the verifier reclassified AWAY from a locally-testable class
+    (to `structural`/`integration`/`spec`/`docs`), that declared class is
+    authoritative — otherwise the queue's stale unit/property estimate forces a
+    PoC the verifier already (correctly) showed is the wrong test class.
+
+    Recall-safe / anti-gaming: a ledger that leaves the declared class at
+    unit/property (or omits it) NEVER relaxes below the queue estimate — a
+    silent leave-testable still requires the PoC. This helper can ONLY move a
+    testable queue class to a non-testable declared class, never the reverse.
+
+    Read via the shared `_field_anywhere` tolerant extractor (table-cell / bold
+    / bullet / colon forms) with a LEADING-TOKEN match so the justification text
+    the prompt asks for (`PoC Class: structural  (queue said property; ...)`) is
+    honored.
+    """
+    poc_class = (queue_class or "structural").strip().lower()
+    if not content:
+        return poc_class
+    declared_raw, _shape = _field_anywhere(
+        content, ("PoC Class", "Poc Class"), table_ok=True
+    )
+    m_decl = re.match(r"\s*([A-Za-z_]+)", declared_raw or "")
+    if m_decl:
+        declared = m_decl.group(1).lower()
+        if declared in {"structural", "integration", "spec", "docs"}:
+            return declared
+    return poc_class
+
+
 def _poc_contract_required(
     row: dict[str, str], mode: str, content: Optional[str] = None
 ) -> bool:
@@ -17735,19 +17940,11 @@ def _poc_contract_required(
     requirement (anti-gaming floor preserved — silently leaving it testable
     still requires the PoC).
     """
-    poc_class = (row.get("poc class") or "structural").strip().lower()
-    if content:
-        declared_raw, _shape = _field_anywhere(
-            content, ("PoC Class", "Poc Class"), table_ok=True
-        )
-        m_decl = re.match(r"\s*([A-Za-z_]+)", declared_raw or "")
-        if m_decl:
-            declared = m_decl.group(1).lower()
-            # Only a reclassification AWAY from a locally-testable class relaxes
-            # the requirement; a declared unit/property never tightens or
-            # loosens beyond the queue estimate (recall-safe).
-            if declared in {"structural", "integration", "spec", "docs"}:
-                poc_class = declared
+    # Effective class honors a verifier's non-silent reclassification AWAY from
+    # a locally-testable class (recall-safe: never relaxes below queue estimate
+    # for a declared unit/property/omitted ledger). Shared with the aggregate
+    # skip-vocabulary audit so both gates agree on the authoritative class.
+    poc_class = _effective_poc_class(row.get("poc class") or "", content)
     if poc_class not in {"unit", "property"}:
         return False
     mode_l = (mode or "core").lower()
@@ -17909,18 +18106,16 @@ def _validate_poc_attempt_coverage(scratchpad: Path, mode: str) -> list[str]:
 
     warnings: list[str] = []
     for row in rows:
-        poc_class = row.get("poc class", "structural").strip().lower()
+        queue_class = row.get("poc class", "structural").strip().lower()
         severity = (row.get("severity") or "").strip().lower()
         fid = row.get("finding id", "")
 
-        if mode == "core":
-            if poc_class not in ("unit", "property"):
-                continue
-            if severity not in ("critical", "high", "medium"):
-                continue
-        else:  # thorough
-            if poc_class not in ("unit", "property"):
-                continue
+        # First-pass cheap gate on the QUEUE class (no I/O): if not even the
+        # queue estimate makes this testable, skip without reading the file.
+        if queue_class not in ("unit", "property"):
+            continue
+        if mode == "core" and severity not in ("critical", "high", "medium"):
+            continue
 
         verify_path = _find_verify_file(scratchpad, fid)
         if not verify_path:
@@ -17929,6 +18124,21 @@ def _validate_poc_attempt_coverage(scratchpad: Path, mode: str) -> list[str]:
         try:
             content = verify_path.read_text(encoding="utf-8", errors="replace")
         except Exception:
+            continue
+
+        # Second-pass gate using the verifier's DECLARED `PoC Class:` ledger
+        # field. When the verifier non-silently reclassified this finding to a
+        # non-testable class (structural/integration/spec/docs), the
+        # unit/property attempt expectation no longer applies — flagging it
+        # "Attempted: NO without structural justification" is a FALSE warning
+        # (the verifier DID justify, via the reclassification). Parity with the
+        # hard `_poc_contract_required` gate; shared `_effective_poc_class`
+        # keeps both gates' class resolution identical. Anti-gaming floor
+        # preserved: a ledger left at unit/property (or omitted) does NOT relax,
+        # so a genuine unit/property finding with no reclassification + invalid
+        # skip STILL warns below.
+        poc_class = _effective_poc_class(queue_class, content)
+        if poc_class not in ("unit", "property"):
             continue
 
         _attempt_sec, _exec_sec = _has_poc_ledger_sections(content)
