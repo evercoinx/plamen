@@ -22,18 +22,26 @@ Read:
 - {SCRATCHPAD}/verify_core.md — **OPTIONAL but primary when present**. Both current SC and L1 pipelines normally produce this via the verification aggregate phase. When absent, enumerate `verify_*.md` files directly and derive the per-hypothesis verdicts from them. Do NOT fail the phase on its absence.
 - {SCRATCHPAD}/rag_validation.md (historical support / contradiction)
 - {SCRATCHPAD}/finding_mapping.md (hypothesis → agent finding mapping)
+- {SCRATCHPAD}/verification_queue.md (the bounded per-hypothesis view — coverage source)
+- {SCRATCHPAD}/severity_binding.md (driver-computed expected severity per finding)
+- {SCRATCHPAD}/report_index_coverage_seed.md (OPTIONAL but PRIMARY for completeness when present — the driver-enumerated ID list of EVERY finding/hypothesis with its source verdict, expected tier, mapped hypothesis, and dedup absorbed→survivor relation. This is the mechanical completeness backbone for STEP 5/5.5 — enumerate the full ID set from here, NOT from the raw inventory.)
+- {SCRATCHPAD}/candidate_semantic_facets.md (compact preservation ledger for merges/deferred rows)
 - {SCRATCHPAD}/contract_inventory.md (component list for report header)
-- {SCRATCHPAD}/findings_inventory.md (complete agent finding inventory)
 - {SCRATCHPAD}/recon_summary.md (audit themes and risk areas)
 - {SCRATCHPAD}/template_recommendations.md (recommended niche/analysis lanes)
+- The index is a MAPPING task over BOUNDED ledgers. `findings_inventory.md`,
+  `hypotheses.md`, and the raw `depth_*` / `blind_spot_*` / `scanner_*` /
+  `validation_sweep_*` artifacts are **fallback-only, single-finding,
+  on-demand** reads — open a single finding's block ONLY when a bounded ledger
+  leaves THAT finding ambiguous. Do NOT bulk-read `findings_inventory.md` or
+  `hypotheses.md` in full; the full inventory can be 100K+ of finding prose and
+  pulling it into one turn is the context-collapse trigger this scope prevents.
+  This is now enforced by the driver scope override.
 - If `verify_core.md` exists and already provides the needed status, do NOT open
   `finding_mapping.md`, raw depth findings, or scanner findings up front.
   Treat those as fallback-only inputs for missing detail, not default reads.
   If `verify_core.md` is absent, read `verify_*.md` files directly
   — each contains its own hypothesis ID and verdict header.
-- {SCRATCHPAD}/depth_*_findings.md (raw depth findings and chain summaries)
-- {SCRATCHPAD}/blind_spot_*_findings.md or {SCRATCHPAD}/scanner_*_findings.md (scanner findings)
-- {SCRATCHPAD}/validation_sweep_findings.md or {SCRATCHPAD}/scanner_validation_findings.md (validation findings)
 - {SCRATCHPAD}/dedup_candidate_pairs.md (OPTIONAL — pre-computed same-file finding pairs with high title overlap or shared code identifiers, produced by the depth promotion pipeline. Use these pairs as HINTS for Step 1.5 consolidation — each pair is a candidate for merging, not a mandate.)
 - {SCRATCHPAD}/poc_demotions.md (OPTIONAL — mechanically-computed severity caps for findings where PoC execution disproved the claimed harm. If present, apply caps in STEP 1 rule 7.)
 
@@ -215,8 +223,14 @@ Example: If chain hypothesis CH-1 (now C-01) references standalone hypothesis H-
 
 ### STEP 5: Verify Completeness (MANDATORY)
 
-Cross-check: For EVERY hypothesis in hypotheses.md AND every standalone finding
-([VS-*], [BLIND-*], [SE-*], [EN-*], [SLITHER-*]) in findings_inventory.md:
+Enumerate the full ID set from `report_index_coverage_seed.md` when present (it
+already lists EVERY finding/hypothesis ID with its source). When the seed is
+absent, derive the full ID set from `verification_queue.md` + `verify_core.md` +
+`finding_mapping.md` — these bounded sources contain every hypothesis and every
+standalone finding ([VS-*], [BLIND-*], [SE-*], [EN-*], [SLITHER-*]) ID. Do NOT
+re-derive the ID set by bulk-reading `hypotheses.md` or `findings_inventory.md`.
+
+Cross-check: For EVERY ID in that bounded set:
 - Is it assigned a report ID in the Master Finding Index above?
 - If NO and NOT marked FALSE_POSITIVE by a verifier → ASSIGN a report ID and tier
 

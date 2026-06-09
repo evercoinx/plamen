@@ -161,6 +161,26 @@ def test_status_row_example_parses_with_real_regex(text):
         )
 
 
+def test_sc_does_not_read_full_inventory(text):
+    """D1: the SC dedup agent must NOT read findings_inventory.md (context bomb);
+    the bounded focus inventory carries every body it needs."""
+    n = _norm(text)
+    assert "do not read" in n and "findings_inventory.md" in n
+    # the focus inventory is the judging source
+    assert "focus inventory" in n
+
+
+def test_sc_output_is_driver_applied_decisions_only(text):
+    """D1/D2: the agent writes decisions only; the driver builds the deduped
+    inventory mechanically from those decisions."""
+    n = _norm(text)
+    assert "driver-applied" in n or "driver mechanically builds" in n
+    # the agent does NOT write findings_inventory_deduped.md by hand
+    assert "you do not write or edit `findings_inventory_deduped.md`" in n or \
+        "you do not write `findings_inventory_deduped.md`" in n or \
+        "driver mechanically builds it from your" in n
+
+
 def test_status_row_example_heading_parses_with_real_regex(text):
     """The example MERGE heading must parse with the SAME regex
     plamen_validators._collect_semantic_dedup_acknowledged_ids uses."""

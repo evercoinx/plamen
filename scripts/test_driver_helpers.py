@@ -2115,11 +2115,18 @@ def test_A3_semantic_dedup_prompt_is_fail_open_and_bounded():
         plamen_home() / "prompts" / "shared" / "v2" /
         "phase4e-semantic-dedup.md"
     ).read_text(encoding="utf-8")
-    check("A3 semantic dedup prompt writes passthrough first",
+    # D1: the SC agent emits decisions-only and the driver builds the deduped
+    # inventory. The crash-safety stub the agent writes FIRST is now the
+    # decisions stub (IN_PROGRESS_PASSTHROUGH_WRITTEN); the L1 queue copy
+    # remains. The SC `findings_inventory.md` -> deduped copy moved to the
+    # driver (pre-run passthrough safety net), so the agent no longer performs
+    # it (avoiding the full-inventory read/rewrite context bomb).
+    check("A3 semantic dedup prompt writes decisions stub first",
           "Mandatory First Action" in prompt
-          and "copy `{SCRATCHPAD}/findings_inventory.md`" in prompt
-          and "IN_PROGRESS_PASSTHROUGH_WRITTEN" in prompt,
-          prompt[:1000])
+          and "IN_PROGRESS_PASSTHROUGH_WRITTEN" in prompt
+          and "copy `{SCRATCHPAD}/verification_queue.md`" in prompt
+          and "do NOT read `{SCRATCHPAD}/findings_inventory.md`" in prompt,
+          prompt[:1200])
     check("A3 semantic dedup prompt forbids global expansion",
           "Do NOT read or expand" in prompt
           and "Evaluate ONLY the candidate rows" in prompt

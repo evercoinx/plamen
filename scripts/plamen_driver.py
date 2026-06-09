@@ -40,6 +40,7 @@ from plamen_mechanical import _extract_dedup_absorbed_ids  # noqa: F401
 import plamen_display as display
 from pty_exec import (
     SUBPROCESS_ISOLATION_PAYLOAD,
+    _CONTEXT_THRASH_LOOP_S,
     ClaudePtySession,
     append_claude_pty_prompt_arg,
     event_is_overloaded,
@@ -3407,6 +3408,141 @@ def _write_dedup_absorbed_map(
     return n
 
 
+# Column 1 = source finding ID, column 2 = mapped hypothesis ID. The hypothesis
+# column is NOT restricted to ``H-``/``CH-`` — real pipelines emit severity-
+# prefixed hypothesis IDs (``HC-01``, ``HH-01``, ``HM-01``, ``HL-``, ``HI-``,
+# ``CH-``). Accepting any ``<PREFIX>-<num>`` token here is RECALL-SAFE for the
+# coverage seed: it only ever ADDS the column-1 source IDs to the superset (a
+# narrower pattern silently dropped every INV-* source ID whenever the
+# hypothesis prefix was multi-letter, which is the common case).
+# Finding-mapping rows are `| <source-id> | <hypothesis-id> |`. IDs span many
+# formats across modes: SC `INV-041`/`H-22`/`CH-1`/`HL-05`, and L1
+# severity-encoded `H-C01`/`H-M27`/`L1-H-12`. A `[A-Za-z]+-\d+` pattern silently
+# DROPS the severity-encoded L1 forms (digits not immediately after the dash) →
+# coverage-seed under-counts an L1 report. Match the general ID shape instead:
+# starts with a letter, contains at least one dash, ends with a digit (so any
+# letter/number-segmented ID is captured), per feedback_id_regex_catalog
+# (catalog ALL formats; permissive capture, not prefix enumeration).
+_FINDING_MAPPING_ROW_RE = re.compile(
+    r"^\|\s*([A-Za-z][A-Za-z0-9-]*\d)\s*\|\s*([A-Za-z][A-Za-z0-9-]*\d)\s*\|",
+    re.MULTILINE,
+)
+
+
+def _write_report_index_coverage_seed(scratchpad: Path) -> int:
+    """Write the driver-owned ``report_index_coverage_seed.md``.
+
+    This is the mechanical completeness backbone for the report_index phase. It
+    enumerates EVERY finding/hypothesis ID from BOUNDED, driver-written ledgers
+    (the verification queue + computed severities, the dedup absorbed->survivor
+    map, and finding_mapping) so the Index Agent never has to re-derive the ID
+    set by bulk-reading the 100K+ ``findings_inventory.md`` — the exact context
+    -collapse trigger this artifact exists to remove.
+
+    Recall-safety: the seed is a SUPERSET — it lists every ID present in any of
+    the bounded sources. Coverage/completeness is still enforced by the existing
+    Step 6a.1 gate (``hypothesis_count == report_ids + excluded + consolidated``)
+    and STEP 5.5 ledger, which now run over a bounded ID list rather than over
+    finding prose. Returns the number of seed rows written.
+    """
+    scratchpad = Path(scratchpad)
+
+    # 1. Per-finding expected severity from the bounded verification queue.
+    try:
+        sev_map = _expected_report_index_severities(scratchpad)
+    except Exception:
+        sev_map = {}
+
+    # 2. Per-finding verdict + mapped hypothesis from the verification queue.
+    verdict_map: dict[str, str] = {}
+    try:
+        for row in parse_verification_queue_rows(scratchpad):
+            fid = (row.get("finding id") or "").strip().upper()
+            if not fid:
+                continue
+            verdict_map[fid] = (
+                row.get("verdict")
+                or row.get("status")
+                or row.get("preferred verification")
+                or ""
+            ).strip()
+    except Exception:
+        pass
+
+    # 3. finding_id -> hypothesis_id from finding_mapping.md (bounded).
+    hyp_map: dict[str, str] = {}
+    try:
+        fm_path = scratchpad / "finding_mapping.md"
+        if fm_path.is_file():
+            fm_text = fm_path.read_text(encoding="utf-8", errors="replace")
+            for m in _FINDING_MAPPING_ROW_RE.finditer(fm_text):
+                hyp_map.setdefault(
+                    m.group(1).strip().upper(), m.group(2).strip().upper()
+                )
+    except Exception:
+        pass
+
+    # 4. absorbed -> survivor relations from the dedup decisions (bounded).
+    try:
+        absorbed_map = _dedup_absorbed_survivor_mapping(scratchpad)
+    except Exception:
+        absorbed_map = {}
+
+    # Union of every ID that appears in any bounded source. This is the
+    # authoritative completeness set — a SUPERSET, never a filtered subset.
+    all_ids: set[str] = set()
+    all_ids.update(sev_map.keys())
+    all_ids.update(verdict_map.keys())
+    all_ids.update(hyp_map.keys())
+    for absorbed, info in absorbed_map.items():
+        all_ids.add(absorbed)
+        surv = (info or {}).get("survivor", "")
+        if surv:
+            all_ids.add(surv.upper())
+
+    lines = [
+        "# Report Index Coverage Seed",
+        "",
+        "**Status**: DRIVER_ENUMERATED",
+        "",
+        "Driver-enumerated ID list of EVERY finding/hypothesis from bounded "
+        "ledgers (verification queue, severity binding, finding_mapping, dedup "
+        "absorbed map). The Index Agent MUST account for every ID below in the "
+        "Master Finding Index or the Excluded Findings / Consolidation Map. "
+        "This is the mechanical completeness backbone — enumerate the full ID "
+        "set from HERE, not by bulk-reading findings_inventory.md.",
+        "",
+        "| Finding/Hyp ID | Expected Severity | Verdict | Mapped Hypothesis | Dedup Relation |",
+        "|----------------|-------------------|---------|-------------------|----------------|",
+    ]
+    n = 0
+    for fid in sorted(all_ids, key=lambda x: x.upper()):
+        sev = sev_map.get(fid, "")
+        verdict = verdict_map.get(fid, "")
+        hyp = hyp_map.get(fid, "")
+        relation = ""
+        if fid in absorbed_map:
+            surv = (absorbed_map[fid] or {}).get("survivor", "")
+            relation = f"ABSORBED into {surv}" if surv else ""
+        else:
+            absorbed_into_this = [
+                a for a, info in absorbed_map.items()
+                if (info or {}).get("survivor", "").upper() == fid
+            ]
+            if absorbed_into_this:
+                relation = "SURVIVOR of " + ",".join(sorted(absorbed_into_this))
+        lines.append(
+            f"| {fid} | {sev} | {verdict} | {hyp} | {relation} |"
+        )
+        n += 1
+    if n == 0:
+        lines.append("| (none) | | | | no bounded IDs found |")
+    (scratchpad / "report_index_coverage_seed.md").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+    return n
+
+
 def _propagate_dedup_absorbed_to_finding_mapping(scratchpad: Path) -> int:
     """Record dedup-absorbed IDs as constituents of their survivor's hypothesis.
 
@@ -5057,6 +5193,22 @@ def _run_supervised_pty_loop(
 
         if state.rate_limited:
             return 1, session
+
+        # Ship 8.17: context-overflow / autocompact-thrash fast-fail. The wait
+        # loop returned early (instead of burning the full deadline) because
+        # the turn was emitting compaction churn with zero forward progress for
+        # >= _CONTEXT_THRASH_LOOP_S. This is NOT a new halt: we simply let the
+        # existing gate + missing-only / whole-phase recovery below take over
+        # immediately, exactly as on a timeout. If the gate happens to have
+        # passed (work landed on disk before thrash), the gate_passed branch
+        # below returns 0 unchanged. Diagnostic WARNING, emitted at most once.
+        if getattr(state, "context_thrash", False):
+            log.warning(
+                f"[{phase.name}] context-overflow thrash detected after "
+                f"~{int(_CONTEXT_THRASH_LOOP_S)}s with no new productive "
+                f"output; abandoning this turn and recovering missing rows "
+                f"instead of waiting the full {timeout}s timeout"
+            )
 
         # Run the in-session gate.
         try:
@@ -11567,6 +11719,15 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
                             f"the full {timeout}s"
                         )
                         rc = 0
+                    elif getattr(state, "context_thrash", False):
+                        log.warning(
+                            f"[{phase.name}] context-overflow thrash detected "
+                            f"after ~{int(_CONTEXT_THRASH_LOOP_S)}s with no new "
+                            f"productive output; accepting current artifacts and "
+                            f"letting the disk gate decide instead of waiting "
+                            f"the full {timeout}s"
+                        )
+                        rc = 0
                     else:
                         log.warning(
                             f"[{phase.name}] timed out after {timeout}s"
@@ -12904,6 +13065,29 @@ def _run_phase_validators(
                 "incomplete after mechanical repair; continuing "
                 "warning-only to avoid dropping findings or spending a "
                 "full phase retry"
+            )
+
+    # --- decisions-as-delta: build the deduped artifact from the LLM's own
+    #     MERGE/GROUP decisions (faithful path). The dedup agent now emits ONLY
+    #     dedup_decisions.md; the driver mechanically couples + removes via the
+    #     shared engine so the survivor-superset coupling + zero-data-loss are
+    #     enforced on the LLM's choices, identically to the mechanical fallback.
+    #     If decisions are PASSTHROUGH/empty, this is a no-op and the pre-run
+    #     passthrough copy of the deduped artifact remains as the recall-safe
+    #     floor (the supplemental/fallback paths below still apply). ---
+    if phase.name in ("semantic_dedup", "sc_semantic_dedup") and passed:
+        try:
+            n_llm = apply_llm_dedup_decisions(scratchpad, phase.name)
+            if n_llm > 0:
+                log.info(
+                    f"[{phase.name}] driver applied {n_llm} LLM MERGE "
+                    "decision(s) into the deduped artifact (survivor coupling "
+                    "+ zero-data-loss enforced mechanically)"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] LLM-decision apply failed (non-blocking; "
+                f"passthrough/fallback remains the floor): {exc}"
             )
 
     # --- sc_semantic_dedup (SC): swap deduped inventory before chain analysis ---
@@ -15512,6 +15696,24 @@ def main():
                     )
             except Exception as exc:
                 log.warning(f"[report_index] severity binding failed: {exc!r}")
+
+            # R2: mechanical completeness backbone. Enumerate every finding/
+            # hypothesis ID from bounded ledgers so the Index Agent never has
+            # to bulk-read the 100K+ findings_inventory.md to recover the ID
+            # set. Coverage stays guaranteed by the existing 6a.1 gate over
+            # this bounded list. Best-effort: a failure here only loses the
+            # convenience seed (the LLM falls back to the bounded sources it
+            # already reads), never a finding.
+            try:
+                seed_rows = _write_report_index_coverage_seed(scratchpad)
+                log.info(
+                    f"[report_index] wrote report_index_coverage_seed.md "
+                    f"({seed_rows} ID row(s))"
+                )
+            except Exception as exc:
+                log.warning(
+                    f"[report_index] coverage seed write failed: {exc!r}"
+                )
 
         if config["pipeline"] == "sc" and phase.name == "report_index":
             repaired = _repair_sc_report_index_from_prior(scratchpad)

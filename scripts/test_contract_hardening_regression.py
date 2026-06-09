@@ -819,10 +819,18 @@ def test_semantic_dedup_prompt_requires_physical_passthrough_writes() -> None:
         encoding="utf-8"
     )
 
-    assert "physically create safe passthrough outputs on disk" in shared
+    # D1: agent emits decisions-only; it must still PHYSICALLY write the
+    # decisions stub on disk (not merely summarize) so a timeout retains the
+    # upstream artifact unchanged.
+    assert "physically create the decisions stub on disk" in shared
     assert "Do not merely return a summary" in shared
     assert "Only return `DONE` after `dedup_decisions.md`" in shared
+    # D1: the agent no longer reads/rewrites the full inventory (context bomb).
+    assert "do NOT read `{SCRATCHPAD}/findings_inventory.md`" in shared
+    # The driver retains the crash-safety pre-run passthrough copy AND now
+    # builds the deduped artifact from the LLM's decisions (D2).
     assert "pre-run passthrough safety net" in driver
+    assert "apply_llm_dedup_decisions" in driver
 
 
 def test_chain_prompt_requires_physical_handoff_writes() -> None:

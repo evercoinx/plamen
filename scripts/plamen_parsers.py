@@ -4545,9 +4545,21 @@ def _dedup_live_pair_cap() -> int:
 _DEDUP_LIVE_PAIR_CAP_DEFAULT = 50
 
 # Keep chunk == cap so len(live_pairs) <= _DEDUP_ROUND_CHUNK is ALWAYS true ->
-# exactly ONE round of <= cap pairs reaches the single subprocess. Until the
-# dedup phase re-invokes one subprocess PER round, multi-round-in-one-turn must
-# never happen.
+# exactly ONE round of <= cap pairs reaches the single subprocess, and EVERY
+# live pair is per-pair LLM-judged in that one round (no orphaned rounds that
+# only the mechanical supplemental fallback would touch). The dedup phase does
+# NOT (yet) re-invoke one subprocess PER round, so multi-round-in-one-turn must
+# never happen — chunk < cap would strand rounds 2..N unjudged by the LLM.
+#
+# The real per-turn context pressure was NOT the ~50 focus-inventory bodies; it
+# was the SC override forcing the agent to READ the full findings_inventory.md
+# AND REWRITE it verbatim into findings_inventory_deduped.md in the same turn.
+# That read+rewrite of the whole inventory is now removed: the agent emits
+# decisions-only (dedup_decisions.md) and the driver mechanically builds the
+# deduped inventory via plamen_mechanical.apply_llm_dedup_decisions. With the
+# inventory rewrite gone and only the BOUNDED per-round focus packet read, 50
+# per-pair judgements fit comfortably in one turn. Per-round SEPARATE
+# subprocesses would let this go higher without overflow (future work).
 _DEDUP_ROUND_CHUNK = 50
 
 # Findings whose depth source-ID set exceeds this threshold are treated as

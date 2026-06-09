@@ -35,6 +35,9 @@ __all__ = [
     "_ATTENTION_REPAIR_MAX_ITEMS",
     "_apply_location_recovery",
     "_apply_mechanical_dedup_from_pairs",
+    "_apply_merges_to_inventory",
+    "apply_llm_dedup_decisions",
+    "_stamp_dedup_group_note",
     "_dedup_parse_finding_info",
     "_dedup_survivor_superset_ok",
     "_resolve_dedup_survivor",
@@ -5000,12 +5003,39 @@ def _apply_mechanical_dedup_from_pairs(
     if not read_path.exists():
         return len(final_merges)
 
+    _apply_merges_to_inventory(read_path, target, final_merges, finfo)
+
+    return len(final_merges)
+
+
+def _apply_merges_to_inventory(
+    read_path: Path,
+    target: Path,
+    final_merges: list[tuple[str, str, str]],
+    finfo: dict[str, dict],
+) -> int:
+    """Apply MERGE decisions to a findings inventory / verification queue.
+
+    Shared ZERO-DATA-LOSS coupling+removal engine used by BOTH the mechanical
+    fallback path (``_apply_mechanical_dedup_from_pairs``) and the faithful
+    LLM-decisions path (``apply_llm_dedup_decisions``). For each merge:
+
+      1. COUPLE the absorbed finding's distinct Location / Impact /
+         Recommendation / union Source IDs / higher Severity / strongest
+         evidence into the SURVIVOR (block for SC, row for L1).
+      2. THEN remove the absorbed block / row.
+
+    ``read_path`` is the source inventory/queue to start from; the result is
+    written to ``target`` (they may be the same file for in-place edits).
+    ``final_merges`` is a list of ``(absorbed_id, survivor_id, signal)`` tuples;
+    the survivor-superset gate is the caller's responsibility (the mechanical
+    path runs ``_resolve_dedup_survivor`` first, the LLM path trusts the
+    agent's flipped direction recorded in ``dedup_decisions.md``). Returns the
+    number of merges applied.
+    """
+    if not read_path.exists():
+        return 0
     body = read_path.read_text(encoding="utf-8", errors="replace")
-    # ZERO-DATA-LOSS coupling + removal. For each merge:
-    #   1. COUPLE the absorbed finding's distinct Location / Impact /
-    #      Recommendation / union Source IDs / higher Severity / strongest
-    #      evidence into the SURVIVOR (block for SC, row for L1).
-    #   2. THEN remove the absorbed block / row.
     absorbed_to_keep = {absorb: keep for absorb, keep, _ in final_merges}
     absorbed_ids = set(absorbed_to_keep.keys())
 
@@ -5093,6 +5123,190 @@ def _apply_mechanical_dedup_from_pairs(
     if not deduped.endswith("\n"):
         deduped += "\n"
     target.write_text(deduped, encoding="utf-8")
+    return len(final_merges)
+
+
+# ── GROUP-note stamping for the LLM-decisions apply path ──
+_DEDUP_GROUP_NOTE_RE = re.compile(r"\*\*Dedup Group\*\*:", re.IGNORECASE)
+
+
+def _stamp_dedup_group_note(
+    inv_path: Path, representative_id: str, member_ids: list[str]
+) -> int:
+    """Stamp a ``**Dedup Group**:`` note onto non-representative member blocks.
+
+    GROUP keeps every member block visible (no removal); the non-representative
+    members inherit verification/reporting from the representative. Idempotent:
+    a member already carrying a Dedup Group note is left unchanged. Returns the
+    number of member blocks stamped.
+    """
+    if not inv_path.exists() or not member_ids:
+        return 0
+    body = inv_path.read_text(encoding="utf-8", errors="replace")
+    members = {m for m in member_ids if m and m != representative_id}
+    if not members:
+        return 0
+    stamped = 0
+
+    def _stamp(match: re.Match) -> str:
+        nonlocal stamped
+        block = match.group(0)
+        fid = match.group(1)
+        if fid not in members:
+            return block
+        if _DEDUP_GROUP_NOTE_RE.search(block):
+            return block
+        note = (
+            f"\n**Dedup Group**: inherits verification from "
+            f"{representative_id}\n"
+        )
+        trailing = block[len(block.rstrip()):]
+        stamped += 1
+        return block.rstrip() + note + trailing
+
+    body = re.sub(
+        r"#{2,4}\s+(?:Finding\s+)?\[((?:INV|F)-\d+)\]:?[^\n]*\n"
+        r"(?:(?!#{2,4}\s+(?:Finding\s+)?\[(?:INV|F)-).*\n?)*",
+        _stamp,
+        body,
+    )
+    if stamped:
+        if not body.endswith("\n"):
+            body += "\n"
+        inv_path.write_text(body, encoding="utf-8")
+    return stamped
+
+
+def apply_llm_dedup_decisions(scratchpad: Path, phase_name: str) -> int:
+    """Build the deduped inventory/queue from LLM-authored dedup decisions.
+
+    Faithful (non-fallback) path: the dedup agent emits ONLY ``dedup_decisions.md``
+    (decisions-as-delta); the driver mechanically produces the deduped artifact
+    so the survivor-superset coupling + aggregate guard + zero-data-loss
+    coupling are enforced on the LLM's own MERGE choices — identically to the
+    mechanical fallback. The LLM never rewrites the whole inventory verbatim.
+
+    Parses ``dedup_decisions.md`` for:
+      - ``| {absorbed} | MERGED into {survivor} | ... |`` status rows AND/OR
+        ``### MERGE: {survivor} absorbs {absorbed}`` headings (MERGE pairs).
+      - ``### GROUP: {representative} represents {member_ids}`` headings, which
+        keep both blocks and stamp a ``**Dedup Group**:`` note.
+
+    The survivor direction is taken from the LLM decision as authored (the agent
+    already applied the survivor-superset gate / flip per the prompt). The
+    coupling+removal is applied by the shared ``_apply_merges_to_inventory``
+    engine so no distinct content is lost. Returns the number of MERGE
+    decisions applied. Does nothing (returns 0) when no real MERGE/GROUP rows
+    exist (e.g. a passthrough stub), leaving any prewritten passthrough copy in
+    place as the recall-safe floor.
+    """
+    scratchpad = Path(scratchpad)
+    dec_path = scratchpad / "dedup_decisions.md"
+    if not dec_path.is_file():
+        return 0
+    try:
+        text = dec_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return 0
+
+    # Source + target artifacts per pipeline.
+    if phase_name == "semantic_dedup":
+        source = scratchpad / "verification_queue.md"
+        target = scratchpad / "verification_queue_deduped.md"
+    elif phase_name == "sc_semantic_dedup":
+        source = scratchpad / "findings_inventory.md"
+        target = scratchpad / "findings_inventory_deduped.md"
+    else:
+        return 0
+    if not source.exists():
+        return 0
+
+    # Parse per-finding info for coupling (severity / source IDs / location /
+    # kind). Same parser the mechanical path uses.
+    finfo: dict[str, dict] = {}
+    try:
+        finfo = _dedup_parse_finding_info(
+            source.read_text(encoding="utf-8", errors="replace")
+        )
+    except Exception:
+        finfo = {}
+
+    # --- Parse MERGE pairs (absorbed -> survivor) from BOTH the status rows
+    #     and the headings; union them so a decision recorded in either form is
+    #     honored. ---
+    merge_dir: dict[str, str] = {}  # absorbed -> survivor
+    for m in re.finditer(
+        r"^\|\s*\[?([A-Za-z]+-\d+)\]?\s*\|\s*MERGED\s+into\s+\[?([A-Za-z]+-\d+)\]?",
+        text,
+        re.MULTILINE | re.IGNORECASE,
+    ):
+        absorbed = m.group(1).strip().upper()
+        survivor = m.group(2).strip().upper()
+        if absorbed and survivor and absorbed != survivor:
+            merge_dir.setdefault(absorbed, survivor)
+    for m in re.finditer(
+        r"(?im)^\s*#{2,6}\s+MERGE:\s+\[?([A-Za-z]+-\d+)\]?\s+absorbs\s+\[?([A-Za-z]+-\d+)\]?",
+        text,
+    ):
+        survivor = m.group(1).strip().upper()
+        absorbed = m.group(2).strip().upper()
+        if absorbed and survivor and absorbed != survivor:
+            merge_dir.setdefault(absorbed, survivor)
+
+    # Normalize finfo keys to upper for lookup parity with parsed IDs.
+    finfo = {k.upper(): v for k, v in finfo.items()}
+
+    # De-conflict: if a finding is recorded as absorbed AND as a survivor,
+    # prefer keeping it absorbed only if it is not itself a survivor of another
+    # merge (avoid chains collapsing a needed survivor). Drop any merge whose
+    # survivor is itself absorbed elsewhere.
+    survivors = set(merge_dir.values())
+    final_merges: list[tuple[str, str, str]] = []
+    seen_absorbed: set[str] = set()
+    for absorbed, survivor in merge_dir.items():
+        if absorbed in survivors:
+            # absorbed is a survivor of another merge — skip to avoid losing it
+            continue
+        if absorbed in seen_absorbed:
+            continue
+        seen_absorbed.add(absorbed)
+        final_merges.append((absorbed, survivor, "llm-decision"))
+
+    # --- GROUP decisions: keep all member blocks, stamp the note (applied to
+    #     the deduped artifact below, after MERGEs, SC block-form only) ---
+    # If there are no real decisions, leave any prewritten passthrough in place.
+    has_group = bool(
+        re.search(r"(?im)^\s*#{2,6}\s+GROUP:\s+", text)
+    )
+    if not final_merges and not has_group:
+        return 0
+
+    # Build the deduped artifact: start from a copy of source, then apply merges.
+    try:
+        shutil.copy2(source, target)
+    except Exception:
+        # Fall back to a manual copy.
+        target.write_text(
+            source.read_text(encoding="utf-8", errors="replace"),
+            encoding="utf-8",
+        )
+
+    if final_merges:
+        _apply_merges_to_inventory(target, target, final_merges, finfo)
+
+    # Now stamp GROUP notes on the deduped artifact (SC block-form only).
+    if has_group and phase_name == "sc_semantic_dedup":
+        for m in re.finditer(
+            r"(?im)^\s*#{2,6}\s+GROUP:\s+\[?([A-Za-z]+-\d+)\]?\s+represents\s+(.+?)\s*$",
+            text,
+        ):
+            rep = m.group(1).strip().upper()
+            members = [
+                tok.strip().upper().strip("[]")
+                for tok in re.split(r"[,;\s]+", m.group(2))
+                if re.fullmatch(r"\[?[A-Za-z]+-\d+\]?", tok.strip())
+            ]
+            _stamp_dedup_group_note(target, rep, members)
 
     return len(final_merges)
 

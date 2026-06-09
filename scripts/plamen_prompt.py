@@ -2869,20 +2869,43 @@ prompt mentions other consumers of the inventory.
 Run ONLY Step 6a / 6a.1 (index generation + completeness gate). Do NOT spawn
 any tier writer or assembler in this phase.
 
-Cost discipline:
-- Read `skeptic_judge_decisions.md` first when it exists, then `verify_core.md`,
-  `findings_inventory.md`, and `rag_validation.md`
-  first.
-- Read `candidate_semantic_facets.md` when present. It is a compact
-  driver-extracted preservation ledger; use it to ensure merges/deferred rows
-  retain each candidate's mechanism, branch, field, and entrypoint facets.
-- Open individual `verify_<ID>.md` / `verify_*.md` files ONLY when `verify_core.md` leaves a
-  finding ambiguous, contested, or cross-referenced.
-- Do NOT bulk-read the entire `verify_*.md` set up front.
+Cost discipline (HARD SCOPE — the index is a MAPPING task over BOUNDED
+ledgers, not a re-read of raw finding prose):
+- Do NOT read `findings_inventory.md` or `hypotheses.md` in full, and do NOT
+  bulk-read the raw `depth_*` / `scanner_*` / `blind_spot_*` artifacts. The
+  full inventory can be 100K+ of finding bodies; pulling it into one turn is
+  the context-collapse trigger this scope exists to prevent.
+- Your AUTHORITATIVE inputs (all bounded, driver-written) are:
+  1. `skeptic_judge_decisions.md` (when present)
+  2. `verify_core.md` (per-hypothesis verdict + severity)
+  3. `severity_binding.md` (driver-computed expected severity per finding)
+  4. `verification_queue.md` (the bounded per-hypothesis view)
+  5. `finding_mapping.md` (hypothesis -> source finding mapping)
+  6. `report_index_coverage_seed.md` (when present — the driver-enumerated
+     ID list of EVERY finding/hypothesis with its source verdict, expected
+     tier, mapped hypothesis, and dedup absorbed->survivor relation; this is
+     your mechanical completeness backbone)
+  7. `candidate_semantic_facets.md` (compact preservation ledger — use it to
+     ensure merges/deferred rows retain each candidate's mechanism, branch,
+     field, and entrypoint facets)
+  8. `dedup_decisions.md` / `dedup_absorbed_map.md` / `dedup_candidate_pairs.md`
+     (consolidation hints — STEP 1.5)
+  9. `rag_validation.md`
+- Open an individual `verify_<ID>.md` or a SINGLE finding's body ONLY when one
+  of the bounded ledgers above leaves THAT finding ambiguous, contested, or
+  cross-referenced — never as a bulk scan, never the whole inventory.
+- STEP 1.5 (root-cause consolidation): drive consolidation from
+  `dedup_candidate_pairs.md` / `dedup_absorbed_map.md` / `dedup_decisions.md`
+  + `candidate_semantic_facets.md` — NOT from the raw inventory.
+- STEP 5 / 5.5 (completeness + coverage ledger): enumerate the full ID set
+  from `report_index_coverage_seed.md` (or, if absent, from
+  `verification_queue.md` + `verify_core.md` + `finding_mapping.md`). These
+  bounded sources contain every finding/hypothesis ID; the completeness gate
+  is satisfied without re-deriving the ID set from finding prose.
 - Severity authority order:
   1. `skeptic_judge_decisions.md`
   2. `verify_core.md`
-  3. `findings_inventory.md`
+  3. `severity_binding.md` / `verification_queue.md`
 
 ## CONTESTED vs UNRESOLVED (MANDATORY DISTINCTION)
 
@@ -3153,9 +3176,10 @@ RESUMPTION OVERRIDE: If `{scratchpad}/dedup_decisions.md` says `PASSTHROUGH`
 or `IN_PROGRESS_PASSTHROUGH_WRITTEN` and `dedup_candidate_pairs.md` contains
 live table rows, the semantic-dedup work is NOT complete even if output files
 already exist and are larger than 200 bytes. You MUST evaluate every live pair
-and overwrite `dedup_decisions.md` plus `findings_inventory_deduped.md` with
-real MERGE/GROUP/KEEP SEPARATE decisions. The prewritten passthrough is only a
-crash-safety net, not a completed phase result.
+and overwrite `dedup_decisions.md` with real MERGE/GROUP/KEEP SEPARATE
+decisions (the driver rebuilds `findings_inventory_deduped.md` from your
+decisions). The prewritten passthrough is only a crash-safety net, not a
+completed phase result.
 
 **SC mode**: You are deduplicating the findings INVENTORY before the next
 driver-owned consumer. This reduces pairwise compound-finding inflation
@@ -3163,20 +3187,32 @@ quadratically.
 
 Your inputs:
 1. `{scratchpad}/dedup_candidate_pairs.md` (pre-computed pairs with overlap scores)
-2. `{scratchpad}/dedup_focus_inventory.md` (if present; bounded full bodies for the live pair packet)
+2. `{scratchpad}/dedup_focus_inventory.md` (bounded full bodies for the live pair
+   packet — this carries every Location, Source IDs, Description, Impact, and
+   evidence tag you need to judge AND couple both sides of every pair)
 3. `{scratchpad}/dedup_candidate_pairs_full.md` (if present; traceability only, do not expand the live packet)
-4. `{scratchpad}/findings_inventory.md` (full inventory with [LIKELY-DUP] tags)
 
-Your outputs:
-1. `{scratchpad}/dedup_decisions.md` (merge/keep decisions with rationale)
-2. `{scratchpad}/findings_inventory_deduped.md` (deduped inventory)
+Do NOT read `{scratchpad}/findings_inventory.md`. The focus inventory above
+carries every body you need to judge and couple a pair. Reading the full
+inventory is the context-collapse trigger this phase deliberately avoids.
 
-**Output format for findings_inventory_deduped.md**: Same format as
-findings_inventory.md. Copy all surviving findings verbatim. For merged
-findings, update the survivor's Location and Recommendation to cover absorbed
-findings' sites. Omit absorbed findings entirely.
+Your output:
+1. `{scratchpad}/dedup_decisions.md` (merge/keep/group decisions with rationale,
+   including the parser-critical `### MERGE: {{survivor}} absorbs {{absorbed}}`
+   headings and `| {{absorbed}} | MERGED into {{survivor}} | ... |` status rows
+   plus the per-MERGE survivor-coupling prose — see the phase4e §Output Contract
+   and §Survivor coupling)
 
-Stop after writing both files. Do not proceed outside this phase.
+You do NOT write `findings_inventory_deduped.md`. The driver mechanically builds
+it from your `dedup_decisions.md` — coupling each absorbed finding's distinct
+Location / Impact / union Source IDs / higher severity / strongest evidence into
+the survivor and then removing the absorbed block — so your only job is faithful,
+per-pair JUDGEMENT. Emit the coupling prose in the decision rows per §Survivor
+coupling; the driver applies it. The ZERO-DATA-LOSS mandate, survivor-superset
+gate, and higher-severity inheritance govern your decisions, which the driver
+applies faithfully.
+
+Stop after writing `dedup_decisions.md`. Do not proceed outside this phase.
 """.format(scratchpad=config['scratchpad'])
     elif phase.name == "attention_repair":
         phase_cost_directive = """

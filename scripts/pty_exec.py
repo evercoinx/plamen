@@ -54,6 +54,39 @@ _OUTPUT_CAP_TEXT_RE = re.compile(
 # finish productively -> stop early and let the disk gate / recovery take over.
 _OUTPUT_CAP_LOOP_S = 120.0
 
+# Ship 8.17: context-overflow / autocompact-thrash fingerprint. Distinct from
+# the OUTPUT cap (model can't emit more) -- this is the INPUT side: the turn's
+# context has grown so large that Claude Code is stuck auto-compacting (or has
+# explicitly given up). The pathology: the transcript KEEPS emitting events
+# (compaction summaries, file re-reads) so `last_event_time` never goes stale
+# and the quiescence gate never trips; the process stays alive; and it is NOT
+# the output-token cap. Without a dedicated exit the ONLY terminator is the
+# full scaled phase deadline (observed: 3.6h burn on a 144K-finding report
+# index). Number-agnostic so it survives Claude Code wording changes.
+_CONTEXT_OVERFLOW_TEXT_RE = re.compile(
+    r"(?:"
+    r"autocompact\s+is\s+thrashing"
+    r"|auto-?compact\s+is\s+thrashing"
+    r"|a\s+file\s+being\s+read\s+is\s+too\s+large"
+    r"|the\s+file\s+(?:is|being\s+read\s+is)\s+too\s+large"
+    r"|prompt\s+is\s+too\s+long"
+    r"|input\s+is\s+too\s+long"
+    r"|exceeds?\s+(?:the\s+)?(?:maximum\s+)?context\s+window"
+    r"|context\s+(?:window\s+)?(?:is\s+)?(?:too\s+)?(?:low|full|exceeded)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Context-thrash LOOP window. A NORMAL auto-compaction is frequent and benign:
+# Claude compacts a long turn and then RESUMES producing tool_use / assistant
+# text. We must never cut THAT off. We fire only when (a) the thrash/overflow
+# fingerprint is present (explicit text OR a sustained compaction signature)
+# AND (b) NO new productive event (assistant text or tool_use) has advanced for
+# this long -- i.e. the turn is emitting compaction churn while producing zero
+# forward progress. The `first_thrash_seen_at` latch is reset on every genuine
+# productive event, so a compact-then-resume turn is recall-safe.
+_CONTEXT_THRASH_LOOP_S = float(os.environ.get("PLAMEN_CONTEXT_THRASH_LOOP_S", "180") or 180)
+
 # Ship 8.10: the subprocess-isolation overlay payload. SINGLE source of
 # truth shared by plamen_driver (production) and preflight_pty_transports
 # (probe). Empty enabledPlugins/hooks/mcpServers disables those subsystems
@@ -425,6 +458,33 @@ def _event_text(event: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def event_is_productive(event: dict[str, Any]) -> bool:
+    """Return True iff this assistant event represents FORWARD PROGRESS:
+    it carries a tool_use block, or non-trivial text that is not merely a
+    compaction summary. Used by the context-thrash gate to tell a
+    compact-then-resume turn (productive) from a stuck-thrashing turn (only
+    compaction churn). Conservative: anything ambiguous counts as productive
+    so a genuinely working turn is never starved of its forward-progress
+    signal (recall-safe — we would rather wait than cut off real work)."""
+    if event.get("type") != "assistant":
+        return False
+    msg = _event_message(event)
+    content = msg.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "tool_use":
+                return True
+    text = _event_text(event).strip()
+    if not text:
+        return False
+    # A compaction summary block is not forward progress. Match the same
+    # fingerprints used by transcript_shows_compaction.
+    low = text.lower()
+    if any(marker in low for marker in _COMPACTION_MARKERS):
+        return False
+    return True
+
+
 def event_is_turn_end(event: dict[str, Any]) -> bool:
     if event.get("type") != "assistant":
         return False
@@ -498,7 +558,14 @@ class TurnCompleteState:
     done_seen: bool = False
     rate_limited: bool = False
     output_truncated: bool = False
+    context_thrash: bool = False
     line_count: int = 0
+    # Count of PRODUCTIVE assistant events (those carrying a tool_use block or
+    # non-trivial text). Used by the context-thrash gate to distinguish a turn
+    # that is making forward progress (productive_event_count keeps rising)
+    # from one that is only emitting compaction churn (count frozen). Pure
+    # compaction-summary / re-read events do not advance this counter.
+    productive_event_count: int = 0
     last_event_time: float | None = None
     last_assistant: dict[str, Any] | None = None
 
@@ -522,6 +589,8 @@ def inspect_transcript(path: Path) -> TurnCompleteState:
                     state.rate_limited = True
                 if event.get("type") == "assistant":
                     state.last_assistant = event
+                    if event_is_productive(event):
+                        state.productive_event_count += 1
                     if event_has_done(event):
                         state.done_seen = True
                     if event_is_turn_end(event):
@@ -1019,6 +1088,13 @@ class ClaudePtySession:
         # cap episode. Reset whenever the cap text is no longer present (a
         # productive turn scrolled past it). Used by the cap-LOOP gate below.
         first_output_cap_seen_at: Optional[float] = None
+        # Context-thrash latches (Ship 8.17). `first_thrash_seen_at` is the
+        # start of the current thrash episode; reset whenever a new productive
+        # event arrives OR the overflow/compaction signature clears.
+        # `last_productive_count` tracks forward progress: a rising count means
+        # the turn is still doing real work and must not be cut off.
+        first_thrash_seen_at: Optional[float] = None
+        last_productive_count = -1
         while True:
             now = time.time()
             if now - last_transcript_poll >= transcript_poll_s:
@@ -1054,11 +1130,44 @@ class ClaudePtySession:
                             state.output_truncated = True
                     else:
                         first_output_cap_seen_at = None
+
+                    # Ship 8.17: context-overflow / autocompact-thrash gate.
+                    # Two INDEPENDENT requirements, both must hold sustained:
+                    #   (a) a thrash/overflow signature is present -- either an
+                    #       explicit overflow phrase in recent output, OR a
+                    #       sustained compaction signature in the transcript
+                    #       (transcript_shows_compaction); AND
+                    #   (b) NO new productive event (assistant text / tool_use)
+                    #       has advanced -- the turn is emitting compaction
+                    #       churn but producing zero forward progress.
+                    # When BOTH have held past _CONTEXT_THRASH_LOOP_S, the turn
+                    # is stuck thrashing and will never finish before deadline.
+                    # A genuine compact-then-resume turn emits a new productive
+                    # event, advancing productive_event_count -> latch resets ->
+                    # never cut off (recall-safe).
+                    _overflow_text = bool(_CONTEXT_OVERFLOW_TEXT_RE.search(_recent_norm))
+                    _compaction_sig = transcript_shows_compaction(
+                        self.transcript_path, self._recent_output
+                    )
+                    _thrash_signature = _overflow_text or _compaction_sig
+                    if state.productive_event_count > last_productive_count:
+                        # Forward progress -> reset the thrash episode latch.
+                        last_productive_count = state.productive_event_count
+                        first_thrash_seen_at = None
+                    elif _thrash_signature:
+                        if first_thrash_seen_at is None:
+                            first_thrash_seen_at = now
+                        elif now - first_thrash_seen_at >= _CONTEXT_THRASH_LOOP_S:
+                            state.context_thrash = True
+                    else:
+                        first_thrash_seen_at = None
             if on_poll:
                 on_poll(now, state)
             if state.rate_limited:
                 return state
             if state.output_truncated:
+                return state
+            if state.context_thrash:
                 return state
             if state.complete and state.last_event_time is not None:
                 if now - state.last_event_time >= quiescence_s:

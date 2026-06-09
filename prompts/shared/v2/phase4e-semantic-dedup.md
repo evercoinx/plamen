@@ -47,8 +47,14 @@ Read only these files in this order:
    These carry the full body (Location, **Source IDs**, Description, Impact,
    evidence tags) of both sides of each pair — you NEED this to apply the
    survivor-superset gate and to couple distinct content.
-3. {SCRATCHPAD}/findings_inventory.md for SC passthrough/copy only
-4. {SCRATCHPAD}/verification_queue.md for L1 passthrough/copy only
+SC: do NOT read `{SCRATCHPAD}/findings_inventory.md`. The focus inventory
+(#2) carries every body you need to judge and couple a pair. Reading the full
+inventory is the context-collapse trigger this phase deliberately avoids — the
+driver mechanically builds `findings_inventory_deduped.md` from your decisions.
+
+L1: `{SCRATCHPAD}/verification_queue.md` for passthrough/copy only (the L1
+deduped queue may still be agent-written; the focus inventory remains your
+primary judging source).
 
 Do NOT read or expand `{SCRATCHPAD}/dedup_candidate_pairs_full.md` during this
 phase. It is traceability only.
@@ -67,28 +73,32 @@ DIRECTION_FLIP / distinct-defect artifacts and resolve to `KEEP SEPARATE`.
 
 ## Mandatory First Action
 
-Before semantic review, physically create safe passthrough outputs on disk:
+Before semantic review, physically create the decisions stub on disk:
 
-- SC: copy `{SCRATCHPAD}/findings_inventory.md` to
-  `{SCRATCHPAD}/findings_inventory_deduped.md`
-- L1: copy `{SCRATCHPAD}/verification_queue.md` to
-  `{SCRATCHPAD}/verification_queue_deduped.md`
 - Write `{SCRATCHPAD}/dedup_decisions.md` with a header and a `Status:
   IN_PROGRESS_PASSTHROUGH_WRITTEN` line.
+- L1 only: copy `{SCRATCHPAD}/verification_queue.md` to
+  `{SCRATCHPAD}/verification_queue_deduped.md` as a crash-safety passthrough.
+- SC: do NOT copy `findings_inventory.md` to `findings_inventory_deduped.md` —
+  the driver owns and (re)builds that artifact mechanically from your
+  `dedup_decisions.md`. The driver also pre-writes a passthrough copy as a
+  crash-safety net before this phase, so a timeout never loses the upstream
+  inventory.
 
 Do not merely return a summary saying this was done. Use the available file
-tools or shell commands to write the files. If you later time out, the pipeline
-must retain the upstream artifact unchanged.
+tools or shell commands to write the file(s). If you later time out, the
+pipeline must retain the upstream artifact unchanged.
 
 v2.0.10 (P4.4) — **`PASSTHROUGH` IS NOT A COMPLETION STATE.**
 
-The driver pre-writes a `PASSTHROUGH` stub in `dedup_decisions.md` and copies
-upstream artifacts to their deduped names ONLY as crash-recovery safety nets.
-If `dedup_candidate_pairs.md` contains any live table row, your job is to
-OVERWRITE `dedup_decisions.md` with explicit `MERGE` / `GROUP` / `KEEP SEPARATE`
-decisions covering every candidate pair. Returning while the file still
-contains `Status: PASSTHROUGH` or `IN_PROGRESS_PASSTHROUGH_WRITTEN` is not a
-completed phase — the driver's coverage gate flags it as ceremonial no-op and
+The driver pre-writes a `PASSTHROUGH` stub in `dedup_decisions.md` and (SC) a
+crash-safety passthrough copy of the deduped inventory ONLY as crash-recovery
+safety nets. If `dedup_candidate_pairs.md` contains any live table row, your job
+is to OVERWRITE `dedup_decisions.md` with explicit `MERGE` / `GROUP` /
+`KEEP SEPARATE` decisions covering every candidate pair (the driver then
+rebuilds the deduped inventory from those decisions). Returning while the file
+still contains `Status: PASSTHROUGH` or `IN_PROGRESS_PASSTHROUGH_WRITTEN` is not
+a completed phase — the driver's coverage gate flags it as ceremonial no-op and
 applies a mechanical fallback only as a last resort. The mechanical fallback
 exists to PREVENT data loss, not to LET YOU SKIP the semantic work.
 
@@ -271,19 +281,28 @@ the survivor MUST end up with:
 - **Distinct impacts/recommendations** from the absorbed finding folded into
   the survivor's Impact/Recommendation.
 
-### SC output
+### SC output (driver-applied)
 
-`findings_inventory_deduped.md` must remain a valid inventory:
+You do NOT write or edit `findings_inventory_deduped.md`. The driver
+mechanically builds it from your `dedup_decisions.md`, faithfully applying the
+same coupling+removal you would have done by hand:
 
-- Start from an exact copy of `findings_inventory.md`.
-- For `MERGE`, FIRST edit the survivor block to couple the absorbed finding's
-  distinct attack path/route/location(s)/impact, set the survivor's
-  `**Source IDs**` to the union, set `**Severity**` to the higher of the two,
-  and retain every evidence tag; THEN omit the absorbed finding block. Never
-  delete the absorbed block before the survivor has absorbed its distinct
-  content.
-- For `GROUP`, keep all member blocks and add the `**Dedup Group**:` note.
-- For `KEEP SEPARATE`, leave both blocks unchanged.
+- For `MERGE`, the driver FIRST couples the absorbed finding's distinct attack
+  path/route/location(s)/impact into the survivor block, sets the survivor's
+  `**Source IDs**` to the union, sets `**Severity**` to the higher of the two,
+  and retains every evidence tag; THEN removes the absorbed finding block.
+  Never delete the absorbed block before the survivor has absorbed its distinct
+  content (the driver enforces this ordering mechanically).
+- For `GROUP`, the driver keeps all member blocks and stamps the
+  `**Dedup Group**:` note on non-representatives.
+- For `KEEP SEPARATE`, both blocks are left unchanged.
+
+Your job is to emit, for every MERGE, the survivor-coupling prose described in
+§Survivor coupling (which distinct route/location/impact must be carried into
+the survivor) so the driver couples it faithfully. The parser-critical
+`### MERGE: {survivor_id} absorbs {absorbed_id}` heading and
+`| {absorbed_id} | MERGED into {survivor_id} | ... |` status row are what the
+driver reads to apply your decision.
 
 ### L1 output
 
@@ -323,8 +342,10 @@ never a downgrade.
 Return:
 `DONE: evaluated {P} live pairs; {M} merges, {G} groups, {K} kept separate`
 
-Only return `DONE` after `dedup_decisions.md` and the mode-specific deduped
-artifact exist on disk.
+Only return `DONE` after `dedup_decisions.md` exists on disk with one
+disposition row per live candidate pair. (SC: the driver builds
+`findings_inventory_deduped.md` from your decisions; L1: also ensure
+`verification_queue_deduped.md` exists.)
 ```
 
 ---
