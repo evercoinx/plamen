@@ -1131,43 +1131,23 @@ class ClaudePtySession:
                     else:
                         first_output_cap_seen_at = None
 
-                    # Ship 8.17: context-overflow / autocompact-thrash gate.
-                    # Two INDEPENDENT requirements, both must hold sustained:
-                    #   (a) a thrash/overflow signature is present -- either an
-                    #       explicit overflow phrase in recent output, OR a
-                    #       sustained compaction signature in the transcript
-                    #       (transcript_shows_compaction); AND
-                    #   (b) NO new productive event (assistant text / tool_use)
-                    #       has advanced -- the turn is emitting compaction
-                    #       churn but producing zero forward progress.
-                    # When BOTH have held past _CONTEXT_THRASH_LOOP_S, the turn
-                    # is stuck thrashing and will never finish before deadline.
-                    # A genuine compact-then-resume turn emits a new productive
-                    # event, advancing productive_event_count -> latch resets ->
-                    # never cut off (recall-safe).
-                    _overflow_text = bool(_CONTEXT_OVERFLOW_TEXT_RE.search(_recent_norm))
-                    _compaction_sig = transcript_shows_compaction(
-                        self.transcript_path, self._recent_output
-                    )
-                    _thrash_signature = _overflow_text or _compaction_sig
-                    if state.productive_event_count > last_productive_count:
-                        # Forward progress -> reset the thrash episode latch.
-                        last_productive_count = state.productive_event_count
-                        first_thrash_seen_at = None
-                    elif _thrash_signature:
-                        if first_thrash_seen_at is None:
-                            first_thrash_seen_at = now
-                        elif now - first_thrash_seen_at >= _CONTEXT_THRASH_LOOP_S:
-                            state.context_thrash = True
-                    else:
-                        first_thrash_seen_at = None
+                    # REMOVED (2026-06-10): the context-overflow / autocompact-
+                    # thrash fast-fail. It abandoned a worker turn after
+                    # _CONTEXT_THRASH_LOOP_S of "no productive event," but normal
+                    # context COMPACTION emits no tool_use/text for long stretches
+                    # while it recovers -- so it killed slow-but-completing
+                    # rescan/inventory/depth workers mid-compaction (workers that
+                    # ran fine for 8 weeks). The rare 3h report_index hang it was
+                    # meant to catch is far less costly than degrading every phase
+                    # that reads a large finding set. Workers now run to their
+                    # normal deadline again (pre-Ship-8.17 behavior). The
+                    # detection vars (_CONTEXT_*_RE, productive_event_count,
+                    # first_thrash_seen_at) are retained but inert.
             if on_poll:
                 on_poll(now, state)
             if state.rate_limited:
                 return state
             if state.output_truncated:
-                return state
-            if state.context_thrash:
                 return state
             if state.complete and state.last_event_time is not None:
                 if now - state.last_event_time >= quiescence_s:

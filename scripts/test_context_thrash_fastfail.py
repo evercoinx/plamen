@@ -181,24 +181,22 @@ class _FakeSession:
         return True
 
 
-def test_real_wait_loop_fast_fails_on_thrash(tmp_path, monkeypatch):
+def test_real_wait_loop_does_not_cut_on_thrash(tmp_path, monkeypatch):
+    """GUTTED (2026-06-10): the thrash fast-fail was removed because it abandoned
+    slow-but-completing workers mid-compaction (it killed rescan/inventory/depth
+    that ran fine for 8 weeks). A sustained thrash/overflow signature must NO
+    LONGER set context_thrash or cut the turn early -- the loop runs to its normal
+    deadline so the worker can compact-then-resume to completion."""
     import pty_exec as px
-    # Shrink the thrash window so the test is fast, via the module constant the
-    # wait loop reads.
     monkeypatch.setattr(px, "_CONTEXT_THRASH_LOOP_S", 0.4, raising=False)
     sess = _FakeSession(tmp_path, "Autocompact is thrashing")
     bound = px.ClaudePtySession.wait_for_turn_complete.__get__(sess, _FakeSession)
-    t0 = time.time()
-    # Generous deadline: if the gate is broken, this would block the full 30s.
-    state = bound(timeout_s=30.0, quiescence_s=8.0, poll_s=0.05,
+    # Short deadline so the test is fast; the loop should run to it, NOT cut early.
+    state = bound(timeout_s=0.6, quiescence_s=8.0, poll_s=0.05,
                   transcript_poll_s=0.05)
-    elapsed = time.time() - t0
-    assert getattr(state, "context_thrash", False), (
-        "sustained thrash signature must set state.context_thrash"
-    )
-    assert elapsed < 10.0, (
-        f"thrash fast-fail must return well before the 30s deadline; "
-        f"took {elapsed:.1f}s"
+    assert not getattr(state, "context_thrash", False), (
+        "thrash fast-fail is GUTTED -- a thrash signature must not set "
+        "context_thrash; the worker runs to its deadline (8-week behavior)"
     )
 
 
@@ -273,25 +271,21 @@ def test_quiet_dodo_variant_fast_fails_without_overflow_text(tmp_path, monkeypat
     )
 
     monkeypatch.setattr(px, "_CONTEXT_THRASH_LOOP_S", 0.4, raising=False)
-    # recent_text is deliberately NON-overflow: the gate must rely on the
-    # transcript compaction signature, not on overflow text in recent output.
+    # GUTTED (2026-06-10): the quiet-compaction variant must NO LONGER be cut.
+    # This was the exact pattern (compaction fingerprint, frozen productive
+    # count) that the fast-fail killed on rescan/inventory/depth -- legitimate
+    # slow compaction, not a hang. The worker must run to its deadline.
     sess = _FakeSession(
         tmp_path,
         recent_text="reading findings_inventory.md ...",
         transcript_text=_QUIET_DODO_TRANSCRIPT,
     )
     bound = px.ClaudePtySession.wait_for_turn_complete.__get__(sess, _FakeSession)
-    t0 = time.time()
-    state = bound(timeout_s=30.0, quiescence_s=8.0, poll_s=0.05,
+    state = bound(timeout_s=0.6, quiescence_s=8.0, poll_s=0.05,
                   transcript_poll_s=0.05)
-    elapsed = time.time() - t0
-    assert getattr(state, "context_thrash", False), (
-        "the QUIET DODO variant (compaction fingerprint + frozen productive "
-        "count, NO overflow text) must trip the dual-signal fast-fail"
-    )
-    assert elapsed < 10.0, (
-        f"quiet-variant fast-fail must return well before the 30s deadline; "
-        f"took {elapsed:.1f}s"
+    assert not getattr(state, "context_thrash", False), (
+        "thrash fast-fail GUTTED -- the quiet compaction variant must NOT be "
+        "cut off; it runs to its deadline (this is what killed rescan/inventory)"
     )
 
 
