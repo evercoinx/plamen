@@ -2813,6 +2813,15 @@ def _owned_artifact_patterns(pipeline: str, scratchpad: Optional[Path] = None) -
             "report_low_info": ["report_low_info.md"],
             "report_low_info_merge": ["report_low_info.md"],
             "report_assemble": common_report,
+            # Cross-tier dedup (Python-native). Owns its decisions mapping and
+            # the snapshot side artifacts; MAY rewrite the delivered report when
+            # the data-loss gate passes (hence common_report ownership too).
+            "report_dedup": [
+                "report_dedup_mapping.md",
+                "AUDIT_REPORT.pre-dedup.md",
+                "AUDIT_REPORT.deduped.md",
+                *common_report,
+            ],
         }
         # Dynamic tier shard entries based on actual manifests
         if scratchpad:
@@ -2911,6 +2920,15 @@ def _owned_artifact_patterns(pipeline: str, scratchpad: Optional[Path] = None) -
         "report_low_info": ["report_low_info.md"],
         "report_low_info_merge": ["report_low_info.md"],
         "report_assemble": common_report,
+        # Cross-tier dedup (Python-native). Owns its decisions mapping and the
+        # snapshot side artifacts; MAY rewrite the delivered report when the
+        # data-loss gate passes (hence common_report ownership too).
+        "report_dedup": [
+            "report_dedup_mapping.md",
+            "AUDIT_REPORT.pre-dedup.md",
+            "AUDIT_REPORT.deduped.md",
+            *common_report,
+        ],
     }
     if scratchpad:
         manifest_dir = scratchpad / "body_manifests"
@@ -15763,12 +15781,13 @@ def _validate_inventory_chunk_structure(scratchpad: Path, phase_name: str) -> li
 
     issues: list[str] = []
 
-    def has_field(block: str, label: str) -> bool:
-        return bool(re.search(
-            rf"(?im)^\s*\*\*{re.escape(label)}\*\*\s*:"
-            rf"|^\s*{re.escape(label)}\s*:",
-            block,
-        ))
+    def has_field(block: str, group: tuple[str, ...]) -> bool:
+        # Route through the shared tolerant extractor (_llm_norm + table /
+        # heading / `**Label:**` / bold tolerance) instead of a raw two-shape
+        # regex, so a field present in a non-canonical shape is NOT miscounted
+        # as missing. The whole alias group is passed at once.
+        val, _shape = _field_anywhere(block, group, table_ok=True)
+        return bool(val.strip())
 
     detail_matches = list(re.finditer(
         r"(?m)^###\s+(?:Finding\s+)?\[(CC-\d+)\]\s*:?\s*(.+?)\s*$",
@@ -15814,7 +15833,6 @@ def _validate_inventory_chunk_structure(scratchpad: Path, phase_name: str) -> li
     # Per-field miss counters. Soft-log up to 8 individual findings (to
     # avoid log spam on huge chunks), but always count toward the global
     # tally so we can promote pervasive field drift to a retry-hint.
-    chunk_field_warnings = 0
     field_miss_counts: dict[str, int] = {}
     for idx, match in enumerate(detail_matches):
         start = match.end()
@@ -15822,18 +15840,16 @@ def _validate_inventory_chunk_structure(scratchpad: Path, phase_name: str) -> li
         block = text[start:end]
         missing = [
             group[0] for group in required_field_groups
-            if not any(has_field(block, alias) for alias in group)
+            if not has_field(block, group)
         ]
         for field in missing:
             field_miss_counts[field] = field_miss_counts.get(field, 0) + 1
-        if missing:
-            chunk_field_warnings += 1
-            if chunk_field_warnings <= 8:
-                log.warning(
-                    "[_validate_inventory_chunk_structure] %s missing field(s): "
-                    "%s — LLM prose format check (soft)",
-                    match.group(1), ", ".join(missing),
-                )
+        # NOTE: per-finding misses are NOT logged here. A sub-threshold miss
+        # (e.g. a few findings folding Impact into Description prose) is normal
+        # LLM variance — it was emitting cosmetic [WARNING] lines without ever
+        # triggering a retry (false-positive noise). Only PERVASIVE drift
+        # (>=30%, computed below) is surfaced, so the log aligns exactly with
+        # the gate's actual decision.
 
     # Mechanical-default pass: a tiny set of fields have an unambiguous
     # pre-verify default, so a chunk that merely omitted them should be
@@ -15852,7 +15868,7 @@ def _validate_inventory_chunk_structure(scratchpad: Path, phase_name: str) -> li
         lines = []
         for field, default in _DEFAULTABLE.items():
             group = next((g for g in required_field_groups if g[0] == field), None)
-            if group and not any(has_field(block, alias) for alias in group):
+            if group and not has_field(block, group):
                 lines.append(f"**{field}**: {default}")
         if lines:
             inserts_at.append((end, "\n" + "\n".join(lines) + "\n"))
@@ -15893,6 +15909,13 @@ def _validate_inventory_chunk_structure(scratchpad: Path, phase_name: str) -> li
             if count / total >= 0.30:
                 pervasive.append(f"{field} ({count}/{total} findings)")
         if pervasive:
+            # Pervasive drift IS actionable (it triggers a retry-hint), so it
+            # IS logged — exactly the misses that matter, never the cosmetic
+            # sub-threshold ones.
+            log.warning(
+                "[_validate_inventory_chunk_structure] pervasive field drift "
+                "in %s: %s", phase_name, ", ".join(sorted(pervasive)),
+            )
             issues.append(
                 "pervasive per-finding field drift: "
                 + ", ".join(sorted(pervasive))

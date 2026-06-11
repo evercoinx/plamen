@@ -1448,6 +1448,59 @@ def test_inventory_chunk_accepts_per_finding_details_plural(tmp_path: Path) -> N
     )
 
 
+def _inv_chunk_block(cc: str, *, impact_line: str) -> str:
+    """One well-formed inventory detail block; impact_line lets a test vary how
+    (or whether) the Impact field is expressed."""
+    return (
+        f"### [{cc}]: Some finding {cc}\n"
+        "**Source IDs**: CS-1\n"
+        "**Severity**: Medium\n"
+        "**Location**: src/X.sol:L10\n"
+        "**Preferred Tag**: [CODE-TRACE]\n"
+        "**Verdict**: CONFIRMED\n"
+        "**Description**: Decode path trusts attacker-controlled length.\n"
+        f"{impact_line}"
+    )
+
+
+def test_inventory_chunk_impact_in_tolerant_shape_not_flagged(tmp_path: Path) -> None:
+    """FP fix: an Impact field written in a non-canonical-but-tolerant shape
+    (`**Impact:**` — colon inside the bold) was miscounted as missing by the old
+    raw two-shape regex. Routing has_field through _field_anywhere recognizes it,
+    so NO 'missing Impact' / pervasive-drift issue is raised."""
+    sp = tmp_path / ".scratchpad"
+    sp.mkdir()
+    body = "\n\n".join(
+        _inv_chunk_block(f"CC-{i}", impact_line="**Impact:** Funds can be drained.\n")
+        for i in range(1, 6)
+    )
+    _write(sp / "findings_inventory_chunk_a.md",
+           "# Inventory Chunk A\n\n## Per-Finding Detail\n\n" + body + "\n")
+    issues = _validate_inventory_chunk_structure(sp, "inventory_chunk_a")
+    assert not any("Impact" in i for i in issues), (
+        f"Impact present in a tolerant shape must NOT be flagged: {issues}"
+    )
+    assert not any("pervasive" in i for i in issues), issues
+
+
+def test_inventory_chunk_pervasively_missing_impact_still_flagged(tmp_path: Path) -> None:
+    """NEGATIVE CONTROL: the FP fix must NOT mask a real failure. A chunk where
+    Impact is GENUINELY absent from every finding (no label, no consequence
+    anywhere) must STILL raise the pervasive-drift issue (>=30% threshold)."""
+    sp = tmp_path / ".scratchpad"
+    sp.mkdir()
+    body = "\n\n".join(
+        _inv_chunk_block(f"CC-{i}", impact_line="")  # no Impact at all
+        for i in range(1, 6)
+    )
+    _write(sp / "findings_inventory_chunk_a.md",
+           "# Inventory Chunk A\n\n## Per-Finding Detail\n\n" + body + "\n")
+    issues = _validate_inventory_chunk_structure(sp, "inventory_chunk_a")
+    assert any("pervasive" in i and "Impact" in i for i in issues), (
+        f"Genuinely-missing Impact across all findings MUST still be flagged: {issues}"
+    )
+
+
 # ── v2.8.5 Fix 3: _validate_report_coverage_accounting substring column ─
 
 
