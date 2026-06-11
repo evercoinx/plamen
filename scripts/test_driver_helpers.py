@@ -2211,17 +2211,24 @@ def test_M4_l1_verify_shards_are_severity_weighted():
         )
         if shards.get(name)
     ]
+    # Uniform per-shard target (VERIFY_TARGET_PER_SHARD=4): C/H spreads across
+    # the full 10-slot pool (84 findings -> ~9/shard, slot-pool capped).
     check("M4 L1 C/H verify shards are <=9 on Irys-sized queue",
           max(ch_sizes) <= 9,
           repr(non_empty))
-    check("M4 L1 Medium verify shards are <=11 on Irys-sized queue",
-          max(med_sizes) <= 11,
+    # Medium now uses ALL 6 slots (43 findings / 4 ~= 11 desired, capped at 6
+    # slots -> ~8/shard) instead of the old ~11/shard heavy lane.
+    check("M4 L1 Medium verify shards stay in the fast lane (<=8)",
+          max(med_sizes) <= 8,
           repr(non_empty))
-    check("M4 L1 Low verify shards are <=17 on Irys-sized queue",
-          max(low_sizes) <= 17,
+    # Low spreads to ~5/shard (17 findings / 4 = 5 shards over 4 slots)
+    # instead of the old ~17/shard near-timeout lane.
+    check("M4 L1 Low verify shards stay in the fast lane (<=5)",
+          max(low_sizes) <= 5,
           repr(non_empty))
+    # Heavy tiers produce MORE shards (negative control: spread, not cram).
     check("M4 L1 verify shard count is bounded and balanced",
-          len(non_empty) == 15 and min(non_empty.values()) >= 8,
+          len(non_empty) == 20 and min(non_empty.values()) >= 4,
           repr(non_empty))
     check("M4 L1 verify shard total preserves queue",
           sum(non_empty.values()) == 145,
@@ -2245,12 +2252,97 @@ def test_M4b_sc_high_verify_shards_are_small_enough_for_thorough():
         len(shards[name]) for name in D.SC_VERIFY_CRITHIGH_PHASE_NAMES
         if shards.get(name)
     ]
-    check("M4b SC C/H verify shards cap live 13-item queue at <=3",
-          max(ch_sizes) <= 3,
+    # Uniform per-shard target (VERIFY_TARGET_PER_SHARD=4): 13 C/H findings
+    # spread across 4 shards (4,3,3,3) -> max 4, still the fast lane.
+    check("M4b SC C/H verify shards cap live 13-item queue at <= target",
+          max(ch_sizes) <= D.VERIFY_TARGET_PER_SHARD,
           repr(non_empty))
     check("M4b SC C/H verify shards preserve all rows",
           sum(ch_sizes) == 13,
           repr(non_empty))
+
+
+def _build_skewed_queue(counts: dict[str, int]) -> str:
+    """Build a verification_queue.md with the given per-severity finding counts."""
+    header = [
+        "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact |",
+        "|---------|------------|----------|-------|-----------|---------------|----------|------------------|",
+    ]
+    rows = []
+    q = 1
+    prefix = {"Critical": "C", "High": "H", "Medium": "M", "Low": "L", "Informational": "I"}
+    for sev, n in counts.items():
+        for i in range(1, n + 1):
+            fid = f"{prefix[sev]}-{i:03d}"
+            rows.append(
+                f"| {q} | {fid} | {sev} | T{q} | logic | [CODE-TRACE] | src/A.sol:L{q} | depth.md |"
+            )
+            q += 1
+    return "\n".join(header + rows)
+
+
+def test_M4h_sc_verify_shard_partition_complete_and_disjoint():
+    """ROOT FIX: every finding lands in EXACTLY ONE shard (complete + disjoint)
+    on a live-like skewed distribution (1C / 18H / 30M / 37L / 13I)."""
+    counts = {"Critical": 1, "High": 18, "Medium": 30, "Low": 37, "Informational": 13}
+    sp = _mkscratch({"verification_queue.md": _build_skewed_queue(counts)})
+    queue_rows = D.parse_verification_queue_rows(sp)
+    queue_ids = [r.get("finding id") for r in queue_rows]
+    shards = D.compute_sc_verify_shards(sp)
+
+    sharded_ids = [
+        r.get("finding id")
+        for rows_in in shards.values()
+        for r in rows_in
+    ]
+    # Completeness: every queued finding is assigned to some shard.
+    check("M4h every finding is assigned (complete)",
+          set(sharded_ids) == set(queue_ids),
+          f"queue={len(set(queue_ids))} sharded={len(set(sharded_ids))}")
+    # Disjoint: no finding appears in two shards, and the total count matches.
+    check("M4h no finding is duplicated (disjoint)",
+          len(sharded_ids) == len(set(sharded_ids)) == len(queue_ids),
+          f"sharded={len(sharded_ids)} unique={len(set(sharded_ids))} queue={len(queue_ids)}")
+    # Every returned shard name exists in all four registries (slot contract).
+    for name in shards:
+        check(f"M4h {name} is a registered shard name",
+              name in D.SC_VERIFY_SHARD_MANIFESTS,
+              name)
+    # Fast-lane assertion: no non-empty shard exceeds TARGET_PER_SHARD+1.
+    target = D.VERIFY_TARGET_PER_SHARD
+    for name, rows_in in shards.items():
+        if rows_in:
+            check(f"M4h {name} stays in the fast lane (<= target+1)",
+                  len(rows_in) <= target + 1,
+                  f"{name}={len(rows_in)} target={target}")
+
+
+def test_M4i_sc_verify_shards_spread_heavy_tiers_not_overshard_light():
+    """Negative control: a heavy tier produces MORE shards (spread, not cram);
+    a light tier does NOT over-shard."""
+    # Heavy: 36 Low findings -> ceil(36/4)=9 Low shards (spread).
+    heavy = _mkscratch({"verification_queue.md": _build_skewed_queue({"Low": 36})})
+    heavy_shards = D.compute_sc_verify_shards(heavy)
+    low_used = [n for n, v in heavy_shards.items()
+                if n.startswith("sc_verify_low") and v]
+    check("M4i heavy Low tier spreads across many shards (>=8)",
+          len(low_used) >= 8,
+          f"low_used={len(low_used)}")
+    check("M4i heavy Low shards stay small (<=5 each)",
+          max(len(heavy_shards[n]) for n in low_used) <= 5,
+          {n: len(heavy_shards[n]) for n in low_used})
+
+    # Light: 2 Medium findings -> only 1 Medium shard used (no over-shard).
+    light = _mkscratch({"verification_queue.md": _build_skewed_queue({"Medium": 2})})
+    light_shards = D.compute_sc_verify_shards(light)
+    med_used = [n for n, v in light_shards.items()
+                if n.startswith("sc_verify_medium") and v]
+    check("M4i light Medium tier does NOT over-shard (1 shard)",
+          len(med_used) == 1,
+          f"med_used={med_used}")
+    check("M4i light Medium shard holds all findings",
+          len(light_shards[med_used[0]]) == 2,
+          light_shards[med_used[0]])
 
 
 def test_M4c_stale_verify_retry_hint_cleared_after_reshard():
@@ -3103,6 +3195,8 @@ def main():
         test_M3_l1_verify_shards_are_cost_capped,
         test_M4_l1_verify_shards_are_severity_weighted,
         test_M4b_sc_high_verify_shards_are_small_enough_for_thorough,
+        test_M4h_sc_verify_shard_partition_complete_and_disjoint,
+        test_M4i_sc_verify_shards_spread_heavy_tiers_not_overshard_light,
         test_M4c_stale_verify_retry_hint_cleared_after_reshard,
         test_M4d_semantic_dedup_passthrough_with_pairs_is_not_complete,
         test_M4e_semantic_dedup_prompt_overrides_passthrough_resumption,

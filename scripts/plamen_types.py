@@ -503,8 +503,22 @@ SC_VERIFY_SHARD_MANIFESTS = {
     "sc_verify_medium_b": "verification_queue_medium_b.md",
     "sc_verify_medium_c": "verification_queue_medium_c.md",
     "sc_verify_medium_d": "verification_queue_medium_d.md",
+    "sc_verify_medium_e": "verification_queue_medium_e.md",
+    "sc_verify_medium_f": "verification_queue_medium_f.md",
+    "sc_verify_medium_g": "verification_queue_medium_g.md",
+    "sc_verify_medium_h": "verification_queue_medium_h.md",
+    "sc_verify_medium_i": "verification_queue_medium_i.md",
+    "sc_verify_medium_j": "verification_queue_medium_j.md",
     "sc_verify_low_a": "verification_queue_low_a.md",
     "sc_verify_low_b": "verification_queue_low_b.md",
+    "sc_verify_low_c": "verification_queue_low_c.md",
+    "sc_verify_low_d": "verification_queue_low_d.md",
+    "sc_verify_low_e": "verification_queue_low_e.md",
+    "sc_verify_low_f": "verification_queue_low_f.md",
+    "sc_verify_low_g": "verification_queue_low_g.md",
+    "sc_verify_low_h": "verification_queue_low_h.md",
+    "sc_verify_low_i": "verification_queue_low_i.md",
+    "sc_verify_low_j": "verification_queue_low_j.md",
 }
 SC_VERIFY_PHASE_NAMES = tuple(SC_VERIFY_SHARD_MANIFESTS.keys())
 SC_VERIFY_CRITHIGH_PHASE_NAMES = (
@@ -837,8 +851,16 @@ def validate_phase_graph(phases: list, mode: str, pipeline: str) -> list[str]:
 
     Returns a list of issue strings. Empty list = graph is valid.
     """
+    # Verify shards are manifest-driven (empty expected_artifacts by design).
+    # Exempt them via BOTH (a) the explicit manifest sets and (b) a convention
+    # regex. The set keeps the exemption exact as the SC/L1 slot pools grow
+    # (verify-shard sizing root fix); the regex is the robust fallback that also
+    # covers L1-style names (verify_high_a, no sc_ prefix) and any convention-
+    # named shard not yet listed — the prior set-only check regressed by missing
+    # those. Ranges widened to [a-j] to cover the expanded medium/low slot pools.
+    _verify_shard_names = set(SC_VERIFY_SHARD_MANIFESTS) | set(L1_VERIFY_SHARD_MANIFESTS)
     _verify_shard_re = re.compile(
-        r"^(?:sc_)?verify_(crithigh|high_[a-j]|medium_[a-f]|low_[a-d])$"
+        r"^(?:sc_)?verify_(crithigh|high_[a-j]|medium_[a-j]|low_[a-j])$"
     )
     issues: list[str] = []
     if pipeline not in _VALID_PIPELINES:
@@ -881,7 +903,9 @@ def validate_phase_graph(phases: list, mode: str, pipeline: str) -> list[str]:
 
         expected = getattr(phase, "expected_artifacts", []) or []
         any_of = getattr(phase, "any_of", []) or []
-        if not expected and not any_of and not _verify_shard_re.match(name):
+        if (not expected and not any_of
+                and name not in _verify_shard_names
+                and not _verify_shard_re.match(name)):
             issues.append(
                 f"phase {name!r} declares no expected_artifacts AND no any_of"
                 " (silent-pass risk)"
@@ -1165,10 +1189,52 @@ SC_PHASES = [
     Phase("sc_verify_medium_d", ["Phase 5: Verification"],
           [],
           base_timeout_s=4800, critical=True, model="sonnet"),
+    Phase("sc_verify_medium_e", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=4800, critical=True, model="sonnet"),
+    Phase("sc_verify_medium_f", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=4800, critical=True, model="sonnet"),
+    Phase("sc_verify_medium_g", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=4800, critical=True, model="sonnet"),
+    Phase("sc_verify_medium_h", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=4800, critical=True, model="sonnet"),
+    Phase("sc_verify_medium_i", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=4800, critical=True, model="sonnet"),
+    Phase("sc_verify_medium_j", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=4800, critical=True, model="sonnet"),
     Phase("sc_verify_low_a", ["Phase 5: Verification"],
           [],
           base_timeout_s=3600, critical=True, modes={"thorough"}, model="sonnet"),
     Phase("sc_verify_low_b", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=3600, critical=True, modes={"thorough"}, model="sonnet"),
+    Phase("sc_verify_low_c", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=3600, critical=True, modes={"thorough"}, model="sonnet"),
+    Phase("sc_verify_low_d", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=3600, critical=True, modes={"thorough"}, model="sonnet"),
+    Phase("sc_verify_low_e", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=3600, critical=True, modes={"thorough"}, model="sonnet"),
+    Phase("sc_verify_low_f", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=3600, critical=True, modes={"thorough"}, model="sonnet"),
+    Phase("sc_verify_low_g", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=3600, critical=True, modes={"thorough"}, model="sonnet"),
+    Phase("sc_verify_low_h", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=3600, critical=True, modes={"thorough"}, model="sonnet"),
+    Phase("sc_verify_low_i", ["Phase 5: Verification"],
+          [],
+          base_timeout_s=3600, critical=True, modes={"thorough"}, model="sonnet"),
+    Phase("sc_verify_low_j", ["Phase 5: Verification"],
           [],
           base_timeout_s=3600, critical=True, modes={"thorough"}, model="sonnet"),
     Phase("sc_verify_aggregate", ["Phase 5: Verification"],

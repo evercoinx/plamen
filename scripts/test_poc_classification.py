@@ -478,8 +478,18 @@ def test_verify_completion_reports_all_poc_contract_failures():
         + "".join(rows)
     )
     sp = _mkscratch(files)
-    issues = _validate_verify_completion(sp, "sc_verify_medium_a", mode="core")
-    detail = "\n".join(issues)
+    # Uniform per-shard target (4) now spreads 8 Medium findings across
+    # multiple medium shards instead of one. Validate that EVERY bad ledger is
+    # surfaced across all populated shards (the original "not just the first
+    # six" intent), regardless of which shard each finding lands in.
+    import plamen_driver as _D
+    shards = _D.ensure_sc_verify_shard_manifests(sp)
+    detail = "\n".join(
+        line
+        for name, rows_in in shards.items()
+        if rows_in
+        for line in _validate_verify_completion(sp, name, mode="core")
+    )
     check("all eight failures are surfaced", all(f"H-{i} mandatory unit" in detail for i in range(1, 9)), detail)
 
 

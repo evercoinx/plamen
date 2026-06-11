@@ -221,6 +221,7 @@ __all__ = [
     "compute_report_medium_shards",  # backward compat wrapper
     "compute_report_tier_shards",
     "classify_poc_testability",
+    "VERIFY_TARGET_PER_SHARD",
     "compute_sc_verify_shards",
     "compute_verify_shards",
     "derive_tier_assignments_from_verify_queue",
@@ -1167,6 +1168,16 @@ def _severity_bucket(sev: str) -> str:
     return "info" if n == "Informational" else n.lower()
 
 
+# ROOT FIX (verify-shard sizing): every severity tier shards by FINDING COUNT
+# at the same small per-shard target so heavy tiers (e.g. 37 Low, 30 Medium)
+# spread across enough shards to stay in the High "fast lane" instead of being
+# crammed 10-18 findings into one near-timeout shard. The slot pools in
+# SC_VERIFY_SHARD_MANIFESTS / L1_VERIFY_SHARD_MANIFESTS must be large enough
+# that the `min(len(names), ...)` ceiling never throttles a tier below this
+# target; over-provisioned slots are harmless (empty manifests are no-ops).
+VERIFY_TARGET_PER_SHARD = 4
+
+
 def compute_verify_shards(scratchpad: Path) -> dict[str, list[dict[str, str]]]:
     rows = parse_verification_queue_rows(scratchpad)
     crit_high = [r for r in rows if _severity_bucket(r.get("severity", "")) in {"critical", "high"}]
@@ -1202,17 +1213,17 @@ def compute_verify_shards(scratchpad: Path) -> dict[str, list[dict[str, str]]]:
     shards.update(assign_chunks(
         list(L1_VERIFY_CRITHIGH_PHASE_NAMES),
         crit_high,
-        8,
+        VERIFY_TARGET_PER_SHARD,
     ))
     shards.update(assign_chunks(
         ["verify_medium_a", "verify_medium_b", "verify_medium_c", "verify_medium_d", "verify_medium_e", "verify_medium_f"],
         medium,
-        12,
+        VERIFY_TARGET_PER_SHARD,
     ))
     shards.update(assign_chunks(
         ["verify_low_a", "verify_low_b", "verify_low_c", "verify_low_d"],
         low_info,
-        18,
+        VERIFY_TARGET_PER_SHARD,
     ))
     return shards
 
@@ -1959,12 +1970,12 @@ def compute_sc_verify_shards(scratchpad: Path) -> dict[str, list[dict[str, str]]
     shards.update(assign_chunks(
         list(SC_VERIFY_CRITHIGH_PHASE_NAMES),
         crit_high,
-        3,
+        VERIFY_TARGET_PER_SHARD,
     ))
     sc_medium_names = [k for k in SC_VERIFY_SHARD_MANIFESTS if k.startswith("sc_verify_medium")]
     sc_low_names = [k for k in SC_VERIFY_SHARD_MANIFESTS if k.startswith("sc_verify_low")]
-    shards.update(assign_chunks(sc_medium_names, medium, 12))
-    shards.update(assign_chunks(sc_low_names, low_info, 18))
+    shards.update(assign_chunks(sc_medium_names, medium, VERIFY_TARGET_PER_SHARD))
+    shards.update(assign_chunks(sc_low_names, low_info, VERIFY_TARGET_PER_SHARD))
     return shards
 
 
