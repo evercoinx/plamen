@@ -2343,6 +2343,53 @@ def _inventory_has_usable_findings(scratchpad: Path, min_blocks: int = 3) -> boo
         return False
 
 
+def _inventory_degrade_floor_ok(scratchpad: Path) -> bool:
+    """B2 verify graceful fallback: decide the inventory degrade branch.
+
+    Returns True (degrade-and-continue, NEVER terminal halt) when either:
+
+      * the inventory already holds usable finding blocks, OR
+      * the B1 floor can reconstruct a structurally valid inventory from the
+        completed breadth/depth/chunk artifacts. The floor is honest: it only
+        carries forward findings that actually exist (never fabricates), and a
+        genuinely empty audit (0 findings anywhere) still yields a valid empty
+        inventory, not a crash.
+
+    `ensure_findings_inventory_floor` is a NO-OP when a real inventory already
+    exists, so calling it here cannot clobber a good inventory or invent
+    findings. The only path that should NOT reach this branch is one where the
+    floor itself raised — in which case we return False and let the caller fall
+    through to the critical-halt diagnostics so the failure is surfaced, not
+    silently swallowed.
+    """
+    if _inventory_has_usable_findings(scratchpad):
+        return True
+    try:
+        n_findings, n_sources = ensure_findings_inventory_floor(scratchpad)
+    except Exception as exc:
+        log.error(f"[inventory] floor reconstruction raised: {exc}")
+        return False
+    inv_path = scratchpad / "findings_inventory.md"
+    if not inv_path.exists():
+        # Floor must always write a file (even the empty path); absence means an
+        # unexpected failure — surface it via the critical-halt path.
+        return False
+    if n_findings > 0:
+        log.warning(
+            f"[inventory] degraded with no usable inventory on disk; floor "
+            f"reconstructed {n_findings} finding(s) from {n_sources} source "
+            "artifact(s) -- degrading and continuing (verification proceeds on "
+            "the honest reconstructed inventory)"
+        )
+    else:
+        log.warning(
+            f"[inventory] degraded and {n_sources} source artifact(s) yielded "
+            "0 findings (genuinely empty audit); wrote a valid empty inventory "
+            "-- degrading and continuing"
+        )
+    return True
+
+
 _BODY_CONTENT_RETRY_CAP = 2
 
 
@@ -12694,6 +12741,22 @@ def _run_phase_validators(
 
     # --- report_index: completeness gate ---
     if phase.name == "report_index" and passed:
+        # A2 (upstream root fix): reconcile the Index Agent `## Summary` counts
+        # with the Master Finding Index distinct report-ID set BEFORE the tier
+        # writers dispatch. The DODO shape (Summary=45 vs Master=74 distinct IDs)
+        # caused tier writers to hallucinate ghost IDs filling the gap. Master is
+        # the cardinality contract; this self-heals the Summary in place. It is a
+        # NO-OP when consistent and never alters Master rows — so it is a repair,
+        # not a halt.
+        try:
+            _sm_notes = validate_report_index_summary_master_parity(scratchpad)
+            for _n in _sm_notes:
+                log.warning(f"[report_index] {_n}")
+        except Exception as _sm_exc:
+            log.warning(
+                f"[report_index] Summary/Master parity self-heal skipped "
+                f"(non-blocking): {_sm_exc!r}"
+            )
         index_issues = _check_index_completeness(
             scratchpad, config["project_root"]
         )
@@ -15360,6 +15423,40 @@ def main():
                     continue
                 log.warning(f"[inventory] single-shard copy failed parity: {parity_issues}")
 
+            # B1 inventory floor (WIRE #1): the chunk-merge / single-shard
+            # fast-paths above did not produce a usable findings_inventory.md
+            # (0/1 chunks, or merge failed parity). Reconstruct honestly from
+            # whatever breadth/depth/chunk artifacts completed so the file is
+            # ALWAYS present before sc_verify_queue. The floor is a NO-OP if a
+            # real inventory already exists, and never fabricates findings.
+            inv_path = scratchpad / "findings_inventory.md"
+            _inv_missing = (
+                not inv_path.exists()
+                or not _inventory_has_usable_findings(scratchpad)
+            )
+            if _inv_missing:
+                floor_n, floor_src = ensure_findings_inventory_floor(scratchpad)
+                if floor_n > 0:
+                    _validate_inventory_evidence(scratchpad, config["project_root"])
+                    parity_issues = _validate_inventory_parity(scratchpad)
+                    if not parity_issues:
+                        checkpoint.mark_completed(phase.name)
+                        checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
+                        checkpoint.save(scratchpad)
+                        log.warning(
+                            f"[inventory] floor reconstructed {floor_n} finding(s) "
+                            f"from {floor_src} source artifact(s) "
+                            "(degraded inventory phase) -- continuing"
+                        )
+                        display.print_phase_skipped(
+                            phase_idx + 1, total_active, phase.name,
+                            f"floor reconstruction ({floor_n} findings)",
+                        )
+                        continue
+                    log.warning(
+                        f"[inventory] floor reconstruction failed parity: {parity_issues}"
+                    )
+
         if config["pipeline"] == "l1" and phase.name == "graph_sweeps":
             cov_issues = _compute_subsystem_coverage_gap(
                 scratchpad, config.get("mode", "core"),
@@ -15508,6 +15605,26 @@ def main():
                 )
 
         if config["pipeline"] == "l1" and phase.name == "verify_queue":
+            # B2 verify graceful fallback (L1 parity with sc_verify_queue): if
+            # the inventory phase degraded and left findings_inventory.md
+            # missing/empty, reconstruct it honestly from completed artifacts
+            # now so verification proceeds instead of hitting the terminal
+            # "inventory missing" parity halt. NO-OP when a real inventory
+            # already exists; genuinely empty audit gets a valid empty inventory.
+            if not _inventory_has_usable_findings(scratchpad):
+                _floor_n, _floor_src = ensure_findings_inventory_floor(scratchpad)
+                if _floor_n > 0:
+                    log.warning(
+                        f"[verify_queue] inventory missing/empty; floor "
+                        f"reconstructed {_floor_n} finding(s) from {_floor_src} "
+                        "source artifact(s) -- verification proceeds (degraded)"
+                    )
+                else:
+                    log.warning(
+                        "[verify_queue] inventory missing/empty and "
+                        f"{_floor_src} source artifact(s) yielded 0 findings; "
+                        "wrote a valid empty inventory -- clean empty path"
+                    )
             promoted = _promote_depth_findings_to_inventory(scratchpad)
             if promoted:
                 log.info(
@@ -15604,6 +15721,26 @@ def main():
 
         # v2.4.1: SC verify queue — mechanical, same pattern as L1.
         if config.get("pipeline") != "l1" and phase.name == "sc_verify_queue":
+            # B2 verify graceful fallback: if the inventory phase degraded and
+            # left findings_inventory.md missing/empty, reconstruct it honestly
+            # from completed artifacts NOW so verification proceeds on the real
+            # findings instead of hitting the terminal "inventory missing"
+            # parity halt. NO-OP when a real inventory already exists; a
+            # genuinely empty audit still gets a valid empty inventory.
+            if not _inventory_has_usable_findings(scratchpad):
+                _floor_n, _floor_src = ensure_findings_inventory_floor(scratchpad)
+                if _floor_n > 0:
+                    log.warning(
+                        f"[sc_verify_queue] inventory missing/empty; floor "
+                        f"reconstructed {_floor_n} finding(s) from {_floor_src} "
+                        "source artifact(s) -- verification proceeds (degraded)"
+                    )
+                else:
+                    log.warning(
+                        "[sc_verify_queue] inventory missing/empty and "
+                        f"{_floor_src} source artifact(s) yielded 0 findings; "
+                        "wrote a valid empty inventory -- clean empty path"
+                    )
             promoted = _promote_depth_findings_to_inventory(scratchpad)
             if promoted:
                 log.info(
@@ -18217,7 +18354,7 @@ def main():
                         checkpoint.degraded.append(phase.name)
                     checkpoint.save(scratchpad)
                     continue
-                elif phase.name == "inventory" and _inventory_has_usable_findings(
+                elif phase.name == "inventory" and _inventory_degrade_floor_ok(
                     scratchpad
                 ):
                     # AP-HF-1: inventory degraded on a STRUCTURE /

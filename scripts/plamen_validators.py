@@ -71,6 +71,9 @@ __all__ = [
     "_check_perturbation_block_per_finding",
     "_check_promotion_symmetry",
     "_check_report_index_unresolved_authenticity",
+    "validate_report_index_summary_master_parity",
+    "_distinct_master_report_ids",
+    "_master_tier_counts",
     "_check_speculative_critical_chains",
     "_check_step_execution_traces",
     "_check_unresolved_authenticity",
@@ -2223,16 +2226,121 @@ def _compute_unrouted_inventory_ids(scratchpad: Path) -> list[str]:
     return sorted(inventory_ids - acknowledged)
 
 
-def _validate_verification_queue_inventory_parity(scratchpad: Path) -> list[str]:
+def _resolve_inventory_floor_builder():
+    """Opportunistically resolve the B1 inventory floor builder WITHOUT
+    creating a validators -> mechanical import dependency.
+
+    The dependency-direction invariant (test_modularization.DIRECTION) forbids
+    `plamen_validators` from importing the mechanical module — mechanical sits
+    ABOVE validators and imports validators at module load, so a static or
+    function-local reverse import of mechanical would be a layering violation
+    (and a load-time cycle). The floor builder nonetheless lives in mechanical
+    (it composes mechanical-owned rendering with parser-owned merging).
+
+    Resolution rule: look the builder up in `sys.modules` ONLY. At driver
+    runtime mechanical is always already imported (it imports us), so the
+    builder is present and the B2 fallback works. In an isolated unit test that
+    loaded the mechanical module (as the B1/B2 controls do) it is likewise
+    present. If mechanical is genuinely not loaded, this returns
+    None and the caller surfaces the honest "missing inventory" error rather
+    than silently skipping — it never fabricates a dependency.
+
+    Returns the `ensure_findings_inventory_floor` callable, or None.
+    """
+    import sys as _sys
+
+    mech = _sys.modules.get("plamen_mechanical")
+    builder = getattr(mech, "ensure_findings_inventory_floor", None)
+    return builder if callable(builder) else None
+
+
+def _validate_verification_queue_inventory_parity(
+    scratchpad: Path, floor_builder=None
+) -> list[str]:
     """Ensure every inventory ID is routed to verify or explicitly excluded.
 
     Evidence filtering is allowed to suppress rows only by writing
     verification_queue_evidence_excluded.md. Anything else is a promotion
     dropout and must halt before verification.
+
+    `floor_builder` (B2): an optional `ensure_findings_inventory_floor`-shaped
+    callable injected by the driver (which legitimately imports mechanical). When
+    omitted, the builder is resolved opportunistically from `sys.modules` via
+    `_resolve_inventory_floor_builder` so this layer never statically depends on
+    mechanical.
     """
     inv_path = scratchpad / "findings_inventory.md"
-    if not inv_path.exists():
-        return ["verification queue parity: findings_inventory.md missing"]
+
+    # B2 verify graceful fallback (ROOT, validator-level): a missing OR
+    # present-but-empty findings_inventory.md must NOT be a terminal hard-fail
+    # whenever real findings still exist on disk in the completed breadth/depth/
+    # chunk artifacts. Reconstruct honestly via the B1 inventory floor BEFORE
+    # returning the "missing" error, so verification proceeds on the real
+    # findings instead of silently skipping them. The floor:
+    #   * is a NO-OP when a usable inventory already exists (no clobber),
+    #   * NEVER fabricates a finding (only carries forward findings that
+    #     actually appear in a source artifact), and
+    #   * writes a structurally valid EMPTY inventory for a genuinely empty
+    #     audit (0 findings anywhere) -> clean empty path, not a crash.
+    # Only if the floor itself cannot put a usable file on disk AND the audit is
+    # genuinely empty do we treat it as the valid empty path (return []). A hard
+    # terminal "missing" is returned only when reconstruction was attempted and
+    # still left no inventory file at all (an unexpected failure worth halting
+    # on, not a silent skip).
+    def _inventory_usable() -> bool:
+        if not inv_path.exists():
+            return False
+        try:
+            txt = inv_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        try:
+            return len(_inventory_blocks(txt)) > 0
+        except Exception:
+            return False
+
+    if not _inventory_usable():
+        # B2: reconstruct via the injected (or opportunistically-resolved) B1
+        # floor builder. No static reverse import of the mechanical module here
+        # — that would violate the validators -> mechanical dependency-direction
+        # invariant and reintroduce the module-load cycle.
+        floor_n = 0
+        floor_src = 0
+        builder = floor_builder or _resolve_inventory_floor_builder()
+        if builder is None:
+            # Mechanical not loaded and no builder injected: we cannot honestly
+            # reconstruct. Surface the missing-inventory error rather than
+            # silently skipping — recall-safe (never fabricate, never hide).
+            return ["verification queue parity: findings_inventory.md missing"]
+        try:
+            floor_n, floor_src = builder(scratchpad)
+        except Exception as exc:
+            log.error(
+                "[verify_queue parity] inventory floor reconstruction raised: "
+                f"{exc!r}"
+            )
+        if floor_n > 0:
+            log.warning(
+                "[verify_queue parity] findings_inventory.md was missing/empty; "
+                f"B1 floor reconstructed {floor_n} finding(s) from {floor_src} "
+                "source artifact(s) -- proceeding on the honest reconstructed "
+                "inventory (DEGRADED, not terminal)"
+            )
+        elif inv_path.exists():
+            # Floor ran and wrote a valid (empty) inventory: genuinely empty
+            # audit. Clean empty path -- no IDs to route, no dropout.
+            log.warning(
+                "[verify_queue parity] findings_inventory.md was missing/empty "
+                f"and {floor_src} source artifact(s) yielded 0 findings "
+                "(genuinely empty audit); valid empty inventory on disk -- "
+                "clean empty path"
+            )
+            return []
+        else:
+            # Reconstruction could not even place a file on disk: surface a hard
+            # error so the unexpected failure is visible, never silently skipped.
+            return ["verification queue parity: findings_inventory.md missing"]
+
     try:
         inventory_ids, active_ids, mapped_hypos, acknowledged = (
             _verification_queue_parity_sets(scratchpad)
@@ -12099,6 +12207,120 @@ def _parse_master_finding_index_rows(scratchpad: Path) -> list[dict[str, str]]:
             "internal": _cell("internal"),
         })
     return rows
+
+
+def _distinct_master_report_ids(scratchpad: Path) -> set[str]:
+    """Distinct, normalized report-ID set from the Master Finding Index.
+
+    The Master Finding Index is the report-body cardinality contract: one row
+    per reportable finding, keyed by a clean severity-prefixed report ID
+    (C-/H-/M-/L-/I-NN). Consolidation-Map-absorbed IDs are INTERNAL hypothesis
+    IDs, not report IDs, so they never appear as Master rows — the distinct
+    report-ID set already excludes them by construction.
+    """
+    ids: set[str] = set()
+    for r in _parse_master_finding_index_rows(scratchpad):
+        rid = (r.get("report_id") or "").strip().strip("[]").upper()
+        m = re.match(r"([CHMLI])-0*(\d+)", rid)
+        if m:
+            ids.add(f"{m.group(1)}-{int(m.group(2))}")
+    return ids
+
+
+def _master_tier_counts(scratchpad: Path) -> dict[str, int]:
+    """Per-tier counts derived from the distinct Master report-ID set."""
+    counts = {"C": 0, "H": 0, "M": 0, "L": 0, "I": 0}
+    for rid in _distinct_master_report_ids(scratchpad):
+        tier = rid[:1]
+        if tier in counts:
+            counts[tier] += 1
+    return counts
+
+
+def validate_report_index_summary_master_parity(scratchpad: Path) -> list[str]:
+    """A2: reconcile the Index Agent `## Summary` counts with the Master Finding
+    Index distinct report-ID set, and REPAIR the Summary in place when they
+    drift.
+
+    The DODO failure shape: the `## Summary` count table claimed 45 findings
+    while the Master Finding Index actually listed 74 distinct report IDs. Tier
+    writers dispatched against that inconsistent index then hallucinated IDs to
+    "fill" the gap between the summary count and the body, producing ghost
+    findings with no backing section.
+
+    This is the UPSTREAM root fix (at report_index, before tier writers
+    dispatch). The Master Finding Index is authoritative for cardinality — every
+    distinct report ID is one reportable finding. When the LLM's Summary table
+    disagrees, this gate rewrites the Summary table to match the Master via the
+    existing ``_canonicalize_summary_table`` helper so tier writers receive a
+    consistent index. It NEVER changes the Master rows themselves (no findings
+    are added or dropped — only the summary metadata is corrected), and it is a
+    NO-OP when the Summary already matches the Master (no false flag).
+
+    Returns a list of human-readable repair notes (empty = already consistent).
+    These are informational; the caller treats them as a self-heal, not a halt —
+    a corrected summary is strictly better than an inconsistent one, and
+    blocking the pipeline on a metadata mismatch the gate just fixed would be a
+    recall-negative false halt.
+    """
+    ri = scratchpad / "report_index.md"
+    if not ri.exists():
+        return []
+    master_counts = _master_tier_counts(scratchpad)
+    # No Master rows parsed → nothing to reconcile against (don't touch the
+    # Summary; a different gate handles a genuinely empty/malformed Master).
+    if sum(master_counts.values()) == 0:
+        return []
+
+    summary_counts = _parse_report_index_summary_counts(scratchpad)
+    if not summary_counts:
+        # Master rows exist but no Summary table found: do not fabricate one
+        # here (a separate structural gate owns Summary presence). No false flag.
+        return []
+
+    # Compare LLM Summary vs Master cardinality per tier.
+    drift = {
+        char: (summary_counts.get(char, 0), master_counts.get(char, 0))
+        for char in ("C", "H", "M", "L", "I")
+        if summary_counts.get(char, 0) != master_counts.get(char, 0)
+    }
+    if not drift:
+        return []  # consistent — NO false flag
+
+    try:
+        text = ri.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return [
+            "report_index Summary/Master parity: could not read report_index.md "
+            f"to repair drift {drift}: {exc}"
+        ]
+    new_text, deltas = _canonicalize_summary_table(text, master_counts)
+    notes: list[str] = []
+    if deltas:
+        try:
+            ri.write_text(new_text, encoding="utf-8")
+            notes.append(
+                "report_index Summary/Master parity: rewrote `## Summary` to "
+                "match Master Finding Index cardinality "
+                f"(Master total={sum(master_counts.values())}); "
+                "deltas: " + ", ".join(f"{n} {d}" for n, d in deltas)
+            )
+        except Exception as exc:
+            notes.append(
+                "report_index Summary/Master parity: Summary disagrees with "
+                f"Master {drift} but in-place repair failed: {exc}"
+            )
+    else:
+        # Drift detected by tier-count comparison but the canonicalizer found no
+        # `| Severity | N |` rows to rewrite (Summary table in a non-canonical
+        # shape). Surface as a note so the inconsistency is visible, not silent.
+        notes.append(
+            "report_index Summary/Master parity: Summary counts disagree with "
+            f"Master Finding Index {drift} but the `## Summary` table is not in "
+            "the canonical `| Severity | N |` shape — could not auto-repair; "
+            "Master remains authoritative for tier-writer dispatch"
+        )
+    return notes
 
 
 def _check_report_index_unresolved_authenticity(scratchpad: Path) -> list[str]:

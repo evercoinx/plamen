@@ -86,6 +86,8 @@ __all__ = [
     "_write_spec_expectations",
     "_write_location_recovery_skip",
     "_write_mechanical_inventory_from_chunks",
+    "_render_inventory_from_merged_entries",
+    "ensure_findings_inventory_floor",
     "_write_mechanical_report_index",
     "promote_niche_to_inventory",
     "strip_codex_prepass_markers",
@@ -3098,6 +3100,42 @@ def _write_mechanical_inventory_from_chunks(scratchpad: Path) -> tuple[int, int]
     if not merged:
         return 0, 0
 
+    _n_parsed_entries, _n_merged = _render_inventory_from_merged_entries(
+        scratchpad, merged
+    )
+    receipt = [
+        "# Mechanical Inventory Merge Receipt",
+        "",
+        f"Chunk files: {len(chunk_paths)}",
+        f"Parsed chunk findings: {len(entries)}",
+        f"Merged inventory findings: {_n_merged}",
+        "",
+    ]
+    (scratchpad / "inventory_merge_receipt.md").write_text(
+        "\n".join(receipt), encoding="utf-8"
+    )
+    return len(entries), _n_merged
+
+
+def _render_inventory_from_merged_entries(
+    scratchpad: Path, merged: list[dict[str, object]]
+) -> tuple[int, int]:
+    """Render `findings_inventory.md` from already-merged inventory entries.
+
+    Shared emission body extracted from `_write_mechanical_inventory_from_chunks`
+    so the floor builder (`ensure_findings_inventory_floor`) produces a
+    byte-structurally identical inventory: the same `# Finding Inventory` header,
+    `## Summary` table, and `### Finding [INV-NNN]:` blocks the downstream
+    verify-queue / parity validators expect.
+
+    `merged` MUST already be the conservative-merge output of
+    `_merge_inventory_entries` (it never fabricates a finding). Returns
+    (input_entry_count, rendered_finding_count). Writes nothing and returns
+    (0, 0) when `merged` is empty.
+    """
+    if not merged:
+        return 0, 0
+
     counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Informational": 0}
     for item in merged:
         sev = _severity_name_from_text("", {"severity": str(item.get("severity", ""))})
@@ -3193,16 +3231,142 @@ def _write_mechanical_inventory_from_chunks(scratchpad: Path) -> tuple[int, int]
 
     (scratchpad / "findings_inventory.md").write_text("\n".join(lines), encoding="utf-8")
     _write_finding_records_from_inventory(scratchpad)
+    return len(merged), len(merged)
+
+
+def ensure_findings_inventory_floor(scratchpad: Path) -> tuple[int, int]:
+    """Guarantee `findings_inventory.md` exists, reconstructed honestly.
+
+    B1 inventory floor. When the inventory phase degrades (a chunk failed, the
+    LLM merge truncated, the file was never written or is empty), downstream
+    verification has nothing to work on and the run terminally halts even though
+    real findings exist on disk in the breadth/depth/chunk artifacts. This floor
+    reconstructs `findings_inventory.md` from whatever completed:
+
+      * `findings_inventory_chunk_*.md` (already-structured inventory chunks),
+      * `analysis_*.md` (breadth pass findings, incl. rescan/percontract),
+      * `depth_*_findings.md` (depth agent findings).
+
+    It REUSES the existing parse + conservative-merge helpers
+    (`_parse_inventory_chunk`, `_parse_depth_finding_blocks`,
+    `_merge_inventory_entries`) and the shared renderer, so it can NEVER
+    fabricate a finding — every emitted INV-* entry traces to a real finding in
+    a source artifact. `_merge_inventory_entries` only coalesces exact
+    title+location duplicates, so no real finding is silently dropped either.
+
+    Idempotent w.r.t. an already-good inventory: it is a NO-OP (returns the
+    current block count, 0 sources scanned) when `findings_inventory.md` already
+    holds usable finding blocks — it never overwrites a real inventory.
+
+    Returns (n_findings, n_source_artifacts). When NO source artifact yields ANY
+    finding (a genuinely empty audit), it writes a structurally valid EMPTY
+    inventory and returns (0, n_source_artifacts) — a valid empty path, never a
+    crash.
+    """
+    inv_path = scratchpad / "findings_inventory.md"
+    # NO-OP guard: never clobber an inventory that already has real findings.
+    if inv_path.exists():
+        try:
+            existing = inv_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            existing = ""
+        try:
+            existing_blocks = len(_inventory_blocks(existing))
+        except Exception:
+            existing_blocks = 0
+        if existing_blocks > 0:
+            return existing_blocks, 0
+
+    entries: list[dict[str, object]] = []
+    n_sources = 0
+
+    # (1) Structured inventory chunks — richest source, parse first.
+    for p in sorted(scratchpad.glob("findings_inventory_chunk_*.md")):
+        n_sources += 1
+        entries.extend(_parse_inventory_chunk(p))
+
+    # (2) Breadth analysis passes (analysis_*.md, incl. rescan/percontract) and
+    # (3) depth agent findings (depth_*_findings.md). Both use the standard
+    # `### Finding [ID]: Title` heading format parsed by _parse_depth_finding_blocks.
+    feeder_globs = ("analysis_*.md", "depth_*_findings.md")
+    for pattern in feeder_globs:
+        for p in sorted(scratchpad.glob(pattern)):
+            n_sources += 1
+            for blk in _parse_depth_finding_blocks(p):
+                # _parse_depth_finding_blocks emits `id`; the merge helper keys
+                # provenance off `local_id` / `source_ids`. Adapt without losing
+                # the originating finding ID.
+                src_id = str(blk.get("id", "")).strip()
+                entries.append({
+                    "title": blk.get("title", ""),
+                    "severity": blk.get("severity", ""),
+                    "location": blk.get("location", ""),
+                    "preferred_tag": blk.get("preferred_tag", ""),
+                    "verdict": blk.get("verdict", ""),
+                    "root_cause": blk.get("root_cause", "") or blk.get("description", ""),
+                    "description": blk.get("description", ""),
+                    "impact": blk.get("impact", ""),
+                    "local_id": src_id,
+                    "source_ids": [src_id] if src_id else [],
+                    **{
+                        f: blk.get(f, "")
+                        for f in _OPTIONAL_FINDING_METADATA_FIELDS
+                        if blk.get(f)
+                    },
+                })
+
+    merged = _merge_inventory_entries(entries)
+    if not merged:
+        # Genuinely empty audit (no findings anywhere) OR no source artifacts.
+        # Either way write a structurally valid empty inventory — a clean empty
+        # path, never a crash. Downstream parity treats an empty inventory as
+        # zero IDs to route (no dropout).
+        empty_lines = [
+            "# Finding Inventory",
+            "",
+            "Reconstructed mechanically by the inventory floor "
+            "(`ensure_findings_inventory_floor`). No findings were recoverable "
+            "from any completed breadth/depth/chunk artifact.",
+            "",
+            "## Summary",
+            "",
+            "| Severity | Count |",
+            "|----------|-------|",
+            "| Critical | 0 |",
+            "| High | 0 |",
+            "| Medium | 0 |",
+            "| Low | 0 |",
+            "| Informational | 0 |",
+            "| Total | 0 |",
+            "",
+            "## Findings",
+            "",
+            "_No findings._",
+            "",
+        ]
+        inv_path.write_text("\n".join(empty_lines), encoding="utf-8")
+        try:
+            _write_finding_records_from_inventory(scratchpad)
+        except Exception:
+            pass
+        return 0, n_sources
+
+    n_parsed, n_rendered = _render_inventory_from_merged_entries(scratchpad, merged)
     receipt = [
-        "# Mechanical Inventory Merge Receipt",
+        "# Inventory Floor Reconstruction Receipt",
         "",
-        f"Chunk files: {len(chunk_paths)}",
-        f"Parsed chunk findings: {len(entries)}",
-        f"Merged inventory findings: {len(merged)}",
+        "findings_inventory.md was missing/empty after the inventory phase; "
+        "reconstructed honestly from completed artifacts (no fabrication).",
+        "",
+        f"Source artifacts scanned: {n_sources}",
+        f"Parsed source findings: {len(entries)}",
+        f"Reconstructed inventory findings: {n_rendered}",
         "",
     ]
-    (scratchpad / "inventory_merge_receipt.md").write_text("\n".join(receipt), encoding="utf-8")
-    return len(entries), len(merged)
+    (scratchpad / "inventory_floor_receipt.md").write_text(
+        "\n".join(receipt), encoding="utf-8"
+    )
+    return n_rendered, n_sources
 
 
 # v2.x: Niche finding ID prefixes recognized by promote_niche_to_inventory.

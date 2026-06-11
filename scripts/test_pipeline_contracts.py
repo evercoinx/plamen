@@ -225,7 +225,12 @@ def test_AP_HF_1_inventory_degrade_branch_precedes_critical_funnel():
     agnostic: the same branch covers SC and L1)."""
     import inspect
     src = inspect.getsource(D.main)
-    degrade_idx = src.find('phase.name == "inventory" and _inventory_has_usable_findings')
+    # B2: the inventory degrade branch now routes through the B1-floor-aware
+    # helper `_inventory_degrade_floor_ok` (reconstructs an honest inventory
+    # from completed artifacts before any halt) instead of the bare
+    # `_inventory_has_usable_findings` precondition. The structural invariant
+    # (degrade branch precedes the critical-halt funnel) is unchanged.
+    degrade_idx = src.find('phase.name == "inventory" and _inventory_degrade_floor_ok')
     critical_idx = src.find("elif phase.critical:")
     assert degrade_idx != -1, "inventory degrade branch missing from run loop"
     assert critical_idx != -1, "critical-halt funnel missing from run loop"
