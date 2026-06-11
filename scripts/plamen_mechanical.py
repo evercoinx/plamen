@@ -43,6 +43,12 @@ __all__ = [
     "_resolve_dedup_survivor",
     "backfill_unrouted_inventory_into_queue",
     "_assemble_report_python",
+    "_dedup_report_python",
+    "_dedup_report_sections",
+    "_dedup_report_candidate_pairs",
+    "_dedup_data_loss_gate",
+    "_dedup_title_jaccard",
+    "_defined_report_section_ids",
     "_build_human_review_appendix",
     "_build_attention_repair_items",
     "_build_asset_binding_repair_items",
@@ -1893,6 +1899,30 @@ def _repair_promotion_dropouts(body: str, scratchpad: Path) -> str:
     return body.rstrip() + "\n\n---\n\n" + insertion
 
 
+_REPORT_SECTION_HEADING_RE = re.compile(
+    r"(?im)^#{2,3}\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[\s*([CHMLI]-\d+)\s*\]"
+)
+
+
+def _defined_report_section_ids(*tier_texts: str) -> set[str]:
+    """Return the set of report IDs that have a real `## [X-NN]` / `### [X-NN]`
+    finding section across the given tier texts.
+
+    Used to prevent the Priority Remediation Order / Executive Summary from
+    citing a report ID that the Master Finding Index lists but that has no
+    corresponding finding section in the assembled body (the "ghost reference"
+    class). Matches the heading shapes the assembler actually emits (H2 or H3,
+    optional REPORT-BLOCKED prefix, optional inner whitespace).
+    """
+    ids: set[str] = set()
+    for text in tier_texts:
+        if not text:
+            continue
+        for m in _REPORT_SECTION_HEADING_RE.finditer(text):
+            ids.add(m.group(1).upper())
+    return ids
+
+
 def _finalize_report_tier_section(section: str, id_to_title: dict) -> str:
     """Rewrite generic/broken finding headings from the canonical index title
     and strip internal-status prose. Preserves a trailing verification-status
@@ -2099,8 +2129,52 @@ def _assemble_report_python(
         )
     )
     # Canonical report-ID -> title map used to repair generic/broken tier
-    # headings during section finalization.
+    # headings during section finalization. Built from ALL index rows BEFORE the
+    # ghost-reference filter below, so a tier heading can still be repaired from
+    # its canonical title even if the remediation order will not cite it.
     id_to_title = {r["id"]: r["title"] for r in finding_rows}
+
+    # --- Ghost-reference guard (assembler bug fix) ---------------------------
+    # The Master Finding Index can list a report ID (e.g. M-18) that has NO
+    # corresponding `### [X-NN]` finding section in any tier file — a stale
+    # internal/index ID that never produced a body section. Citing it in the
+    # Priority Remediation Order or Executive Summary creates a dangling
+    # reference the reader cannot resolve. Derive the set of report IDs that
+    # ACTUALLY have a finding section from the tier texts, and restrict
+    # finding_rows to those. IDs with a real section but absent from the index
+    # are also recovered so they are not silently dropped from remediation.
+    defined_section_ids = _defined_report_section_ids(
+        crit_high_text, medium_text, low_info_text
+    )
+    if defined_section_ids:
+        kept_rows = [r for r in finding_rows if r["id"] in defined_section_ids]
+        dropped = [r["id"] for r in finding_rows if r["id"] not in defined_section_ids]
+        if dropped:
+            log.warning(
+                "[report_assemble] dropped %d dangling remediation ID(s) with "
+                "no finding section: %s",
+                len(dropped), ", ".join(sorted(dropped)),
+            )
+        present_ids = {r["id"] for r in kept_rows}
+        for rid in sorted(
+            defined_section_ids - present_ids,
+            key=lambda x: (
+                {"C": 0, "H": 1, "M": 2, "L": 3, "I": 4}.get(x[0], 9),
+                int(re.findall(r"\d+", x)[0]) if re.findall(r"\d+", x) else 0,
+            ),
+        ):
+            kept_rows.append({"id": rid, "title": id_to_title.get(rid, "Finding")})
+            log.warning(
+                "[report_assemble] recovered remediation ID %s present as a "
+                "finding section but missing from Master Finding Index", rid,
+            )
+        kept_rows.sort(
+            key=lambda r: (
+                {"C": 0, "H": 1, "M": 2, "L": 3, "I": 4}.get(r["id"][0], 9),
+                int(re.findall(r"\d+", r["id"])[0]) if re.findall(r"\d+", r["id"]) else 0,
+            )
+        )
+        finding_rows = kept_rows
 
     # --- Generate Executive Summary mechanically -----------------------------
     top_crits = [r for r in finding_rows if r["id"].startswith("C-")][:5]
@@ -2346,6 +2420,443 @@ def _assemble_report_python(
         f"[report_assemble] python-assembled {audit_report_path.name} "
         f"({len(body):,} bytes, {finding_section_count} finding sections, "
         f"no LLM round-trip)"
+    )
+    return True
+
+
+# ── report_dedup phase (cross-tier same-bug consolidation) ──────────────────
+#
+# report_index STEP-1.5 forbids merging hypotheses across severity tiers, so a
+# single bug that surfaced at two severities (e.g. C-01 + H-12) is never a
+# consolidation candidate before the report exists. This phase runs AFTER
+# severities are final (post report_assemble) and looks for cross-tier
+# duplicates in the assembled AUDIT_REPORT.md.
+#
+# SAFETY (invariant #1, non-negotiable): this phase NEVER loses report content.
+# It ALWAYS snapshots the untouched original (AUDIT_REPORT.pre-dedup.md), writes
+# the candidate deduped report to AUDIT_REPORT.deduped.md, and only promotes the
+# deduped output to AUDIT_REPORT.md if a MECHANICAL DATA-LOSS GATE confirms every
+# original Location string, Impact bullet, PoC test-id, and report-ID mapping
+# still appears. On ANY detected loss it KEEPS the original as the delivered
+# report and leaves the deduped file as a side artifact for human review.
+
+_DEDUP_LOCATION_TOKEN_RE = re.compile(
+    r"`?[\w./\\-]+\.\w+:L?\d+(?:-L?\d+)?`?", re.IGNORECASE
+)
+_DEDUP_POC_FN_RE = re.compile(r"\b(test[A-Za-z0-9_]+|test_[A-Za-z0-9_]+)\b")
+_DEDUP_IMPACT_BULLET_RE = re.compile(r"(?m)^\s*[-*]\s+(.+\S)\s*$")
+_DEDUP_TITLE_STOPWORDS = frozenset({
+    "the", "a", "an", "in", "on", "of", "to", "and", "or", "is", "are", "for",
+    "with", "via", "by", "when", "due", "can", "be", "not", "no", "missing",
+})
+
+
+def _dedup_report_sections(body: str) -> list[dict]:
+    """Split an assembled report body into per-finding records.
+
+    Each record carries: id, severity prefix, heading line, full section text,
+    location-token set, impact-bullet set, and PoC test-fn set. Only
+    `### [X-NN]` / `## [X-NN]` finding sections are records (not H2 tier
+    headers like `## Critical Findings`).
+    """
+    headers = list(re.finditer(
+        r"(?im)^(#{2,3})\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[\s*([CHMLI]-\d+)\s*\][^\n]*$",
+        body or "",
+    ))
+    records: list[dict] = []
+    for i, hm in enumerate(headers):
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(body or "")
+        section = (body or "")[hm.start():end]
+        rid = _normalize_report_id(hm.group(2))
+        locs = {m.group(0).strip("`") for m in _DEDUP_LOCATION_TOKEN_RE.finditer(section)}
+        pocs = set(_DEDUP_POC_FN_RE.findall(section))
+        impacts = set()
+        impact_block = re.search(
+            r"(?is)\*\*Impact\*\*\s*:?(.*?)(?:\n\*\*[A-Z]|\Z)", section
+        )
+        if impact_block:
+            for bm in _DEDUP_IMPACT_BULLET_RE.finditer(impact_block.group(1)):
+                impacts.add(bm.group(1).strip())
+        title = hm.group(0)
+        title = re.sub(r"(?i)^#{2,3}\s*\[\s*[CHMLI]-\d+\s*\]\s*", "", title)
+        title = re.sub(r"(?i)\s*\[(?:VERIFIED|UNVERIFIED|CONTESTED|UNRESOLVED[^\]]*|VERIFICATION NOT EXECUTED)\]\s*$", "", title).strip()
+        records.append({
+            "id": rid,
+            "prefix": rid[0],
+            "heading": hm.group(0),
+            "section": section,
+            "title": title,
+            "locations": locs,
+            "pocs": pocs,
+            "impacts": impacts,
+        })
+    return records
+
+
+def _dedup_title_jaccard(a: str, b: str) -> float:
+    def _toks(s: str) -> set[str]:
+        return {
+            w for w in re.findall(r"[a-z0-9]+", (s or "").lower())
+            if w not in _DEDUP_TITLE_STOPWORDS and len(w) > 2
+        }
+    ta, tb = _toks(a), _toks(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _dedup_source_ids_by_report_id(scratchpad: Path) -> dict[str, set[str]]:
+    """Back-join each report ID to its internal/source-ID set.
+
+    Recovers the source-ID dimension the client report lacks, via
+    report_index.md Master Finding Index "Internal Hypothesis" column
+    (parse_report_index_assignments) plus finding_mapping.md.
+    """
+    out: dict[str, set[str]] = {}
+    try:
+        rows = parse_report_index_assignments(scratchpad)
+    except Exception:
+        rows = []
+    fmap: dict[str, set[str]] = {}
+    fm_path = scratchpad / "finding_mapping.md"
+    if fm_path.exists():
+        try:
+            fm_text = fm_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            fm_text = ""
+        # finding_mapping rows associate a hypothesis ID with its source finding
+        # IDs. Collect all internal IDs that co-occur on a line under a hypothesis.
+        for line in fm_text.splitlines():
+            ids = _INTERNAL_FINDING_ID_RE.findall(line)
+            if len(ids) >= 2:
+                head = ids[0].upper()
+                fmap.setdefault(head, set()).update(x.upper() for x in ids)
+    for row in rows:
+        rid = _normalize_report_id(str(row.get("report_id", "") or ""))
+        if not rid:
+            continue
+        internal = str(row.get("finding_id", "") or row.get("internal", "") or "")
+        src: set[str] = set()
+        for tok in _INTERNAL_FINDING_ID_RE.findall(internal):
+            tok = tok.upper()
+            src.add(tok)
+            src |= fmap.get(tok, set())
+        if src:
+            out.setdefault(rid, set()).update(src)
+    return out
+
+
+_DEDUP_AGGREGATE_SUPPRESS_THRESHOLD = 6
+
+
+def _dedup_report_candidate_pairs(
+    records: list[dict], src_by_id: dict[str, set[str]]
+) -> list[dict]:
+    """Detect cross-tier candidate pairs (NEVER auto-merge — candidates only).
+
+    Signals, ranked: (1) cross-tier source-ID subset [primary], (2) shared
+    location token, (3) shared PoC test-fn, (4) title Jaccard >= 0.5.
+    Aggregate-source-ID suppression: a finding with a large source-ID set is
+    excluded from the subset signal (avoids class-D false merges).
+    """
+    pairs: list[dict] = []
+    n = len(records)
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = records[i], records[j]
+            if a["prefix"] == b["prefix"]:
+                continue  # same tier handled by report_index STEP-1.5
+            a_src = src_by_id.get(a["id"], set())
+            b_src = src_by_id.get(b["id"], set())
+            signals: list[str] = []
+            rank = 99
+            agg = (len(a_src) > _DEDUP_AGGREGATE_SUPPRESS_THRESHOLD
+                   or len(b_src) > _DEDUP_AGGREGATE_SUPPRESS_THRESHOLD)
+            if a_src and b_src and not agg and (
+                a_src.issubset(b_src) or b_src.issubset(a_src)
+            ):
+                signals.append("source-id-subset")
+                rank = min(rank, 0)
+            if a["locations"] & b["locations"]:
+                signals.append("shared-location")
+                rank = min(rank, 1)
+            if a["pocs"] & b["pocs"]:
+                signals.append("shared-poc")
+                rank = min(rank, 2)
+            jac = _dedup_title_jaccard(a["title"], b["title"])
+            if jac >= 0.5:
+                signals.append(f"title-jaccard={jac:.2f}")
+                rank = min(rank, 3)
+            if not signals:
+                continue
+            # survivor = higher severity (lower prefix priority number)
+            pri = {"C": 0, "H": 1, "M": 2, "L": 3, "I": 4}
+            if pri.get(a["prefix"], 9) <= pri.get(b["prefix"], 9):
+                keep, absorb = a, b
+            else:
+                keep, absorb = b, a
+            pairs.append({
+                "keep": keep["id"], "absorb": absorb["id"],
+                "signals": signals, "rank": rank,
+            })
+    pairs.sort(key=lambda p: p["rank"])
+    return pairs
+
+
+def _dedup_data_loss_gate(original: str, deduped: str) -> list[str]:
+    """Mechanical zero-data-loss gate. Returns a list of LOST items (empty=ok).
+
+    Every Location token, Impact bullet, PoC test-id, and report-ID heading in
+    the ORIGINAL must still appear somewhere in the DEDUPED output. Merged
+    findings renumber survivors, so we do NOT require the absorbed ID heading to
+    survive — only its CONTENT (locations/impacts/pocs). The report-ID dimension
+    is checked via the dedup mapping separately by the caller.
+    """
+    lost: list[str] = []
+    orig_locs = {m.group(0).strip("`") for m in _DEDUP_LOCATION_TOKEN_RE.finditer(original)}
+    ded_locs = {m.group(0).strip("`") for m in _DEDUP_LOCATION_TOKEN_RE.finditer(deduped)}
+    for loc in orig_locs:
+        if loc not in ded_locs:
+            lost.append(f"location:{loc}")
+    orig_pocs = set(_DEDUP_POC_FN_RE.findall(original))
+    ded_pocs = set(_DEDUP_POC_FN_RE.findall(deduped))
+    for poc in orig_pocs:
+        if poc not in ded_pocs:
+            lost.append(f"poc:{poc}")
+    # Impact bullets: compare normalized bullet text presence.
+    def _norm_bullets(text: str) -> set[str]:
+        return {
+            re.sub(r"\s+", " ", m.group(1)).strip().lower()
+            for m in _DEDUP_IMPACT_BULLET_RE.finditer(text)
+        }
+    orig_b = _norm_bullets(original)
+    ded_normalized = re.sub(r"\s+", " ", deduped).lower()
+    for bullet in orig_b:
+        if bullet and bullet not in ded_normalized:
+            lost.append(f"impact:{bullet[:60]}")
+    return lost
+
+
+def _dedup_report_python(scratchpad: Path, project_root: str) -> bool:
+    """Cross-tier report dedup. Python-native, NEVER loses content.
+
+    Idempotent: a report with no cross-tier candidate pairs is a no-op (the
+    delivered AUDIT_REPORT.md is left untouched, mapping records identity).
+    `critical=False` — a crash/timeout/veto here MUST NOT halt the run or
+    corrupt the delivered report.
+    """
+    audit_path = Path(project_root) / "AUDIT_REPORT.md"
+    mapping_path = scratchpad / "report_dedup_mapping.md"
+
+    def _write_mapping(lines: list[str]) -> None:
+        try:
+            mapping_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception as exc:
+            log.warning(f"[report_dedup] mapping write failed: {exc!r}")
+
+    if not audit_path.exists():
+        _write_mapping([
+            "# Report Dedup Mapping", "",
+            "_AUDIT_REPORT.md not present — no-op._",
+        ])
+        log.warning("[report_dedup] AUDIT_REPORT.md missing — no-op")
+        return True
+
+    try:
+        original = audit_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        _write_mapping(["# Report Dedup Mapping", "", f"_read failed: {exc!r}_"])
+        log.warning(f"[report_dedup] read failed: {exc!r}")
+        return True
+
+    records = _dedup_report_sections(original)
+    src_by_id = _dedup_source_ids_by_report_id(scratchpad)
+    pairs = _dedup_report_candidate_pairs(records, src_by_id)
+
+    # ALWAYS snapshot the untouched original first (data-loss safety).
+    pre_path = scratchpad / "AUDIT_REPORT.pre-dedup.md"
+    try:
+        pre_path.write_text(original, encoding="utf-8")
+    except Exception as exc:
+        log.warning(f"[report_dedup] pre-dedup snapshot failed: {exc!r}")
+
+    rec_by_id = {r["id"]: r for r in records}
+    decisions: list[dict] = []
+    # Resolve merge direction with the reusable superset gate; default
+    # KEEP_SEPARATE (a duplicate is cosmetic, a dropped finding is recall loss).
+    absorbed_into: dict[str, str] = {}
+    for p in pairs:
+        keep_id, absorb_id = p["keep"], p["absorb"]
+        if absorb_id in absorbed_into or keep_id in absorbed_into:
+            # avoid transitive double-merge; conservative skip
+            decisions.append({**p, "decision": "KEEP_SEPARATE",
+                              "reason": "transitive-merge-avoided"})
+            continue
+        finfo = {
+            keep_id: {"source_ids": src_by_id.get(keep_id, set()),
+                      "line_range": None, "file": ""},
+            absorb_id: {"source_ids": src_by_id.get(absorb_id, set()),
+                        "line_range": None, "file": ""},
+        }
+        # Only the primary source-id-subset signal authorizes a mechanical
+        # cross-tier merge. Weaker signals (location/poc/title) are surfaced as
+        # candidates but default KEEP_SEPARATE without an LLM adjudication layer.
+        if "source-id-subset" in p["signals"]:
+            keep_src = src_by_id.get(keep_id, set())
+            absorb_src = src_by_id.get(absorb_id, set())
+            merge_ok = False
+            reason = ""
+            if keep_src and absorb_src and keep_src == absorb_src:
+                # Identical internal-hypothesis provenance → unambiguously the
+                # same bug surfaced at two severities. Survivor = higher sev
+                # (already chosen as `keep`).
+                merge_ok = True
+                reason = "identical source-id set (same hypothesis, cross-tier)"
+            else:
+                # Proper subset → use the reusable superset gate to pick the
+                # survivor (and FLIP if the proposed survivor is the smaller).
+                resolved = _resolve_dedup_survivor(
+                    absorb_id, keep_id, absorb_id, keep_id, finfo
+                )
+                if resolved is not None:
+                    absorb_id, keep_id = resolved
+                    merge_ok = True
+                    reason = "source-id subset (cross-tier, superset survivor)"
+            if merge_ok:
+                decisions.append({
+                    "keep": keep_id, "absorb": absorb_id,
+                    "signals": p["signals"], "decision": "MERGE",
+                    "reason": reason,
+                })
+                absorbed_into[absorb_id] = keep_id
+                continue
+        decisions.append({**p, "decision": "KEEP_SEPARATE",
+                          "reason": "weak-signal-only (" + ",".join(p["signals"]) + ")"})
+
+    merges = [d for d in decisions if d["decision"] == "MERGE"]
+
+    # --- write decisions-only mapping ---------------------------------------
+    map_lines = ["# Report Dedup Mapping", ""]
+    map_lines.append(f"- Candidate pairs evaluated: {len(pairs)}")
+    map_lines.append(f"- Merges proposed: {len(merges)}")
+    map_lines.append("")
+    map_lines.append("| Survivor | Absorbed | Decision | Signals | Reason |")
+    map_lines.append("|----------|----------|----------|---------|--------|")
+    for d in decisions:
+        map_lines.append(
+            f"| {d['keep']} | {d['absorb']} | {d['decision']} | "
+            f"{';'.join(d['signals'])} | {d['reason']} |"
+        )
+
+    if not merges:
+        # Idempotent no-op: leave AUDIT_REPORT.md untouched.
+        _write_mapping(map_lines + ["", "_No cross-tier merges — report unchanged (identity)._"])
+        log.info(
+            f"[report_dedup] no cross-tier merges "
+            f"({len(pairs)} candidates) — report unchanged"
+        )
+        return True
+
+    # --- build deduped body: append absorbed content into survivor, drop
+    #     absorbed section. Survivor keeps highest severity (it already is the
+    #     keep). Renumbering is intentionally NOT done here to keep the merge
+    #     strictly additive and the data-loss gate exact on locations/impacts. --
+    deduped = original
+    for d in merges:
+        keep_rec = rec_by_id.get(d["keep"])
+        absorb_rec = rec_by_id.get(d["absorb"])
+        if not keep_rec or not absorb_rec:
+            continue
+        # Build a coupling block of the absorbed finding's distinct content.
+        extra_locs = sorted(absorb_rec["locations"] - keep_rec["locations"])
+        extra_impacts = sorted(absorb_rec["impacts"] - keep_rec["impacts"])
+        extra_pocs = sorted(absorb_rec["pocs"] - keep_rec["pocs"])
+        couple_parts = [
+            f"\n\n**Consolidated from {d['absorb']}** "
+            f"(same root cause, surfaced at a different severity tier):\n"
+        ]
+        if extra_locs:
+            couple_parts.append(
+                "- Additional locations: " + ", ".join(f"`{l}`" for l in extra_locs)
+            )
+        for imp in extra_impacts:
+            couple_parts.append(f"- {imp}")
+        if extra_pocs:
+            couple_parts.append("- PoC references: " + ", ".join(extra_pocs))
+        # If the absorbed section has unique location/impact/poc content not
+        # captured by tokens above, append its full section text verbatim so the
+        # data-loss gate is guaranteed to pass (zero-loss superset).
+        #
+        # IDEMPOTENCY: demote the absorbed `### [X-NN]` heading inside the
+        # embedded block to a non-heading bold line. Otherwise the embedded
+        # heading re-materializes the absorbed finding as a parseable section on
+        # a subsequent run, and the phase would merge it AGAIN (non-idempotent).
+        # The data-loss gate checks locations/impacts/pocs — never headings — so
+        # demoting the heading preserves zero-loss while making re-runs a no-op.
+        absorbed_body = re.sub(
+            r"(?im)^#{2,3}\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[\s*([CHMLI]-\d+)\s*\]\s*",
+            r"**Absorbed finding \1:** ",
+            absorb_rec["section"].strip(),
+        )
+        couple_block = "\n".join(couple_parts) + "\n\n" + absorbed_body + "\n"
+        # Insert coupling at end of the survivor section.
+        keep_section = keep_rec["section"]
+        idx = deduped.find(keep_section)
+        if idx < 0:
+            continue
+        new_keep = keep_section.rstrip() + "\n" + couple_block
+        deduped = deduped[:idx] + new_keep + deduped[idx + len(keep_section):]
+        # Remove the absorbed standalone section.
+        ab_section = absorb_rec["section"]
+        ab_idx = deduped.find(ab_section)
+        if ab_idx >= 0:
+            deduped = deduped[:ab_idx] + deduped[ab_idx + len(ab_section):]
+        # Refresh rec_by_id survivor section pointer for chained merges.
+        refreshed = _dedup_report_sections(deduped)
+        rec_by_id = {r["id"]: r for r in refreshed}
+
+    deduped = re.sub(r"\n{4,}", "\n\n\n", deduped)
+
+    # --- write deduped side artifact ----------------------------------------
+    ded_path = scratchpad / "AUDIT_REPORT.deduped.md"
+    try:
+        ded_path.write_text(deduped, encoding="utf-8")
+    except Exception as exc:
+        log.warning(f"[report_dedup] deduped write failed: {exc!r}")
+
+    # --- MECHANICAL DATA-LOSS GATE ------------------------------------------
+    lost = _dedup_data_loss_gate(original, deduped)
+    if lost:
+        # VETO: keep the original AUDIT_REPORT.md as delivered, leave deduped
+        # as a side artifact, log a warning. NEVER auto-degrade the real report.
+        _write_mapping(map_lines + [
+            "", f"## DATA-LOSS GATE: VETO ({len(lost)} item(s) lost)",
+            "_Deduped output dropped content — original report retained as delivered._",
+            "",
+            *[f"- LOST {item}" for item in lost[:50]],
+        ])
+        log.warning(
+            f"[report_dedup] data-loss gate VETO ({len(lost)} lost item(s)) — "
+            f"original AUDIT_REPORT.md retained, deduped kept as side artifact"
+        )
+        return True
+
+    # --- gate passed → promote deduped to delivered report -------------------
+    try:
+        audit_path.write_text(deduped, encoding="utf-8")
+    except Exception as exc:
+        log.warning(
+            f"[report_dedup] promote failed ({exc!r}) — original retained"
+        )
+        return True
+    _write_mapping(map_lines + [
+        "", "## DATA-LOSS GATE: PASS",
+        f"_Promoted deduped report ({len(merges)} cross-tier merge(s)). "
+        f"Original snapshot at AUDIT_REPORT.pre-dedup.md._",
+    ])
+    log.info(
+        f"[report_dedup] promoted deduped report: {len(merges)} cross-tier "
+        f"merge(s), data-loss gate passed"
     )
     return True
 

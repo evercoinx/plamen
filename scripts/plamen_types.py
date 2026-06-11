@@ -1314,6 +1314,13 @@ SC_PHASES = [
     Phase("report_assemble", ["Step 6c: Assembler"],
           ["AUDIT_REPORT.md"],
           base_timeout_s=3600, model="sonnet", critical=True),
+    # Python-native cross-tier dedup. critical=False is LOAD-BEARING: a
+    # crash/timeout/data-loss-veto here MUST NOT halt the run or corrupt the
+    # delivered AUDIT_REPORT.md. Gate artifact is the always-written mapping,
+    # NOT AUDIT_REPORT.md (the phase must not change it on a no-op/veto).
+    Phase("report_dedup", ["Step 6d: Report Dedup"],
+          ["report_dedup_mapping.md"],
+          base_timeout_s=900, model="sonnet", critical=False),
 ]
 
 L1_PHASES = [
@@ -1511,4 +1518,11 @@ L1_PHASES = [
                               "Step 6.6: Report Preservation"],
           ["AUDIT_REPORT.md"],
           base_timeout_s=4800, model="sonnet", critical=True),
+    # Python-native cross-tier dedup (L1 parity). critical=False is
+    # LOAD-BEARING: a crash/timeout/data-loss-veto MUST NOT halt the run or
+    # corrupt the delivered AUDIT_REPORT.md. Gate artifact is the always-written
+    # mapping, NOT AUDIT_REPORT.md (the phase must not change it on no-op/veto).
+    Phase("report_dedup", ["6d. Report Dedup"],
+          ["report_dedup_mapping.md"],
+          base_timeout_s=900, model="sonnet", critical=False),
 ]

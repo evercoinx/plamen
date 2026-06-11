@@ -927,6 +927,10 @@ _STANDALONE_PROMPT_MAP: dict[str, str] = {
     "crossbatch": "phase5-crossbatch.md",
     "report_index": "phase6a-report-index.md",
     "report_assemble": "phase6c-assembler.md",
+    # Phase 6d cross-tier report dedup — Python-native; stub prompt exists so
+    # build_phase_prompt doesn't crash. Driver short-circuits this phase to
+    # plamen_mechanical._dedup_report_python(). critical=False; never halts.
+    "report_dedup": "phase6d-report-dedup.md",
     # Phase 5b mechanical PoC verification â€” Python-native; stub prompt
     # exists so build_phase_prompt doesn't crash. Driver short-circuits
     # this phase to mechanical_verify.run_phase5b_mechanical_verify().

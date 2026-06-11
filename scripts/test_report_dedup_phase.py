@@ -1,0 +1,484 @@
+"""Tests for the report_dedup phase + assembler ghost-reference fix.
+
+Covers BUILD STEP 1:
+  (a) report_dedup phase scaffold present, last, critical=False (SC + L1);
+      Python-native cross-tier dedup with snapshot-both + mechanical
+      data-loss gate; idempotent no-op; veto-keeps-original safety.
+  (b) Priority Remediation Order ghost-reference repair: every remediation
+      ID must resolve to a real `### [X-NN]` finding section.
+
+Each test uses plain `assert` so pytest genuinely fails on regression.
+Run: `python -m pytest scripts/test_report_dedup_phase.py -q`
+"""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+from pathlib import Path
+
+SCRIPTS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPTS_DIR))
+
+import plamen_types as T  # noqa: E402
+import plamen_mechanical as M  # noqa: E402
+import plamen_driver as D  # noqa: E402
+
+
+# =============================================================================
+# (a.1) Phase-graph: report_dedup present, last, critical=False
+# =============================================================================
+
+def test_report_dedup_present_last_sc():
+    names = [p.name for p in T.SC_PHASES]
+    assert "report_dedup" in names, "report_dedup missing from SC_PHASES"
+    assert names[-1] == "report_dedup", f"report_dedup not last: {names[-3:]}"
+    # must come AFTER report_assemble
+    assert names.index("report_dedup") > names.index("report_assemble")
+
+
+def test_report_dedup_present_last_l1():
+    names = [p.name for p in T.L1_PHASES]
+    assert "report_dedup" in names, "report_dedup missing from L1_PHASES"
+    assert names[-1] == "report_dedup", f"report_dedup not last: {names[-3:]}"
+    assert names.index("report_dedup") > names.index("report_assemble")
+
+
+def test_report_dedup_critical_false():
+    for phases, label in [(T.SC_PHASES, "sc"), (T.L1_PHASES, "l1")]:
+        dp = [p for p in phases if p.name == "report_dedup"][0]
+        assert dp.critical is False, f"{label} report_dedup must be critical=False"
+        # gate artifact is the mapping, NOT AUDIT_REPORT.md (must not gate on
+        # the delivered report, which is unchanged on no-op/veto).
+        assert dp.expected_artifacts == ["report_dedup_mapping.md"], dp.expected_artifacts
+        assert "AUDIT_REPORT.md" not in dp.expected_artifacts
+        # static graph validator requires non-empty markers + artifacts
+        assert dp.section_markers, f"{label} report_dedup needs section_markers"
+        assert dp.base_timeout_s > 0
+
+
+def test_report_dedup_phase_graph_valid_all_modes():
+    for phases, pipe in [(T.SC_PHASES, "sc"), (T.L1_PHASES, "l1")]:
+        for mode in ("light", "core", "thorough"):
+            issues = D.validate_phase_graph(phases, pipe, mode)
+            rd = [i for i in issues if "report_dedup" in i]
+            assert not rd, f"{pipe} {mode} report_dedup issues: {rd}"
+
+
+# NEGATIVE CONTROL: a phase with empty artifacts AND empty any_of is flagged.
+def test_negctrl_empty_artifacts_flagged():
+    from dataclasses import replace
+    bad = replace(
+        [p for p in T.SC_PHASES if p.name == "report_dedup"][0],
+        expected_artifacts=[], any_of=[],
+    )
+    issues = D.validate_phase_graph([bad], "sc", "thorough")
+    assert any("expected_artifacts" in i for i in issues), issues
+
+
+# NEGATIVE CONTROL: empty section_markers is flagged (we deliberately gave the
+# Python-native phase a placeholder marker to satisfy the static validator).
+def test_negctrl_empty_section_markers_flagged():
+    from dataclasses import replace
+    bad = replace(
+        [p for p in T.SC_PHASES if p.name == "report_dedup"][0],
+        section_markers=[],
+    )
+    issues = D.validate_phase_graph([bad], "sc", "thorough")
+    assert any("section_markers" in i for i in issues), issues
+
+
+# =============================================================================
+# (a.2) Section parsing + candidate-pair detection
+# =============================================================================
+
+_REPORT_TWO_TIER = """# Security Audit Report — demo
+
+## Critical Findings
+
+### [C-01] Reentrancy in withdraw [VERIFIED]
+
+**Severity**: Critical
+**Location**: `src/Vault.sol:L42`
+**Description**: The withdraw path is reentrant.
+**Impact**:
+- Attacker drains the vault.
+**PoC Result**: testReentrancyDrain passed.
+**Recommendation**: Add a reentrancy guard.
+
+---
+
+## High Findings
+
+### [H-03] Reentrancy in withdraw (duplicate at lower sev) [VERIFIED]
+
+**Severity**: High
+**Location**: `src/Vault.sol:L42`
+**Description**: Same reentrant withdraw, surfaced again.
+**Impact**:
+- Funds can be stolen by reentering.
+**PoC Result**: testReentrancyDrain passed.
+**Recommendation**: Add nonReentrant.
+
+### [H-04] Unrelated overflow
+
+**Severity**: High
+**Location**: `src/Math.sol:L9`
+**Description**: An unrelated overflow bug.
+**Impact**:
+- Wrong accounting.
+**Recommendation**: Use checked math.
+"""
+
+
+def test_sections_parsed():
+    recs = M._dedup_report_sections(_REPORT_TWO_TIER)
+    ids = {r["id"] for r in recs}
+    assert ids == {"C-01", "H-03", "H-04"}, ids
+    c01 = [r for r in recs if r["id"] == "C-01"][0]
+    assert "src/Vault.sol:L42" in c01["locations"]
+    assert "testReentrancyDrain" in c01["pocs"]
+
+
+def test_candidate_pairs_cross_tier_shared_location_and_poc():
+    recs = M._dedup_report_sections(_REPORT_TWO_TIER)
+    # no source IDs available → relies on location/poc/title signals only
+    pairs = M._dedup_report_candidate_pairs(recs, {})
+    cross = [p for p in pairs if {p["keep"], p["absorb"]} == {"C-01", "H-03"}]
+    assert cross, f"expected C-01/H-03 candidate pair, got {pairs}"
+    # survivor is the higher-severity finding (C-01)
+    assert cross[0]["keep"] == "C-01"
+    # H-04 is unrelated → must NOT pair with C-01
+    assert not any({"C-01", "H-04"} == {p["keep"], p["absorb"]} for p in pairs)
+
+
+def test_same_tier_pairs_never_candidates():
+    # report_index STEP-1.5 owns same-tier merges; this phase must skip them.
+    recs = M._dedup_report_sections(_REPORT_TWO_TIER)
+    pairs = M._dedup_report_candidate_pairs(recs, {})
+    for p in pairs:
+        assert p["keep"][0] != p["absorb"][0], f"same-tier pair leaked: {p}"
+
+
+def test_title_jaccard():
+    assert M._dedup_title_jaccard("Reentrancy in withdraw", "Reentrancy withdraw bug") >= 0.5
+    assert M._dedup_title_jaccard("Reentrancy in withdraw", "Integer overflow in mint") < 0.5
+
+
+# =============================================================================
+# (a.3) data-loss gate
+# =============================================================================
+
+def test_data_loss_gate_detects_dropped_location():
+    orig = _REPORT_TWO_TIER
+    # remove a location that existed in the original
+    bad = orig.replace("`src/Math.sol:L9`", "")
+    lost = M._dedup_data_loss_gate(orig, bad)
+    assert any("src/Math.sol:L9" in x for x in lost), lost
+
+
+def test_data_loss_gate_detects_dropped_poc():
+    orig = _REPORT_TWO_TIER
+    bad = orig.replace("testReentrancyDrain", "x", 99)
+    lost = M._dedup_data_loss_gate(orig, bad)
+    assert any("poc:testReentrancyDrain" in x for x in lost), lost
+
+
+def test_data_loss_gate_passes_on_identity():
+    assert M._dedup_data_loss_gate(_REPORT_TWO_TIER, _REPORT_TWO_TIER) == []
+
+
+# =============================================================================
+# (a.4) end-to-end: merge with source-ID subset + snapshot-both + promote
+# =============================================================================
+
+def _setup(tmp: Path, report: str, index: str = "", mapping: str = "") -> tuple[Path, Path]:
+    scratch = tmp / "scratch"
+    scratch.mkdir()
+    proj = tmp / "proj"
+    proj.mkdir()
+    (proj / "AUDIT_REPORT.md").write_text(report, encoding="utf-8")
+    if index:
+        (scratch / "report_index.md").write_text(index, encoding="utf-8")
+    if mapping:
+        (scratch / "finding_mapping.md").write_text(mapping, encoding="utf-8")
+    return scratch, proj
+
+
+# A Master Finding Index that back-joins C-01 and H-03 to overlapping source IDs
+# (subset relationship → authorizes a mechanical cross-tier merge).
+_INDEX_SUBSET = """# Report Index
+
+## Master Finding Index
+
+| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |
+|-----------|-------|----------|----------|--------------|-----------|--------------------|
+| C-01 | Reentrancy in withdraw | Critical | src/Vault.sol:L42 | VERIFIED | - | H-7 |
+| H-03 | Reentrancy in withdraw | High | src/Vault.sol:L42 | VERIFIED | - | H-7 |
+| H-04 | Unrelated overflow | High | src/Math.sol:L9 | VERIFIED | - | H-9 |
+"""
+
+
+def test_e2e_merge_promotes_and_snapshots():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch, proj = _setup(tmp, _REPORT_TWO_TIER, index=_INDEX_SUBSET)
+        ok = M._dedup_report_python(scratch, str(proj))
+        assert ok is True
+        # snapshot-both: original preserved
+        assert (scratch / "AUDIT_REPORT.pre-dedup.md").exists()
+        assert (scratch / "AUDIT_REPORT.pre-dedup.md").read_text(encoding="utf-8") == _REPORT_TWO_TIER
+        # deduped side artifact written
+        assert (scratch / "AUDIT_REPORT.deduped.md").exists()
+        # mapping written with a MERGE row
+        mapping = (scratch / "report_dedup_mapping.md").read_text(encoding="utf-8")
+        assert "MERGE" in mapping
+        assert "DATA-LOSS GATE: PASS" in mapping
+        # delivered report: absorbed content survives (zero loss), absorbed
+        # standalone heading removed (survivor consolidated).
+        delivered = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        assert "src/Vault.sol:L42" in delivered
+        assert "Consolidated from H-03" in delivered
+        # data-loss gate must hold against the original
+        assert M._dedup_data_loss_gate(_REPORT_TWO_TIER, delivered) == []
+
+
+def test_e2e_idempotent_noop_when_no_pairs():
+    # A report with two genuinely unrelated cross-tier findings → no merge.
+    report = """# Report
+
+## Critical Findings
+
+### [C-01] Reentrancy
+
+**Severity**: Critical
+**Location**: `src/A.sol:L1`
+**Impact**:
+- Drain.
+**Recommendation**: guard.
+
+## Low Findings
+
+### [L-01] Typo in comment
+
+**Severity**: Low
+**Location**: `src/B.sol:L99`
+**Impact**:
+- None.
+**Recommendation**: fix typo.
+"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch, proj = _setup(tmp, report)
+        ok = M._dedup_report_python(scratch, str(proj))
+        assert ok is True
+        # no-op: delivered report unchanged
+        assert (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8") == report
+        mapping = (scratch / "report_dedup_mapping.md").read_text(encoding="utf-8")
+        assert "report unchanged" in mapping.lower()
+
+
+def test_e2e_missing_report_is_noop():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch = tmp / "scratch"; scratch.mkdir()
+        proj = tmp / "proj"; proj.mkdir()
+        ok = M._dedup_report_python(scratch, str(proj))
+        assert ok is True
+        assert (scratch / "report_dedup_mapping.md").exists()
+        assert not (proj / "AUDIT_REPORT.md").exists()
+
+
+# NEGATIVE CONTROL: even if a merge is proposed, a deduped output that would
+# lose content is VETOED and the ORIGINAL is kept as the delivered report.
+def test_negctrl_data_loss_veto_keeps_original(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch, proj = _setup(tmp, _REPORT_TWO_TIER, index=_INDEX_SUBSET)
+
+        # Force a lossy "merge" by monkeypatching the coupling to drop content:
+        # we simulate by making the gate see a deduped body that lost a location.
+        real_gate = M._dedup_data_loss_gate
+
+        def lossy_gate(original, deduped):
+            return ["location:src/Vault.sol:L42"]  # pretend content was lost
+
+        monkeypatch.setattr(M, "_dedup_data_loss_gate", lossy_gate)
+        ok = M._dedup_report_python(scratch, str(proj))
+        monkeypatch.setattr(M, "_dedup_data_loss_gate", real_gate)
+
+        assert ok is True  # critical=False: never halts
+        # original report retained as delivered
+        delivered = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        assert delivered == _REPORT_TWO_TIER, "VETO must keep the original report"
+        mapping = (scratch / "report_dedup_mapping.md").read_text(encoding="utf-8")
+        assert "VETO" in mapping
+        # deduped artifact still left as a side artifact for human review
+        assert (scratch / "AUDIT_REPORT.deduped.md").exists()
+
+
+# NEGATIVE CONTROL (mandate b): idempotency — a SECOND run of the phase on an
+# already-deduped delivered report is a no-op (no further merge, report stable).
+def test_negctrl_second_run_on_deduped_is_noop():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch, proj = _setup(tmp, _REPORT_TWO_TIER, index=_INDEX_SUBSET)
+        # First run: performs the cross-tier merge and promotes.
+        ok1 = M._dedup_report_python(scratch, str(proj))
+        assert ok1 is True
+        after_first = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        # The merge must actually have happened (otherwise this is a vacuous test).
+        assert "Consolidated from H-03" in after_first
+        assert after_first != _REPORT_TWO_TIER
+
+        # Second run on the already-deduped report: the absorbed standalone
+        # H-03 section is gone, so no cross-tier pair remains → identity no-op.
+        ok2 = M._dedup_report_python(scratch, str(proj))
+        assert ok2 is True
+        after_second = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        assert after_second == after_first, "second run must be a no-op (idempotent)"
+        mapping = (scratch / "report_dedup_mapping.md").read_text(encoding="utf-8")
+        assert "report unchanged" in mapping.lower(), \
+            "second run should record an identity no-op, got:\n" + mapping
+
+
+# NEGATIVE CONTROL (mandate d): a pair where BOTH findings carry a large
+# source-ID set is SUPPRESSED from the subset signal — no false merge. This is
+# the dangerous class-D false-merge guard (large aggregates always carry many
+# source IDs; merging them across tiers would destroy distinct findings).
+def test_negctrl_large_source_id_set_suppressed():
+    recs = M._dedup_report_sections(_REPORT_TWO_TIER)
+    n = M._DEDUP_AGGREGATE_SUPPRESS_THRESHOLD
+    big_a = {f"H-{k}" for k in range(1, n + 3)}          # > threshold
+    big_b = big_a | {f"H-{k}" for k in range(n + 3, n + 6)}  # superset, also big
+    # C-01 / H-03 share the SAME location + PoC (weak signals) but both have a
+    # large source-ID set, so the strong subset signal must be suppressed.
+    src_by_id = {"C-01": big_a, "H-03": big_b, "H-04": {"H-9"}}
+    pairs = M._dedup_report_candidate_pairs(recs, src_by_id)
+    cross = [p for p in pairs if {p["keep"], p["absorb"]} == {"C-01", "H-03"}]
+    # The pair may still surface on weak (location/poc) signals, but the
+    # source-id-subset signal MUST be absent (suppressed) — that is what would
+    # otherwise authorize a mechanical merge in _dedup_report_python.
+    for p in cross:
+        assert "source-id-subset" not in p["signals"], \
+            f"large-aggregate subset must be suppressed, got signals {p['signals']}"
+
+    # End-to-end: with only weak signals, the phase must NOT merge (KEEP_SEPARATE).
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch, proj = _setup(tmp, _REPORT_TWO_TIER)
+        # Build an index that gives C-01/H-03 the large overlapping source sets.
+        idx_rows = [
+            "# Report Index", "", "## Master Finding Index", "",
+            "| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |",
+            "|---|---|---|---|---|---|---|",
+            "| C-01 | Reentrancy | Critical | src/Vault.sol:L42 | VERIFIED | - | " + " ".join(sorted(big_a)) + " |",
+            "| H-03 | Reentrancy | High | src/Vault.sol:L42 | VERIFIED | - | " + " ".join(sorted(big_b)) + " |",
+            "| H-04 | Overflow | High | src/Math.sol:L9 | VERIFIED | - | H-9 |",
+        ]
+        (scratch / "report_index.md").write_text("\n".join(idx_rows) + "\n", encoding="utf-8")
+        ok = M._dedup_report_python(scratch, str(proj))
+        assert ok is True
+        # No false merge: the delivered report is unchanged (no consolidation).
+        delivered = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        assert "Consolidated from" not in delivered, \
+            "large-aggregate pair must NOT be merged"
+        mapping = (scratch / "report_dedup_mapping.md").read_text(encoding="utf-8")
+        assert "MERGE" not in mapping.replace("Merges proposed: 0", ""), \
+            "no MERGE decision should be recorded for large-aggregate pair"
+
+
+# =============================================================================
+# (b) Assembler ghost-reference fix
+# =============================================================================
+
+def test_defined_report_section_ids():
+    ids = M._defined_report_section_ids(_REPORT_TWO_TIER)
+    assert ids == {"C-01", "H-03", "H-04"}, ids
+    # empty / None inputs are tolerated
+    assert M._defined_report_section_ids("", None) == set()
+
+
+# Master index lists M-18 but the medium tier file has NO M-18 section → ghost.
+_INDEX_WITH_GHOST = """# Report Index
+
+## Summary
+
+| Severity | Count |
+|----------|-------|
+| Critical | 0 |
+| High | 0 |
+| Medium | 2 |
+| Low | 0 |
+| Informational | 0 |
+
+## Master Finding Index
+
+| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |
+|-----------|-------|----------|----------|--------------|-----------|--------------------|
+| M-01 | Real medium finding | Medium | src/X.sol:L1 | VERIFIED | - | H-1 |
+| M-18 | Ghost finding with no section | Medium | src/Y.sol:L2 | VERIFIED | - | H-99 |
+"""
+
+_MEDIUM_TIER = """# Medium Findings
+
+## Medium Findings
+
+### [M-01] Real medium finding [VERIFIED]
+
+**Severity**: Medium
+**Location**: `src/X.sol:L1`
+**Description**: A real, fully-written medium finding with enough body text to
+clear the substantive-body gate and appear in the assembled report body.
+**Impact**:
+- Some concrete medium impact happens here.
+**Recommendation**: Apply the documented fix.
+"""
+
+
+def test_assembler_drops_ghost_remediation_id():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch = tmp / "scratch"; scratch.mkdir()
+        proj = tmp / "proj"; proj.mkdir()
+        (scratch / "report_index.md").write_text(_INDEX_WITH_GHOST, encoding="utf-8")
+        (scratch / "report_medium.md").write_text(_MEDIUM_TIER, encoding="utf-8")
+        # empty crit/low so assembly proceeds with medium only
+        ok = M._assemble_report_python(scratch, str(proj))
+        assert ok is True
+        body = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+
+        # M-01 has a real ### section AND a remediation entry.
+        assert "### [M-01]" in body
+        # GHOST: M-18 is in the index but has NO finding section.
+        assert "### [M-18]" not in body
+        # The Priority Remediation Order must NOT cite the ghost M-18.
+        rem = body.split("## Priority Remediation Order", 1)[1]
+        assert "M-18" not in rem, "ghost remediation ID M-18 leaked into report"
+        assert "M-01" in rem, "real finding M-01 missing from remediation order"
+
+
+# NEGATIVE CONTROL: every Priority Remediation Order ID resolves to a real
+# finding section in the assembled body (the general invariant, not just M-18).
+def test_negctrl_every_remediation_id_resolves_to_section():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch = tmp / "scratch"; scratch.mkdir()
+        proj = tmp / "proj"; proj.mkdir()
+        (scratch / "report_index.md").write_text(_INDEX_WITH_GHOST, encoding="utf-8")
+        (scratch / "report_medium.md").write_text(_MEDIUM_TIER, encoding="utf-8")
+        ok = M._assemble_report_python(scratch, str(proj))
+        assert ok is True
+        body = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+
+        defined = M._defined_report_section_ids(body)
+        rem = body.split("## Priority Remediation Order", 1)[1]
+        import re
+        cited = set(re.findall(r"\b([CHMLI]-\d+)\b", rem))
+        dangling = cited - defined
+        assert not dangling, f"dangling remediation IDs with no section: {dangling}"
+
+
+if __name__ == "__main__":
+    import pytest
+    sys.exit(pytest.main([__file__, "-q"]))

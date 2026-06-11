@@ -16595,6 +16595,38 @@ def main():
             )
             continue
 
+        # report_dedup is Python-native and critical=False. It performs
+        # cross-tier same-bug consolidation on the assembled AUDIT_REPORT.md with
+        # a snapshot-both + mechanical data-loss gate. On any gate veto it KEEPS
+        # the original report — it NEVER halts the run or corrupts the delivered
+        # report. A False return (or exception) is treated as a non-fatal degrade.
+        if phase.name == "report_dedup":
+            try:
+                ok = _dedup_report_python(scratchpad, config["project_root"])
+            except Exception as exc:
+                ok = False
+                log.warning(f"[report_dedup] non-fatal failure: {exc!r}")
+            if ok:
+                checkpoint.mark_completed(phase.name)
+                checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
+                checkpoint.save(scratchpad)
+            else:
+                # critical=False: degrade, do NOT halt. Original report stands.
+                (scratchpad / f"{phase.name}.degraded").write_text(
+                    f"Phase {phase.name} dedup did not complete; "
+                    f"original AUDIT_REPORT.md retained.\n"
+                    f"Timestamp: {time.strftime('%Y-%m-%dT%H:%M:%S')}\n",
+                    encoding="utf-8",
+                )
+                if phase.name not in checkpoint.degraded:
+                    checkpoint.degraded.append(phase.name)
+                    checkpoint.save(scratchpad)
+            display.print_phase_skipped(
+                phase_idx + 1, total_active, phase.name,
+                "mechanical (cross-tier dedup)" if ok else "dedup degraded (original retained)",
+            )
+            continue
+
         # Empty-queue short-circuit for verification phases. When the
         # upstream pipeline produced zero Medium+ findings (rare but
         # legitimate — e.g., a clean codebase, or Light mode running on a
