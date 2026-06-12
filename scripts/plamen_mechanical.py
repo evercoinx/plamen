@@ -2452,6 +2452,87 @@ _DEDUP_TITLE_STOPWORDS = frozenset({
     "with", "via", "by", "when", "due", "can", "be", "not", "no", "missing",
 })
 
+# Fix-text similarity vocabulary. Recommendation/fix prose is stop-worded down
+# to its content terms (verbs + nouns describing the CODE CHANGE), then the two
+# survivors' fix term sets are Jaccard-compared. A high overlap means "the same
+# code change fixes both" — the load-bearing same-fix signal that distinguishes
+# a true cross-tier duplicate (a) from a related-but-distinct pair (b).
+_DEDUP_FIX_STOPWORDS = frozenset({
+    "the", "a", "an", "in", "on", "of", "to", "and", "or", "is", "are", "for",
+    "with", "via", "by", "when", "due", "can", "be", "not", "no", "should",
+    "must", "this", "that", "it", "as", "at", "if", "then", "use", "using",
+    "add", "ensure", "consider", "recommend", "recommended", "fix", "apply",
+    "function", "value", "values", "code", "call", "calls", "called", "before",
+    "after", "which", "will", "would", "also", "from", "into", "all", "any",
+})
+# Code identifiers used as merge anchors: camelCase/snake_case names with >=4
+# chars, plus dotted member paths. These tie a title like "Reward accounting in
+# claim()" to the same function across two findings even when titles diverge.
+_DEDUP_ANCHOR_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{3,})\b")
+# Antonym pairs that signal OPPOSITE fixes (e.g. inflow vs outflow accounting).
+# When the two fix texts each contain a different member of the same pair, the
+# same-fix gate is BLOCKED even at high lexical overlap — they touch the same
+# topic but require divergent code changes (the totalTitanXDistributed case).
+_DEDUP_FIX_ANTONYMS = (
+    frozenset({"inflow", "outflow"}),
+    frozenset({"deposit", "withdraw"}),
+    frozenset({"deposit", "withdrawal"}),
+    frozenset({"increment", "decrement"}),
+    frozenset({"increase", "decrease"}),
+    frozenset({"mint", "burn"}),
+    frozenset({"add", "subtract"}),
+    frozenset({"credit", "debit"}),
+    frozenset({"lock", "unlock"}),
+    frozenset({"stake", "unstake"}),
+    frozenset({"enter", "exit"}),
+    frozenset({"buy", "sell"}),
+    frozenset({"lower", "upper"}),
+    frozenset({"min", "max"}),
+    frozenset({"floor", "ceil"}),
+    frozenset({"send", "receive"}),
+)
+
+
+def _dedup_fix_terms(text: str) -> set[str]:
+    """Content-term set of a Recommendation/fix paragraph (for fix similarity)."""
+    return {
+        w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+        if w not in _DEDUP_FIX_STOPWORDS and len(w) > 2
+    }
+
+
+def _dedup_fix_jaccard(a: str, b: str) -> float:
+    ta, tb = _dedup_fix_terms(a), _dedup_fix_terms(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _dedup_fix_antonym_conflict(a: str, b: str) -> bool:
+    """True iff the two fix texts pick OPPOSITE members of an antonym pair.
+
+    A related-but-distinct pair (same variable, opposite direction → different
+    fix) is blocked from merging even when its surrounding prose overlaps. We
+    require each side to contain a DIFFERENT member of the same pair and NOT the
+    other's member, so a fix that mentions both ('handle deposit and withdraw')
+    is not falsely flagged.
+    """
+    ta = _dedup_fix_terms(a)
+    tb = _dedup_fix_terms(b)
+    for pair in _DEDUP_FIX_ANTONYMS:
+        members = tuple(pair)
+        x, y = members[0], members[1]
+        a_has_x, a_has_y = x in ta, y in ta
+        b_has_x, b_has_y = x in tb, y in tb
+        # A leans to one member exclusively, B leans to the other exclusively.
+        a_only_x = a_has_x and not a_has_y
+        a_only_y = a_has_y and not a_has_x
+        b_only_x = b_has_x and not b_has_y
+        b_only_y = b_has_y and not b_has_x
+        if (a_only_x and b_only_y) or (a_only_y and b_only_x):
+            return True
+    return False
+
 
 def _dedup_report_sections(body: str) -> list[dict]:
     """Split an assembled report body into per-finding records.
@@ -2482,6 +2563,27 @@ def _dedup_report_sections(body: str) -> list[dict]:
         title = hm.group(0)
         title = re.sub(r"(?i)^#{2,3}\s*\[\s*[CHMLI]-\d+\s*\]\s*", "", title)
         title = re.sub(r"(?i)\s*\[(?:VERIFIED|UNVERIFIED|CONTESTED|UNRESOLVED[^\]]*|VERIFICATION NOT EXECUTED)\]\s*$", "", title).strip()
+        # Recommendation/fix prose: the load-bearing same-fix discriminator.
+        fix_text = ""
+        fix_block = re.search(
+            r"(?is)\*\*Recommendation\*\*\s*:?(.*?)(?:\n\*\*[A-Z]|\Z)", section
+        )
+        if fix_block:
+            fix_text = fix_block.group(1).strip()
+        # Description prose (fallback context for the same-fix gate).
+        desc_text = ""
+        desc_block = re.search(
+            r"(?is)\*\*Description\*\*\s*:?(.*?)(?:\n\*\*[A-Z]|\Z)", section
+        )
+        if desc_block:
+            desc_text = desc_block.group(1).strip()
+        # Anchor identifiers from the title (function/variable names tie two
+        # findings to the same code site even when titles otherwise diverge).
+        anchors = {
+            m.group(1).lower()
+            for m in _DEDUP_ANCHOR_RE.finditer(title)
+            if m.group(1).lower() not in _DEDUP_TITLE_STOPWORDS
+        }
         records.append({
             "id": rid,
             "prefix": rid[0],
@@ -2491,6 +2593,9 @@ def _dedup_report_sections(body: str) -> list[dict]:
             "locations": locs,
             "pocs": pocs,
             "impacts": impacts,
+            "fix_text": fix_text,
+            "desc_text": desc_text,
+            "anchors": anchors,
         })
     return records
 
@@ -2549,6 +2654,37 @@ def _dedup_source_ids_by_report_id(scratchpad: Path) -> dict[str, set[str]]:
 
 
 _DEDUP_AGGREGATE_SUPPRESS_THRESHOLD = 6
+# Same-fix recall layer thresholds. A weak-signal cross-tier pair (shared
+# location OR shared anchor, but no source-ID subset) is PROMOTED to a mergeable
+# candidate only when the two Recommendation texts overlap at/above this Jaccard
+# AND no antonym (opposite-direction) conflict is present. Tuned conservatively:
+# precision (no false merge that HIDES a finding) dominates recall.
+_DEDUP_SAME_FIX_JACCARD = 0.5
+_DEDUP_SAME_FIX_MIN_TERMS = 3
+
+
+def _dedup_same_fix_ok(a: dict, b: dict) -> tuple[bool, str]:
+    """Precision gate: do these two findings require the SAME code fix?
+
+    Returns (ok, reason). True ONLY when the Recommendation texts are
+    substantively present, overlap at/above the same-fix Jaccard, and carry no
+    antonym (opposite-direction) conflict. This is the adjudication layer that
+    authorizes a weak-signal cross-tier MERGE without an LLM call: a false
+    positive here HIDES a finding (worse than a duplicate), so the gate is
+    deliberately strict and defaults to NOT-OK on any ambiguity.
+    """
+    fa, fb = a.get("fix_text", ""), b.get("fix_text", "")
+    if not fa or not fb:
+        return (False, "no-recommendation-text")
+    ta, tb = _dedup_fix_terms(fa), _dedup_fix_terms(fb)
+    if len(ta) < _DEDUP_SAME_FIX_MIN_TERMS or len(tb) < _DEDUP_SAME_FIX_MIN_TERMS:
+        return (False, "fix-text-too-thin")
+    if _dedup_fix_antonym_conflict(fa, fb):
+        return (False, "antonym-conflict (opposite-direction fix)")
+    jac = _dedup_fix_jaccard(fa, fb)
+    if jac < _DEDUP_SAME_FIX_JACCARD:
+        return (False, f"fix-jaccard={jac:.2f}<{_DEDUP_SAME_FIX_JACCARD}")
+    return (True, f"same-fix (fix-jaccard={jac:.2f})")
 
 
 def _dedup_report_candidate_pairs(
@@ -2557,7 +2693,8 @@ def _dedup_report_candidate_pairs(
     """Detect cross-tier candidate pairs (NEVER auto-merge — candidates only).
 
     Signals, ranked: (1) cross-tier source-ID subset [primary], (2) shared
-    location token, (3) shared PoC test-fn, (4) title Jaccard >= 0.5.
+    location token, (3) shared PoC test-fn, (4) title Jaccard >= 0.5,
+    (5) same-fix-cross-tier (shared location/anchor + same Recommendation).
     Aggregate-source-ID suppression: a finding with a large source-ID set is
     excluded from the subset signal (avoids class-D false merges).
     """
@@ -2579,7 +2716,8 @@ def _dedup_report_candidate_pairs(
             ):
                 signals.append("source-id-subset")
                 rank = min(rank, 0)
-            if a["locations"] & b["locations"]:
+            shared_loc = bool(a["locations"] & b["locations"])
+            if shared_loc:
                 signals.append("shared-location")
                 rank = min(rank, 1)
             if a["pocs"] & b["pocs"]:
@@ -2589,6 +2727,20 @@ def _dedup_report_candidate_pairs(
             if jac >= 0.5:
                 signals.append(f"title-jaccard={jac:.2f}")
                 rank = min(rank, 3)
+            # Same-fix recall layer: a pair tied to the same code site (shared
+            # location OR shared anchor identifier) whose Recommendations agree
+            # is a true cross-tier duplicate that the subset signal misses
+            # (different agents → different source IDs). The same-fix gate runs
+            # here so the candidate carries an authoritative MERGE-eligible flag;
+            # the antonym/thin-fix vetoes keep precision intact.
+            shared_anchor = bool(a.get("anchors") and b.get("anchors")
+                                 and (a["anchors"] & b["anchors"]))
+            if (shared_loc or shared_anchor) and "source-id-subset" not in signals:
+                ok, reason = _dedup_same_fix_ok(a, b)
+                if ok:
+                    site = "loc" if shared_loc else "anchor"
+                    signals.append(f"same-fix-cross-tier[{site}]:{reason}")
+                    rank = min(rank, 1)
             if not signals:
                 continue
             # survivor = higher severity (lower prefix priority number)
@@ -2700,9 +2852,38 @@ def _dedup_report_python(scratchpad: Path, project_root: str) -> bool:
             absorb_id: {"source_ids": src_by_id.get(absorb_id, set()),
                         "line_range": None, "file": ""},
         }
-        # Only the primary source-id-subset signal authorizes a mechanical
-        # cross-tier merge. Weaker signals (location/poc/title) are surfaced as
-        # candidates but default KEEP_SEPARATE without an LLM adjudication layer.
+        # Two signals authorize a mechanical cross-tier merge:
+        #   (1) source-id-subset — same internal provenance (primary), and
+        #   (2) same-fix-cross-tier — same code site + same Recommendation,
+        #       re-confirmed below by the same-fix precision gate.
+        # All OTHER weak signals (bare location/poc/title) remain
+        # candidates-only and default KEEP_SEPARATE.
+        same_fix_signal = any(
+            s.startswith("same-fix-cross-tier") for s in p["signals"]
+        )
+        if same_fix_signal and "source-id-subset" not in p["signals"]:
+            keep_rec_p = rec_by_id.get(keep_id)
+            absorb_rec_p = rec_by_id.get(absorb_id)
+            # Re-confirm the same-fix gate at decision time (defense in depth):
+            # the candidate flag was set on the SAME two records, so this is a
+            # deterministic re-check that also makes the merge auditable.
+            sf_ok, sf_reason = (False, "missing-record")
+            if keep_rec_p is not None and absorb_rec_p is not None:
+                sf_ok, sf_reason = _dedup_same_fix_ok(keep_rec_p, absorb_rec_p)
+            if sf_ok:
+                # Survivor = higher severity (already chosen as `keep`). No
+                # source-ID superset exists (different agents), so the merge
+                # rests entirely on the same-fix gate + the data-loss gate.
+                decisions.append({
+                    "keep": keep_id, "absorb": absorb_id,
+                    "signals": p["signals"], "decision": "MERGE",
+                    "reason": f"same-fix cross-tier ({sf_reason})",
+                })
+                absorbed_into[absorb_id] = keep_id
+                continue
+            decisions.append({**p, "decision": "KEEP_SEPARATE",
+                              "reason": f"same-fix gate vetoed ({sf_reason})"})
+            continue
         if "source-id-subset" in p["signals"]:
             keep_src = src_by_id.get(keep_id, set())
             absorb_src = src_by_id.get(absorb_id, set())

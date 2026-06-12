@@ -25,11 +25,22 @@ duplicates in the assembled `AUDIT_REPORT.md`.
    `report_index.md` Master Finding Index and `finding_mapping.md` (recovers the
    source-ID dimension the client report lacks).
 3. Detect CANDIDATE PAIRS only (never auto-merge): cross-tier source-ID subset
-   [primary], shared location token, shared PoC test-fn, title Jaccard ≥ 0.5.
-   Aggregate-source-ID suppression avoids class-D false merges.
-4. Mechanically MERGE only on the primary source-ID-subset signal; weaker
-   signals default KEEP_SEPARATE (a duplicate is cosmetic; a dropped finding is
-   recall loss). Decisions are written to `report_dedup_mapping.md`.
+   [primary], shared location token, shared PoC test-fn, title Jaccard ≥ 0.5,
+   and same-fix-cross-tier (shared location OR shared anchor identifier + a
+   high-overlap Recommendation). Aggregate-source-ID suppression avoids class-D
+   false merges.
+4. Mechanically MERGE on two signals: (1) the primary source-ID-subset signal,
+   and (2) the same-fix-cross-tier signal, which is gated by a strict same-fix
+   precision check — the two Recommendation texts must share content terms at
+   Jaccard ≥ 0.5 with NO antonym (opposite-direction) conflict and no thin/empty
+   fix text. This recovers true cross-tier duplicates that different agents
+   found (so they carry different source IDs and the subset signal misses them),
+   WITHOUT merging related-but-distinct findings that share a variable/site but
+   require opposite fixes (e.g. inflow-vs-outflow accounting) — a false merge
+   HIDES a real finding and is worse than a duplicate. All OTHER weak signals
+   (bare location/poc/title) still default KEEP_SEPARATE (a duplicate is
+   cosmetic; a dropped finding is recall loss). Decisions are written to
+   `report_dedup_mapping.md`.
 
 ## SNAPSHOT-BOTH + DATA-LOSS GATE (invariant #1)
 

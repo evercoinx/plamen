@@ -479,6 +479,265 @@ def test_negctrl_every_remediation_id_resolves_to_section():
         assert not dangling, f"dangling remediation IDs with no section: {dangling}"
 
 
+# =============================================================================
+# (c) Same-fix recall layer: catch TRUE cross-tier dupes without false merges
+# =============================================================================
+
+# (a) TRUE same-fix cross-tier dup: DIFFERENT source IDs (different agents found
+# it → no subset signal), DIFFERENT tiers, SAME code site (shared anchor +
+# location), SAME recommendation. Must become a candidate AND merge losslessly.
+_REPORT_SAME_FIX = """# Security Audit Report — demo
+
+## Medium Findings
+
+### [M-02] Stale reward in claimReward accounting [VERIFIED]
+
+**Severity**: Medium
+**Location**: `src/Staking.sol:L120`
+**Description**: claimReward reads a stale accumulator before settling.
+**Impact**:
+- Users receive an incorrect reward amount.
+**Recommendation**: Update the reward accumulator inside claimReward by calling
+the settle helper before reading the pending balance so the snapshot is current.
+
+## Low Findings
+
+### [L-08] claimReward uses outdated accumulator snapshot [VERIFIED]
+
+**Severity**: Low
+**Location**: `src/Staking.sol:L120`
+**Description**: The accumulator snapshot in claimReward is outdated.
+**Impact**:
+- Reward reads can be slightly off.
+**Recommendation**: Update the reward accumulator inside claimReward by calling
+the settle helper before reading the pending balance so the snapshot is current.
+"""
+
+_INDEX_SAME_FIX = """# Report Index
+
+## Master Finding Index
+
+| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |
+|-----------|-------|----------|----------|--------------|-----------|--------------------|
+| M-02 | Stale reward in claimReward accounting | Medium | src/Staking.sol:L120 | VERIFIED | - | H-31 |
+| L-08 | claimReward uses outdated accumulator snapshot | Low | src/Staking.sol:L120 | VERIFIED | - | H-44 |
+"""
+
+
+def test_same_fix_pair_is_candidate():
+    recs = M._dedup_report_sections(_REPORT_SAME_FIX)
+    # DIFFERENT source IDs → no subset signal; same-fix layer must catch it.
+    src = {"M-02": {"H-31"}, "L-08": {"H-44"}}
+    pairs = M._dedup_report_candidate_pairs(recs, src)
+    cross = [p for p in pairs if {p["keep"], p["absorb"]} == {"M-02", "L-08"}]
+    assert cross, f"expected M-02/L-08 same-fix candidate, got {pairs}"
+    assert any(s.startswith("same-fix-cross-tier") for s in cross[0]["signals"]), \
+        f"same-fix-cross-tier signal missing: {cross[0]['signals']}"
+    # survivor is the higher-severity finding (M-02 over L-08)
+    assert cross[0]["keep"] == "M-02"
+    # and NO source-id-subset signal (the whole point — different agents)
+    assert "source-id-subset" not in cross[0]["signals"]
+
+
+def test_same_fix_gate_accepts_true_dup():
+    recs = {r["id"]: r for r in M._dedup_report_sections(_REPORT_SAME_FIX)}
+    ok, reason = M._dedup_same_fix_ok(recs["M-02"], recs["L-08"])
+    assert ok, f"true same-fix pair must pass gate, got {reason}"
+
+
+def test_negctrl_a_true_same_fix_merges_losslessly():
+    """NEGATIVE CONTROL (a): a validated TRUE same-fix cross-tier dup pair
+    (different source-IDs, different tiers, same fix) is generated as a
+    candidate AND merges losslessly."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch, proj = _setup(tmp, _REPORT_SAME_FIX, index=_INDEX_SAME_FIX)
+        ok = M._dedup_report_python(scratch, str(proj))
+        assert ok is True
+        delivered = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        # merge happened: absorbed L-08 consolidated into survivor M-02
+        assert "Consolidated from L-08" in delivered, \
+            "true same-fix cross-tier dup must merge"
+        assert "### [L-08]" not in delivered, "absorbed standalone heading must go"
+        # lossless: data-loss gate holds against the original
+        assert M._dedup_data_loss_gate(_REPORT_SAME_FIX, delivered) == []
+        mapping = (scratch / "report_dedup_mapping.md").read_text(encoding="utf-8")
+        assert "MERGE" in mapping
+        assert "same-fix" in mapping.lower()
+        assert "DATA-LOSS GATE: PASS" in mapping
+
+
+# (b) RELATED-BUT-DISTINCT: SAME variable/topic (totalTitanXDistributed), same
+# function family, but OPPOSITE direction → DIFFERENT fix. Must NOT merge.
+_REPORT_RELATED_DISTINCT = """# Security Audit Report — demo
+
+## Medium Findings
+
+### [M-09] totalTitanXDistributed not updated on inflow deposit [VERIFIED]
+
+**Severity**: Medium
+**Location**: `src/Burn.sol:L235`
+**Description**: distributeTitanXForBurning deposits TitanX but never increments
+totalTitanXDistributed on the inflow path.
+**Impact**:
+- Inflow accounting undercounts distributed TitanX.
+**Recommendation**: Increment totalTitanXDistributed on the inflow deposit path
+inside distributeTitanXForBurning so the deposited amount is recorded.
+
+## Low Findings
+
+### [I-03] totalTitanXDistributed not decremented on outflow burn [VERIFIED]
+
+**Severity**: Informational
+**Location**: `src/Burn.sol:L235`
+**Description**: The outflow burn path of distributeTitanXForBurning never
+decrements totalTitanXDistributed when TitanX leaves.
+**Impact**:
+- Outflow accounting overcounts remaining TitanX.
+**Recommendation**: Decrement totalTitanXDistributed on the outflow burn path
+inside distributeTitanXForBurning so the burned amount is removed.
+"""
+
+_INDEX_RELATED_DISTINCT = """# Report Index
+
+## Master Finding Index
+
+| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |
+|-----------|-------|----------|----------|--------------|-----------|--------------------|
+| M-09 | totalTitanXDistributed not updated on inflow deposit | Medium | src/Burn.sol:L235 | VERIFIED | - | H-50 |
+| I-03 | totalTitanXDistributed not decremented on outflow burn | Informational | src/Burn.sol:L235 | VERIFIED | - | H-51 |
+"""
+
+
+def test_same_fix_gate_rejects_related_distinct():
+    recs = {r["id"]: r for r in M._dedup_report_sections(_REPORT_RELATED_DISTINCT)}
+    ok, reason = M._dedup_same_fix_ok(recs["M-09"], recs["I-03"])
+    assert not ok, "inflow-vs-outflow (opposite fix) must NOT pass same-fix gate"
+    assert "antonym" in reason.lower(), f"expected antonym veto, got {reason}"
+
+
+def test_negctrl_b_related_distinct_not_merged():
+    """NEGATIVE CONTROL (b): a RELATED-BUT-DISTINCT pair (same variable/topic,
+    DIFFERENT fix — inflow-vs-outflow) is NOT merged (stays separate)."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch, proj = _setup(tmp, _REPORT_RELATED_DISTINCT, index=_INDEX_RELATED_DISTINCT)
+        ok = M._dedup_report_python(scratch, str(proj))
+        assert ok is True
+        delivered = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        # BOTH findings survive as standalone sections — no false merge.
+        assert "### [M-09]" in delivered
+        assert "### [I-03]" in delivered
+        assert "Consolidated from" not in delivered, \
+            "opposite-direction pair must NOT merge (would HIDE a real finding)"
+        # delivered report is unchanged (identity)
+        assert delivered == _REPORT_RELATED_DISTINCT
+
+
+def test_negctrl_b_distinct_fix_text_not_merged():
+    """Reinforces (b): same site, but the fixes touch different functions /
+    have low fix-text overlap → KEEP_SEPARATE even without an antonym."""
+    report = """# Report
+
+## High Findings
+
+### [H-01] Access control gap in pause()
+
+**Severity**: High
+**Location**: `src/Ctrl.sol:L10`
+**Description**: pause() lacks an onlyOwner modifier.
+**Impact**:
+- Anyone can pause the protocol.
+**Recommendation**: Restrict pause to the owner by adding the onlyOwner modifier
+to the pause entry point.
+
+## Low Findings
+
+### [L-01] Event missing in pause()
+
+**Severity**: Low
+**Location**: `src/Ctrl.sol:L10`
+**Description**: pause() emits no event.
+**Impact**:
+- Off-chain monitors miss pause transitions.
+**Recommendation**: Emit a Paused event when the contract transitions so indexers
+observe the state change reliably.
+"""
+    recs = {r["id"]: r for r in M._dedup_report_sections(report)}
+    ok, reason = M._dedup_same_fix_ok(recs["H-01"], recs["L-01"])
+    assert not ok, f"different fixes (modifier vs event) must not merge: {reason}"
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch, proj = _setup(tmp, report)
+        assert M._dedup_report_python(scratch, str(proj)) is True
+        delivered = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        assert "Consolidated from" not in delivered
+        assert delivered == report
+
+
+# (c) data-loss gate still vetoes a lossy same-fix merge → original kept.
+def test_negctrl_c_same_fix_lossy_merge_vetoed(monkeypatch):
+    """NEGATIVE CONTROL (c): the data-loss gate still vetoes a lossy merge
+    (original kept) — even on the new same-fix path."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch, proj = _setup(tmp, _REPORT_SAME_FIX, index=_INDEX_SAME_FIX)
+
+        def lossy_gate(original, deduped):
+            return ["location:src/Staking.sol:L120"]
+
+        monkeypatch.setattr(M, "_dedup_data_loss_gate", lossy_gate)
+        ok = M._dedup_report_python(scratch, str(proj))
+        assert ok is True
+        delivered = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        assert delivered == _REPORT_SAME_FIX, "VETO must keep the original report"
+        mapping = (scratch / "report_dedup_mapping.md").read_text(encoding="utf-8")
+        assert "VETO" in mapping
+
+
+# (d) idempotency: a second run on an already-same-fix-deduped report is a no-op.
+def test_negctrl_d_same_fix_second_run_is_noop():
+    """NEGATIVE CONTROL (d): idempotency on the same-fix merge path."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch, proj = _setup(tmp, _REPORT_SAME_FIX, index=_INDEX_SAME_FIX)
+        assert M._dedup_report_python(scratch, str(proj)) is True
+        after_first = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        assert "Consolidated from L-08" in after_first
+        assert after_first != _REPORT_SAME_FIX
+
+        assert M._dedup_report_python(scratch, str(proj)) is True
+        after_second = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        assert after_second == after_first, "second run must be a no-op (idempotent)"
+        mapping = (scratch / "report_dedup_mapping.md").read_text(encoding="utf-8")
+        assert "report unchanged" in mapping.lower()
+
+
+def test_antonym_conflict_helper_direct():
+    # Direct unit coverage of the antonym discriminator.
+    assert M._dedup_fix_antonym_conflict(
+        "increment the inflow counter", "decrement the outflow counter"
+    )
+    # A fix that mentions BOTH directions is not a conflict.
+    assert not M._dedup_fix_antonym_conflict(
+        "handle both deposit and withdraw paths", "handle deposit and withdraw"
+    )
+    # Unrelated fixes → no conflict.
+    assert not M._dedup_fix_antonym_conflict(
+        "add the onlyOwner modifier", "emit a Paused event"
+    )
+
+
+def test_same_fix_gate_rejects_thin_fix_text():
+    # A near-empty Recommendation must not authorize a merge.
+    thin = {"fix_text": "Fix it.", "anchors": set()}
+    other = {"fix_text": "Update the reward accumulator inside claimReward by "
+                         "calling settle before reading pending balance.",
+             "anchors": set()}
+    ok, reason = M._dedup_same_fix_ok(thin, other)
+    assert not ok and "thin" in reason.lower(), reason
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))
