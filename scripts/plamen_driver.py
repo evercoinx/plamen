@@ -14684,6 +14684,48 @@ def _resolve_family(
     )
 
 
+def _language_correction(configured, detected, conf, pipeline):
+    """Decide whether to auto-correct config.language from the ecosystem detector.
+
+    Returns the corrected language (lowercased) to apply, or None to keep the
+    configured value.
+
+    - L1 pipelines: ALWAYS return None (keep configured rust/go). The ecosystem
+      detector is SC-oriented (solana/aptos/sui/evm/soroban); a Rust L1 codebase
+      has .rs files and would be mis-corrected rust -> solana, injecting the
+      wrong (Solana-SC) skills into an L1 audit.
+    - SC pipelines: correct only on a high/medium-confidence genuine mismatch
+      with the configured language. A 'none'/low-confidence or matching signal
+      keeps the configured value.
+    """
+    configured = (configured or "").strip().lower()
+    pipeline = (pipeline or "").strip().lower()
+    conf = str(conf).strip().lower()
+    # L1: never SC-correct (defense-in-depth; the high/medium rules below would
+    # already keep a configured rust/go, but be explicit).
+    if pipeline == "l1":
+        return None
+    if detected is None:
+        return None
+    detected = str(detected).strip().lower()
+    if detected == configured:
+        return None
+    # HIGH confidence = the detector disambiguated via build manifest
+    # (anchor-lang/solana-program -> solana, soroban-sdk -> soroban, .sol -> evm,
+    # Move.toml markers -> sui/aptos). Trustworthy proof of a genuine misconfig
+    # -> override.
+    if conf == "high":
+        return detected
+    # MEDIUM = suffix-only fallback. It CANNOT tell apart same-suffix families
+    # (.rs: solana vs soroban vs rust-L1; .move: sui vs aptos) and just returns
+    # the family DEFAULT (e.g. .rs -> solana). It must NOT clobber an EXPLICITLY
+    # configured language (the Irys rust->solana bug, and the symmetric
+    # soroban->solana / aptos<->sui risks). Only fill an UNSET config.
+    if conf == "medium" and not configured:
+        return detected
+    return None
+
+
 def _detect_ecosystem(
     project_root: str | Path,
 ) -> tuple[str | None, str, dict]:
@@ -14888,15 +14930,21 @@ def main():
         }
     _configured = str(config.get("language", "")).strip().lower()
     _det_reason = (_signals or {}).get("reason", "")
+    _pipeline = str(config.get("pipeline", "")).strip().lower()
 
-    if _detected is not None and _conf in ("high", "medium") \
-            and _detected != _configured:
-        config["language"] = _detected
-        _persist_corrected_language(config_path, config, _detected)
+    # L1 GUARD (see _language_correction): for pipeline=l1 the SC ecosystem
+    # detector would wrongly correct a Rust L1 codebase (.rs files, e.g. Irys)
+    # to solana. _language_correction returns None for L1 so the configured
+    # rust/go is kept and L1 skills inject correctly. For SC it returns the
+    # detected language only on a high/medium-confidence genuine mismatch.
+    _corrected = _language_correction(_configured, _detected, _conf, _pipeline)
+    if _corrected is not None:
+        config["language"] = _corrected
+        _persist_corrected_language(config_path, config, _corrected)
         _correct_msg = (
-            f"[startup] auto-detected ecosystem={_detected} "
+            f"[startup] auto-detected ecosystem={_corrected} "
             f"(confidence={_conf}) from signals={_det_reason}; "
-            f"corrected config.language {_configured or 'unset'} -> {_detected}"
+            f"corrected config.language {_configured or 'unset'} -> {_corrected}"
         )
         log.info(_correct_msg)
         # Also surface on the clean TUI (WARNING-level handler) so the user sees

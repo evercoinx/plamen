@@ -285,3 +285,56 @@ def test_autocorrect_conflict_keeps_configured(tmp_path: Path):
     override = detected is not None and conf in ("high", "medium") \
         and detected != configured
     assert override is False
+
+
+# ---- L1 guard: SC ecosystem detector must NOT override L1 rust/go language ----
+
+def test_language_correction_l1_keeps_configured_rust():
+    """L1 GUARD regression: a Rust L1 codebase (e.g. Irys) has .rs files so the
+    SC ecosystem detector returns 'solana'; for pipeline=l1 we MUST keep the
+    configured rust/go and never inject Solana-SC skills."""
+    import plamen_driver as D
+    assert D._language_correction("rust", "solana", "medium", "l1") is None
+    assert D._language_correction("rust", "solana", "high", "l1") is None
+    assert D._language_correction("go", "evm", "high", "l1") is None
+
+
+def test_language_correction_high_confidence_overrides():
+    """HIGH confidence = manifest-disambiguated (anchor-lang->solana,
+    soroban-sdk->soroban, .sol->evm, Move.toml markers). Genuine misconfig
+    proof -> override is allowed."""
+    import plamen_driver as D
+    assert D._language_correction("evm", "solana", "high", "sc") == "solana"
+    assert D._language_correction("solana", "soroban", "high", "sc") == "soroban"
+    assert D._language_correction("aptos", "sui", "high", "sc") == "sui"
+
+
+def test_language_correction_medium_does_not_clobber_configured():
+    """THE BROADER FIX: MEDIUM = suffix-only fallback that returns the family
+    DEFAULT (.rs->solana, .move->one of sui/aptos). It cannot tell apart
+    same-suffix families, so it must NEVER override an EXPLICITLY configured
+    language. Protects Soroban->Solana, Aptos<->Sui, native-Solana, Rust-L1."""
+    import plamen_driver as D
+    # Soroban project whose Cargo didn't trip soroban-sdk -> .rs suffix-only
+    # -> medium 'solana'. Must KEEP configured soroban.
+    assert D._language_correction("soroban", "solana", "medium", "sc") is None
+    # Aptos project -> .move suffix-only could default to sui. Must KEEP aptos.
+    assert D._language_correction("aptos", "sui", "medium", "sc") is None
+    assert D._language_correction("sui", "aptos", "medium", "sc") is None
+    # Rust-L1 mislabeled as SC: .rs suffix-only medium solana. Must KEEP rust.
+    assert D._language_correction("rust", "solana", "medium", "sc") is None
+
+
+def test_language_correction_medium_fills_unset_only():
+    """MEDIUM may only FILL an unset/empty configured language, never clobber."""
+    import plamen_driver as D
+    assert D._language_correction("", "solana", "medium", "sc") == "solana"
+    assert D._language_correction(None, "aptos", "medium", "sc") == "aptos"
+
+
+def test_language_correction_sc_noop_cases():
+    """No correction when confidence is low/none, signal matches, or absent."""
+    import plamen_driver as D
+    assert D._language_correction("solana", "solana", "high", "sc") is None   # match
+    assert D._language_correction("evm", "solana", "low", "sc") is None       # low conf
+    assert D._language_correction("evm", None, "none", "sc") is None          # no detection
