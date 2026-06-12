@@ -20,24 +20,27 @@ from typing import Any, Optional, TextIO
 _DONE_RE = re.compile(r"\bDONE\s*:", re.IGNORECASE)
 _RATE_LIMIT_STATUSES = {429, 529}
 
-# Claude Code v2.1.x interactive-TUI turn-COMPLETE signal, read from the live
-# PTY footer (NOT the transcript). Root cause it works around: when the driver
-# forces `--session-id S`, newer Claude Code writes only the conversation's
-# `ai-title` stub to `S.jsonl` and logs the real end_turn-bearing transcript
-# under a DIFFERENT uuid filename. `inspect_transcript(S.jsonl)` then sees a
-# 1-line stub with no end_turn, so a worker that actually FINISHED and is now
-# idling at the prompt would otherwise burn the entire phase deadline (observed:
-# L1 bake idle ~4h on a 14400s timeout after completing in 8 min). These anchors
-# appear ONLY after a turn completes: the post-turn footer ("Worked for 8m 1s")
-# and the idle input hint ("/clear to save N tokens"). A mid-turn screen shows
-# "esc to interrupt" / a live spinner instead, never these — and the caller
-# additionally requires sustained output quiescence, so a transient redraw or a
-# compaction pass cannot trip it. This is a turn-COMPLETE signal of the same
-# granularity as end_turn; the caller decides whether to continue or finish.
-_TURN_IDLE_TEXT_RE = re.compile(
-    r"(?:worked\s+for\s+\d|/clear\s+to\s+save)",
-    re.IGNORECASE,
-)
+# Claude Code v2.1.x ai-title-stub completion fallback signal. Root cause it
+# works around: when the driver forces `--session-id S`, newer Claude Code
+# writes only the conversation's `ai-title` record to `S.jsonl` and logs the
+# real end_turn-bearing transcript under a DIFFERENT uuid filename.
+# `inspect_transcript(S.jsonl)` then sees a 1-line stub with no end_turn, so a
+# worker that actually FINISHED and is now idling at the prompt would otherwise
+# burn the entire phase deadline (observed: L1 bake idle ~4h on a 14400s
+# timeout after completing in ~8-20 min). This only happens for some cwd shapes
+# (e.g. a path with a space); phases whose transcript resolves normally hit the
+# `end_turn` path first and never reach this fallback.
+#
+# The robust completion anchor is the bootstrap-MANDATED `DONE:` summary
+# (send_bootstrap instructs every worker: "When done, output your one-line DONE
+# summary"), matched by the existing `_DONE_RE`. This is deterministic across
+# all phases and Claude versions -- unlike the post-turn footer, whose verb is
+# randomized ("Worked for" / "Cogitated for" / "Symbioting" / ...), which is why
+# an earlier footer-word anchor failed to fire. The caller additionally requires
+# the PTY output to be BYTE-STABLE (no new bytes) for quiescence_s, so a
+# mid-stream `DONE:` inside a tool result -- where output keeps flowing -- cannot
+# trip it; only a finished-and-idle worker is byte-quiescent. Same granularity
+# as end_turn; the caller still runs the authoritative disk gate.
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _USAGE_CAP_TEXT_RE = re.compile(
     r"(?:"
@@ -1114,10 +1117,15 @@ class ClaudePtySession:
         # the turn is still doing real work and must not be cut off.
         first_thrash_seen_at: Optional[float] = None
         last_productive_count = -1
-        # v2.1.x ai-title-stub completion fallback latch. Sticky timestamp of the
-        # first sighting of the post-turn idle footer in the live PTY output;
-        # reset whenever the footer is no longer present (a new turn started).
-        first_turn_idle_seen_at: Optional[float] = None
+        # v2.1.x ai-title-stub completion fallback (see _DONE_RE usage below).
+        # Track byte-stability of the live PTY output: `last_output_hash` is the
+        # hash of the recent-output buffer, `last_output_change_at` the wall time
+        # it last changed. A finished worker idling at the prompt stops emitting
+        # bytes, so the buffer hash freezes; a still-working turn keeps changing
+        # it. Used to require the `DONE:` summary to coincide with a genuinely
+        # quiescent screen before treating the turn as complete.
+        last_output_hash: Optional[int] = None
+        last_output_change_at = time.time()
         while True:
             now = time.time()
             if now - last_transcript_poll >= transcript_poll_s:
@@ -1154,24 +1162,33 @@ class ClaudePtySession:
                     else:
                         first_output_cap_seen_at = None
 
-                    # v2.1.x ai-title-stub completion fallback (see
-                    # _TURN_IDLE_TEXT_RE). When the transcript poll cannot see
-                    # end_turn (the forced --session-id file is only the ai-title
-                    # stub), detect a finished-and-idling turn from the live PTY
-                    # footer and require it to PERSIST for quiescence_s so a
-                    # transient redraw cannot trip it. Sets the same completion
-                    # state an end_turn would, so the existing quiescence-gated
-                    # return below fires and the caller runs the disk gate.
-                    if not state.complete and _TURN_IDLE_TEXT_RE.search(_recent_norm):
-                        if first_turn_idle_seen_at is None:
-                            first_turn_idle_seen_at = now
-                        if now - first_turn_idle_seen_at >= quiescence_s:
-                            state.complete = True
-                            state.done_seen = True
-                            if state.last_event_time is None:
-                                state.last_event_time = first_turn_idle_seen_at
-                    elif not _TURN_IDLE_TEXT_RE.search(_recent_norm):
-                        first_turn_idle_seen_at = None
+                    # v2.1.x ai-title-stub completion fallback. When the
+                    # transcript poll cannot see end_turn (the forced
+                    # --session-id file is only the ai-title stub), detect a
+                    # finished-and-idling turn from the live PTY output: the
+                    # bootstrap-mandated `DONE:` summary is present AND the output
+                    # has been byte-stable (no new bytes) for quiescence_s. The
+                    # stability requirement means a mid-stream `DONE:` (inside a
+                    # tool result, with output still flowing) cannot trip it --
+                    # only a genuinely finished, quiescent worker. Sets the same
+                    # completion state an end_turn would, so the existing
+                    # quiescence-gated return below fires and the caller runs the
+                    # authoritative disk gate. Guarded by `not state.complete`, so
+                    # it is fully inert whenever the transcript DOES carry
+                    # end_turn (every healthy phase/ecosystem).
+                    cur_output_hash = hash(self._recent_output)
+                    if cur_output_hash != last_output_hash:
+                        last_output_hash = cur_output_hash
+                        last_output_change_at = now
+                    if (
+                        not state.complete
+                        and _DONE_RE.search(_recent_norm)
+                        and now - last_output_change_at >= quiescence_s
+                    ):
+                        state.complete = True
+                        state.done_seen = True
+                        if state.last_event_time is None:
+                            state.last_event_time = last_output_change_at
 
                     # REMOVED (2026-06-10): the context-overflow / autocompact-
                     # thrash fast-fail. It abandoned a worker turn after
