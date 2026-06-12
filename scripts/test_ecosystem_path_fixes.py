@@ -338,3 +338,48 @@ def test_language_correction_sc_noop_cases():
     assert D._language_correction("solana", "solana", "high", "sc") is None   # match
     assert D._language_correction("evm", "solana", "low", "sc") is None       # low conf
     assert D._language_correction("evm", None, "none", "sc") is None          # no detection
+
+
+def test_detect_solana_pinocchio_high_confidence(tmp_path: Path):
+    """A Pinocchio Solana program depends on `pinocchio` and reimplements the
+    entrypoint, so it often has NEITHER anchor-lang NOR solana-program. The
+    marker vocab must still resolve it to HIGH-confidence solana (not a
+    suffix-only medium guess)."""
+    crate = tmp_path / "pinocchio_prog"
+    _touch(crate / "src" / "lib.rs")
+    _touch(crate / "src" / "processor.rs")
+    (crate / "Cargo.toml").write_text(
+        '[package]\nname = "p"\n\n[dependencies]\n'
+        'pinocchio = "0.7"\npinocchio-system = "0.2"\n',
+        encoding="utf-8",
+    )
+    lang, conf, _ = D._detect_ecosystem(crate)
+    assert lang == "solana"
+    assert conf == "high"
+
+
+def test_detect_solana_native_sdk_high_confidence(tmp_path: Path):
+    """Native Solana via solana-sdk (no anchor) resolves HIGH solana."""
+    crate = tmp_path / "native_prog"
+    _touch(crate / "src" / "lib.rs")
+    (crate / "Cargo.toml").write_text(
+        '[package]\nname = "n"\n\n[dependencies]\nsolana-sdk = "2.1"\n',
+        encoding="utf-8",
+    )
+    lang, conf, _ = D._detect_ecosystem(crate)
+    assert lang == "solana"
+    assert conf == "high"
+
+
+def test_detect_soroban_not_confused_with_solana(tmp_path: Path):
+    """Soroban (soroban-sdk) resolves HIGH soroban; the expanded solana vocab
+    must not steal it (soroban-sdk and the solana markers never co-occur)."""
+    crate = tmp_path / "soro"
+    _touch(crate / "src" / "lib.rs")
+    (crate / "Cargo.toml").write_text(
+        '[package]\nname = "s"\n\n[dependencies]\nsoroban-sdk = "21"\n',
+        encoding="utf-8",
+    )
+    lang, conf, _ = D._detect_ecosystem(crate)
+    assert lang == "soroban"
+    assert conf == "high"

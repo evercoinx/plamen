@@ -14775,7 +14775,15 @@ def _detect_ecosystem(
             Path(project_root),
             {"Cargo.toml"},
             {
-                "solana": ("anchor-lang", "solana-program"),
+                # Solana program/SDK frameworks. Mutually exclusive with
+                # soroban-sdk in any real crate. Covers Anchor, native
+                # (solana-program/solana-sdk), and Pinocchio (zero-dep
+                # framework that reimplements the entrypoint, so it often has
+                # neither anchor-lang nor solana-program).
+                "solana": (
+                    "anchor-lang", "solana-program", "solana-sdk",
+                    "pinocchio",
+                ),
                 "soroban": ("soroban-sdk",),
             },
         )
