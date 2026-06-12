@@ -229,8 +229,20 @@ _PARENT_CLAUDE_IDENTITY_ENV_KEYS = frozenset({
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_CHILD_SESSION",
     "AI_AGENT",
 })
+
+# Every env var with this prefix is parent-Claude-Code session/runtime identity
+# and must NEVER leak into a fresh child `claude` worker. Enumerating the exact
+# set is fragile -- new identity vars appear across Claude Code releases and a
+# single missed one makes nested workers misbehave. Observed on v2.1.175:
+# `CLAUDE_CODE_CHILD_SESSION=1` was inherited (not in the old explicit set), and
+# nested PTY workers then wrote only a 1-line `ai-title` STUB transcript instead
+# of the real end_turn-bearing conversation, so the driver's completion poll
+# never saw end_turn and the phase hung to its full timeout. Stripping by prefix
+# is future-proof against the next such variable.
+_PARENT_CLAUDE_IDENTITY_ENV_PREFIXES = ("CLAUDE_CODE_",)
 
 
 def _filtered_child_subprocess_environ(
@@ -238,14 +250,24 @@ def _filtered_child_subprocess_environ(
 ) -> dict[str, str]:
     """Return a subprocess env that cannot inherit a parent Claude session.
 
-    Launching Plamen from inside `/plamen` means the driver itself can run under
-    Claude Code. Child `claude` subprocesses must start as fresh sessions; if
-    they inherit Claude Code identity variables, Claude may detect a nested
-    active session and exit rc=0 without doing any phase work.
+    Launching Plamen from inside `/plamen` (or from any Claude Code session, e.g.
+    a Bash tool call) means the driver itself runs under Claude Code. Child
+    `claude` subprocesses must start as fresh, standalone sessions; if they
+    inherit Claude Code identity variables, Claude may detect a nested active
+    session and either exit rc=0 without doing any phase work OR write only a
+    1-line `ai-title` stub transcript (v2.1.175) -- both break the driver, which
+    detects completion from the session's on-disk transcript.
+
+    Strips both the explicit identity keys and ANYTHING under the
+    `CLAUDE_CODE_` prefix so a newly-added identity variable cannot reintroduce
+    the nested-session footgun.
     """
     env = dict(os.environ if source_env is None else source_env)
-    for key in _PARENT_CLAUDE_IDENTITY_ENV_KEYS:
-        env.pop(key, None)
+    for key in list(env.keys()):
+        if key in _PARENT_CLAUDE_IDENTITY_ENV_KEYS or key.startswith(
+            _PARENT_CLAUDE_IDENTITY_ENV_PREFIXES
+        ):
+            env.pop(key, None)
     return env
 
 
