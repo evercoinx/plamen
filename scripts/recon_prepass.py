@@ -720,6 +720,10 @@ def _write_template_recommendations(scratch: Path, skill_index: Path,
 # SCIP bake for Rust-based SC pipelines (v2.5.0 P1)
 
 _RUST_ANALYZER_SCIP_TIMEOUT = 180  # seconds
+# Go SCIP indexing (scip-go) type-checks the whole module, so it is slower and
+# more memory-heavy than rust-analyzer on a large repo (e.g. cosmos-sdk). Larger
+# budget; on timeout the caller falls back to grep (non-fatal).
+_SCIP_GO_TIMEOUT = 600  # seconds
 
 def _bake_rust_scip(scratch: Path, proj: Path) -> str:
     """Run `rust-analyzer scip` on a Rust project and generate graph artifacts.
@@ -765,6 +769,62 @@ def _bake_rust_scip(scratch: Path, proj: Path) -> str:
         return f"FAILED:{e.__class__.__name__}"
 
     # Convert SCIP index to graph artifacts
+    return _scip_to_graph_artifacts(scratch, index_path, proj)
+
+
+def _bake_go_scip(scratch: Path, proj: Path) -> str:
+    """Run `scip-go` on a Go module and generate the graph artifacts.
+
+    Mirrors ``_bake_rust_scip``: produces caller_map.md, callee_map.md,
+    state_write_map.md, function_summary.md from the SCIP index — the same
+    artifacts depth agents expect. SCIP is a language-agnostic protobuf, so
+    ``_scip_to_graph_artifacts`` parses a Go index identically to a Rust one.
+
+    Returns status string: WRITTEN | SKIPPED | FAILED:{reason}
+    """
+    if not shutil.which("scip-go"):
+        return "SKIPPED:scip-go not found"
+    if not shutil.which("go"):
+        return "SKIPPED:go toolchain not found"
+
+    go_mod = proj / "go.mod"
+    if not go_mod.exists():
+        return "SKIPPED:no go.mod"
+
+    index_path = scratch / "scip_go.index"
+    # scip-go writes the output (default index.scip) into its working dir; pin it
+    # explicitly so we never collide with a checked-in index.scip in the repo.
+    ra_index = proj / "_plamen_scip_go.index"
+    try:
+        proc = subprocess.run(
+            ["scip-go", "--quiet", "--output", str(ra_index)],
+            cwd=str(proj),
+            timeout=_SCIP_GO_TIMEOUT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if proc.returncode != 0:
+            return f"FAILED:scip-go exit {proc.returncode}"
+        if not ra_index.exists() or ra_index.stat().st_size < 100:
+            return "FAILED:scip-go index not produced or empty"
+        shutil.move(str(ra_index), str(index_path))
+    except subprocess.TimeoutExpired:
+        return f"FAILED:timeout after {_SCIP_GO_TIMEOUT}s"
+    except FileNotFoundError:
+        return "SKIPPED:scip-go not found"
+    except Exception as e:
+        return f"FAILED:{e.__class__.__name__}"
+    finally:
+        # Clean up a partial index file if the move never happened.
+        try:
+            if ra_index.exists():
+                ra_index.unlink()
+        except Exception:
+            pass
+
+    # Convert SCIP index to graph artifacts (language-agnostic reader)
     return _scip_to_graph_artifacts(scratch, index_path, proj)
 
 
@@ -876,7 +936,7 @@ def _scip_to_graph_artifacts(scratch: Path, index_path: Path, proj: Path) -> str
         # Write caller_map.md
         lines = [
             "> **Status**: POPULATED",
-            "> **Source**: rust-analyzer SCIP index (v2.5.0 P1)",
+            "> **Source**: SCIP index (v2.5.0 P1)",
             "",
             "# Caller Map",
             "",
@@ -895,7 +955,7 @@ def _scip_to_graph_artifacts(scratch: Path, index_path: Path, proj: Path) -> str
         # depth agents weight it as a hint, not ground truth.
         lines = [
             f"> **Status**: {callee_map_status}",
-            "> **Source**: rust-analyzer SCIP index (v2.5.0 P1) — file-level "
+            "> **Source**: SCIP index (v2.5.0 P1) — file-level "
             "co-occurrence heuristic, not verified call edges",
             "",
             "# Callee Map",
@@ -911,7 +971,7 @@ def _scip_to_graph_artifacts(scratch: Path, index_path: Path, proj: Path) -> str
         # Write state_write_map.md
         lines = [
             "> **Status**: POPULATED",
-            "> **Source**: rust-analyzer SCIP index (v2.5.0 P1)",
+            "> **Source**: SCIP index (v2.5.0 P1)",
             "",
             "# State Write Map",
             "",
@@ -926,7 +986,7 @@ def _scip_to_graph_artifacts(scratch: Path, index_path: Path, proj: Path) -> str
         # Write function_summary.md
         lines = [
             "> **Status**: POPULATED",
-            "> **Source**: rust-analyzer SCIP index (v2.5.0 P1)",
+            "> **Source**: SCIP index (v2.5.0 P1)",
             "",
             "# Function Summary",
             "",

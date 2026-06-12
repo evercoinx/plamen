@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from recon_prepass import (
     _bake_rust_scip,
+    _bake_go_scip,
     _scip_to_graph_artifacts,
     run_recon_prepass,
 )
@@ -442,3 +443,69 @@ def test_bake_moves_index_to_scratchpad(tmp_path):
     # index.scip should be moved, not copied
     assert not fake_index.exists(), "index.scip should be moved from project root"
     assert (scratch / "scip_rust.index").exists(), "index should be in scratchpad"
+
+
+# ── _bake_go_scip: skip/fail paths (mirror of _bake_rust_scip) ───────────
+
+def _mkproj_go(tmp_path: Path, *, gomod: bool = True) -> Path:
+    p = tmp_path / "goproject"
+    p.mkdir()
+    if gomod:
+        (p / "go.mod").write_text("module test\n\ngo 1.21\n", encoding="utf-8")
+    return p
+
+
+def test_bake_go_skip_no_scip_go(tmp_path):
+    """No scip-go on PATH -> SKIPPED."""
+    scratch = _mkscratch(tmp_path)
+    proj = _mkproj_go(tmp_path)
+    with mock.patch("shutil.which", return_value=None):
+        result = _bake_go_scip(scratch, proj)
+    assert result.startswith("SKIPPED:")
+    assert "scip-go" in result
+
+
+def test_bake_go_skip_no_gomod(tmp_path):
+    """scip-go + go present but no go.mod -> SKIPPED."""
+    scratch = _mkscratch(tmp_path)
+    proj = _mkproj_go(tmp_path, gomod=False)
+    with mock.patch("shutil.which", return_value="/usr/bin/x"):
+        result = _bake_go_scip(scratch, proj)
+    assert result.startswith("SKIPPED:")
+    assert "go.mod" in result
+
+
+def test_bake_go_fail_nonzero_exit(tmp_path):
+    """scip-go returns nonzero -> FAILED."""
+    scratch = _mkscratch(tmp_path)
+    proj = _mkproj_go(tmp_path)
+    fake_proc = mock.Mock(returncode=1, stdout="", stderr="error")
+    with mock.patch("shutil.which", return_value="/usr/bin/x"), \
+         mock.patch("subprocess.run", return_value=fake_proc):
+        result = _bake_go_scip(scratch, proj)
+    assert result.startswith("FAILED:")
+    assert "exit 1" in result
+
+
+def test_bake_go_fail_no_index_produced(tmp_path):
+    """scip-go exit 0 but no index file -> FAILED."""
+    scratch = _mkscratch(tmp_path)
+    proj = _mkproj_go(tmp_path)
+    fake_proc = mock.Mock(returncode=0, stdout="", stderr="")
+    with mock.patch("shutil.which", return_value="/usr/bin/x"), \
+         mock.patch("subprocess.run", return_value=fake_proc):
+        result = _bake_go_scip(scratch, proj)
+    assert result.startswith("FAILED:")
+    assert "not produced" in result
+
+
+def test_bake_go_fail_timeout(tmp_path):
+    """scip-go times out -> FAILED with timeout message."""
+    import subprocess as sp
+    scratch = _mkscratch(tmp_path)
+    proj = _mkproj_go(tmp_path)
+    with mock.patch("shutil.which", return_value="/usr/bin/x"), \
+         mock.patch("subprocess.run", side_effect=sp.TimeoutExpired("scip-go", 600)):
+        result = _bake_go_scip(scratch, proj)
+    assert result.startswith("FAILED:")
+    assert "timeout" in result

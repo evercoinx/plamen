@@ -10927,6 +10927,19 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
                 status = _bake_rust_scip(scratchpad, _proj)
                 log.info(f"[{phase.name}] SCIP pre-breadth bake: {status}")
             if (
+                config.get("pipeline") == "l1"
+                and _lang == "go"
+                and not (scratchpad / "caller_map.md").exists()
+                and os.environ.get("PLAMEN_DISABLE_SCIP") != "1"
+            ):
+                display.print_phase_heartbeat(
+                    phase.name, 0, status="optional graph bake: SCIP (Go)",
+                )
+                sys.path.insert(0, str(Path(__file__).parent))
+                from recon_prepass import _bake_go_scip
+                status = _bake_go_scip(scratchpad, _proj)
+                log.info(f"[{phase.name}] SCIP-Go pre-breadth bake: {status}")
+            if (
                 config.get("pipeline") != "l1"
                 and _lang == "solana"
                 and not (scratchpad / "sec3_findings.md").exists()
