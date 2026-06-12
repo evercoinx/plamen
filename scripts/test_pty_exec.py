@@ -166,6 +166,16 @@ def test_wait_for_turn_complete_timeout_without_transcript(tmp_path):
     assert time.time() - start < 1.0
 
 
+def test_turn_idle_text_re_matches_post_turn_footer_not_midturn():
+    from pty_exec import _TURN_IDLE_TEXT_RE
+    # Post-turn / idle anchors -> match.
+    assert _TURN_IDLE_TEXT_RE.search("worked for 8m 1s")
+    assert _TURN_IDLE_TEXT_RE.search("new task? /clear to save 105.1k tokens")
+    # Mid-turn screen -> must NOT match (this shows WHILE a turn runs).
+    assert not _TURN_IDLE_TEXT_RE.search("esc to interrupt")
+    assert not _TURN_IDLE_TEXT_RE.search("simmering... (8m 11s)")
+
+
 def _ai_title_stub(path, session_id="abde1e79"):
     # Mirrors Claude Code v2.1.x: --session-id S receives ONLY this 1-line
     # ai-title record; the real end_turn transcript is a DIFFERENT uuid file.
@@ -175,12 +185,10 @@ def _ai_title_stub(path, session_id="abde1e79"):
     )
 
 
-def test_wait_completes_on_done_summary_when_transcript_is_aititle_stub(tmp_path):
+def test_wait_completes_on_idle_footer_when_transcript_is_aititle_stub(tmp_path):
     """The v2.1.x ai-title-stub bug: transcript has no end_turn, but the worker
-    finished and is idling. The bootstrap-mandated DONE: summary + byte-stable
-    output must detect completion instead of burning the full timeout. (The real
-    failure: the footer verb was 'Cogitated for', not 'Worked for' — so we anchor
-    on the deterministic DONE: summary, not the randomized footer word.)"""
+    finished and is idling. The PTY-footer fallback must detect completion
+    instead of burning the full timeout."""
     stub = tmp_path / "stub.jsonl"
     _ai_title_stub(stub)
     session = ClaudePtySession(
@@ -190,13 +198,11 @@ def test_wait_completes_on_done_summary_when_transcript_is_aititle_stub(tmp_path
     )
     session._resolved_transcript_path = stub  # poll sees the stub (no end_turn)
     session.is_alive = lambda: True  # type: ignore[method-assign]
-    # Exactly the kind of idle screen the live L1 bake produced: a randomized
-    # footer verb ('Cogitated for'), the DONE: summary, and the idle prompt.
     with session._recent_output_lock:
         session._recent_output = (
-            "Bake phase complete. primitive_status.md written.\n"
-            "DONE: bake phase complete - SCIP regenerated, opengrep 112 hits\n"
-            "Cogitated for 20m 58s   > for agents\n"
+            "Phase 0.5 Bake complete: primitive_status.md written\n"
+            "Worked for 8m 1s\n"
+            "new task? /clear to save 105.1k tokens\n"
         )
 
     start = time.time()
@@ -210,8 +216,8 @@ def test_wait_completes_on_done_summary_when_transcript_is_aititle_stub(tmp_path
 
 
 def test_wait_does_not_complete_on_midturn_output_with_stub(tmp_path):
-    """Negative: a mid-turn screen with NO DONE: summary and the same stub
-    transcript must NOT trip the fallback — it should time out."""
+    """Negative: a mid-turn screen ('esc to interrupt') with the same stub
+    transcript must NOT trip the idle fallback — it should time out."""
     stub = tmp_path / "stub.jsonl"
     _ai_title_stub(stub)
     session = ClaudePtySession(
@@ -229,43 +235,6 @@ def test_wait_does_not_complete_on_midturn_output_with_stub(tmp_path):
     )
 
     assert state.complete is False
-
-
-def test_wait_does_not_complete_on_done_while_output_still_flowing(tmp_path):
-    """Negative: a mid-stream 'DONE:' (e.g. inside a tool result) while output
-    keeps CHANGING must NOT trip the fallback — byte-stability is required."""
-    stub = tmp_path / "stub.jsonl"
-    _ai_title_stub(stub)
-    session = ClaudePtySession(
-        ["claude"], cwd=tmp_path, env={}, session_id="abde1e79",
-        prompt_path=tmp_path / "prompt.md", log_file=io.StringIO(),
-        claude_home=tmp_path,
-    )
-    session._resolved_transcript_path = stub
-    session.is_alive = lambda: True  # type: ignore[method-assign]
-    session._recent_output = "tool result: DONE: subtask\n"
-
-    stop = threading.Event()
-
-    def _churn():
-        i = 0
-        while not stop.is_set():
-            with session._recent_output_lock:
-                session._recent_output = f"tool result: DONE: subtask\nstep {i}\n"
-            i += 1
-            time.sleep(0.005)
-
-    t = threading.Thread(target=_churn, daemon=True)
-    t.start()
-    try:
-        state = session.wait_for_turn_complete(
-            timeout_s=0.4, quiescence_s=0.15, poll_s=0.01, transcript_poll_s=0.01
-        )
-    finally:
-        stop.set()
-        t.join(timeout=1.0)
-
-    assert state.complete is False  # output never stabilized -> no completion
 
 
 def test_parse_transcript_usage_accumulates_assistant_usage(tmp_path):
