@@ -11,6 +11,7 @@ Status: WRITTEN | STUB | FAILED | SKIPPED
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -18,6 +19,12 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# Module logger. `_scip_to_graph_artifacts` emits a log.warning on the
+# large-index (>callee-node-cap) PARTIAL path; without this module-level logger
+# that call raised `NameError: name 'log' is not defined` on big repos
+# (cosmos-sdk), which surfaced as the SCIP bake FAILED and fell back to grep.
+log = logging.getLogger("plamen.recon_prepass")
 
 # Filesystem helpers
 SKIP_DIR_NAMES = {

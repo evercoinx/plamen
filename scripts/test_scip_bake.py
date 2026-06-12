@@ -509,3 +509,44 @@ def test_bake_go_fail_timeout(tmp_path):
         result = _bake_go_scip(scratch, proj)
     assert result.startswith("FAILED:")
     assert "timeout" in result
+
+
+# ── large-index PARTIAL path (callee node cap) must not NameError ─────────
+
+class _BigScipReader:
+    """Reader with >callee-node-cap function defs to hit the PARTIAL path.
+
+    Regression: _scip_to_graph_artifacts emitted log.warning on this path with
+    no module-level `log` defined -> NameError on big repos (cosmos-sdk), which
+    surfaced as SCIP bake FAILED -> grep fallback.
+    """
+    def __init__(self, index_path, n=1600):
+        self._definitions = {f"scip . fn{i}()": _FakeOccurrence("a.go", i) for i in range(n)}
+        self._references = {f"scip . fn{i}()": [_FakeOccurrence("a.go", i)] for i in range(n)}
+        self._symbol_info = {f"scip . fn{i}()": _FakeSymbolInfo("Function") for i in range(n)}
+        self._file_symbols = {}
+
+    @staticmethod
+    def _extract_name_from_symbol(sym: str) -> str:
+        return sym.rstrip("()").split()[-1]
+
+    def stats(self):
+        return {"definitions": len(self._definitions), "documents": 1}
+
+
+def test_scip_to_graph_large_index_partial_no_nameerror(tmp_path):
+    """>1500 functions -> PARTIAL callee_map via log.warning; must not raise
+    NameError (regression for the missing module logger)."""
+    import types
+    scratch = _mkscratch(tmp_path)
+    index = scratch / "scip_go.index"
+    index.write_bytes(b"x" * 200)
+    proj = _mkproj(tmp_path)
+    fake_l1 = types.ModuleType("plamen_l1")
+    fake_mod = types.ModuleType("plamen_l1.scip_reader")
+    fake_mod.ScipReader = _BigScipReader
+    fake_l1.scip_reader = fake_mod
+    with mock.patch.dict("sys.modules", {"plamen_l1": fake_l1, "plamen_l1.scip_reader": fake_mod}):
+        result = _scip_to_graph_artifacts(scratch, index, proj)
+    assert result.startswith("WRITTEN:"), result
+    assert "PARTIAL" in (scratch / "callee_map.md").read_text(encoding="utf-8")
