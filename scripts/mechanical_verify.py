@@ -194,7 +194,15 @@ def _format_test_command(template: str, test_function: str,
     """
     lang = (language or "").lower().strip()
     # l1_go: anchor the -run regex to the exact function name.
-    fn_sub = test_function
+    # Guard against a None test_function: str.replace() rejects a None
+    # replacement ("replace() argument 2 must be str, not None"), which on a
+    # finding with no dictated test name crashed the whole sc_mechanical_verify
+    # phase (observed: 1 degraded phase on DFlow). Falling back to "" localizes
+    # the failure to that one finding (empty test name -> its PoC simply can't
+    # run) instead of degrading the entire phase. All downstream uses of
+    # test_function (fn_lower, the test_{id} substitution, cargo --exact) are
+    # already None-guarded.
+    fn_sub = test_function or ""
     if lang == "l1_go" and test_function and not (
         test_function.startswith("^") and test_function.endswith("$")
     ):

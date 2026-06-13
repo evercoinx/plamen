@@ -101,6 +101,25 @@ def test_format_test_command_go():
     assert cmd == ["go", "test", "-run", "TestH3", "-v", "./..."]
 
 
+def test_format_test_command_none_function_no_crash():
+    """Regression: a None test_function must NOT raise
+    'replace() argument 2 must be str, not None' (it degraded the whole
+    sc_mechanical_verify phase on DFlow). Falls back to empty test name and
+    localizes the failure to that one finding."""
+    mv = _mv()
+    cmd = mv._format_test_command(
+        "cargo test {test_function} -- --nocapture", None, "tests/x.rs"
+    )
+    assert isinstance(cmd, list)
+    assert cmd[:2] == ["cargo", "test"]
+    # l1_go path with None must also not crash (the -run anchor is skipped)
+    cmd_go = mv._format_test_command(
+        "go test -run {test_function} -v ./...", None, None, "l1_go"
+    )
+    assert isinstance(cmd_go, list)
+    assert cmd_go[:2] == ["go", "test"]
+
+
 # ---------------------------------------------------------------------------
 # Outcome classification
 # ---------------------------------------------------------------------------
