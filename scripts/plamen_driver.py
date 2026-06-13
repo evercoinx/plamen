@@ -1006,6 +1006,33 @@ def _codex_auth_is_chatgpt() -> bool:
         return False
 
 
+def _codex_robustness_overrides() -> list[str]:
+    """Inline `-c` config overrides applied to every `codex exec` invocation.
+
+    Both codex command builders pass `--ignore-user-config` (so config.toml is
+    NOT read live); these research-backed settings must therefore be inline:
+
+    - `model_auto_compact_token_limit=220000` — force early history compaction
+      instead of the bogus "context window exceeded (~N tokens)" PERMANENT
+      failure caused by the token-counter corruption bug (openai/codex #16068,
+      #19409). NEVER set `model_context_window` (the trigger for that bug).
+    - `service_tier="flex"` — a built-in tier value so `spawn_agent` can resolve
+      the child model. Without a valid tier, sub-agent spawning fails with
+      "could not resolve the child model for service tier validation" (#27297),
+      which degrades the fan-out-heavy recon phase. Only `flex`/`fast` are valid
+      on older parsers; `default`/`priority` are rejected.
+
+    Uses the same proven `-c key=value` form already used for
+    `model_reasoning_effort`. If a future codex version rejects either key it
+    surfaces as a config error; the context-exceeded handler now degrades the
+    phase and continues rather than perma-failing the run.
+    """
+    return [
+        "-c", "model_auto_compact_token_limit=220000",
+        "-c", 'service_tier="flex"',
+    ]
+
+
 def _build_codex_cmd(effective_model: str, *, needs_mcp: bool = False,
                      output_last_message: str = "",
                      writable_dirs: list[str] | None = None) -> list[str]:
@@ -1042,6 +1069,7 @@ def _build_codex_cmd(effective_model: str, *, needs_mcp: bool = False,
         "--ignore-user-config",
         "--ignore-rules",
     ])
+    cmd.extend(_codex_robustness_overrides())
     if writable_dirs:
         for d in writable_dirs:
             cmd.extend(["--add-dir", d])
@@ -1132,6 +1160,7 @@ def _build_codex_cmd_no_model(*, needs_mcp: bool = False,
         "--ignore-user-config",
         "--ignore-rules",
     ]
+    cmd.extend(_codex_robustness_overrides())
     if writable_dirs:
         for d in writable_dirs:
             cmd.extend(["--add-dir", d])
@@ -17260,20 +17289,42 @@ def main():
                         est_tokens = snap_path.stat().st_size // 4
                 except Exception:
                     pass
-                log.error(
-                    f"[{phase.name}] Codex context window exceeded "
-                    f"(~{est_tokens:,} est. tokens). This is a permanent "
-                    f"failure for the current prompt size — retrying with "
-                    f"identical prompt is pointless. Consider reducing prompt "
-                    f"size or using a model with a larger context window."
+                # Codex hit a context-window error on THIS phase's prompt. That is
+                # NOT a whole-audit failure: degrade this ONE phase and continue so
+                # the run still produces a report. Missing verify files are stubbed
+                # [CODE-TRACE] UNVERIFIED by the verify parity fallback; other phases'
+                # gaps are covered by their degrade/stub machinery. A single oversized
+                # Codex prompt must NEVER perma-fail the whole run (was
+                # sys.exit(EXIT_ERROR) — a perma-degrading dead end).
+                (scratchpad / f"{phase.name}.degraded").write_text(
+                    f"[CODEX-CONTEXT-EXCEEDED] ~{est_tokens:,} est. tokens; phase "
+                    f"degraded (codex context window) and pipeline continued.\n",
+                    encoding="utf-8",
                 )
+                if phase.name not in checkpoint.degraded:
+                    checkpoint.degraded.append(phase.name)
                 checkpoint.save(scratchpad)
-                display.print_failure_diagnosis(
-                    phase.name, str(scratchpad),
-                    [f"context_exceeded (~{est_tokens:,} est. tokens)"],
-                    config,
+                log.warning(
+                    f"[{phase.name}] Codex context window exceeded "
+                    f"(~{est_tokens:,} est. tokens) — degrading THIS phase and "
+                    f"continuing (no perma-fail); downstream stubs/parity cover the gap."
                 )
-                sys.exit(EXIT_ERROR)
+                if phase.critical:
+                    # A critical phase can't be silently skipped, but must NOT
+                    # hard-error: exit with the DEGRADED code (treated as
+                    # complete-with-degraded by resume/report tooling), not EXIT_ERROR,
+                    # so resume can continue and a partial report is still produced.
+                    display.print_failure_diagnosis(
+                        phase.name, str(scratchpad),
+                        [f"codex context_exceeded (~{est_tokens:,} est. tokens) on critical phase"],
+                        config,
+                    )
+                    sys.exit(EXIT_DEGRADED)
+                display.print_phase_skipped(
+                    phase_idx + 1, total_active, phase.name,
+                    f"codex context exceeded (~{est_tokens:,} tok) — degraded",
+                )
+                continue
             if _detect_codex_model_not_available(_stdio_crash_log):
                 requested = phase_model(phase, config["mode"], config)
                 fallback = _CODEX_MODEL_MAP.get("sonnet", "gpt-5.4")

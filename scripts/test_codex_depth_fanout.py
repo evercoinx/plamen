@@ -329,3 +329,50 @@ def test_source_wiring_is_additive():
         "prompt = _translate_prompt_for_codex(\n            prompt, phase_name=phase.name,"
     )
     assert fanout_idx < translate_idx
+
+
+# ── Codex robustness fixes (context-window / spawn_agent / no perma-fail) ──
+
+def test_codex_robustness_overrides_present():
+    ov = D._codex_robustness_overrides()
+    s = " ".join(ov)
+    assert "model_auto_compact_token_limit=220000" in s
+    assert 'service_tier="flex"' in s
+    # The #16068 trigger must NEVER be set (causes bogus context-exceeded).
+    assert "model_context_window" not in s
+
+
+def test_build_codex_cmd_includes_robustness_overrides():
+    cmd = D._build_codex_cmd("gpt-5.4")
+    j = " ".join(cmd)
+    assert "model_auto_compact_token_limit=220000" in j
+    assert 'service_tier="flex"' in j
+    assert "model_context_window" not in j
+
+
+def test_build_codex_cmd_no_model_includes_robustness_overrides():
+    cmd = D._build_codex_cmd_no_model()
+    j = " ".join(cmd)
+    assert "model_auto_compact_token_limit=220000" in j
+    assert 'service_tier="flex"' in j
+
+
+def test_codex_config_generator_no_context_window_landmine():
+    import inspect
+    import codex_adapter
+    src = inspect.getsource(codex_adapter.generate_config_toml)
+    # The #16068 landmine assignment is gone; replaced by auto-compact + flex tier.
+    assert "model_context_window = 272000" not in src
+    assert 'model = "gpt-5.3-codex"' not in src   # ChatGPT-auth-rejected default removed
+    assert "model_auto_compact_token_limit" in src
+    assert 'service_tier = "flex"' in src
+    assert 'model = "gpt-5.4"' in src
+
+
+def test_codex_context_exceeded_degrades_not_perma_fail():
+    """The codex context-window handler must DEGRADE the phase and continue
+    (no perma-fail), not sys.exit(EXIT_ERROR)."""
+    import inspect
+    src = inspect.getsource(D.run_pipeline) if hasattr(D, "run_pipeline") else inspect.getsource(D)
+    assert "CODEX-CONTEXT-EXCEEDED" in src
+    assert "no perma-fail" in src
