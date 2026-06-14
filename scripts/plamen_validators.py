@@ -60,6 +60,8 @@ __all__ = [
     "_canonicalize_summary_table",
     "_check_graph_artifact_consumption",
     "_check_index_completeness",
+    "_report_index_dropped_ids",
+    "_backfill_report_coverage_dropouts",
     "_check_notread_priority_coverage",
     "_check_opengrep_obligation_coverage",
     "_check_dedup_decision_coverage",
@@ -11001,6 +11003,83 @@ def _collect_consolidation_absorbed_ids(scratchpad: Path) -> set[str]:
             if idx < len(raw_cells):
                 ids.update(m.group(1) for m in _INTERNAL_FINDING_ID_RE.finditer(raw_cells[idx]))
     return ids
+
+
+def _report_index_dropped_ids(scratchpad: Path) -> list[str]:
+    """Return the reference IDs the report index has NOT accounted for.
+
+    This is the EXACT reference/indexed computation used by
+    _check_index_completeness, factored out so the dropout-recovery backfill
+    consumes the identical set with zero divergence. reference = verify IDs
+    union coverage-seed superset; indexed = master|excluded|absorbed|coverage.
+    """
+    verify_ids = _collect_verify_hypothesis_ids(scratchpad)
+    seed_ids = _collect_report_index_seed_ids(scratchpad)
+    reference_ids = set(verify_ids) | set(seed_ids)
+    if not reference_ids:
+        return []
+    master_ids, excluded_ids, _master_list = _collect_index_acknowledged_ids(scratchpad)
+    absorbed_ids = _collect_consolidation_absorbed_ids(scratchpad)
+    coverage_ids = _collect_report_coverage_acknowledged_ids(scratchpad)
+
+    def _zn(s: str) -> str:
+        return re.sub(r"-0+(\d)", r"-\1", s)
+
+    norm_ref = {_zn(v): v for v in reference_ids}
+    norm_indexed = {
+        _zn(i) for i in (master_ids | excluded_ids | absorbed_ids | coverage_ids)
+    }
+    dropped_norm = sorted(set(norm_ref) - norm_indexed)
+    return [norm_ref[n] for n in dropped_norm]
+
+
+def _backfill_report_coverage_dropouts(scratchpad: Path) -> int:
+    """Recall-safe completeness guarantee: append every still-dropped reference
+    ID to report_coverage.md's Raw Candidate Ledger as a DEFERRED disposition so
+    the completeness gate passes deterministically instead of halting a finished
+    audit at the last mile.
+
+    This is the residual net behind the mechanical report-index builder: any
+    reference ID that has no verify file (e.g. a depth auto-find with only a
+    coverage-seed entry) and therefore is not enumerated into the body still
+    gets an explicit, non-UNACCOUNTED ledger row. Findings are NEVER silently
+    dropped — they are mechanically accounted with a human-promotion note.
+    Returns the number of IDs backfilled.
+    """
+    dropped = _report_index_dropped_ids(scratchpad)
+    if not dropped:
+        return 0
+    path = scratchpad / "report_coverage.md"
+    try:
+        existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    except Exception:
+        existing = ""
+    out: list[str] = []
+    if "Raw Candidate Ledger" not in existing:
+        out.append("\n## Raw Candidate Ledger\n")
+        out.append(
+            "| Source File | Candidate ID / Label | Severity Signal | Status | "
+            "Report ID / Refutation / Reason |"
+        )
+        out.append(
+            "|-------------|----------------------|-----------------|--------|"
+            "---------------------------------|"
+        )
+    for fid in dropped:
+        out.append(
+            f"| mechanical-dropout-backfill | {fid} | unknown | DEFERRED | "
+            f"report_index dropout — mechanically backfilled for completeness; "
+            f"see verify_{fid}.md / coverage seed; pending human promotion to body |"
+        )
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write("\n".join(out) + "\n")
+    except Exception as exc:  # pragma: no cover - filesystem failure
+        logging.getLogger("plamen.validators").warning(
+            f"[report_index] coverage dropout backfill write failed: {exc!r}"
+        )
+        return 0
+    return len(dropped)
 
 
 def _check_index_completeness(

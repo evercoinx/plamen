@@ -16156,37 +16156,78 @@ def main():
                 )
 
         if config["pipeline"] == "sc" and phase.name == "report_index":
+            # Step 1: preserve the LLM index when it is GOOD or only needs row-
+            # level fixes (severity/trust), keeping its root-cause consolidation
+            # and client-worthiness triage. Repair edits existing rows only.
             repaired = _repair_sc_report_index_from_prior(scratchpad)
-            if repaired:
-                idx_in_issues = _validate_report_index_inputs(scratchpad)
-                coverage_issues = _validate_report_coverage_accounting(scratchpad)
-                if not idx_in_issues and not coverage_issues:
-                    try:
-                        manifests = _build_sc_body_writer_manifests(scratchpad)
-                    except Exception as exc:
-                        manifests = {}
-                        log.warning(
-                            f"[report_index] SC manifest rebuild after repair failed: {exc!r}"
-                        )
-                    checkpoint.mark_completed(phase.name)
-                    checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
-                    checkpoint.save(scratchpad)
-                    log.info(
-                        f"[report_index] mechanically repaired report_index.md "
-                        f"with {repaired} active row(s); manifests={len(manifests)}"
+            idx_in_issues = _validate_report_index_inputs(scratchpad)
+            coverage_issues = _validate_report_coverage_accounting(scratchpad)
+
+            def _finalize_sc_report_index(detail: str) -> None:
+                try:
+                    manifests = _build_sc_body_writer_manifests(scratchpad)
+                except Exception as exc:
+                    manifests = {}
+                    log.warning(
+                        f"[report_index] SC manifest rebuild failed: {exc!r}"
                     )
-                    phases[:] = expand_shard_phases(phases, scratchpad)
-                    active_phases = [p for p in phases if mode in p.modes]
-                    total_active = len(active_phases)
-                    display.print_phase_skipped(
-                        phase_idx + 1, total_active, phase.name,
-                        f"mechanical repair ({repaired} active rows)",
-                    )
-                    continue
-                log.warning(
-                    "[report_index] mechanical SC repair did not satisfy gates: "
-                    + "; ".join(idx_in_issues + coverage_issues)
+                checkpoint.mark_completed(phase.name)
+                checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
+                checkpoint.save(scratchpad)
+                log.info(f"[report_index] {detail}; manifests={len(manifests)}")
+                phases[:] = expand_shard_phases(phases, scratchpad)
+                _active = [p for p in phases if mode in p.modes]
+                display.print_phase_skipped(
+                    phase_idx + 1, len(_active), phase.name, detail,
                 )
+
+            if not idx_in_issues and not coverage_issues:
+                _finalize_sc_report_index(
+                    f"report_index.md satisfied gates "
+                    f"({repaired or 0} row(s) repaired)"
+                )
+                continue
+
+            # Step 2: deterministic dropout recovery. The LLM index dropped
+            # findings (or wrote nothing parseable) and row-repair cannot ADD
+            # them. Take the LLM off the critical path EXACTLY as L1 does:
+            # rebuild from the verifier queue (cannot drop — it enumerates the
+            # authoritative finding set and clusters at threshold>=3), then
+            # backfill any residual non-queue reference IDs into the coverage
+            # ledger. A finished audit must NEVER halt at the last mile over an
+            # LLM bookkeeping failure.
+            log.warning(
+                "[report_index] LLM/repair index failed completeness gates "
+                f"(repaired={repaired}): "
+                + "; ".join(idx_in_issues + coverage_issues)
+                + " — falling back to deterministic mechanical index (no halt)."
+            )
+            try:
+                active = _write_mechanical_report_index(scratchpad)
+            except Exception as exc:
+                active = 0
+                log.warning(
+                    f"[report_index] mechanical SC index build raised: {exc!r}"
+                )
+            try:
+                backfilled = _backfill_report_coverage_dropouts(scratchpad)
+            except Exception as exc:
+                backfilled = 0
+                log.warning(
+                    f"[report_index] coverage dropout backfill raised: {exc!r}"
+                )
+            post_idx = _validate_report_index_inputs(scratchpad)
+            post_cov = _validate_report_coverage_accounting(scratchpad)
+            if not post_idx and not post_cov:
+                _finalize_sc_report_index(
+                    f"deterministic dropout recovery: {active} body row(s) "
+                    f"+ {backfilled} coverage backfill(s) (no halt)"
+                )
+                continue
+            log.warning(
+                "[report_index] deterministic recovery still failing gates: "
+                + "; ".join(post_idx + post_cov)
+            )
 
         if config["pipeline"] == "l1" and phase.name == "report_index":
             # Phase E2: refuse to mechanically write report_index when queue
