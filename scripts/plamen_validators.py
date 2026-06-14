@@ -10406,9 +10406,20 @@ def _collect_report_coverage_acknowledged_ids(scratchpad: Path) -> set[str]:
             continue
         cells = [c.strip() for c in line.strip("|").split("|")]
         lower_cells = [c.lower() for c in cells]
-        if any(kw in c for c in lower_cells for kw in ("candidate", "finding id", "internal id")):
+        # A header row's ID cell is a SHORT header LABEL (e.g. "Candidate ID /
+        # Label", "Finding ID"), NOT prose that merely contains the word
+        # "candidate". Data rows whose Reason text says e.g. "auto-mapped depth
+        # candidate" must NOT be misdetected as headers — that flips id_col to
+        # the reason column and corrupts ID extraction for every following row.
+        def _is_id_header_cell(cell: str) -> bool:
+            return bool(re.match(
+                r"^(?:raw\s+)?(?:candidate(?:\s+id)?(?:\s*/\s*label)?"
+                r"|finding\s+id|internal\s+id|hyp(?:othesis)?\s+id)\s*$",
+                cell.strip(),
+            ))
+        if any(_is_id_header_cell(c) for c in lower_cells):
             for i, c in enumerate(lower_cells):
-                if any(kw in c for kw in ("candidate", "finding id", "internal id")):
+                if _is_id_header_cell(c):
                     id_col = i
                 if any(kw in c for kw in ("status", "disposition", "report id", "reason", "refutation")):
                     status_cols.append(i)
@@ -11054,26 +11065,49 @@ def _backfill_report_coverage_dropouts(scratchpad: Path) -> int:
         existing = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
     except Exception:
         existing = ""
-    out: list[str] = []
-    if "Raw Candidate Ledger" not in existing:
-        out.append("\n## Raw Candidate Ledger\n")
-        out.append(
-            "| Source File | Candidate ID / Label | Severity Signal | Status | "
-            "Report ID / Refutation / Reason |"
-        )
-        out.append(
-            "|-------------|----------------------|-----------------|--------|"
-            "---------------------------------|"
-        )
-    for fid in dropped:
-        out.append(
-            f"| mechanical-dropout-backfill | {fid} | unknown | DEFERRED | "
-            f"report_index dropout — mechanically backfilled for completeness; "
-            f"see verify_{fid}.md / coverage seed; pending human promotion to body |"
+
+    rows = [
+        f"| mechanical-dropout-backfill | {fid} | unknown | DEFERRED | "
+        f"report_index dropout — mechanically backfilled for completeness; "
+        f"see verify_{fid}.md / coverage seed; pending human promotion to body |"
+        for fid in dropped
+    ]
+
+    # CRITICAL: the coverage parser (_collect_report_coverage_acknowledged_ids /
+    # _validate_report_coverage_accounting) reads rows ONLY between a ledger
+    # header and the NEXT `## ` heading. If a ledger section already exists
+    # mid-file (the LLM-written coverage case, with later sections after it),
+    # appending rows at EOF puts them OUTSIDE that section → invisible to the
+    # parser. So insert INTO the existing ledger section (right before the next
+    # `## ` heading); only create a new section when none exists.
+    ledger_re = re.compile(
+        r"(?im)^##\s+(?:Raw\s+)?(?:Candidate|Coverage|Promotion)\s+Ledger\b.*$"
+    )
+    m = ledger_re.search(existing)
+    if m:
+        rest = existing[m.end():]
+        nxt = re.search(r"(?m)^##\s+", rest)
+        sec_end = m.end() + (nxt.start() if nxt else len(rest))
+        head = existing[:sec_end].rstrip("\n")
+        tail = existing[sec_end:]
+        new_text = head + "\n" + "\n".join(rows) + "\n"
+        if tail.strip():
+            new_text += "\n" + tail.lstrip("\n")
+    else:
+        prefix = existing
+        if prefix and not prefix.endswith("\n"):
+            prefix += "\n"
+        new_text = (
+            prefix
+            + "\n## Raw Candidate Ledger\n"
+            + "| Source File | Candidate ID / Label | Severity Signal | Status | "
+            "Report ID / Refutation / Reason |\n"
+            + "|-------------|----------------------|-----------------|--------|"
+            "---------------------------------|\n"
+            + "\n".join(rows) + "\n"
         )
     try:
-        with path.open("a", encoding="utf-8") as f:
-            f.write("\n".join(out) + "\n")
+        path.write_text(new_text, encoding="utf-8")
     except Exception as exc:  # pragma: no cover - filesystem failure
         logging.getLogger("plamen.validators").warning(
             f"[report_index] coverage dropout backfill write failed: {exc!r}"

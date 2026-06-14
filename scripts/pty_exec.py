@@ -19,6 +19,12 @@ from typing import Any, Optional, TextIO
 
 _DONE_RE = re.compile(r"\bDONE\s*:", re.IGNORECASE)
 _RATE_LIMIT_STATUSES = {429, 529}
+# Transient 5xx server errors (Internal Server Error / Bad Gateway / Service
+# Unavailable / Gateway Timeout). Same RETRY class as 529 overloaded — short
+# backoff + retries, NOT a usage-cap pause. Without handling these, a 500 from
+# the API is not recognized and the worker stalls waiting for a completion
+# marker that never arrives (instead of retrying or surfacing halt/resume).
+_SERVER_ERROR_STATUSES = {500, 502, 503, 504}
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _USAGE_CAP_TEXT_RE = re.compile(
     r"(?:"
@@ -198,6 +204,27 @@ def text_shows_overloaded(text: str) -> bool:
         return True
     if re.search(r"\bstatus[_ ]?code\b[^\n\r]{0,20}\b529\b", normalized):
         return True
+    # Transient 5xx server errors — same retry class as 529. Keyed on the
+    # API-error CONTEXT (apiErrorStatus / status_code / explicit phrase) so a
+    # bare "500" in audited prose does not trip it.
+    if re.search(
+        r"\b(?:apierrorstatus|api error status)\b[^\n\r]{0,80}\b50[0234]\b",
+        normalized,
+    ):
+        return True
+    if re.search(r"\bstatus[_ ]?code\b[^\n\r]{0,20}\b50[0234]\b", normalized):
+        return True
+    if re.search(
+        r"\b50[0234]\b[^\n\r]{0,80}"
+        r"\b(?:internal server error|bad gateway|service unavailable|gateway timeout)\b",
+        normalized,
+    ):
+        return True
+    if re.search(
+        r"\b(?:type|code|error)\"?\s*[:=]\s*\"?(?:api_error|internal_server_error)\b",
+        normalized,
+    ):
+        return True
     return False
 
 
@@ -210,7 +237,7 @@ def event_is_overloaded(event: dict[str, Any]) -> bool:
     before the rate-limit pause path is ever surfaced.
     """
     status = event.get("api_error_status") or event.get("apiErrorStatus")
-    if _status_code(status) == 529:
+    if _status_code(status) in (_SERVER_ERROR_STATUSES | {529}):
         return True
     event_type = str(event.get("type") or "").lower()
     if event_type == "user":
@@ -230,17 +257,19 @@ def event_is_overloaded(event: dict[str, Any]) -> bool:
             or source.get("apiErrorStatus")
             or source.get("status")
         )
-        if _status_code(status) == 529:
+        if _status_code(status) in (_SERVER_ERROR_STATUSES | {529}):
             return True
         err = source.get("error")
         if isinstance(err, str) and err.lower() == "overloaded":
             return True
         if isinstance(err, dict):
             typ = str(err.get("type") or err.get("code") or "").lower()
-            if "overloaded" in typ:
+            if ("overloaded" in typ or "server_error" in typ
+                    or typ in ("api_error", "internal_server_error")):
                 return True
         typ = str(source.get("type") or source.get("code") or "").lower()
-        if "overloaded" in typ:
+        if ("overloaded" in typ or "server_error" in typ
+                or typ in ("api_error", "internal_server_error")):
             return True
         stop = str(source.get("stop_reason") or "").lower()
         if stop == "overloaded":

@@ -97,6 +97,22 @@ from InquirerPy import inquirer
 from InquirerPy.separator import Separator
 from InquirerPy.utils import InquirerPyStyle
 
+def _drain_stdin():
+    """Flush buffered keystrokes so a stray Enter from a prior prompt or
+    from scrolling output does not auto-submit the next interactive prompt.
+    Fixes the chained-prompt input-bleed where a checkbox returned [] before
+    the user could interact."""
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            while msvcrt.kbhit():
+                msvcrt.getwch()
+        else:
+            import termios
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
+
 # ── Paths ───────────────────────────────────────────────────
 # PLAMEN_HOME: where the Plamen repo actually lives (resolves through symlinks)
 # CLAUDE_HOME: where Claude Code reads config from (always ~/.claude)
@@ -1405,6 +1421,75 @@ def _update_path_env(new_paths: list, persist: bool = False):
         # persistent Windows User PATH.
         if persist and sys.platform == "win32":
             _persist_path_windows(expanded)
+        elif persist:
+            # macOS/Linux: persist to the user's shell rc so audit subprocesses
+            # spawned from a future shell find the tool (mirrors the Windows
+            # registry persistence — without this, toolchains installed by
+            # `plamen setup` update only the in-process PATH and vanish).
+            _persist_path_posix(expanded)
+
+
+def _persist_path_posix(directory: str):
+    """Add a directory to the user's shell PATH permanently on macOS/Linux.
+
+    Maintains a single marker-delimited block in the user's shell rc file(s).
+    Idempotent and best-effort, mirroring `_persist_path_windows`. Without this,
+    tools installed by `plamen setup` (foundry -> ~/.foundry/bin, cargo, solana)
+    update only the in-process PATH and are invisible to the codex/claude audit
+    subprocesses launched from a future shell -> `COMPILATION_FAILED` mid-audit.
+    """
+    import re as _re
+    BEGIN = "# >>> plamen toolchain PATH >>>"
+    END = "# <<< plamen toolchain PATH <<<"
+    home = os.path.expanduser("~")
+    shell = os.environ.get("SHELL", "")
+    # ~/.profile (login-shell baseline) + the interactive rc for the active
+    # shell + any common rc that already exists (so we hit the file the user's
+    # interactive shell actually sources — zsh ignores ~/.profile).
+    candidates = [os.path.join(home, ".profile")]
+    if "zsh" in shell:
+        candidates.append(os.path.join(home, ".zshrc"))
+    elif "bash" in shell:
+        candidates.append(os.path.join(home, ".bashrc"))
+    for extra in (".zshrc", ".bashrc", ".bash_profile"):
+        p = os.path.join(home, extra)
+        if os.path.exists(p):
+            candidates.append(p)
+    targets = list(dict.fromkeys(candidates))  # dedupe, preserve order
+
+    for rc in targets:
+        try:
+            text = ""
+            if os.path.exists(rc):
+                with open(rc, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            dirs: list[str] = []
+            m = _re.search(
+                _re.escape(BEGIN) + r"\n(.*?)\n" + _re.escape(END), text, _re.S
+            )
+            if m:
+                em = _re.search(r'export PATH="([^"]*):\$PATH"', m.group(1))
+                if em:
+                    dirs = [d for d in em.group(1).split(":") if d]
+            if directory in dirs:
+                continue  # already persisted in this rc — idempotent
+            dirs.append(directory)
+            block = (
+                BEGIN + "\n"
+                + 'export PATH="' + ":".join(dirs) + ':$PATH"\n'
+                + END
+            )
+            if m:
+                new_text = text[:m.start()] + block + text[m.end():]
+            else:
+                prefix = text
+                if prefix and not prefix.endswith("\n"):
+                    prefix += "\n"
+                new_text = prefix + block + "\n"
+            with open(rc, "w", encoding="utf-8") as f:
+                f.write(new_text)
+        except Exception:
+            pass  # non-critical — user can add the export manually
 
 
 def _persist_path_windows(directory: str):
@@ -2490,6 +2575,7 @@ def run_uninstall():
         # Non-TTY + PLAMEN_UNINSTALL_YES=1 path: skip the inquirer prompt.
         confirm = True
     else:
+        _drain_stdin()
         confirm = inquirer.select(
             message="Proceed with uninstall?",
             choices=[
@@ -3171,7 +3257,7 @@ def run_setup():
     else:
         for group, recipes in _INSTALL_RECIPES.items():
             names = ", ".join(d for d, _, _, _, _, _, _ in recipes)
-            item_choices.append({"name": f"{group:8s} {names}  {_C_GREEN}✓{_RST}",
+            item_choices.append({"name": f"{group:8s} {names}  ✓",
                                  "value": group, "enabled": False})
 
     if rag_empty:
@@ -3180,6 +3266,22 @@ def run_setup():
     else:
         rag_label = f"RAG DB   rebuild ({rag_count:,} entries)" if rag_count > 0 else "RAG DB   build vulnerability knowledge base"
         item_choices.append({"name": rag_label, "value": "__rag__"})
+
+    # Codex adapter toggle — gated on codex backend presence. The Claude-side
+    # link (run_install) NEVER creates ~/.codex; Codex-only users who run plain
+    # `plamen setup` get NO ~/.codex/plamen, AGENTS.md, or config.toml, and their
+    # audits then hard-fail at the first codex phase. Surfacing it here closes
+    # the silent "I ran setup, why is Codex broken" loophole.
+    codex_present = bool(_find_codex_bin())
+    codex_linked = (os.path.isdir(os.path.expanduser("~/.codex/plamen"))
+                    or os.path.islink(os.path.expanduser("~/.codex/plamen")))
+    if codex_present:
+        codex_label = (
+            "Codex    refresh ~/.codex adapter (AGENTS.md, config.toml, agents, plamen link)"
+            if codex_linked else
+            "Codex    install ~/.codex adapter — REQUIRED for the Codex backend"
+        )
+        item_choices.append({"name": codex_label, "value": "__codex__"})
 
     all_values = [c["value"] for c in item_choices]
 
@@ -3213,8 +3315,16 @@ def run_setup():
     else:
         w(f"  {_C_GREEN}All tools installed ({rag_count:,} RAG entries).{_RST}\n")
         w(f"  {_C_GRAY}Select components to reinstall/rebuild, or Skip to go back.{_RST}\n\n")
+    if codex_present and not codex_linked:
+        w(f"  {_C_ORANGE}! Codex backend detected, but ~/.codex is NOT linked.{_RST}\n")
+        w(f"  {_C_GRAY}  Claude-side setup does NOT wire Codex. Toggle 'Codex' below{_RST}\n")
+        w(f"  {_C_GRAY}  (or run `plamen install --codex`), or Codex audits will fail to{_RST}\n")
+        w(f"  {_C_GRAY}  load methodology (needs ~/.codex/plamen, AGENTS.md, config.toml).{_RST}\n\n")
+    elif codex_present and codex_linked:
+        w(f"  {_C_GRAY}Codex adapter linked (~/.codex). Toggle 'Codex' to refresh it.{_RST}\n\n")
     sys.stdout.flush()
 
+    _drain_stdin()
     selected = inquirer.checkbox(
         message="Select components (space to toggle):",
         choices=choices,
@@ -3240,6 +3350,11 @@ def run_setup():
 
     for group in selected:
         if group == "__skip__":
+            continue
+
+        if group == "__codex__":
+            console.print(Rule(title="Codex Adapter", style="color(238)"))
+            _install_codex_adapter(w)
             continue
 
         if group == "__rag__":
@@ -4099,6 +4214,7 @@ def _cap(s: str, n: int = 44) -> str:
 
 def select_pipeline() -> str:
     """Returns 'sc', 'l1', 'compare', or 'setup'."""
+    _drain_stdin()
     result = inquirer.select(
         message="What are you auditing?",
         choices=[
@@ -4143,6 +4259,7 @@ def select_audit_mode(pipeline: str) -> str:
              "value": "thorough"},
             *_back_separator(),
         ]
+    _drain_stdin()
     return inquirer.select(
         message="Select audit depth:",
         choices=choices,
@@ -4190,6 +4307,7 @@ def select_target() -> tuple:
     choices.append({"name": "Browse...    enter a different path", "value": "__browse__"})
     choices.extend(_back_separator())
 
+    _drain_stdin()
     result = inquirer.select(
         message="Target project to audit:",
         choices=choices,
@@ -4216,6 +4334,7 @@ def select_target() -> tuple:
 
 
 def select_docs() -> str:
+    _drain_stdin()
     result = inquirer.select(
         message=_wrap_msg(
             "Docs describing trust roles or permissions?",
@@ -4248,6 +4367,7 @@ def select_docs() -> str:
         return os.path.abspath(path)
 
     if result == "url":
+        _drain_stdin()
         return inquirer.text(
             message="Docs URL:",
             validate=lambda v: v.startswith("http") or "Enter a valid URL",
@@ -4259,6 +4379,7 @@ def select_docs() -> str:
 
 def select_scope() -> tuple:
     """Returns (scope_file_path, scope_notes). Both can be empty."""
+    _drain_stdin()
     result = inquirer.select(
         message="Scope constraints?",
         choices=[
@@ -4292,6 +4413,7 @@ def select_scope() -> tuple:
             choices = [{"name": os.path.basename(f), "value": f} for f in scope_files]
             choices.append(Separator())
             choices.append({"name": "Browse...  pick a different file", "value": "__browse__"})
+            _drain_stdin()
             chosen = inquirer.select(
                 message="Select scope file:",
                 choices=choices,
@@ -4316,6 +4438,7 @@ def select_scope() -> tuple:
             return (os.path.abspath(path), "")
 
     if result == "notes":
+        _drain_stdin()
         notes = inquirer.text(
             message="Scope notes (e.g., 'focus on vault module, ignore governance'):",
             style=_STYLE, qmark=">", amark="✓",
@@ -4343,6 +4466,7 @@ def select_report(message: str, allow_back: bool = True) -> str:
     if allow_back:
         choices.extend(_back_separator())
 
+    _drain_stdin()
     result = inquirer.select(
         message=message,
         choices=choices,
@@ -4369,6 +4493,7 @@ def select_report(message: str, allow_back: bool = True) -> str:
 
 def confirm_launch() -> str:
     """Returns 'launch', 'back', or 'cancel'."""
+    _drain_stdin()
     return inquirer.select(
         message="Ready to launch?",
         choices=[
@@ -4391,6 +4516,7 @@ def select_l1_tier(detected_tier: str, loc: int) -> str:
         marker = " ←" if tid == detected_tier else ""
         choices.append({"name": f"{label:22s} {desc}{marker}", "value": tid})
     choices.extend(_back_separator())
+    _drain_stdin()
     result = inquirer.select(
         message=f"Select audit tier (detected: {detected_tier.upper()} based on {loc:,} LOC):",
         choices=choices,
@@ -4411,6 +4537,7 @@ def select_l1_modules(modules: list) -> list:
         {"name": f"{name:20s} {loc:>7,} LOC   {path}", "value": (name, path, loc)}
         for name, path, loc in modules
     ]
+    _drain_stdin()
     result = inquirer.checkbox(
         message="Select modules to audit (space=toggle, enter=confirm, empty=back):",
         choices=choices,
@@ -4426,6 +4553,7 @@ def select_l1_modules(modules: list) -> list:
 
 def select_l1_fork() -> str:
     """Select fork analysis mode. Returns 'diff'/'standalone'/'both' or _BACK."""
+    _drain_stdin()
     result = inquirer.select(
         message="Fork detected. Upstream comparison?",
         choices=[
@@ -4824,6 +4952,7 @@ def _resume_audit_prompt(info: dict) -> str:
         ]
         default = "resume"
 
+    _drain_stdin()
     result = inquirer.select(
         message="What would you like to do?",
         choices=choices,
@@ -5394,6 +5523,7 @@ def main():
                     "value": "codex",
                 })
             choices.extend(_back_separator())
+            _drain_stdin()
             result = inquirer.select(
                 message="AI runtime?",
                 choices=choices,
@@ -5446,6 +5576,7 @@ def main():
                 step = 35; continue
 
             if step == 35:
+                _drain_stdin()
                 result = inquirer.select(
                     message="Proven-only mode?",
                     choices=[

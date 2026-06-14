@@ -850,24 +850,26 @@ def _translate_prompt_for_codex(prompt_text: str, *,
     attempt 1 (v2.6.2).
     """
     codex_home = Path.home() / ".codex" / "plamen"
-    if codex_home.is_dir():
-        translated = prompt_text.replace("~/.claude/", "~/.codex/plamen/")
-        if sys.platform == "win32":
-            home = str(Path.home()).replace("\\", "/")
-            translated = translated.replace(
-                f"{home}/.claude/", "~/.codex/plamen/"
-            )
-            # Also handle native backslash form from plamen_home() on Windows
-            home_native = str(Path.home())
-            translated = translated.replace(
-                f"{home_native}\\.claude\\", "~/.codex/plamen/"
-            )
-    else:
+    if not codex_home.is_dir():
         raise RuntimeError(
             f"Codex backend is active but {codex_home} does not exist. "
             f"Create it as a symlink to your Plamen install "
             f"(e.g., mklink /D \"{codex_home}\" \"{Path.home() / '.claude'}\")"
         )
+    # Rewrite every ~/.claude reference to the Codex methodology mirror, covering
+    # ALL forms the prompts / methodology files can carry, on every platform:
+    #   ~/.claude/ , $HOME/.claude/ , <expanded-home>/.claude(/) , and the
+    #   no-trailing-slash variants (sys.path.insert('~/.claude'), --add-dir ~/.claude).
+    translated = prompt_text.replace("~/.claude/", "~/.codex/plamen/")
+    translated = translated.replace("$HOME/.claude/", "~/.codex/plamen/")
+    home_fwd = str(Path.home()).replace("\\", "/")
+    translated = translated.replace(f"{home_fwd}/.claude/", "~/.codex/plamen/")
+    if "\\" in str(Path.home()):
+        translated = translated.replace(
+            f"{str(Path.home())}\\.claude\\", "~/.codex/plamen/"
+        )
+    translated = translated.replace("$HOME/.claude", "~/.codex/plamen")
+    translated = re.sub(r"~/\.claude(?![\w./])", "~/.codex/plamen", translated)
 
     translated = translated.replace("claude -p subprocess", "codex exec subprocess")
     translated = translated.replace("Claude Code's MCP timeout is 300s", "MCP tools are unavailable in this runtime")
@@ -10388,6 +10390,56 @@ def _ensure_fresh_audit_sentinel(scratchpad: Path, config: dict) -> str:
     return "written"
 
 
+def _assert_methodology_reachable(config: dict) -> None:
+    """Loud preflight: refuse to run blind if the methodology tree is not
+    reachable for the configured backend.
+
+    Closes the Codex-only / missing-~/.claude loophole where the driver would
+    otherwise launch agents against non-existent rule/prompt paths and silently
+    produce an empty or degraded audit. Fails fast with an actionable message.
+    """
+    root = plamen_home()
+    backend = (config.get("cli_backend") or "claude").lower()
+    problems: list[str] = []
+    if not root.exists():
+        problems.append(f"methodology root does not exist: {root}")
+    else:
+        rules = root / "rules"
+        sentinel = rules / "finding-output-format.md"
+        if not rules.is_dir():
+            problems.append(f"missing rules dir: {rules}")
+        else:
+            try:
+                ok = sentinel.exists() and bool(
+                    sentinel.read_text(encoding="utf-8", errors="replace").strip()
+                )
+            except Exception:
+                ok = False
+            if not ok:
+                problems.append(f"missing/empty sentinel rule: {sentinel}")
+        if not (root / "prompts").is_dir():
+            problems.append(f"missing prompts dir: {root / 'prompts'}")
+    if backend == "codex":
+        codex_home = Path.home() / ".codex" / "plamen"
+        if not codex_home.is_dir():
+            problems.append(
+                f"Codex backend selected but {codex_home} is not linked — run "
+                f"`plamen install --codex` (or toggle 'Codex' in `plamen setup`)"
+            )
+    if problems:
+        log.error("[startup] methodology preflight FAILED — refusing to run blind:")
+        for p in problems:
+            log.error(f"  - {p}")
+        print(
+            "\nPlamen cannot start: methodology files are not reachable.\n  "
+            + "\n  ".join(problems)
+            + "\n\nFix the install (`plamen setup`, or `plamen install --codex` "
+            "for the Codex backend) and retry.\n",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_CONFIG_MISSING)
+
+
 def _ensure_rule_files_materialized() -> list[str]:
     """Repair empty active rule files from bundled `.pre-plamen` backups.
 
@@ -10400,6 +10452,10 @@ def _ensure_rule_files_materialized() -> list[str]:
     rules = plamen_home() / "rules"
     repaired: list[str] = []
     if not rules.exists():
+        log.warning(
+            f"[startup] rules dir not found at {rules} — methodology may be "
+            f"unavailable (preflight gate will verify)"
+        )
         return repaired
     for backup in sorted(rules.glob("*.pre-plamen")):
         active = backup.with_name(backup.name[:-len(".pre-plamen")])
@@ -12835,6 +12891,36 @@ def _run_phase_validators(
                 index_issues = _check_index_completeness(
                     scratchpad, config["project_root"]
                 )
+            # Stellar-class residual: the LLM agent indexed every VERIFY finding
+            # but left some coverage-seed-only IDs (semantic-invariant refs,
+            # enabler/chain IDs) unaccounted. Those are NOT body findings — the
+            # surgical verify-ID repair above can't (and shouldn't) add them as
+            # findings. If the residual dropout is 100% coverage-seed-only (zero
+            # verify-backed), account them in the coverage ledger (DEFERRED) so
+            # completeness passes — PRESERVING the LLM's consolidated index, no
+            # halt, no rebuild. A residual that still contains a verify-backed ID
+            # is a genuine lost finding and KEEPS the hard-fail/retry path.
+            if index_issues:
+                _residual = _report_index_dropped_ids(scratchpad)
+                _vn = {
+                    re.sub(r"-0+(\d)", r"-\1", v)
+                    for v in _collect_verify_hypothesis_ids(scratchpad)
+                }
+                _residual_verify = [
+                    d for d in _residual
+                    if re.sub(r"-0+(\d)", r"-\1", d) in _vn
+                ]
+                if _residual and not _residual_verify:
+                    _n = _backfill_report_coverage_dropouts(scratchpad)
+                    log.warning(
+                        f"[report_index] {len(_residual)} residual "
+                        f"coverage-seed-only ID(s) (0 verify-backed findings) "
+                        f"accounted via coverage backfill ({_n} ledger row(s)) "
+                        f"— LLM index preserved, no halt."
+                    )
+                    index_issues = _check_index_completeness(
+                        scratchpad, config["project_root"]
+                    )
             if index_issues:
                 passed = False
                 missing = list(missing) + [
@@ -15095,6 +15181,10 @@ def main():
             + ", ".join(repaired_rules)
         )
 
+    # Loud preflight: fail fast if methodology is unreachable for the configured
+    # backend, instead of shooting blind (Codex-only / missing-~/.claude loophole).
+    _assert_methodology_reachable(config)
+
     try:
         checkpoint = Checkpoint.load(scratchpad)
     except RuntimeError as exc:
@@ -16156,78 +16246,48 @@ def main():
                 )
 
         if config["pipeline"] == "sc" and phase.name == "report_index":
-            # Step 1: preserve the LLM index when it is GOOD or only needs row-
-            # level fixes (severity/trust), keeping its root-cause consolidation
-            # and client-worthiness triage. Repair edits existing rows only.
+            # PRE-SPAWN repair ONLY. `_repair_sc_report_index_from_prior` returns
+            # 0 on a fresh run (no prior report_index.md to repair) — in that case
+            # this block is a no-op and the driver falls through to spawn the LLM
+            # Index Agent, which writes the CONSOLIDATED index + report_coverage.md.
+            # Do NOT validate/rebuild unconditionally here: on a fresh run the
+            # agent has not run yet, so report_index.md/report_coverage.md do not
+            # exist, and an unconditional mechanical rebuild would pre-empt the
+            # Index Agent and replace its consolidated index with a flat,
+            # un-consolidated one (the inflated-finding-count regression).
+            # Genuine post-agent dropouts are handled by the completeness gate
+            # (_check_index_completeness + _repair_report_index_dropouts).
             repaired = _repair_sc_report_index_from_prior(scratchpad)
-            idx_in_issues = _validate_report_index_inputs(scratchpad)
-            coverage_issues = _validate_report_coverage_accounting(scratchpad)
-
-            def _finalize_sc_report_index(detail: str) -> None:
-                try:
-                    manifests = _build_sc_body_writer_manifests(scratchpad)
-                except Exception as exc:
-                    manifests = {}
-                    log.warning(
-                        f"[report_index] SC manifest rebuild failed: {exc!r}"
+            if repaired:
+                idx_in_issues = _validate_report_index_inputs(scratchpad)
+                coverage_issues = _validate_report_coverage_accounting(scratchpad)
+                if not idx_in_issues and not coverage_issues:
+                    try:
+                        manifests = _build_sc_body_writer_manifests(scratchpad)
+                    except Exception as exc:
+                        manifests = {}
+                        log.warning(
+                            f"[report_index] SC manifest rebuild after repair failed: {exc!r}"
+                        )
+                    checkpoint.mark_completed(phase.name)
+                    checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
+                    checkpoint.save(scratchpad)
+                    log.info(
+                        f"[report_index] mechanically repaired report_index.md "
+                        f"with {repaired} active row(s); manifests={len(manifests)}"
                     )
-                checkpoint.mark_completed(phase.name)
-                checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
-                checkpoint.save(scratchpad)
-                log.info(f"[report_index] {detail}; manifests={len(manifests)}")
-                phases[:] = expand_shard_phases(phases, scratchpad)
-                _active = [p for p in phases if mode in p.modes]
-                display.print_phase_skipped(
-                    phase_idx + 1, len(_active), phase.name, detail,
-                )
-
-            if not idx_in_issues and not coverage_issues:
-                _finalize_sc_report_index(
-                    f"report_index.md satisfied gates "
-                    f"({repaired or 0} row(s) repaired)"
-                )
-                continue
-
-            # Step 2: deterministic dropout recovery. The LLM index dropped
-            # findings (or wrote nothing parseable) and row-repair cannot ADD
-            # them. Take the LLM off the critical path EXACTLY as L1 does:
-            # rebuild from the verifier queue (cannot drop — it enumerates the
-            # authoritative finding set and clusters at threshold>=3), then
-            # backfill any residual non-queue reference IDs into the coverage
-            # ledger. A finished audit must NEVER halt at the last mile over an
-            # LLM bookkeeping failure.
-            log.warning(
-                "[report_index] LLM/repair index failed completeness gates "
-                f"(repaired={repaired}): "
-                + "; ".join(idx_in_issues + coverage_issues)
-                + " — falling back to deterministic mechanical index (no halt)."
-            )
-            try:
-                active = _write_mechanical_report_index(scratchpad)
-            except Exception as exc:
-                active = 0
+                    phases[:] = expand_shard_phases(phases, scratchpad)
+                    active_phases = [p for p in phases if mode in p.modes]
+                    total_active = len(active_phases)
+                    display.print_phase_skipped(
+                        phase_idx + 1, total_active, phase.name,
+                        f"mechanical repair ({repaired} active rows)",
+                    )
+                    continue
                 log.warning(
-                    f"[report_index] mechanical SC index build raised: {exc!r}"
+                    "[report_index] mechanical SC repair did not satisfy gates: "
+                    + "; ".join(idx_in_issues + coverage_issues)
                 )
-            try:
-                backfilled = _backfill_report_coverage_dropouts(scratchpad)
-            except Exception as exc:
-                backfilled = 0
-                log.warning(
-                    f"[report_index] coverage dropout backfill raised: {exc!r}"
-                )
-            post_idx = _validate_report_index_inputs(scratchpad)
-            post_cov = _validate_report_coverage_accounting(scratchpad)
-            if not post_idx and not post_cov:
-                _finalize_sc_report_index(
-                    f"deterministic dropout recovery: {active} body row(s) "
-                    f"+ {backfilled} coverage backfill(s) (no halt)"
-                )
-                continue
-            log.warning(
-                "[report_index] deterministic recovery still failing gates: "
-                + "; ".join(post_idx + post_cov)
-            )
 
         if config["pipeline"] == "l1" and phase.name == "report_index":
             # Phase E2: refuse to mechanically write report_index when queue

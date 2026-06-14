@@ -293,7 +293,7 @@ If `plamen.py --estimate` is not available (old version), use this fallback:
 
 ```bash
 PY_CMD=$(command -v python3 2>/dev/null || command -v python 2>/dev/null) && "$PY_CMD" -c "
-import sys; sys.path.insert(0, '$HOME/.claude')
+import sys, os; sys.path.insert(0, os.path.expanduser('~/.claude'))
 from plamen import estimate_cost
 import json
 r = estimate_cost('{PROJECT_PATH}', '{MODE}', scope_file='{SCOPE_FILE}', scope_notes='{SCOPE_NOTES}')

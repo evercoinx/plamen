@@ -20,6 +20,15 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+try:
+    # Canonical checkout root, backend-agnostic (PLAMEN_HOME env -> script-relative).
+    # Using this instead of a hardcoded ~/.claude makes recon work for Codex-only
+    # installs (no ~/.claude) instead of silently failing the SCIP/skill-index reads.
+    from plamen_types import plamen_home as _plamen_home
+except Exception:  # pragma: no cover - standalone/fallback
+    def _plamen_home() -> Path:
+        return Path(os.path.expanduser("~/.claude"))
+
 # Module logger. `_scip_to_graph_artifacts` emits a log.warning on the
 # large-index (>callee-node-cap) PARTIAL path; without this module-level logger
 # that call raised `NameError: name 'log' is not defined` on big repos
@@ -839,7 +848,7 @@ def _scip_to_graph_artifacts(scratch: Path, index_path: Path, proj: Path) -> str
     """Convert a SCIP index into the 4 graph artifacts depth agents consume."""
     try:
         sys_path_added = False
-        scip_reader_dir = Path(os.path.expanduser("~/.claude"))
+        scip_reader_dir = _plamen_home()
         if str(scip_reader_dir) not in sys.path:
             sys.path.insert(0, str(scip_reader_dir))
             sys_path_added = True
@@ -1423,7 +1432,7 @@ def run_recon_prepass(config: dict) -> Dict[str, str]:
     except Exception as e:
         return {"_mkdir_scratch": f"FAILED:{e}"}
 
-    skill_index = Path(os.path.expanduser("~/.claude/rules/skill-index.md"))
+    skill_index = _plamen_home() / "rules" / "skill-index.md"
 
     # RECON-1/RECON-2: slow external scanners (SCIP bake, Sec3 X-Ray, OpenGrep)
     # must NOT run in the startup pre-pass by default. At startup the driver has

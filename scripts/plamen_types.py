@@ -665,10 +665,21 @@ def phase_model(phase: Phase, mode: str, config: Optional[dict] = None) -> str:
             and not name.endswith("_queue")
             and not name.endswith("_aggregate")
         )
+        # SC Thorough report_index (the LLM Index Agent) → Opus. Indexing a large
+        # Thorough report (100+ findings, 300+ ID coverage seed) is consolidation
+        # + completeness accounting over the full ID set; the stronger model
+        # reduces dropped IDs / mis-consolidation that trip the completeness and
+        # coverage gates (and force the post-gate mechanical repair). L1
+        # report_index is deterministic (mechanical, no agent), so this is SC-only.
+        is_sc_report_index = (
+            (config.get("pipeline") if config else None) == "sc"
+            and name == "report_index"
+        )
         promote = (
             name in ("breadth", "skeptic")
             or is_sc_verify_shard
             or is_l1_verify_shard
+            or is_sc_report_index
         )
         tier = "opus" if promote else (phase.model or "sonnet").strip()
         if tier == "opus":
