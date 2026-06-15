@@ -21,7 +21,7 @@ import tempfile
 
 import pytest
 
-_PLAMEN = os.path.join(os.path.expanduser("~/.plamen"), "plamen.py")
+_PLAMEN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plamen.py")
 
 # Long-form start marker that `plamen install` actually writes (see
 # _CLAUDE_MD_START in plamen.py). The bare `<!-- PLAMEN:START -->` is never

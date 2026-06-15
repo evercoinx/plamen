@@ -18,7 +18,7 @@
 > **V1 (default)**: `/plamen light`, `/plamen core`, `/plamen thorough`, `/plamen compare`
 > **V2 (resumable)**: `/plamen-wizard` — interactive setup, then launches `plamen_driver.py`. Same V1 prompt (`commands/plamen.md` or `commands/plamen-l1.md`) is executed one phase at a time, each in a fresh `claude -p` context. This prevents V1's "context saturation → phase skipping" failure mode while reusing V1's orchestrator logic verbatim. Python's job: outer loop, checkpoint, gate-check, retry-once-then-degrade, rate-limit pause + resume.
 >
-> If usage runs out mid-audit, re-run: `python ~/.claude/scripts/plamen_driver.py {project}/.scratchpad/config.json` — auto-resumes from last successful phase.
+> If usage runs out mid-audit, re-run: `python3 ~/.claude/scripts/plamen_driver.py {project}/.scratchpad/config.json` — auto-resumes from last successful phase.
 >
 > **V2 design rule**: Python does NOT compose subagent prompts, manage subagent parallelism, or second-guess the LLM. That's Claude Code's Task tool inside each phase. See `scripts/archive_drift/README.md` for the prior misarchitecture that was scrapped.
 >

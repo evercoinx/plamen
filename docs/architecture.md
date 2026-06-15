@@ -211,7 +211,7 @@ Disk-gate completion contract. The driver only counts a worker complete when:
 Claude saying "done" in the PTY transcript is not trusted for worker phases. The reader thread captures the `DONE:` line for observability but the only completion authority is the disk gate. This closes the premature-DONE failure class observed when Claude Code auto-compacts a worker turn (see *Compaction-as-informational* below).
 
 Key properties:
-- **Resumable**: re-run `python ~/.claude/scripts/plamen_driver.py {project}/.scratchpad/config.json` to resume from the last checkpoint. Stale or corrupt checkpoints recover rather than stranding the run.
+- **Resumable**: re-run `python3 ~/.claude/scripts/plamen_driver.py {project}/.scratchpad/config.json` to resume from the last checkpoint. Stale or corrupt checkpoints recover rather than stranding the run.
 - **Phase-isolated**: each subprocess sees only its own prompt section; forward refs and foreign subsections are stripped before dispatch.
 - **Backend-agnostic**: Claude Code (`claude -p`) and Codex CLI (`codex exec`) share the same phase contracts.
 - **Deterministic gating**: artifact existence and marker hygiene are checked mechanically. The LLM never self-reports completion to the driver's state machine.

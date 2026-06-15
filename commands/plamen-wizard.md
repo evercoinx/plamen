@@ -174,7 +174,7 @@ hand-rolled bash if/elif). Do NOT ask the user when detection is confident.
 ```bash
 # Single source of truth: the driver's mechanical detector. Prints
 # "<language>\t<confidence>" where confidence is high | medium | none.
-python ~/.claude/scripts/plamen_driver.py --detect-language "{PROJECT_PATH}"
+python3 ~/.claude/scripts/plamen_driver.py --detect-language "{PROJECT_PATH}"
 # Example outputs:
 #   evm      high     (.sol dominant — unambiguous)
 #   solana   high     (.rs + anchor-lang/solana-program or Anchor.toml)

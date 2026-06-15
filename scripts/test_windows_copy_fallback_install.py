@@ -22,7 +22,7 @@ import tempfile
 
 import pytest
 
-_PLAMEN = os.path.join(os.path.expanduser("~/.plamen"), "plamen.py")
+_PLAMEN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plamen.py")
 
 
 def _load():
