@@ -5,8 +5,8 @@ Plamen uses 9 MCP servers configured in `mcp.json` (Claude Code) or `[mcp_server
 MCP runs natively under both backends. On Claude Code the servers are loaded from `~/.claude/mcp.json`; on Codex the servers are loaded from `[mcp_servers.*]` blocks in `~/.codex/config.toml`, which `scripts/codex_adapter.py:generate_config_toml` generates from `mcp.json.example` at install time and `plamen install --codex` copies into place. The "tool translation" sometimes referenced elsewhere is prompt-text rewriting in `plamen_driver.py` (paths, `Task()` → `spawn_agent`, bash → PowerShell) — it is NOT an MCP transport shim.
 
 Two Codex-specific caveats:
-1. `evm-chain-data` is currently disabled on Codex due to an MCP protocol version mismatch (`scripts/codex_adapter.py:265`).
-2. Four Python MCP servers (`slither-analyzer`, `unified-vuln-db`, `farofino`, `solana-fender`) are wrapped through `mcp-packages/schema-sanitizer.js` to strip `oneOf`/`allOf` JSON-schema constructs Codex rejects (`scripts/codex_adapter.py:259-264`).
+1. `evm-chain-data` is currently disabled on Codex due to an MCP protocol version mismatch (`scripts/codex_adapter.py:276`).
+2. Four Python MCP servers (`slither-analyzer`, `unified-vuln-db`, `farofino`, `solana-fender`) are wrapped through `mcp-packages/schema-sanitizer.js` to strip `oneOf`/`allOf` JSON-schema constructs Codex rejects (`scripts/codex_adapter.py:270-275`).
 
 Tool permissions on Codex cannot be pre-configured: select "Always allow" on the first prompt per MCP server (`plamen.py:_install_codex_adapter`, ~L2690-2694).
 

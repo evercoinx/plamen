@@ -45,7 +45,8 @@
   },
   "env": {
     "MCP_TIMEOUT": "30000",
-    "MCP_TOOL_TIMEOUT": "300000"
+    "MCP_TOOL_TIMEOUT": "300000",
+    "SOLODIT_API_KEY": ""
   },
   "hooks": {}
 }

@@ -27,12 +27,15 @@ plamen l1 thorough /path/to/node-client # L1 audit, Thorough mode
 
 The OpenAI Codex CLI (`codex exec`) is supported as an alternative, cost-saving backend (beta). It runs one `codex exec` per depth job, detects usage caps from natural-language output and auto-waits instead of halting, and seeds the full mandatory first-pass artifact set so recon/depth degrade losslessly.
 
+Codex requires prior setup: `plamen install --codex`, which also installs the
+slash commands into `~/.codex/commands/` (from `codex-adapter/commands/`). After
+that, either invoke the slash commands (e.g. `/plamen-wizard`, `/plamen-l1-wizard`)
+the same way as in Claude Code, or use the terminal wrapper directly:
+
 ```
-$plamen core /path/to/project           # Codex has no slash commands
+$plamen core /path/to/project
 $plamen l1 core /path/to/node-client
 ```
-
-Codex requires prior setup: `plamen install --codex`.
 
 ---
 
@@ -179,3 +182,5 @@ The terminal wrapper estimates token usage before launch:
 - Weekly plan usage (% of Pro, Max x5, Max x20)
 
 Estimates are rough -- actual usage varies with protocol complexity. Run `/cost` after an audit for actuals.
+
+> `plamen --estimate TARGET MODE [--scope PATH] [--l1]` is an **internal** flag invoked by the `/plamen` slash command and the interactive wizard to produce a per-project estimate (printed as JSON). It is not part of the supported direct-CLI option set and is intentionally omitted from `plamen help`; use the interactive `plamen` wizard for a standalone cost estimate.

@@ -110,7 +110,7 @@ PLAMEN_OPUS_MODEL = os.environ.get("PLAMEN_OPUS_MODEL", "claude-opus-4-8").strip
 
 # v2.8.11: Thorough-mode promotion target. Reasoning-critical roles (discovery
 # = breadth+depth, verification shards, skeptic-judge) run on Opus 4.8 in
-# THOROUGH ONLY (Core keeps the 4.6 pin, Light stays Sonnet) to bound plan
+# THOROUGH ONLY (opus resolves to the 4.8 default; Light stays Sonnet) to bound plan
 # usage. Rationale: <70% strict recall traces to reasoning-hard miss-classes
 # (cross-VM encoding, swap mechanics), and verification quality is model-bound.
 PLAMEN_THOROUGH_OPUS_MODEL = os.environ.get(
@@ -687,7 +687,7 @@ def phase_model(phase: Phase, mode: str, config: Optional[dict] = None) -> str:
         return _resolve_model_alias(tier)
 
     # Core, L1, and config-less calls: honor phase model; opus resolves to the
-    # 4.6 pin via _resolve_model_alias.
+    # 4.8 default via _resolve_model_alias.
     override = _breadth_override()
     if override:
         return _resolve_model_alias(override)

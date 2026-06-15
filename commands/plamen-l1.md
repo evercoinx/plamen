@@ -99,7 +99,7 @@ echo -n "  Targets: " && \
 Missing `scip-go`, `rust-analyzer`, or `ast-grep` is a **hard blocker** — L1 mode requires the primitive layer. Stop and instruct the user to install:
 
 ```
-scip-go:       go install github.com/sourcegraph/scip-go/cmd/scip-go@latest
+scip-go:       go install github.com/scip-code/scip-go/cmd/scip-go@latest
 rust-analyzer: rustup component add rust-analyzer  (or platform binary)
 ast-grep:      cargo install ast-grep --locked     (or brew install ast-grep)
 opengrep:      https://github.com/opengrep/opengrep/releases  (optional but recommended)

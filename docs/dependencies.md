@@ -78,6 +78,7 @@ Medusa requires Go. The setup wizard installs Go automatically if missing (`go i
 | Solana CLI | Toolchain, account data | [docs.anza.xyz](https://docs.anza.xyz/cli/install) | Yes |
 | Anchor (via AVM) | Build Anchor programs | `avm install latest && avm use latest` | Yes (for Anchor projects) |
 | Trident | Stateful fuzzing (v0.11+) | `cargo install trident-cli` | Recommended |
+| Scout (cargo-scout-audit) | Static analysis (Anchor + native Solana) | `cargo install cargo-scout-audit` | Recommended |
 
 ### Solana Platform Notes
 
@@ -176,6 +177,8 @@ Works on all platforms. The setup wizard installs via `suiup` (the official Sui 
 |------|---------|---------|-----------|
 | Stellar CLI | Build, deploy, test Soroban contracts | [stellar.org/docs](https://stellar.org/docs/build/smart-contracts/getting-started) | Yes |
 | Rust (stable) | Soroban contract compilation | [rustup.rs](https://rustup.rs) | Yes |
+| Scout (cargo-scout-audit) | Soroban static analysis | `cargo install cargo-scout-audit` | Recommended |
+| cargo-fuzz | Thorough-mode libFuzzer fuzzing | `rustup toolchain install nightly && cargo install cargo-fuzz` | Recommended |
 
 Soroban contracts are Rust-based. The Stellar CLI (`stellar`) handles contract building and testing. Install Rust stable toolchain first, then install the Stellar CLI.
 
@@ -191,10 +194,11 @@ Works on all platforms. No special setup needed beyond Rust and the Stellar CLI.
 
 | Tool | Purpose | Install | Required? |
 |------|---------|---------|-----------|
-| Go | 1.22+ | Build Go-based node clients | [go.dev/dl](https://go.dev/dl/) | Yes (Go clients) |
-| Rust | stable | Build Rust-based node clients | [rustup.rs](https://rustup.rs) (preferred) | Yes (Rust clients) |
-| scip-go | SCIP indexer for Go | `go install github.com/sourcegraph/scip-go/cmd/scip-go@latest` | Recommended |
-| rust-analyzer | SCIP indexer for Rust | `rustup component add rust-analyzer` (or `brew install rust-analyzer` on Homebrew Rust) | Recommended |
+| Go 1.25+ | Build Go-based node clients | [go.dev/dl](https://go.dev/dl/) | Yes (Go clients) |
+| Rust (stable) | Build Rust-based node clients | [rustup.rs](https://rustup.rs) (preferred) | Yes (Rust clients) |
+| scip-go | SCIP indexer for Go | `go install github.com/scip-code/scip-go/cmd/scip-go@latest` | Recommended |
+| rust-analyzer | SCIP indexer for Rust | `rustup component add rust-analyzer` (or `brew install rust-analyzer` on Homebrew Rust; or `cargo install rust-analyzer` when neither rustup nor brew is available) | Recommended |
+| cargo-fuzz | libFuzzer harness runner for Rust (Thorough-mode fuzzing) | `rustup toolchain install nightly && cargo install cargo-fuzz` | Recommended (L1 Rust) |
 | Opengrep | Cross-ecosystem static analysis | [github.com/opengrep/opengrep](https://github.com/opengrep/opengrep) | Recommended |
 | ast-grep | Structural code search | `cargo install ast-grep --locked` (or `brew install ast-grep` on macOS); auto-installed by `plamen setup` | Recommended |
 | CodeQL CLI | Advanced static analysis | [github.com/github/codeql-cli-binaries](https://github.com/github/codeql-cli-binaries) | Optional |
@@ -209,7 +213,10 @@ Works on all platforms. No special setup needed beyond Rust and the Stellar CLI.
 > `plamen setup` detects Homebrew Rust and routes to `brew install` for
 > `rust-analyzer` and `ast-grep` automatically. Same applies to `ast-grep`
 > when installed via `cargo install` (needs rustup-managed cargo) vs
-> `brew install ast-grep` (standalone).
+> `brew install ast-grep` (standalone). On a box with **neither rustup nor
+> Homebrew** (e.g. a bare Linux/CI environment with only a system `cargo`),
+> `plamen setup` falls back to `cargo install rust-analyzer` — slower (builds
+> from source) but works everywhere.
 
 These tools power the Phase 0.5 "Bake" step that batch-indexes repositories before depth analysis. The pipeline works without them (falls back to grep-based analysis), but SCIP indexing significantly improves cross-reference accuracy.
 
@@ -257,7 +264,7 @@ You don't need honggfuzz. Trident v0.11+ uses TridentSVM. Just `cargo install tr
 This occurs when Anchor CLI encounters Agave v3 (Solana CLI 3.x). Use Solana CLI 2.x for Anchor projects that specify `solana_version = "2.x"` in Anchor.toml.
 
 ### MCP server won't start (`spawn python ENOENT` or server shows as failed)
-Claude Code only (Codex does not use MCP servers). The Python-based MCP servers use `"command": "python"` in mcp.json. On macOS/Linux, change to `"command": "python3"`:
+(Claude Code: edit mcp.json; Codex: the equivalent command lives in ~/.codex/config.toml [mcp_servers.*] blocks). **If you used `plamen install`, skip the sed below** — the installer already resolves the Python path (`_merge_mcp_json()` rewrites `"command": "python"`/`"python3"` to your interpreter's absolute path via `_resolve_command()`), so it is unnecessary and could clobber the resolved path. The sed is **only** for the manual `cp mcp.json.example` path. In that copied file the Python-based MCP servers use `"command": "python"` in mcp.json. On macOS/Linux, change to `"command": "python3"`:
 ```bash
 sed -i '' 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json  # macOS
 sed -i 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json    # Linux

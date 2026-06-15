@@ -1070,25 +1070,68 @@ _OPENGREP_LANG_EXT: Dict[str, Tuple[str, ...]] = {
 }
 
 
+# Populated by _ensure_opengrep_rules() with per-repo clone/init failure
+# reasons so the caller can surface them via its SKIPPED-reason path instead
+# of failing silently.
+_OPENGREP_RULE_FAILURES: Dict[str, str] = {}
+
+
 def _ensure_opengrep_rules() -> Dict[str, Path]:
-    """Clone rule repos if missing. Returns {name: local_path} for present repos."""
+    """Clone rule repos if missing. Returns {name: local_path} for present repos.
+
+    Records any clone/init failures in module-level ``_OPENGREP_RULE_FAILURES``
+    keyed by repo name so the caller can report 'rules unavailable: clone
+    failed' rather than swallowing the error silently.
+    """
     _OPENGREP_RULES_BASE.mkdir(parents=True, exist_ok=True)
+    _OPENGREP_RULE_FAILURES.clear()
     available: Dict[str, Path] = {}
     for name, url in _OPENGREP_RULE_REPOS.items():
         local = _OPENGREP_RULES_BASE / name
         if local.exists() and (local / ".git").exists():
             available[name] = local
             continue
+        # The rule dir may already exist as an uninitialized/partial git
+        # submodule checkout (no .git). `git clone` into a non-empty existing
+        # dir fails with 'destination path already exists and is not an empty
+        # directory'. Try to initialize the submodule first; if that fails,
+        # remove the stale/partial tree so the clone has an empty target.
+        if local.exists() and not (local / ".git").exists():
+            try:
+                init = subprocess.run(
+                    ["git", "submodule", "update", "--init", str(local)],
+                    timeout=60, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace",
+                )
+                if init.returncode == 0 and (local / ".git").exists():
+                    available[name] = local
+                    continue
+            except Exception:
+                pass
+            try:
+                shutil.rmtree(local)
+            except Exception as e:
+                _OPENGREP_RULE_FAILURES[name] = (
+                    f"stale rule dir could not be removed: "
+                    f"{e.__class__.__name__}: {e}"
+                )
+                continue
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 ["git", "clone", "--depth", "1", url, str(local)],
                 timeout=60, capture_output=True, text=True,
                 encoding="utf-8", errors="replace",
             )
-            if local.exists():
+            if local.exists() and (local / ".git").exists():
                 available[name] = local
-        except Exception:
-            pass
+            else:
+                detail = (getattr(proc, "stderr", "") or "").strip().splitlines()
+                reason = detail[-1] if detail else f"git clone exited {getattr(proc, 'returncode', '?')}"
+                _OPENGREP_RULE_FAILURES[name] = f"clone failed: {reason}"
+        except Exception as e:
+            _OPENGREP_RULE_FAILURES[name] = (
+                f"clone failed: {e.__class__.__name__}: {e}"
+            )
     return available
 
 
@@ -1119,6 +1162,11 @@ def _run_opengrep_scan(scratch: Path, proj: Path, lang: str) -> str:
             resolved_rules.append(str(full_path))
 
     if not resolved_rules:
+        if _OPENGREP_RULE_FAILURES:
+            detail = "; ".join(
+                f"{n}: {r}" for n, r in sorted(_OPENGREP_RULE_FAILURES.items())
+            )
+            return f"SKIPPED:rules unavailable: {detail}"
         return "SKIPPED:no rule directories available"
 
     # Check project has relevant source files

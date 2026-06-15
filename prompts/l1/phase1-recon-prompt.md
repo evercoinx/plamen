@@ -399,6 +399,13 @@ go test ./... -count=0 2>&1 | tail -5  # dry-run compile check
 
 Record which command succeeds and which crates/packages have compilable tests.
 
+**Rust fuzzer availability probe** (Rust lanes only): run `cargo +nightly fuzz --version`.
+If it succeeds, record `cargo_fuzz_available: true`; if it fails (cargo-fuzz not
+installed, or no nightly toolchain), record `cargo_fuzz_available: false`. This gates
+Thorough-mode libFuzzer fuzz campaigns; the verifier falls back to proptest, then
+boundary-value parameterized tests, when false. Mirrors the EVM/Solana medusa/trident
+availability probe pattern.
+
 ### Step 4: Extract representative test patterns (3 examples)
 
 From the discovered test files, extract 3 representative test functions that demonstrate:
@@ -418,6 +425,7 @@ Write `{SCRATCHPAD}/test_infrastructure.md`:
 ## Build Commands
 - Workspace test: `{command that works}`
 - Per-crate test: `cargo test -p {crate} -- --nocapture`
+- **cargo_fuzz_available**: true/false (`cargo +nightly fuzz --version` probe, Rust lanes; gates Thorough-mode libFuzzer fuzzing — proptest fallback if false)
 
 ## Test Constructors (public mock builders)
 | Constructor | Crate/Package | Signature | What It Builds |

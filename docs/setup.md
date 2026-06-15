@@ -1,6 +1,8 @@
 # Setup Guide
 
-> **⚠️ Do NOT paste this file into Claude Code or Codex CLI.** These are manual setup instructions meant to be followed in your terminal. Pasting into an AI coding assistant causes it to autonomously execute the commands, including the optional RAG build which requires ~6GB free RAM and heavy CPU for several minutes.
+> **⚠️ Do NOT paste this file into Claude Code or Codex CLI.** These are manual setup instructions meant to be followed in your terminal. Pasting into an AI coding assistant causes it to autonomously execute the commands, including the optional RAG build which requires ~6GB free RAM and heavy CPU for ~10-20 min (including network download of indexers).
+>
+> Want your AI assistant to install for you instead? Paste [SETUP.md](../SETUP.md) (only), not this file.
 
 > **Just installed?** See [getting-started.md](getting-started.md) for the short version — what's required, what's optional, first audit walkthrough.
 >
@@ -79,9 +81,9 @@
 
 | Tool | Purpose | Install |
 |------|---------|---------|
-| Go 1.22+ | Build Go node clients | [go.dev/dl](https://go.dev/dl/) |
+| Go 1.25+ | Build Go node clients | [go.dev/dl](https://go.dev/dl/) |
 | Rust (stable) | Build Rust node clients | [rustup.rs](https://rustup.rs) |
-| scip-go | SCIP batch indexing (Go) | `go install github.com/sourcegraph/scip-go/cmd/scip-go@latest` |
+| scip-go | SCIP batch indexing (Go) | `go install github.com/scip-code/scip-go/cmd/scip-go@latest` |
 | rust-analyzer | SCIP batch indexing (Rust) | Via rustup component or IDE |
 | Opengrep | Cross-ecosystem static analysis | [github.com/opengrep/opengrep](https://github.com/opengrep/opengrep) |
 
@@ -173,7 +175,7 @@ cp codex-adapter/AGENTS.md ~/.codex/AGENTS.md            # orchestrator rules (c
 
 Edit `~/.claude/mcp.json` (Claude Code) or `~/.codex/config.toml` (Codex CLI) with your API keys. See [MCP Servers](mcp-servers.md) for details.
 
-**macOS/Linux — fix the Python command (Claude Code only):** The Python-based MCP servers in `mcp.json` use `"command": "python"` by default. If your system only has `python3` (check: `which python`), update mcp.json:
+**macOS/Linux — fix the Python command (manual `cp mcp.json.example` path only):** If you used `plamen install`, **skip this** — the installer's `_merge_mcp_json()` already resolves `"command": "python"`/`"python3"` to your interpreter's absolute path (`sys.executable`) via `_resolve_command()`, so re-running this sed is unnecessary and could clobber the resolved path. This step is **only** for the manual setup above where you copied `mcp.json.example` directly. In that copied file the Python-based MCP servers use `"command": "python"` by default. If your system only has `python3` (check: `which python`), update mcp.json:
 
 ```bash
 sed -i '' 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json  # macOS
@@ -207,19 +209,21 @@ $env:SOLODIT_API_KEY = "your_key_here"    # Windows PowerShell
 
 > **Why settings.json for Claude Code and not `export`?** Claude Code runs subprocesses in non-interactive shells that don't source `.bashrc`/`.zshrc`. Only `settings.json` `"env"` vars are reliably propagated to both `plamen rag` and audit agent Bash subprocesses. Codex CLI inherits shell environment variables normally, so `export` or `$env:` works.
 
-Then run:
+Then run (once Plamen is on your PATH, all platforms):
 
 ```bash
-plamen rag          # macOS / Linux
-plamen.bat rag      # Windows
+plamen rag
 ```
 
-Or directly:
+Or, before PATH is set, run from inside `~/.plamen`:
 
 ```bash
-python3 plamen.py rag   # macOS / Linux
-python plamen.py rag    # Windows
+python3 plamen.py rag    # macOS / Linux
+python plamen.py rag     # Windows
+plamen.bat rag           # Windows (alternative to python plamen.py)
 ```
+
+> **Note**: `plamen.bat` is the same wrapper as the `plamen` command on your PATH — it is just invoked by relative name from inside `~/.plamen` before PATH is set. The Windows examples elsewhere in these docs use `python plamen.py`, which is equivalent.
 
 If deps aren't installed yet, `plamen rag` installs them automatically before indexing (downloads PyTorch ~2GB). If the build fails partway through (network error, timeout), re-run the same command — it wipes the partial database and rebuilds from scratch.
 

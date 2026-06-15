@@ -186,7 +186,7 @@ All three shapes share the same checkpoint (`_v2_checkpoint.json`), the same `ga
 
 ### Model routing
 
-Opus phases run on **Opus 4.8** (`claude-opus-4-8`) by default across all modes — its stronger multi-step instruction-following reduces attempt-1 misses on recon coverage, breadth/rescan fan-out, and verification rigor (`PLAMEN_OPUS_MODEL`, `scripts/plamen_types.py:105-125`). In **Thorough** mode the reasoning-critical roles (discovery = breadth + depth, verification shards, skeptic-judge) are promoted to Opus 4.8 specifically, while **Core** keeps the 4.6 pin and **Light** stays on Sonnet to bound plan usage (`PLAMEN_THOROUGH_OPUS_MODEL`, `scripts/plamen_types.py:111-118`). Both defaults are env-overridable for benchmarking or cost-capping.
+Opus phases run on **Opus 4.8** (`claude-opus-4-8`) by default across all modes — its stronger multi-step instruction-following reduces attempt-1 misses on recon coverage, breadth/rescan fan-out, and verification rigor (`PLAMEN_OPUS_MODEL`, `scripts/plamen_types.py:105-125`). **Core** (like all modes) defaults its opus tier to Opus 4.8; the **Thorough** promotion only additionally raises to Opus 4.8 the reasoning-critical roles (discovery = breadth + depth, verification shards, skeptic-judge) that would otherwise run on Sonnet, while **Light** stays on Sonnet to bound plan usage (`PLAMEN_THOROUGH_OPUS_MODEL`, `scripts/plamen_types.py:111-118`). Both defaults are env-overridable for benchmarking or cost-capping.
 
 ### Backends (Claude Code + Codex BETA)
 

@@ -117,12 +117,17 @@ echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.zshrc && source ~/.zshrc
 Then use `plamen` from anywhere:
 ```bash
 plamen                              # interactive audit wizard
+plamen resume                       # resume an interrupted audit from last checkpoint
 plamen doctor                       # verify install (no audit run, no API calls)
 plamen setup                        # toolchain wizard + optional RAG build
 plamen migrate                      # upgrade a v1.x install layout
 plamen rag                          # rebuild RAG database only
+plamen compare                      # diff two audit reports
 plamen uninstall                    # remove Plamen symlinks
+plamen help                         # full command + option reference
 ```
+
+> Audit runs accept additional options (`--tier`, `--modules`, `--network`, `--notes`, `--claude`, ...). Run `plamen help` or see [docs/usage.md](docs/usage.md) for the complete list.
 
 > **Important**: Always use `plamen` (not `python3 plamen.py`) after PATH is set. The `python3 plamen.py` form only works from inside `~/.plamen/`.
 
@@ -164,9 +169,18 @@ When the AI runtime reads `~/.claude/agents/depth-edge-case.md` (or `~/.codex/pl
 
 > **Migrating from v1.0.x** (installed directly in `~/.claude`): Close Claude Code (and Codex CLI if running) first, then run:
 >
+> Linux/macOS:
+>
 > ```bash
 > cd ~/.plamen 2>/dev/null || cd ~/.claude    # cd into whichever exists
-> python3 plamen.py migrate                    # or `python plamen.py migrate` on Windows
+> python3 plamen.py migrate
+> ```
+>
+> Windows (PowerShell):
+>
+> ```powershell
+> cd $HOME\.plamen 2>$null; if (-not $?) { cd $HOME\.claude }  # cd into whichever exists
+> python plamen.py migrate
 > ```
 >
 > `plamen migrate` strips any dangling Plamen hook references from
@@ -198,7 +212,7 @@ pip install -e custom-mcp/solana-fender
 pip install -r custom-mcp/farofino-mcp/requirements.txt
 pip install -e custom-mcp/slither-mcp              # EVM only (needs Python 3.11+)
 
-# 2. Build RAG database (~5 min)
+# 2. Build RAG database (~10-20 min, includes network download of indexers)
 # IMPORTANT: a `export SOLODIT_API_KEY=...` here works for this terminal only.
 # For `plamen rag` and audit agents to see it later, put the key in
 # ~/.claude/settings.json -> "env" (Claude Code) or ~/.codex/config.toml -> [env]
@@ -233,7 +247,14 @@ See [docs/setup.md](docs/setup.md) for the full guide with all per-language prer
 ### Updating
 
 ```bash
+# macOS / Linux
 cd ~/.plamen && git pull && plamen install
+plamen install --codex    # if using Codex backend
+```
+
+```powershell
+# Windows (PowerShell)
+cd $HOME\.plamen; git pull; plamen install
 plamen install --codex    # if using Codex backend
 ```
 
@@ -249,7 +270,7 @@ See [docs/updating.md](docs/updating.md) for details on what updates automatical
 plamen                    # terminal wrapper with interactive wizard
 ```
 
-Or inside Claude Code: `/plamen` · Inside Codex CLI: `$plamen core /path/to/project`
+Or inside Claude Code: `/plamen` · Inside Codex CLI: `/plamen core /path/to/project`
 
 ---
 
@@ -266,9 +287,11 @@ Or inside Claude Code: `/plamen` · Inside Codex CLI: `$plamen core /path/to/pro
 
 > Cost / runtime are rough indicators for a ~5k-line codebase on a Claude
 > subscription. Larger codebases scale roughly linearly. The wizard runs
-> `plamen --estimate` before each audit to show a per-project number based
-> on lines, scope, and target plan — use that for budgeting. API-key users
-> (pay-as-you-go) see costs ~2–3× higher than subscription users.
+> `plamen --estimate` (an internal flag invoked by the wizard / `/plamen`
+> slash command — not a direct-CLI option, see [docs/usage.md](docs/usage.md))
+> before each audit to show a per-project number based on lines, scope, and
+> target plan — use the interactive `plamen` wizard for a standalone estimate.
+> API-key users (pay-as-you-go) see costs ~2–3× higher than subscription users.
 
 See [docs/audit-modes.md](docs/audit-modes.md) for the full comparison.
 
@@ -282,7 +305,7 @@ Plamen also audits **L1 node clients and blockchain infrastructure** — consens
 plamen l1 core /path/to/node-client
 ```
 
-Or inside Claude Code: `/plamen l1 core` · Inside Codex CLI: `$plamen l1 core /path/to/node-client`
+Or inside Claude Code: `/plamen l1 core` · Inside Codex CLI: `/plamen l1 core /path/to/node-client`
 
 L1 mode adds:
 - **22+ injectable skills** covering consensus safety, fork choice, p2p DoS/eclipse, mempool asymmetric DoS, BLS aggregation, light client proofs, state sync/pruning, execution client hardening, validator lifecycle, and more
@@ -316,8 +339,8 @@ plamen setup                                        # install tools only
 **Inside Codex CLI**:
 
 ```
-> $plamen core
-> $plamen l1 thorough /path/to/node-client
+> /plamen core
+> /plamen l1 thorough /path/to/node-client
 ```
 
 See [docs/usage.md](docs/usage.md) for PATH setup and all CLI options.
@@ -334,7 +357,7 @@ Plamen is a Python orchestrator that drives Claude (or Codex) workers. Phases ru
 # Launch via wizard (interactive)
 plamen                              # terminal wrapper starts wizard
 /plamen-wizard                      # inside Claude Code
-$plamen-wizard                      # inside Codex CLI
+/plamen-wizard                      # inside Codex CLI
 
 # Resume a crashed/interrupted audit
 python3 ~/.plamen/scripts/plamen_driver.py /path/to/project/.scratchpad/config.json
@@ -355,7 +378,7 @@ Plamen supports [OpenAI Codex CLI](https://github.com/openai/codex) as an altern
 plamen install --codex
 
 # Run via Codex
-$plamen core /path/to/project       # inside Codex CLI
+/plamen core /path/to/project       # inside Codex CLI
 ```
 
 Codex shares methodology via `~/.codex/plamen/` (symlinked to `~/.plamen/`). Config files are copied to `~/.codex/`:

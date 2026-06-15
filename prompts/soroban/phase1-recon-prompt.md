@@ -252,6 +252,7 @@ SCRATCHPAD: {scratchpad}
    - `cargo --version` -- required
    - `rustup target list --installed | grep wasm32` -- verify `wasm32v1-none` target installed
    - `stellar contract build --help` -- verify Stellar CLI available
+   - `cargo +nightly fuzz --version` -- record availability for Phase 4b/5 fuzz campaigns. If it succeeds, set `cargo_fuzz_available: true`; if it fails (cargo-fuzz not installed, or no nightly toolchain), set `cargo_fuzz_available: false` (the verifier falls back to proptest, then boundary-value parameterized tests)
    If any required tool is missing, document in build_status.md and attempt build anyway.
 1c. **CRITICAL - Overflow Check Gate** (MANDATORY before anything else):
    Read Cargo.toml and look for `[profile.release]` section. Check for `overflow-checks = true`.
@@ -292,6 +293,8 @@ Write to {SCRATCHPAD}/build_status.md:
 - **Clippy Warnings (security-relevant)**: {list}
 - **Cargo Audit Results**: {vulnerabilities or clean}
 - **SCOUT_AVAILABLE**: {true/false} (set in TASK 2)
+- **cargo_fuzz_available**: true/false (`cargo +nightly fuzz --version` probe; gates Soroban Thorough-mode libFuzzer fuzzing — proptest fallback if false)
+- **proptest_available**: true/false (check Cargo.toml dev-dependencies; fallback fuzzer when cargo-fuzz absent)
 - **RAG_TOOLS_AVAILABLE**: {true/false} (set by Agent 1A probe)
 - **COMPILE_WEIGHT**: light/moderate/heavy
 ```

@@ -114,7 +114,7 @@ Before any L1 skill runs, Plamen needs tooling primitives beyond grep. Per resea
 
 | Primitive | Tool | License | Runtime | Plamen integration | Build cost | Priority |
 |---|---|---|---|---|---|---|
-| **Go semantic index (batch)** | `scip-go` (sourcegraph/scip-go) | Apache-2.0 | All (Win/Mac/Linux) | Phase 0.5 bake step; output is a SCIP protobuf | ~2 days (integration) | **P0** |
+| **Go semantic index (batch)** | `scip-go` (scip-code/scip-go) | Apache-2.0 | All (Win/Mac/Linux) | Phase 0.5 bake step; output is a SCIP protobuf | ~2 days (integration) | **P0** |
 | **Rust semantic index (batch)** | `rust-analyzer scip` | MIT/Apache | All | Phase 0.5 bake step; output is a SCIP protobuf | ~1 day | **P0** |
 | **SCIP query shim** | Custom `plamen/scip_reader.py` (~150 LOC) over the sourcegraph/scip protobuf schema | (in-project) | All | MCP tool exposing `find_definition`, `find_references`, `list_symbols_in_file` over the baked artifact | ~1-2 days | **P0** |
 | **Structural search** | ast-grep CLI + custom MCP wrapper | MIT | All | MCP exposing `ast_search(pattern, lang, path)`, `ast_diff(rev_a, rev_b, lang)` | ~1 day | **P0** |
@@ -416,7 +416,7 @@ The Round 2 concern was that gopls on native Windows is 15-25× slower than on W
 - Go 1.25+ (`go` CLI for scip-go + builds)
 - Rust stable toolchain
 - rust-analyzer (latest stable) — provides the `scip` subcommand
-- scip-go (`go install github.com/sourcegraph/scip-go/cmd/scip-go@latest`)
+- scip-go (`go install github.com/scip-code/scip-go/cmd/scip-go@latest`)
 - ast-grep (via cargo or prebuilt binary)
 - Opengrep (prebuilt binary from https://github.com/opengrep/opengrep/releases)
 - Python 3.11+

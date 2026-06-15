@@ -3,7 +3,13 @@
 ## Quick Update
 
 ```bash
+# macOS / Linux
 cd ~/.plamen && git pull && plamen install
+```
+
+```powershell
+# Windows (PowerShell)
+cd $HOME\.plamen; git pull; plamen install
 ```
 
 `plamen install` is safe to re-run at any time. It will not wipe your RAG database, re-install toolchains, or overwrite your API keys.
@@ -95,7 +101,7 @@ These are **not symlinked** — they are merged/injected at install time:
 
 ## MCP Package Pinning (Claude Code Only)
 
-npm-based MCP servers (`evm-chain-data`, `foundry-suite`, `tavily-search`, `memory`, `helius`) are pinned to specific versions in `mcp-packages/package.json` to prevent the Anthropic API `oneOf`/`allOf` schema rejection error caused by upstream npm package updates. This applies only to Claude Code -- Codex uses tool translation instead of MCP.
+npm-based MCP servers (`evm-chain-data`, `foundry-suite`, `tavily-search`, `memory`, `helius`) are pinned to specific versions in `mcp-packages/package.json` to prevent the Anthropic API `oneOf`/`allOf` schema rejection error caused by upstream npm package updates. On Codex, MCP servers are configured in `[mcp_servers.*]` blocks of `~/.codex/config.toml` (regenerated from `mcp.json.example` by `plamen install --codex`); the npm version-pinning concern below is Claude-Code-specific because Codex's Python servers are schema-sanitized instead.
 
 `plamen install` handles this automatically:
 1. Runs `npm install` in `mcp-packages/` (installs pinned versions to `node_modules/`)
@@ -133,19 +139,31 @@ The `schema-sanitizer.js` proxy wraps `evm-chain-data` and `foundry-suite` — i
 If you use the Codex CLI backend (`~/.codex/plamen/`), updating follows the same pattern:
 
 ```bash
+# macOS / Linux
 cd ~/.plamen && git pull && plamen install --codex
+```
+
+```powershell
+# Windows (PowerShell)
+cd $HOME\.plamen; git pull; plamen install --codex
 ```
 
 If you use **both** backends, run both installs:
 
 ```bash
+# macOS / Linux
 cd ~/.plamen && git pull && plamen install && plamen install --codex
+```
+
+```powershell
+# Windows (PowerShell)
+cd $HOME\.plamen; git pull; plamen install; plamen install --codex
 ```
 
 **Key differences from Claude Code install:**
 - `AGENTS.md` (not `CLAUDE.md`) receives the marker-based orchestrator injection
 - `config.toml` (not `settings.json`) receives additive model/sandbox merges
-- MCP servers are not configured (Codex uses tool translation instead of MCP)
+- On Codex, MCP servers are configured in `[mcp_servers.*]` blocks of `~/.codex/config.toml` (regenerated from `mcp.json.example` by `plamen install --codex`); the npm version-pinning concern is Claude-Code-specific because Codex's Python servers are schema-sanitized instead
 - Symlinked directories (skills, prompts, agent definitions, rules) work identically
 
 ---
@@ -159,7 +177,7 @@ Running `plamen install` (or `plamen install --codex`) multiple times is safe. H
 | Symlinks | Creates new links | Removes old links, recreates (same result) | Same (into `~/.codex/plamen/`) |
 | User file backup | Backs up to `.pre-plamen` | Skips if backup already exists | Same |
 | settings.json / config.toml | Merges Plamen entries (permissions, env) | Skips entries that already exist | Merges model routing and sandbox entries into `config.toml` |
-| mcp.json | Merges Plamen servers | Skips existing servers, but fixes wrong-platform paths and backfills new env vars | N/A (Codex has no MCP) |
+| mcp.json | Merges Plamen servers | Skips existing servers, but fixes wrong-platform paths and backfills new env vars | Regenerates `[mcp_servers.*]` in `~/.codex/config.toml` from `mcp.json.example` (Codex's Python servers are schema-sanitized instead of npm-pinned) |
 | CLAUDE.md / AGENTS.md | Injects between markers | Strips old injection, re-injects current | Same (into `AGENTS.md`) |
 | Python deps | Installs packages | `pip` skips already-installed packages | Same |
 | Toolchains | Shows missing as checkboxes | Already-installed tools don't appear in list | Same |
