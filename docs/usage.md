@@ -27,6 +27,8 @@ plamen l1 thorough /path/to/node-client # L1 audit, Thorough mode
 
 The OpenAI Codex CLI (`codex exec`) is supported as an alternative, cost-saving backend (beta). It runs one `codex exec` per depth job, detects usage caps from natural-language output and auto-waits instead of halting, and seeds the full mandatory first-pass artifact set so recon/depth degrade losslessly.
 
+> **Before relying on Codex**, read [codex-backend.md](codex-backend.md) — it consolidates the known BETA limitations: reduced fan-out vs Claude, MCP tools partially disabled (WebSearch fallback), interactive-only MCP permissions, speculative model mapping with silent downgrade, ChatGPT-auth/usage-cap behavior, and that `plamen compare` is Claude-only.
+
 Codex requires prior setup: `plamen install --codex`, which also installs the
 slash commands into `~/.codex/commands/` (from `codex-adapter/commands/`). After
 that, either invoke the slash commands (e.g. `/plamen-wizard`, `/plamen-l1-wizard`)

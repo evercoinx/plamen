@@ -1632,16 +1632,20 @@ def _update_path_env(new_paths: list, persist: bool = False):
     current = os.environ.get("PATH", "")
     for p in new_paths:
         expanded = os.path.normpath(os.path.expanduser(p))
-        if not os.path.isdir(expanded):
-            continue
-        if expanded not in current:
+        exists = os.path.isdir(expanded)
+        # Running-process PATH: only add dirs that actually exist — adding a
+        # non-existent dir to the live PATH for post-install detection is
+        # pointless.
+        if exists and expanded not in current:
             os.environ["PATH"] = expanded + os.pathsep + os.environ.get("PATH", "")
             current = os.environ["PATH"]
-        # Persist to Windows user PATH so future terminals AND subprocesses
-        # spawned by external CLI runtimes (codex exec, claude -p) find the
-        # tool. Done unconditionally because the in-process PATH check above
-        # cannot detect a gap between the running shell's PATH and the
-        # persistent Windows User PATH.
+        # Persistence: persist standard toolchain dirs even when they don't
+        # exist yet (callers pass well-known locations like ~/.foundry/bin,
+        # ~/.cargo/bin). This closes the bare-box gap — `plamen install` before
+        # any toolchain exists previously skipped every dir, so a tool installed
+        # out-of-band LATER stayed invisible to audit subprocesses. A
+        # non-existent PATH entry is harmless: shells skip it. Both persisters
+        # are idempotent, so this cannot duplicate entries.
         if persist and sys.platform == "win32":
             _persist_path_windows(expanded)
         elif persist:
@@ -1666,21 +1670,27 @@ def _persist_path_posix(directory: str):
     END = "# <<< plamen toolchain PATH <<<"
     home = os.path.expanduser("~")
     shell = os.environ.get("SHELL", "")
-    # ~/.profile (login-shell baseline) + the interactive rc for the active
-    # shell + any common rc that already exists (so we hit the file the user's
-    # interactive shell actually sources — zsh ignores ~/.profile).
-    candidates = [os.path.join(home, ".profile")]
-    if "zsh" in shell:
-        candidates.append(os.path.join(home, ".zshrc"))
-    elif "bash" in shell:
-        candidates.append(os.path.join(home, ".bashrc"))
-    for extra in (".zshrc", ".bashrc", ".bash_profile"):
-        p = os.path.join(home, extra)
-        if os.path.exists(p):
-            candidates.append(p)
-    targets = list(dict.fromkeys(candidates))  # dedupe, preserve order
 
-    for rc in targets:
+    def _warn(rc_path, err):
+        # Best-effort, but NOT silent: a swallowed persist failure surfaces
+        # later as `command not found` mid-audit with no install-time signal.
+        sys.stderr.write(
+            f"warning: plamen could not persist PATH to {rc_path}: {err}\n"
+            f"         add it manually: export PATH=\"{directory}:$PATH\"\n"
+        )
+
+    # POSIX sh/bash/zsh rc files. Write ~/.profile (login-shell baseline) AND
+    # both ~/.zshrc and ~/.bashrc UNCONDITIONALLY (identical `export` syntax) so
+    # the cross-shell case is covered — e.g. install from bash but run the audit
+    # from zsh (or vice-versa) where the interactive rc would otherwise never be
+    # touched. ~/.bash_profile is updated only when it already exists.
+    sh_targets = [os.path.join(home, n) for n in (".profile", ".zshrc", ".bashrc")]
+    bp = os.path.join(home, ".bash_profile")
+    if os.path.exists(bp):
+        sh_targets.append(bp)
+    sh_targets = list(dict.fromkeys(sh_targets))  # dedupe, preserve order
+
+    for rc in sh_targets:
         try:
             text = ""
             if os.path.exists(rc):
@@ -1711,8 +1721,47 @@ def _persist_path_posix(directory: str):
                 new_text = prefix + block + "\n"
             with open(rc, "w", encoding="utf-8") as f:
                 f.write(new_text)
-        except Exception:
-            pass  # non-critical — user can add the export manually
+        except Exception as e:
+            _warn(rc, e)
+
+    # fish uses a different config file AND PATH syntax (`set -gx PATH ... $PATH`).
+    # Only touch it when fish is actually in use (its config dir exists OR $SHELL
+    # is fish) — don't create a fish config on machines without fish.
+    fish_dir = os.path.join(home, ".config", "fish")
+    if "fish" in shell or os.path.isdir(fish_dir):
+        fish_rc = os.path.join(fish_dir, "config.fish")
+        try:
+            os.makedirs(fish_dir, exist_ok=True)
+            text = ""
+            if os.path.exists(fish_rc):
+                with open(fish_rc, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            dirs = []
+            m = _re.search(
+                _re.escape(BEGIN) + r"\n(.*?)\n" + _re.escape(END), text, _re.S
+            )
+            if m:
+                em = _re.search(r"set -gx PATH (.*) \$PATH", m.group(1))
+                if em:
+                    dirs = [d for d in em.group(1).split() if d]
+            if directory not in dirs:  # idempotent
+                dirs.append(directory)
+                block = (
+                    BEGIN + "\n"
+                    + "set -gx PATH " + " ".join(dirs) + " $PATH\n"
+                    + END
+                )
+                if m:
+                    new_text = text[:m.start()] + block + text[m.end():]
+                else:
+                    prefix = text
+                    if prefix and not prefix.endswith("\n"):
+                        prefix += "\n"
+                    new_text = prefix + block + "\n"
+                with open(fish_rc, "w", encoding="utf-8") as f:
+                    f.write(new_text)
+        except Exception as e:
+            _warn(fish_rc, e)
 
 
 def _persist_path_windows(directory: str):
@@ -1731,8 +1780,14 @@ def _persist_path_windows(directory: str):
                 entries.append(directory)
                 new_path = os.pathsep.join(entries)
                 winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path)
-    except Exception:
-        pass  # non-critical — user can add manually
+    except Exception as e:
+        # Best-effort, but NOT silent — a swallowed failure surfaces later as
+        # `command not found` mid-audit with no install-time signal.
+        sys.stderr.write(
+            f"warning: plamen could not persist PATH to the Windows user "
+            f"registry: {e}\n"
+            f'         add it manually: setx PATH "%PATH%;{directory}"\n'
+        )
 
 
 def _refresh_system_path():
@@ -2300,7 +2355,7 @@ def _installed_version():
     return None
 
 
-def _write_install_manifest(installed=None, copied=None, copied_dirs=None):
+def _write_install_manifest(installed=None, copied=None, copied_dirs=None, shims=None):
     """Write the install manifest to every backend home that exists.
 
     Backend-agnostic and idempotent. Called unconditionally from run_install
@@ -2334,11 +2389,16 @@ def _write_install_manifest(installed=None, copied=None, copied_dirs=None):
         targets.append(os.path.join(codex_home, _PLAMEN_MANIFEST))
     targets.append(os.path.join(PLAMEN_HOME, _PLAMEN_MANIFEST))
 
-    # A version-only call (all tracking args None) preserves prior tracking.
-    preserve = installed is None and copied is None and copied_dirs is None
+    # Per-field merge: read any existing manifest and preserve each tracking
+    # list the caller did NOT supply (passed None). This lets the shim-recording
+    # call (shims=[...]) and the unconditional version-stamp call (all None) each
+    # update only their own field without clobbering installed/copied/copied_dirs
+    # recorded earlier by _run_symlink_install or the codex adapter (and
+    # vice-versa). `shims` records plamen-created python3 shims so uninstall can
+    # remove exactly what install created.
     for manifest_path in targets:
         prev = {}
-        if preserve and os.path.isfile(manifest_path):
+        if os.path.isfile(manifest_path):
             try:
                 with open(manifest_path) as f:
                     prev = _json.load(f)
@@ -2353,6 +2413,8 @@ def _write_install_manifest(installed=None, copied=None, copied_dirs=None):
                        else prev.get("copied", [])),
             "copied_dirs": (copied_dirs if copied_dirs is not None
                             else prev.get("copied_dirs", [])),
+            "shims": (shims if shims is not None
+                      else prev.get("shims", [])),
         }
         try:
             with open(manifest_path, "w") as f:
@@ -2660,7 +2722,7 @@ def _ensure_python3_shim_windows(w):
         shutil.copy2(py_exe, py3_exe)
         w(f"  {_C_GREEN}>{_RST} Created python3.exe shim at {py3_exe}\n")
         w(f"    {_C_GRAY}prevents `python3` from opening the Microsoft Store{_RST}\n")
-        return
+        return py3_exe
     except (OSError, PermissionError) as e:
         tier1_error = e
 
@@ -2679,11 +2741,13 @@ def _ensure_python3_shim_windows(w):
         w(f"    {_C_GRAY}Reason: {tier1_error}{_RST}\n")
         w(f"    {_C_GRAY}Fallback shim: {shim_path}{_RST}\n")
         w(f"    {_C_GRAY}Effective only if ~/.plamen is on PATH before WindowsApps.{_RST}\n")
+        return shim_path
     except OSError as e_shim:
         w(f"  {_C_RED}!{_RST} Could not create any python3 shim\n")
         w(f"    {_C_GRAY}python.exe dir: {tier1_error}{_RST}\n")
         w(f"    {_C_GRAY}PLAMEN_HOME shim: {e_shim}{_RST}\n")
         w(f"    {_C_GRAY}Workaround: Settings > Apps > Advanced app{_RST}\n")
+        return None
         w(f"    {_C_GRAY}settings > App execution aliases > turn OFF{_RST}\n")
         w(f"    {_C_GRAY}App Installer python.exe + python3.exe.{_RST}\n")
 
@@ -3085,21 +3149,58 @@ def _merge_claude_md(w):
 
 
 def run_uninstall():
-    """Remove Plamen symlinks and injected config from ~/.claude/."""
+    """Remove Plamen symlinks, copies, shims, and injected config across every
+    installed backend (~/.claude, ~/.codex, PLAMEN_HOME)."""
     import json as _json
     w = sys.stdout.write
 
-    manifest_path = os.path.join(CLAUDE_HOME, _PLAMEN_MANIFEST)
-    if not os.path.isfile(manifest_path):
-        w(f"  {_C_ORANGE}No install manifest found at {manifest_path}{_RST}\n")
+    # Read EVERY backend's manifest, not just ~/.claude. A codex-only install
+    # records its manifest under ~/.codex, so reading only ~/.claude made
+    # `plamen uninstall` a silent no-op there (orphaning the whole adapter). We
+    # union the tracking lists so a multi-backend install is fully removed.
+    codex_home = os.path.normpath(os.path.expanduser("~/.codex"))
+    manifest_paths_found = []
+    manifests = []
+    codex_home_for_uninstall = None
+    for mp in _manifest_paths():
+        if not os.path.isfile(mp):
+            continue
+        try:
+            with open(mp) as f:
+                mf = _json.load(f)
+        except (OSError, ValueError):
+            continue
+        manifest_paths_found.append(mp)
+        manifests.append(mf)
+        # A manifest under ~/.codex means a Codex adapter is installed there;
+        # record its home so the adapter-owned trees get removed. Deriving the
+        # codex home from a FOUND manifest (not unconditionally from expanduser)
+        # keeps uninstall from touching a real ~/.codex during tests that don't
+        # set up one.
+        if os.path.normpath(os.path.dirname(mp)) == codex_home:
+            codex_home_for_uninstall = codex_home
+
+    if not manifests:
+        w(f"  {_C_ORANGE}No install manifest found{_RST}\n")
+        w(f"  {_C_GRAY}Checked: {', '.join(_manifest_paths())}{_RST}\n")
         w(f"  {_C_GRAY}Nothing to uninstall.{_RST}\n")
         return
 
-    with open(manifest_path) as f:
-        manifest = _json.load(f)
+    def _union(key):
+        seen, out = set(), []
+        for mf in manifests:
+            for v in mf.get(key, []):
+                if v not in seen:
+                    seen.add(v)
+                    out.append(v)
+        return out
+    installed_list = _union("installed")
+    copied_dirs_list = _union("copied_dirs")
+    shims_list = _union("shims")
 
-    n_items = len(manifest.get("installed", []))
-    w(f"\n  {_C_WHITE}This will remove {n_items} symlinks from {CLAUDE_HOME}{_RST}\n")
+    n_items = len(installed_list)
+    homes = ", ".join(sorted({os.path.dirname(mp) for mp in manifest_paths_found}))
+    w(f"\n  {_C_WHITE}This will remove {n_items} Plamen links/copies + config from: {homes}{_RST}\n")
     w(f"  {_C_GRAY}and undo config merges (settings.json, mcp.json, CLAUDE.md).{_RST}\n")
     w(f"  {_C_GRAY}Backups (.pre-plamen) will be restored if they exist.{_RST}\n")
     w(f"  {_C_GRAY}The Plamen repo at {PLAMEN_HOME} will NOT be deleted.{_RST}\n\n")
@@ -3143,8 +3244,8 @@ def run_uninstall():
     # Items copied (not linked) during a Windows non-Developer-Mode install are
     # plain files, so the link check below would skip them and leak them. Remove
     # them explicitly using the manifest's `copied` record.
-    copied_set = set(manifest.get("copied", []))
-    for path in manifest.get("installed", []):
+    copied_set = set(_union("copied"))
+    for path in installed_list:
         is_link = os.path.islink(path) or _is_junction(path)
         if is_link:
             if os.path.isdir(path) and not os.path.islink(path):
@@ -3171,7 +3272,7 @@ def run_uninstall():
     # ~/.codex/plamen methodology tree). These are real directories, so the
     # link/junction branch above skips them and they would leak. Remove them
     # explicitly via rmtree, then restore any backed-up user original.
-    for path in manifest.get("copied_dirs", []):
+    for path in copied_dirs_list:
         # Defensive: never rmtree a live link/junction (would also delete the
         # link target). Only remove a real, non-symlink directory we copied.
         if os.path.isdir(path) and not os.path.islink(path) and not _is_junction(path):
@@ -3181,6 +3282,50 @@ def run_uninstall():
             if os.path.exists(backup):
                 shutil.move(backup, path)
                 restored += 1
+
+    # python3 shims plamen created on Windows (recorded in the manifest, so we
+    # remove exactly what install created — never a python3.exe that shipped
+    # with the user's Python).
+    for shim in shims_list:
+        try:
+            if os.path.isfile(shim):
+                os.remove(shim)
+                removed += 1
+        except OSError:
+            pass
+
+    # Codex adapter artifacts (only when a Codex manifest was found above). The
+    # adapter EXCLUSIVELY owns these trees — install rmtree's each before every
+    # copy — so removing them is safe. ~/.codex/plamen is a symlink/junction in
+    # the common case (a copied tree on cross-volume installs is already handled
+    # via copied_dirs); agents/skills/commands are owned plain dirs.
+    if codex_home_for_uninstall:
+        cp = os.path.join(codex_home_for_uninstall, "plamen")
+        if os.path.islink(cp) or _is_junction(cp):
+            try:
+                if os.path.isdir(cp) and not os.path.islink(cp):
+                    os.rmdir(cp)  # junction
+                else:
+                    os.remove(cp)  # symlink
+                removed += 1
+            except OSError:
+                pass
+        for tree in ("agents", "skills", "commands"):
+            p = os.path.join(codex_home_for_uninstall, tree)
+            if os.path.isdir(p) and not os.path.islink(p) and not _is_junction(p):
+                shutil.rmtree(p, ignore_errors=True)
+                removed += 1
+        # config.toml holds the user's API keys; AGENTS.md may carry user edits.
+        # The install copies these in, but DELETING them risks destroying user
+        # data — leave them and tell the user to review/remove manually.
+        shared = [p for p in (os.path.join(codex_home_for_uninstall, "config.toml"),
+                              os.path.join(codex_home_for_uninstall, "AGENTS.md"))
+                  if os.path.isfile(p)]
+        if shared:
+            w(f"  {_C_ORANGE}!{_RST} Left Codex shared config in place (may contain your edits / API keys):\n")
+            for p in shared:
+                w(f"    {_C_GRAY}{p}{_RST}\n")
+            w(f"    {_C_GRAY}Remove manually if you no longer use the Plamen Codex adapter.{_RST}\n")
 
     # Remove CLAUDE.md injection
     claude_md = os.path.join(CLAUDE_HOME, "CLAUDE.md")
@@ -3253,7 +3398,11 @@ def run_uninstall():
                 f.write("\n")
             w(f"  {_C_GREEN}mcp.json: removed Plamen servers{_RST}\n")
 
-    os.remove(manifest_path)
+    for mp in manifest_paths_found:
+        try:
+            os.remove(mp)
+        except OSError:
+            pass
 
     w(f"\n  {_C_GREEN}Uninstalled: {removed} links removed, {restored} backups restored{_RST}\n")
     w(f"  {_C_GRAY}Plamen repo at {PLAMEN_HOME} is untouched.{_RST}\n\n")
@@ -3752,8 +3901,10 @@ def run_install():
     _heal_dangling_hooks(w)
 
     # ── Windows-only: drop a `python3` shim so LLM-typed shell commands
-    # don't hit the Microsoft Store App Execution Alias.
-    _ensure_python3_shim_windows(w)
+    # don't hit the Microsoft Store App Execution Alias. Capture the created
+    # shim path (None if non-Windows or already present) so it's recorded in
+    # the manifest and uninstall can remove exactly what install created.
+    _plamen_shim = _ensure_python3_shim_windows(w)
 
     # ── Persist Plamen-managed toolchain dirs to the Windows User PATH ──
     # Background: when Foundry / Solana / Aptos / Sui installers ran (either
@@ -3936,8 +4087,10 @@ def run_install():
     # ── Install manifest (backend-agnostic, unconditional) ─────
     # Stamp the version into every backend home that exists (and PLAMEN_HOME)
     # so _setup_python_deps upgrade detection fires on all backends. Runs after
-    # the Codex adapter so ~/.codex exists when present.
-    _write_install_manifest()
+    # the Codex adapter so ~/.codex exists when present. Also records the
+    # python3 shim (if one was created) so uninstall removes it; per-field merge
+    # preserves installed/copied/copied_dirs recorded by the symlink/codex steps.
+    _write_install_manifest(shims=[_plamen_shim] if _plamen_shim else None)
 
     return 0
 
@@ -5853,7 +6006,11 @@ def launch_claude(mode: str, target: str, docs: str,
     """Launch 'compare' mode — runs /plamen compare in a Claude Code session."""
     claude_bin = shutil.which("claude")
     if not claude_bin:
-        sys.stdout.write(f"  {_C_RED}✗ 'claude' not found in PATH{_RST}\n")
+        cw = sys.stdout.write
+        cw(f"  {_C_RED}✗ `plamen compare` requires the Claude backend (`claude` CLI), which is not on PATH.{_RST}\n")
+        cw(f"    {_C_GRAY}Compare runs as an in-session /plamen compare workflow and is not available on the{_RST}\n")
+        cw(f"    {_C_GRAY}Codex backend. Install + authenticate Claude Code, or run a standard audit{_RST}\n")
+        cw(f"    {_C_GRAY}(`plamen core` / `plamen thorough`), which both backends support.{_RST}\n")
         sys.exit(1)
 
     parts = ["/plamen compare"]

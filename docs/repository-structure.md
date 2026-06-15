@@ -98,3 +98,7 @@
 ├── .gitmodules                        # Submodule refs
 └── .gitignore
 ```
+
+---
+
+**See also**: [architecture.md](architecture.md) · [internals.md](internals.md) · [updating.md](updating.md) · [glossary.md](glossary.md) · [docs index](README.md)

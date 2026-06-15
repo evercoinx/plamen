@@ -274,6 +274,54 @@ Or inside Claude Code: `/plamen` · Inside Codex CLI: `/plamen core /path/to/pro
 
 ---
 
+## What You Get
+
+When an audit finishes, the headline deliverable is written to the **root of the
+audited project**:
+
+```
+<project>/AUDIT_REPORT.md
+```
+
+`AUDIT_REPORT.md` is a self-contained Markdown report (per
+[`rules/report-template.md`](rules/report-template.md)) containing:
+
+- **An Executive Summary** and a **severity summary table** (Critical / High / Medium / Low / Informational counts).
+- **A "Components Audited" table** listing the contracts/modules in scope.
+- **Severity-tiered findings** — every finding gets its own section with **Severity**, **Location** (`file:Lnnn`), a **Description** (with the offending code), an **Impact** statement, the **PoC Result** (`[POC-PASS]` / `[POC-FAIL]` / `[CODE-TRACE]` — see [docs/glossary.md](docs/glossary.md)), and a **Recommendation** (a minimal fix diff when the PoC passed). Cosmetic Low/Info items may be grouped into a compact "Quality Observations" table.
+- **A Priority Remediation Order** — a numbered, most-urgent-first list using the clean client-facing IDs (`C-01`, `H-01`, `M-01`, …).
+- **Appendix A** — findings excluded as false-positives or duplicates (client-facing summary).
+- **Appendix B** — *flagged obligations*: any unfinished work the haltless pipeline could not fully complete is surfaced here for human triage instead of silently dropped (see [Resumable Pipeline](#resumable-pipeline-v2)).
+
+**Intermediate artifacts** live in a per-audit workspace inside the project:
+
+```
+<project>/.scratchpad/
+```
+
+This holds everything the pipeline produced on the way to the report — recon
+context, the findings inventory, depth traces, verification PoCs, the
+report index, and the resume checkpoint. It is preserved between runs so the
+audit can resume on crash, and discarded only on a `--fresh` restart. You
+normally never need to open it; `AUDIT_REPORT.md` is the deliverable. See
+[docs/glossary.md](docs/glossary.md) for the `.scratchpad/` layout.
+
+---
+
+## What's New in v2.1.0
+
+v2.1.0 changes *how* the pipeline runs, not what the agents analyze. Highlights:
+
+- **PTY-supervised execution + disk-derived completion** — workers are driven through a pseudo-terminal and completion is inferred from on-disk `<!-- PLAMEN_STATUS: COMPLETE -->` markers, eliminating the 0-byte-stdio silent-hang class.
+- **Haltless recovery** — `report_index`, verify, inventory, and resume paths repair-then-degrade and surface unfinished obligations as Appendix-B items instead of halting.
+- **Codex CLI backend (cost-saving BETA)** — OpenAI Codex (`codex exec`) as an alternative worker backend. See [docs/codex-backend.md](docs/codex-backend.md) for its known limitations.
+- **Opus 4.8 defaults** — Opus-tier phases default to `claude-opus-4-8` (override with `PLAMEN_OPUS_MODEL` / `PLAMEN_THOROUGH_OPUS_MODEL`).
+- **Ecosystem auto-detection** — the audited language is detected and auto-corrected at startup, no halt-to-rerun.
+
+Full release notes: [CHANGELOG.md](CHANGELOG.md). Upgrade guidance: [docs/updating.md](docs/updating.md).
+
+---
+
 ## Audit Modes
 
 | Mode | Plan | Agents | Indicative Cost | Key Features |
@@ -411,6 +459,7 @@ Ecosystem (language) is auto-detected and **auto-corrected at startup** with no 
 
 | Topic | Link |
 |-------|------|
+| Docs index | [docs/README.md](docs/README.md) |
 | Glossary of terms | [docs/glossary.md](docs/glossary.md) |
 | Full setup guide | [docs/setup.md](docs/setup.md) |
 | Updating after git pull | [docs/updating.md](docs/updating.md) |
@@ -418,6 +467,7 @@ Ecosystem (language) is auto-detected and **auto-corrected at startup** with no 
 | Audit mode comparison | [docs/audit-modes.md](docs/audit-modes.md) |
 | Pipeline architecture | [docs/architecture.md](docs/architecture.md) |
 | MCP servers & API keys | [docs/mcp-servers.md](docs/mcp-servers.md) |
+| Codex backend (BETA) limitations | [docs/codex-backend.md](docs/codex-backend.md) |
 | Usage & CLI options | [docs/usage.md](docs/usage.md) |
 | Skills, rules & internals | [docs/internals.md](docs/internals.md) |
 | Repository structure | [docs/repository-structure.md](docs/repository-structure.md) |

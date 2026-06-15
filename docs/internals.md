@@ -300,3 +300,7 @@ When the user presses Esc / halts the run, the driver cancels queued workers and
 
 - `_cancel_pending_worker_futures` (`scripts/plamen_driver.py:1501-1513`) cancels each pending `Future` and calls `executor.shutdown(wait=False, cancel_futures=True)` — it does **not** wait for the pool to drain.
 - In-flight workers receive `SIGTERM` (POSIX `os.killpg`) or `terminate(force=False)` (Windows winpty), then `SIGKILL` / `kill` after `_HALT_TERMINATE_GRACE_S = 2.0` seconds (`scripts/plamen_driver.py:1498`). The same grace window is used at every PTY-session termination site in the driver.
+
+---
+
+**See also**: [architecture.md](architecture.md) · [pipeline-phases-presentation.md](pipeline-phases-presentation.md) · [repository-structure.md](repository-structure.md) · [glossary.md](glossary.md) · [docs index](README.md)

@@ -72,3 +72,7 @@ Key `mcp.json` entries:
 ```
 
 Path notes: `cwd` fields use relative paths resolved from `~/.plamen/`. On Codex, paths inside generated `config.toml` resolve via `~/.codex/plamen/`, which is a symlink to `~/.plamen/` created by `plamen install --codex` — same source tree, different runtime root.
+
+---
+
+**See also**: [getting-started.md](getting-started.md) · [dependencies.md](dependencies.md) · [codex-backend.md](codex-backend.md) · [architecture.md](architecture.md) · [docs index](README.md)

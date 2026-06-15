@@ -366,3 +366,7 @@ Durations and costs below are **typical for complex codebases** — small audits
 | Light | ~15 (skip rescan, invariants, attention repair, RAG, skeptic, crossbatch, low verify) | 1-2 hours | $15-30 |
 | Core | ~25 (skip rescan, attention repair, skeptic, low verify) | 3-5 hours | $40-80 |
 | Thorough | ~40+ (everything, up to 3 depth iterations, all verify tiers) | 6-12 hours | $80-200 |
+
+---
+
+**See also**: [architecture.md](architecture.md) · [internals.md](internals.md) · [audit-modes.md](audit-modes.md) · [glossary.md](glossary.md) · [docs index](README.md)

@@ -251,6 +251,38 @@ Set keys in `~/.claude/mcp.json` (Claude Code) after copying from `mcp.json.exam
 
 ## Troubleshooting
 
+### Common install failure modes
+
+These are the most frequent post-install problems and their fixes. Run
+`plamen doctor` first — it checks most of these and exits non-zero on hard
+failures.
+
+- **No backend installed (`claude`/`codex` not found).** Plamen needs at least
+  one backend CLI in PATH. Install Claude Code (`npm install -g @anthropic-ai/claude-code`)
+  and/or the OpenAI Codex CLI ([github.com/openai/codex](https://github.com/openai/codex)).
+  `plamen doctor`'s `Backend` row shows which it found.
+- **`claude` is installed but unauthenticated ("Not logged in").** An
+  unauthenticated `claude -p` returns rc=0 with a "Not logged in" message and
+  does no work, so an audit appears to start and then produces nothing.
+  `plamen doctor` probes auth state and points at both supported paths: log in
+  with `/login` (OAuth) **or** set `ANTHROPIC_API_KEY` in your environment.
+  Note: an API key dropped into `~/.claude/settings.json` is **not** read as a
+  credential — it must be a real env var or an OAuth login.
+- **PATH not persisted ("command not found" mid-audit).** If `plamen` (or a
+  toolchain binary) works in one shell but a later command reports
+  "command not found", the PATH entry was not persisted to your shell profile.
+  Re-run `plamen setup` (it appends the PATH export to your shell rc) and then
+  **restart your shell** (or `source ~/.bashrc` / `~/.zshrc`). On Windows, the
+  one-time `SetEnvironmentVariable(... "User")` from the README persists across
+  sessions — open a new terminal after setting it.
+- **`cargo install` MSRV failures.** A toolchain whose stable `rustc` predates
+  a dependency's latest minimum-supported Rust version (e.g. `rustc 1.92` vs a
+  dep requiring `1.94`) used to fail to build scout / cargo-fuzz / trident /
+  rust-analyzer. As of v2.1.0 these are installed with `--locked`, so they
+  build against the tool's tested lockfile instead of pulling a newer,
+  incompatible transitive dependency. If you install one of these manually, add
+  `--locked` yourself (e.g. `cargo install cargo-scout-audit --locked`).
+
 ### Windows: `error 1314: A required privilege is not held by the client`
 Enable Developer Mode. See [Solana > Windows](#solana-platform-notes) above.
 

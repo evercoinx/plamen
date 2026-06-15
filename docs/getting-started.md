@@ -124,6 +124,31 @@ All paths invoke the same V2 deterministic driver. The backend difference is tra
 - **Haltless resilience.** A finished audit is never thrown away at the finish line. The report-index, verify, inventory, and resume paths repair-then-degrade: any unfinished obligation is surfaced as a flagged Appendix-B item in `AUDIT_REPORT.md` rather than halting the run. Stale or corrupt checkpoints recover instead of stranding the audit, and rate-limit / usage-cap conditions auto-wait then resume.
 - **Deterministic plumbing.** Report-index recovery, verify backfill, and finding dedup are mechanical Python steps (LLM out of the loop) for reliability.
 
+## Where's my report?
+
+When the audit finishes, the deliverable is written to the **root of the
+audited project**:
+
+```
+<project>/AUDIT_REPORT.md
+```
+
+It contains an Executive Summary, a severity summary table, and a dedicated
+section per finding — **Severity**, **Location** (`file:Lnnn`), **Description**
+with the offending code, **Impact**, **PoC Result** (`[POC-PASS]` /
+`[POC-FAIL]` / `[CODE-TRACE]`), and a **Recommendation** (a minimal fix diff for
+PoC-confirmed findings) — followed by a Priority Remediation Order. Appendix A
+lists excluded/duplicate findings; **Appendix B** surfaces any unfinished
+obligation the haltless pipeline flagged for human triage. See
+[`../rules/report-template.md`](../rules/report-template.md) for the exact
+structure.
+
+All intermediate artifacts (recon context, findings inventory, depth traces,
+verification PoCs, the resume checkpoint) live in a per-audit workspace at
+`<project>/.scratchpad/`. It is preserved for resume and discarded only on a
+`--fresh` restart — you normally never need to open it. See [glossary.md](glossary.md)
+for the `.scratchpad/` layout.
+
 ## What mode should I pick?
 
 | Mode | When to use | Plan needed | Time (small codebase) | Time (large codebase) |

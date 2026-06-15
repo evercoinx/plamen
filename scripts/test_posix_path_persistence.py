@@ -95,6 +95,59 @@ def test_update_path_env_routes_posix_not_windows(monkeypatch):
         assert "plamen toolchain PATH" in open(os.path.join(d, ".profile"), encoding="utf-8").read()
 
 
+def test_writes_both_zshrc_and_bashrc_for_cross_shell(monkeypatch):
+    """Both ~/.zshrc and ~/.bashrc get the block regardless of $SHELL, so an
+    install-from-bash / audit-from-zsh (or vice-versa) is covered."""
+    m = _load()
+    with tempfile.TemporaryDirectory() as d:
+        _home(monkeypatch, d, shell="/bin/zsh")
+        m._persist_path_posix("/opt/.foundry/bin")
+        for rc in (".zshrc", ".bashrc", ".profile"):
+            txt = open(os.path.join(d, rc), encoding="utf-8").read()
+            assert "# >>> plamen toolchain PATH >>>" in txt, rc
+            assert 'export PATH="/opt/.foundry/bin:$PATH"' in txt, rc
+
+
+def test_fish_config_written_with_fish_syntax(monkeypatch):
+    """fish gets its own config in fish syntax (`set -gx PATH ... $PATH`),
+    idempotently — and only when fish is actually in use."""
+    m = _load()
+    with tempfile.TemporaryDirectory() as d:
+        _home(monkeypatch, d, shell="/usr/bin/fish")
+        m._persist_path_posix("/opt/.cargo/bin")
+        fish_rc = os.path.join(d, ".config", "fish", "config.fish")
+        assert os.path.isfile(fish_rc)
+        txt = open(fish_rc, encoding="utf-8").read()
+        assert "set -gx PATH /opt/.cargo/bin $PATH" in txt
+        m._persist_path_posix("/opt/.cargo/bin")  # idempotent
+        txt2 = open(fish_rc, encoding="utf-8").read()
+        assert txt2.count("set -gx PATH") == 1
+        assert txt2.count("/opt/.cargo/bin") == 1
+
+
+def test_no_fish_config_created_without_fish(monkeypatch):
+    """Don't create a fish config on a machine that doesn't use fish."""
+    m = _load()
+    with tempfile.TemporaryDirectory() as d:
+        _home(monkeypatch, d, shell="/bin/bash")
+        m._persist_path_posix("/opt/.foundry/bin")
+        assert not os.path.exists(os.path.join(d, ".config", "fish", "config.fish"))
+
+
+def test_warns_on_persist_failure_no_crash(monkeypatch, capsys):
+    """A persist failure must WARN (not silently pass) and must not raise."""
+    m = _load()
+    with tempfile.TemporaryDirectory() as d:
+        # Point HOME at a regular FILE so every rc write fails.
+        bogus = os.path.join(d, "not_a_dir")
+        open(bogus, "w").close()
+        monkeypatch.setenv("HOME", bogus)
+        monkeypatch.setenv("USERPROFILE", bogus)
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        m._persist_path_posix("/opt/.foundry/bin")  # must not raise
+        assert "could not persist PATH" in capsys.readouterr().err
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-q"]))

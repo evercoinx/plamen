@@ -163,6 +163,11 @@ def test_uninstall_removes_copied_dir_tree(monkeypatch):
         os.makedirs(plamen_home)
         monkeypatch.setattr(m, "CLAUDE_HOME", claude_home, raising=False)
         monkeypatch.setattr(m, "PLAMEN_HOME", plamen_home, raising=False)
+        # HOME isolation: keep _manifest_paths()'s ~/.codex from resolving to a
+        # REAL ~/.codex on the machine running the suite (uninstall now reads +
+        # removes across backends).
+        monkeypatch.setenv("HOME", root)
+        monkeypatch.setenv("USERPROFILE", root)
 
         copied_dir = os.path.join(claude_home, "plamen")
         os.makedirs(os.path.join(copied_dir, "rules"))
@@ -266,6 +271,8 @@ def test_uninstall_removes_copied_plain_files(monkeypatch):
         os.makedirs(plamen_home)
         monkeypatch.setattr(m, "CLAUDE_HOME", claude_home, raising=False)
         monkeypatch.setattr(m, "PLAMEN_HOME", plamen_home, raising=False)
+        monkeypatch.setenv("HOME", root)
+        monkeypatch.setenv("USERPROFILE", root)
 
         # One copied file with NO user backup, one copied file WITH a user
         # backup that must be restored.
@@ -301,6 +308,80 @@ def test_uninstall_removes_copied_plain_files(monkeypatch):
         assert not os.path.exists(copied_over_user + ".pre-plamen")
         # Manifest removed.
         assert not os.path.isfile(os.path.join(claude_home, m._PLAMEN_MANIFEST))
+
+
+def test_uninstall_codex_only_removes_owned_trees_keeps_shared_config(monkeypatch):
+    """Codex-only install (manifest under ~/.codex, none under ~/.claude) must
+    NOT be a no-op: adapter-owned trees (agents/skills/commands) are removed,
+    while shared config.toml / AGENTS.md (may hold user API keys/edits) are KEPT."""
+    m = _load()
+    with tempfile.TemporaryDirectory() as root:
+        claude_home = os.path.join(root, ".claude")
+        codex_home = os.path.join(root, ".codex")
+        plamen_home = os.path.join(root, ".plamen")
+        os.makedirs(claude_home)
+        os.makedirs(codex_home)
+        os.makedirs(plamen_home)
+        monkeypatch.setattr(m, "CLAUDE_HOME", claude_home, raising=False)
+        monkeypatch.setattr(m, "PLAMEN_HOME", plamen_home, raising=False)
+        monkeypatch.setenv("HOME", root)
+        monkeypatch.setenv("USERPROFILE", root)
+
+        for tree in ("agents", "skills", "commands"):
+            d = os.path.join(codex_home, tree)
+            os.makedirs(d)
+            with open(os.path.join(d, "x.toml"), "w") as f:
+                f.write("x\n")
+        config_toml = os.path.join(codex_home, "config.toml")
+        agents_md = os.path.join(codex_home, "AGENTS.md")
+        with open(config_toml, "w") as f:
+            f.write('api_key = "USER-SECRET"\n')
+        with open(agents_md, "w") as f:
+            f.write("user agents\n")
+
+        # codex manifest, NO claude manifest -> a codex-only install
+        manifest = {"plamen_home": plamen_home, "version": m.VERSION,
+                    "installed": [], "copied": [], "copied_dirs": [], "shims": []}
+        with open(os.path.join(codex_home, m._PLAMEN_MANIFEST), "w") as f:
+            json.dump(manifest, f)
+
+        monkeypatch.setenv("PLAMEN_UNINSTALL_YES", "1")
+        m.run_uninstall()
+
+        for tree in ("agents", "skills", "commands"):
+            assert not os.path.exists(os.path.join(codex_home, tree)), tree
+        # Shared config PRESERVED — deleting it would be user-data loss.
+        assert os.path.isfile(config_toml)
+        with open(config_toml) as f:
+            assert f.read() == 'api_key = "USER-SECRET"\n'
+        assert os.path.isfile(agents_md)
+        assert not os.path.isfile(os.path.join(codex_home, m._PLAMEN_MANIFEST))
+
+
+def test_uninstall_removes_recorded_shims(monkeypatch):
+    """python3 shims recorded in the manifest must be removed by uninstall."""
+    m = _load()
+    with tempfile.TemporaryDirectory() as root:
+        claude_home = os.path.join(root, ".claude")
+        plamen_home = os.path.join(root, ".plamen")
+        os.makedirs(claude_home)
+        os.makedirs(plamen_home)
+        monkeypatch.setattr(m, "CLAUDE_HOME", claude_home, raising=False)
+        monkeypatch.setattr(m, "PLAMEN_HOME", plamen_home, raising=False)
+        monkeypatch.setenv("HOME", root)
+        monkeypatch.setenv("USERPROFILE", root)
+
+        shim = os.path.join(plamen_home, "python3.bat")
+        with open(shim, "w") as f:
+            f.write("@echo off\n")
+        manifest = {"plamen_home": plamen_home, "version": m.VERSION,
+                    "installed": [], "copied": [], "copied_dirs": [], "shims": [shim]}
+        with open(os.path.join(claude_home, m._PLAMEN_MANIFEST), "w") as f:
+            json.dump(manifest, f)
+
+        monkeypatch.setenv("PLAMEN_UNINSTALL_YES", "1")
+        m.run_uninstall()
+        assert not os.path.exists(shim)
 
 
 if __name__ == "__main__":

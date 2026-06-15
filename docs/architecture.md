@@ -347,3 +347,9 @@ v2.1.0 Codex-specific hardening:
 - **Natural-language usage-cap detection**: Codex/ChatGPT usage-cap errors arrive as prose, not structured codes; the driver detects them and auto-waits (preserving state) instead of treating them as a phase failure that retries into a halt (`scripts/plamen_driver.py:494`).
 - **Full first-pass artifact seeding**: Codex depth seeds the complete mandatory first-pass artifact set (`_codex_depth_artifact_checklist` / `_codex_widen_depth_output_contract`) so recon/depth stop degrading lossily, and runs a real Devil's-Advocate iteration 2.
 - **Context-exceeded no longer perma-fails**: a context-exceeded condition is recoverable rather than fatal.
+
+For the full list of Codex BETA limitations, see [codex-backend.md](codex-backend.md).
+
+---
+
+**See also**: [getting-started.md](getting-started.md) · [pipeline-phases-presentation.md](pipeline-phases-presentation.md) · [internals.md](internals.md) · [repository-structure.md](repository-structure.md) · [usage.md](usage.md) · [docs index](README.md)

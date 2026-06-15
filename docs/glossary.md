@@ -55,9 +55,20 @@ explained inline where it's used.
   when its trigger pattern is detected.
 - **Skill** — reusable methodology shipped as a markdown file
   (`SKILL.md`) under `agents/skills/`. Injected into an agent prompt
-  when the relevant flag fires.
-- **Skeptic-judge** — Thorough-mode quality gate. Skeptic argues against a
-  HIGH/CRITICAL finding, judge breaks the tie.
+  when the relevant flag fires. Three tiers exist: standard (per-language),
+  injectable, and niche — see [internals.md](internals.md).
+- **Injectable skill** — a protocol-type-specific skill that is **appended to
+  an existing agent's prompt** (it does not spawn a new agent) when recon
+  classifies the protocol as a matching type (e.g. `VAULT_ACCOUNTING` for
+  vaults, `LENDING_PROTOCOL_SECURITY` for lending). Increases the depth of an
+  existing agent rather than adding a budget slot. Contrast with niche agents,
+  which are standalone. Full list in [internals.md](internals.md).
+- **Skeptic-Judge** (a.k.a. **Skeptic-judge**) — Thorough-mode quality gate and
+  built-in false-positive filter. For each HIGH/CRITICAL verified finding a
+  Skeptic agent independently argues the OPPOSITE case (without seeing the
+  verifier's analysis); if it disagrees, a Judge agent reads both sides and
+  decides. Unresolved disagreements are tagged `UNRESOLVED` — demoted one tier
+  but kept in the report body for human review, not dropped.
 
 ## Evidence
 
@@ -123,3 +134,32 @@ explained inline where it's used.
   workers: `security_obligations.md` (obligation ledger from recon) and
   `asset_binding_matrix.md` (value-flow binding checklist). Protocol-agnostic
   — generalize across DEX, vault, lending, bridge, L1 client, etc.
+
+## Resilience & recovery
+
+- **PTY-supervised execution** — the v2.1.0 way the driver runs workers: each
+  worker (Claude, or one `codex exec` per depth job) is driven through a
+  **pseudo-terminal (PTY)** and its turn completion is inferred from artifacts
+  written to disk (the `PLAMEN_STATUS: COMPLETE` marker), not from a
+  stdout/JSON envelope. This eliminates the 0-byte-stdio "silent hang"
+  ambiguity from earlier versions. POSIX uses `pty.openpty()` + `Popen`;
+  Windows uses `winpty` via `pywinpty`. See the **PTY transport** entry above
+  and [architecture.md](architecture.md) for the implementation contract.
+- **Haltless** — a design property of the v2.1.0 driver: a finished audit is
+  never thrown away at the finish line. Late-stage phases (`report_index`,
+  verify, inventory, resume) **repair-then-degrade** rather than stopping the
+  run, and stale/corrupt checkpoints recover instead of stranding the audit.
+- **Repair-then-degrade** — the haltless recovery policy: when a late phase
+  cannot fully complete, the driver first **repairs** what it can
+  deterministically (mechanical report-index recovery, verify backfill, queue
+  manifests), and if work still remains it **degrades** — finishing the run and
+  surfacing the unfinished obligation as a flagged item rather than halting.
+- **Appendix-B flagged items** — the "human-review" obligations that
+  repair-then-degrade could not fully resolve. They are folded into a delivered
+  **Appendix B** of `AUDIT_REPORT.md` (`_build_human_review_appendix` in
+  `scripts/plamen_mechanical.py`) so the flag actually reaches the reader,
+  instead of being buried in an intermediate file the client never sees.
+- **Degraded phase** — a phase that failed (or was skipped) and was marked
+  `degraded` in the checkpoint so the pipeline could continue; downstream
+  phases handle its missing optional artifacts gracefully. A degraded sentinel
+  is cleared on a genuine resume.
