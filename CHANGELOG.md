@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Ecosystem mis-detection requiring a rerun**: startup auto-correction replaces halt-to-rerun.
 - **Regex-fragility silent-drop class**: a tolerant-extraction substrate closes over-strict ID/field parsing drops.
 - **Transient API errors**: 5xx server errors (500/502/503/504) now get 529-style backoff-retry instead of stalling a worker.
+- **Undeclared runtime dependencies**: `pydantic` and `markdown-it-py` (imported by the mechanical substrate `plamen_contracts.py` / `plamen_markdown.py`) are now declared in `requirements.txt`, so a fresh `pip install` no longer leaves the substrate unimportable.
+- **Spurious version-mismatch warning on a clean install**: the in-session command prompts hardcoded the prior version, so the mandatory version check fired a false "run git pull && plamen install" warning on a correctly-installed release.
+- **Non-existent `--dry-run`**: removed from the wizard's resume guidance (the driver has no such flag and treated it as a missing config path). `resume` and `--fresh` are retained.
+- **`cargo install` on stable rustc**: scout / cargo-fuzz / trident / rust-analyzer now install with `--locked`, so a toolchain whose stable rustc predates a dependency's latest MSRV (e.g. rustc 1.92 vs deps requiring 1.94) builds against the tool's tested lockfile instead of failing.
 ## [2.0.2] - 2026-05-20
 
 Follow-up to v2.0.1 — same surface, error-message copy edit only.
