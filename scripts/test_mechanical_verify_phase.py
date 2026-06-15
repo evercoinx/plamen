@@ -278,9 +278,12 @@ def test_run_phase_no_verify_files_short_circuits(tmp_path):
     assert (tmp_path / "mechanical_verify_manifest.json").exists()
 
 
-def test_run_phase_no_test_file_marks_skip(tmp_path):
+def test_run_phase_no_test_file_marks_skip(tmp_path, monkeypatch):
     """Verify file with no Test File field → NO_TEST_FILE status, no test runs."""
     mv = _mv()
+    # Toolchain must APPEAR available so this isolates no-test-file handling
+    # from whether `forge` is installed on the runner (it is not, on CI).
+    monkeypatch.setattr(mv.shutil, "which", lambda b: "/usr/bin/" + b)
     (tmp_path / "verify_H-1.md").write_text(
         "# Verification: H-1\n\n"
         "**Verdict**: CONFIRMED\n"

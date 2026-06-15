@@ -80,9 +80,21 @@ class ExecResult:
 
 
 def _registry_path() -> Path:
-    """Resolve language-toolchain-registry.json under ~/.plamen/rules/."""
+    """Resolve language-toolchain-registry.json.
+
+    Prefers the canonical install location (PLAMEN_HOME or ~/.plamen/rules/);
+    falls back to the copy shipped beside this module in the repo (rules/, one
+    level up from scripts/) when the canonical path is absent -- e.g. CI, or the
+    driver run directly from a checkout that isn't symlinked into ~/.plamen.
+    """
     home = Path(os.environ.get("PLAMEN_HOME", str(Path.home() / ".plamen")))
-    return home / "rules" / "language-toolchain-registry.json"
+    canonical = home / "rules" / "language-toolchain-registry.json"
+    if canonical.exists():
+        return canonical
+    repo = Path(__file__).resolve().parent.parent / "rules" / "language-toolchain-registry.json"
+    if repo.exists():
+        return repo
+    return canonical  # let _load_registry handle the missing-file fallback
 
 
 def _load_registry(custom_path: Optional[Path] = None) -> dict:
