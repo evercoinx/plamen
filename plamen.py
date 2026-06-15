@@ -1117,7 +1117,7 @@ def _anchor_cmds():
         return [f'{py} "{script}"',
                 'avm install latest',
                 'avm use latest']
-    return ['cargo install --git https://github.com/coral-xyz/anchor avm --force',
+    return ['cargo install --git https://github.com/coral-xyz/anchor avm --force --locked',
             'export PATH="$HOME/.avm/bin:$PATH" && avm install latest && avm use latest']
 
 
