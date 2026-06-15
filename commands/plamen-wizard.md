@@ -20,7 +20,7 @@ Output:
 ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═══╝
 ```
 
-**Web3 Security Auditor** v2.0.2 — Deterministic Driver
+**Web3 Security Auditor** v2.1.0 — Deterministic Driver
 
 Then run the toolchain probe:
 
@@ -230,9 +230,6 @@ Check checkpoint:  cat "{PROJECT_PATH}/.scratchpad/_v2_checkpoint.json"
 
 If the audit is interrupted (usage cap, crash, Ctrl+C), resume with:
   python3 ~/.claude/scripts/plamen_driver.py "{PROJECT_PATH}/.scratchpad/config.json"
-
-Preview remaining phases:
-  python3 ~/.claude/scripts/plamen_driver.py --dry-run "{PROJECT_PATH}/.scratchpad/config.json"
 
 Clean restart:
   python3 ~/.claude/scripts/plamen_driver.py --fresh "{PROJECT_PATH}/.scratchpad/config.json"
