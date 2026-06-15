@@ -1,5 +1,26 @@
 ﻿# Phase 1: Recon Agent (EVM pipeline)
 
+## V2 Driver-Owned Recon Contract
+
+The current V2 driver normally runs recon through Python-owned worker PTYs
+rather than a single recon coordinator. In that mode, the worker prompt is the
+authoritative execution contract:
+
+- each worker writes only its assigned `recon_*.md` shard;
+- workers do not write canonical recon files directly;
+- the driver merges shards into `recon_summary.md`, `build_status.md`, and the
+  other canonical recon handoff artifacts;
+- `build_static` / light-mode `context_static` may run bounded build setup and
+  compile-repair commands so later verification can execute PoCs;
+- recon workers must not run `forge test`, `npx hardhat test`, PoC tests,
+  Medusa, Echidna, Halmos, fuzz/invariant campaigns, Slither detector target
+  runs, or later-phase verification commands.
+
+If this file is read from a worker prompt, treat the worker prompt's Output
+Allowlist and Command Boundary as higher priority than any monolithic task
+below. The monolithic tasks remain background methodology for legacy/non-worker
+routes and for deciding what evidence categories matter.
+
 You are the Reconnaissance Agent. Your job is to gather ALL information
 needed for the security audit and write it to the scratchpad. Execute
 the recon orchestration plan and write the required handoff artifacts.
@@ -35,6 +56,15 @@ than no recon.
 3. **Write-first principle**: Before making any slow external call (web, shell), write whatever results you already have to the scratchpad file FIRST. This ensures partial results survive if the agent is killed.
 4. **No task is blocking**: If any task is stuck, skip it, document why, and move to the next. Partial recon is better than no recon.
 5. **Task-local writes are mandatory**: As soon as you finish one assigned task, write its output file immediately before moving to the next task. Do not hold multiple completed outputs in memory.
+
+## CONTEXT DELEGATION PROTOCOL
+
+Use the deterministic pre-pass artifacts as the source of truth for bulk
+enumeration. Do not reread or reproduce large generated lists unless the
+specific recon task needs a sampled correction. When context is tight, delegate
+detail to the scratchpad by writing concise, source-cited summaries in the
+assigned recon artifacts instead of carrying long code or command output in the
+conversation.
 
 ## TURN BUDGET POLICY - DRAFT-FIRST, ENRICH-LATER (MANDATORY)
 
@@ -169,6 +199,17 @@ Continue to TASK 1.
 Write build result to {SCRATCHPAD}/build_status.md
 Include: `MEDUSA_AVAILABLE: true/false` (and version if available)
 Include: `REPO_SHAPE: squashed_import` if `git rev-list --count HEAD` returns 1, otherwise `REPO_SHAPE: normal_dev`. This tells FORK_ANCESTRY whether git history analysis is useful.
+
+**MANDATORY — Chosen build root**: the audit scope dir is often source-only
+(no `foundry.toml`/`hardhat.config.js`); the real build manifest lives in a
+sibling or ancestor directory. After resolving where `forge build` / `npx
+hardhat compile` actually compiled, emit EXACTLY this line into
+`build_status.md` (the mechanical PoC executor parses it verbatim):
+
+`**Chosen build root**: ` followed by the absolute path of the directory that
+owns the build manifest, wrapped in backticks — e.g.
+`` **Chosen build root**: `/abs/path/to/contracts` ``. If no build
+environment exists at all, emit `` **Chosen build root**: `(none)` ``.
 
 ## TASK 2: Static Analysis Artifacts
 
@@ -321,6 +362,7 @@ Grep for these patterns (exclude lib/, test/, mocks/):
 | `ecrecover\|ECDSA.recover\|SignatureChecker\|isValidSignature\|EIP712\|domainSeparator\|_domainSeparatorV4\|permit(` | HAS_SIGNATURES |
 | `proxy\|upgradeable\|diamond\|delegatecall\|sstore\|sload\|assembly\s*{` | STORAGE_LAYOUT |
 | `lzReceive\|ccipReceive\|receiveWormholeMessages\|_nonblockingLzReceive\|setPeer\|setTrustedRemote\|setTrustedRemoteAddress\|onOFTReceived` | CROSS_CHAIN_MSG |
+| EVM contract SERIALIZES data for a NON-EVM destination VM: `AccountEncoder\|Borsh\|base58\|bech32\|solana\|Pubkey\|programId\|ed25519\|bytes32.*pubkey\|bytes20\(.*sender` OR a custom assembly byte encoder building a foreign account/instruction/message layout (Solana/Bitcoin/Move/Cosmos target) | NON_EVM_TARGET |
 | `_safeMint\|safeTransfer\|onERC721Received\|onERC1155Received\|tokensReceived\|onTransferReceived\|onFlashLoan\|executeOperation\|FlashCallback\|beforeSwap\|afterSwap` | OUTCOME_CALLBACK |
 | `depositFor\(\|stakeFor\(\|delegateTo\(\|mintFor\(\|withdrawFor\(\|OnBehalf\(\|claimFor\(\|harvestFor\(\|compoundFor\(` OR (`approve\(\|safeApprove\(\|increaseAllowance\(\|permit\(.*deadline` AND `multicall\|batch\|aggregate\|loop.*approve\|for.*approve`) | MULTI_STEP_OPS |
 | `IUniswapV2Router\|IUniswapV3Pool\|IUniswapV4Pool\|IBalancerVault\|IWeightedPool\|IAToken\|ILendingPool\|IPool\(aave\)\|ICToken\|IComptroller\|ICurvePool\|IStableSwap\|IChainlinkAggregator\|AggregatorV3Interface\|IStETH\|IWstETH\|IContinuousClearingAuction` (EXCLUDE: @openzeppelin generic utilities, solmate, solady " only flag when calling protocol-specific functions) | NAMED_EXTERNAL_PROTOCOL |
@@ -328,6 +370,21 @@ Grep for these patterns (exclude lib/, test/, mocks/):
 | `deadline\|claimPeriod\|default.*selection\|fallback.*assign\|getDefault\|expir` AND time-gated with fallback path | OUTCOME_DELAY |
 
 Write detected flags to {SCRATCHPAD}/detected_patterns.md
+
+**`NON_EVM_TARGET` is a MECHANICAL trigger — do NOT downgrade it on judgment.**
+Set `NON_EVM_TARGET = YES` whenever BOTH hold: (a) the codebase builds bytes via
+`abi.encode`/`abi.encodePacked` or a custom assembly/byte encoder (e.g.
+`AccountEncoder`, a Borsh/BCS packer); AND (b) that output flows into a
+cross-chain send / message / withdraw call whose destination is a confirmed
+non-EVM VM (a non-EVM chain-id constant, a Solana/Move/Cosmos/Bitcoin
+program-id or address, or base58/bech32/32-byte-pubkey handling on that path).
+You do NOT need to judge whether the encoding is correct — surfacing the surface
+is the trigger; conformance is the `CROSS_VM_SERIALIZATION_CONFORMANCE` skill's
+job downstream. Marking `NON_EVM_TARGET = NO` while an EVM-side encoder
+demonstrably feeds a non-EVM destination is a recall-losing misclassification.
+(FP guard: if the encoder output is consumed by an EVM-compatible `abi.decode`
+reader — an EVM L2/sidechain target or an on-chain re-encoding hop — it is NOT a
+non-EVM target.)
 
 ## TASK 7: Prep Artifacts
 From function_list.md, extract:
@@ -360,6 +417,14 @@ Also grep for unused struct fields (defined but never read) â†’ append to s
 Write to {SCRATCHPAD}/static_analysis.md
 
 ## TASK 9: Run Test Suite
+
+Driver-owned recon worker mode: do not execute this task. Record test-suite
+execution as deferred to verification/PoC phases after compile health is known.
+The build-static worker may only establish compile readiness and bounded build
+repair evidence.
+
+Legacy monolithic recon mode only:
+
 Detect framework and run: `forge test` or `npx hardhat test`
 If tests fail, note count and names at top of output as TEST HEALTH WARNING (Info-level signal).
 Write to {SCRATCHPAD}/test_results.md
@@ -400,7 +465,7 @@ Available templates (in ~/.claude/agents/skills/):
 
 ## BINDING MANIFEST (MANDATORY)
 
-> **CRITICAL**: This manifest BINDS pattern detection to agent spawning. The orchestrator MUST spawn an agent for every template marked `Required: YES`.
+> **CRITICAL**: This matrix binds pattern detection to later agent-planning decisions. Recon MUST NOT spawn agents and MUST NOT create any separate roster or coordination artifact. A later driver-owned phase consumes `template_recommendations.md`.
 
 After listing all recommended templates, output this binding manifest:
 
@@ -444,6 +509,7 @@ After listing all recommended templates, output this binding manifest:
 - STORAGE_LAYOUT flag detected â†’ STORAGE_LAYOUT_SAFETY **REQUIRED**
 - CROSS_CHAIN_MSG flag detected â†’ CROSS_CHAIN_MESSAGE_INTEGRITY **REQUIRED**
 - NAMED_EXTERNAL_PROTOCOL flag detected â†’ INTEGRATION_HAZARD_RESEARCH **REQUIRED** (injectable into depth-external)
+- NON_EVM_TARGET flag detected â†’ CROSS_VM_SERIALIZATION_CONFORMANCE **REQUIRED** (injectable into the cross-chain/encoding breadth agent and depth-external). Audits OUTBOUND EVM-side serialization vs the destination VM's layout (CROSS_CHAIN_MESSAGE_INTEGRITY covers inbound only).
 - MIXED_DECIMALS flag detected â†’ DIMENSIONAL_ANALYSIS **niche agent** RECOMMENDED (standalone agent, 1 budget slot)
 
 ### Injectable Skills
@@ -455,6 +521,7 @@ After listing all recommended templates, output this binding manifest:
 - If protocol_type == 'nft': Recommend NFT_PROTOCOL_SECURITY injectable (from ~/.claude/agents/skills/injectable/nft-protocol-security/SKILL.md)
 - If protocol_type == 'account_abstraction': Recommend ACCOUNT_ABSTRACTION_SECURITY injectable (from ~/.claude/agents/skills/injectable/account-abstraction-security/SKILL.md)
 - If protocol_type == 'outcome_determinism': Recommend OUTCOME_DETERMINISM injectable (from ~/.claude/agents/skills/injectable/outcome-determinism/SKILL.md)
+- If NON_EVM_TARGET flag set: Recommend CROSS_VM_SERIALIZATION_CONFORMANCE injectable (from ~/.claude/agents/skills/injectable/cross-vm-serialization-conformance/SKILL.md) — REQUIRED, inject into the cross-chain/encoding breadth agent and depth-external
 - Inject Into: See skill-index.md for merge target per injectable
 
 ### Niche Agent Binding Rules
@@ -477,11 +544,11 @@ After listing all recommended templates, output this binding manifest:
 | SPEC_COMPLIANCE_AUDIT | HAS_DOCS flag (non-empty DOCUMENTATION with testable claims) | {YES/NO} | {if YES: docs contain testable claims} |
 | DIMENSIONAL_ANALYSIS | MIXED_DECIMALS flag (mulDiv/mulWad + 1e6/1e8/decimals()/10** in scope) | {YES/NO} | {if YES: mixed-decimal fixed-point arithmetic detected " standalone DA agent} |
 
-### Manifest Summary
+### Recommendation Summary
 - **Total Required Breadth Agents**: {count of YES in skill templates}
 - **Total Required Niche Agents**: {count of YES in niche agents}
 - **Total Optional Agents**: {count of NO with recommendation}
-- **HARD GATE**: Orchestrator MUST spawn agent for each REQUIRED template AND each REQUIRED niche agent
+- **Downstream use**: later driver-owned phases consume this table; recon stops after writing `template_recommendations.md` and other recon artifacts
 ```
 
 ---

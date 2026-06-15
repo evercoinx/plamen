@@ -50,9 +50,14 @@ ADAPTIVE_DEPTH_LOOP(findings_inventory):
   // Runs AFTER semantic invariants, BEFORE depth agents. Provides concrete counterexamples
   // that depth agents can investigate (higher-quality evidence than static analysis alone).
   // Read template from: ~/.claude/prompts/evm/phase4b-invariant-fuzz.md
+  // NOTE (V2): the invariant fuzz campaign runs as a driver-scheduled depth
+  // fuzz sidecar worker, not a coordinator spawn. See
+  // prompts/evm/v2/phase4b-invariant-fuzz.md. Under V2 the Python driver
+  // schedules it (Thorough + foundry.toml), grants the build root via
+  // --add-dir, and degrade-continues (TOOL_UNAVAILABLE/COMPILATION_FAILED/
+  // TIMEOUT) without halting depth. Do NOT spawn an agent from here.
   if file_exists(PROJECT_ROOT + "/foundry.toml") and semantic_invariants_has_content:
-    spawn invariant_fuzz_agent(model="sonnet", SCRATCHPAD, PROJECT_ROOT, semantic_invariants, state_variables, function_list, contract_inventory)
-    await invariant_fuzz_agent  // violations feed into depth agent input as [FUZZ-N] findings
+    // [V2] driver-scheduled invariant fuzz worker — violations feed depth as [FUZZ-N]
     // If violations found: append to findings_inventory for depth agent consumption
     // Depth agents see [FUZZ-N] findings as concrete counterexamples to investigate
   // SKIP conditions: no foundry.toml (Hardhat-only project), empty semantic_invariants.md,
@@ -64,8 +69,16 @@ ADAPTIVE_DEPTH_LOOP(findings_inventory):
   // Runs IN PARALLEL with the Foundry invariant fuzz agent (if any). Zero depth budget cost.
   // Medusa generates its OWN standalone harness contracts - NOT Foundry-compatible.
   // Graceful degradation: if medusa not installed, skip silently (log MEDUSA_UNAVAILABLE).
+  // NOTE (V2): the Medusa campaign runs as a driver-scheduled depth fuzz
+  // sidecar worker, not a coordinator spawn. See
+  // prompts/evm/v2/phase4b-medusa-fuzz.md. The driver emits this worker only
+  // when MEDUSA_AVAILABLE == true (medusa has NO fallback); it degrade-continues
+  // without halting depth. The methodology below is retained as the canonical
+  // medusa config reference (stopOnFailedTest: false, --timeout 600, dedup) —
+  // do NOT spawn an agent from here.
   if MEDUSA_AVAILABLE and MODE == thorough and LANGUAGE == evm:
-    spawn medusa_campaign_agent(model="sonnet", prompt="
+    // [V2] driver-scheduled medusa fuzz worker — methodology reference follows:
+    medusa_worker_reference = ("
       You are the Medusa Fuzz Campaign Agent. You derive protocol-specific invariants and run Medusa stateful fuzzing.
 
       ## Your Inputs -- read ALL (each contributes different invariant types):
@@ -141,8 +154,9 @@ ADAPTIVE_DEPTH_LOOP(findings_inventory):
 
       Return: 'DONE: {N} invariants tested ({categories} categories), {V} violations found, {C}% coverage'
     ")
-    // Runs in parallel - do NOT await here, await with other fuzz agents
-    // Violations produce [MEDUSA-N] findings as counterexamples for depth agents
+    // [V2] end medusa_worker_reference. The driver-scheduled medusa worker
+    // applies this same methodology. Violations produce [MEDUSA-N] findings as
+    // counterexamples for depth agents.
 
   // â•â•â• ITERATION 1: Full coverage (ALWAYS) â•â•â•
   // Read template_recommendations.md for REQUIRED niche agents

@@ -3,7 +3,7 @@
 Execute the instructions below directly and stop. Do not spawn subagents.
 
 > **Loaded by**: The V2 driver's Phase 6a subprocess (report index generation).
-> **Model**: haiku (mechanical task - fast, cheap).
+> **Model**: sonnet — reasoning task (severity reconciliation, conservative triage, semantic consolidation, coverage audit), NOT mechanical mapping. haiku produces binary-bucket stubs on large indexes (same lesson as confidence scoring). Matches the Phase definition in `plamen_types.py`.
 > **Purpose**: Creates master index mapping internal hypothesis IDs to clean report
 > IDs. Assigns each hypothesis to exactly one tier. Performs root-cause
 > consolidation, completeness verification, and promotion coverage audit.
@@ -14,6 +14,7 @@ Execute the instructions below directly and stop. Do not spawn subagents.
 ## Your Inputs
 
 Read:
+- `{SCRATCHPAD}/obligation_ledger.json` (OPTIONAL but authoritative when present - typed driver-generated retention obligations. Active Medium+ `exact_value_binding` and `chain_upgrade_retention` rows must map to a report ID, be absorbed by a named report ID with no semantic loss, or be explicitly refuted.)
 - `{SCRATCHPAD}/verify_core.md` - **OPTIONAL but primary when present**. Both current SC and L1 pipelines normally produce this via the verification aggregate phase. When absent, enumerate `verify_*.md` files directly and derive the per-hypothesis verdicts from them. Do NOT fail the phase on its absence.
 - `{SCRATCHPAD}/rag_validation.md` (historical support / contradiction)
 - `{SCRATCHPAD}/finding_mapping.md` (hypothesis -> agent finding mapping)
@@ -47,6 +48,37 @@ needed. For Thorough mode, also read `{SCRATCHPAD}/skeptic_findings.md` and
 `{SCRATCHPAD}/skeptic_judge_decisions.md` when present. If the run produced
 legacy shard outputs, also read `{SCRATCHPAD}/judge_*.md`. These artifacts are
 the authority for HIGH/CRIT severity overrides and UNRESOLVED/PARTIAL demotions.
+
+---
+
+## Working-Set Discipline — PROCESS ONE TIER-BATCH PER TURN (MANDATORY)
+
+On a large audit, building the WHOLE Master Finding Index — all-tier STEP 1.5
+consolidation plus all-tier STEP 5/5.5 coverage — in a single turn is the
+context-collapse trigger that froze this phase for tens of minutes on large
+audits. Do NOT hold every finding's working set at once.
+
+The driver pre-partitions the coverage seed into bounded per-tier shards:
+
+- `{SCRATCHPAD}/report_index_seed_critical_high.md` (Critical + High IDs)
+- `{SCRATCHPAD}/report_index_seed_medium.md` (Medium IDs)
+- `{SCRATCHPAD}/report_index_seed_low_info.md` (Low + Informational IDs)
+
+Process the index **one tier-batch at a time**, in order Critical+High →
+Medium → Low+Info. For each tier-batch: read ONLY that tier's seed shard, run
+STEP 1.5 (consolidation) + STEP 5/5.5 (coverage) over THOSE IDs only, append
+that tier's rows to the Master Finding Index / Excluded Findings /
+Consolidation Map / `report_coverage.md`, then move on. Consolidation never
+crosses tiers (the consolidation test already requires same-severity tier), so
+batching loses nothing.
+
+Every ID in EVERY shard MUST receive exactly one disposition (report ID,
+exclusion, or consolidation-absorbed). The union of the three shards equals the
+full `{SCRATCHPAD}/report_index_coverage_seed.md`; the driver reconciles the
+merged `report_index.md` against the FULL seed afterward, so an ID that falls
+between tier-batches is mechanically detected and a retry hint names it. Record
+cross-tier chains/cross-references once in the Cross-Reference Map after all
+tiers are written.
 
 ---
 
@@ -96,7 +128,7 @@ For each hypothesis, apply this priority order:
    **CONTESTED is NOT UNRESOLVED — do not conflate them.** A verifier verdict of `CONTESTED` (found in `verify_*.md` / `verify_core.md`) is a *verifier* outcome; it is NOT a Skeptic-Judge ruling. Do NOT stamp `UNRESOLVED(...)` on a finding merely because its verifier verdict is `CONTESTED`. A `CONTESTED` finding keeps its upstream verifier severity, stays in the report body, and is written with the `[CONTESTED]` status header per report-template.md's `[VERIFIED/UNVERIFIED/CONTESTED]` format — **no tier demotion, no `UNRESOLVED` Trust Adj.** The `UNRESOLVED(original_sev)` stamp is valid ONLY when a literal `UNRESOLVED` or `PARTIAL` ruling token for that finding appears in `skeptic_judge_decisions.md`, a `skeptic_*.md`, or a `judge_*.md` file. If the run produced no Skeptic-Judge artifact at all (Light and Core modes do not run Skeptic-Judge), then `UNRESOLVED(...)` MUST NOT appear anywhere in the Master Finding Index. The driver mechanically rejects phantom `UNRESOLVED(...)` stamps and will retry this phase.
 7. **PoC-fail demotion** : If `{SCRATCHPAD}/poc_demotions.md` exists, read it. For each finding listed, apply the severity cap from the table. Record the original severity in the Trust Adj. column as `POC-FAIL(original_sev)`. These findings REMAIN in the report body at their capped severity (not excluded). The tier writer includes: *"PoC execution disproved the claimed harm — test executed but the system behaved correctly. Capped from {original} to {capped}."* **Mechanical enforcement**: The driver computes these demotions from `[POC-FAIL]` evidence tags in verify files. The Index Agent MUST NOT override, remove, or selectively skip entries in `poc_demotions.md`.
 
-8. **Speculative-Critical cap (T2-c)** : `Critical` is the highest-impact tier and must not be assigned to unproven speculation. A `Critical` severity assigned to a **chain / compound hypothesis** (`CH-*`, or any finding whose claimed impact depends on combining multiple sub-findings that are not each independently confirmed) MUST be capped at `High` UNLESS the chain itself has verifier confirmation — i.e. a `verify_*.md` for the chain (or all its constituents) with `[POC-PASS]` / `[MEDUSA-PASS]` evidence and a `VERIFIED` disposition. An unverified speculative chain is `High` at most. Critical requires EITHER (a) verifier-confirmed exploitation, OR (b) a single, directly-demonstrated fund-loss / permanent-lock mechanism in one finding. When you apply this cap, record `CHAIN-DOWNGRADE(Critical)` in the Trust Adj. column with the chain ID. The driver logs any surviving unverified Critical chain for review.
+8. **Speculative-Critical cap (T2-c)** : `Critical` is the highest-impact tier and must not be assigned to unproven speculation. A `Critical` severity assigned to a **chain / compound hypothesis** (`CH-*`, or any finding whose claimed impact depends on combining multiple sub-findings that are not each independently confirmed) MUST be capped at `High` UNLESS the chain itself has verifier confirmation — i.e. a `verify_*.md` for the chain (or all its constituents) with `[POC-PASS]` / `[MEDUSA-PASS]` evidence and a `VERIFIED` disposition. An unverified speculative chain is `High` at most. Critical requires EITHER (a) verifier-confirmed exploitation, OR (b) a single, directly-demonstrated fund-loss / permanent-lock mechanism in one finding. When you apply this cap, record `CHAIN-DOWNGRADE(Critical)` in the Trust Adj. column with the chain ID. The driver logs any surviving unverified Critical chain for review. **When the cap does NOT apply because all constituents are independently confirmed (`[POC-PASS]`/`[MEDUSA-PASS]` in each constituent `verify_*.md`), keep the `Critical` severity and set the Verification column to `VERIFIED (constituents)` — do NOT leave it as `UNVERIFIED`, which mislabels a constituent-backed chain as speculative and trips the driver's review log.**
 
 ---
 
@@ -187,11 +219,18 @@ Merge two hypotheses into ONE report finding if ALL of these are true:
 3. **Same vulnerability class**: Both are instances of the same bug pattern
 4. **Describable together**: A reader can understand all affected locations from a single description + location table
 5. **No semantic loss**: The merged finding can preserve every distinct broken invariant, branch precondition, terminal failure mechanism, verification disposition, and source ID in its title/description, locations, Consolidation Reason, or coverage ledger
+6. **Obligation retention**: If `obligation_ledger.json` contains an active Medium+ obligation for either source, the merged finding must preserve that obligation ID or exact field/chain relationship in the Consolidation Map or `report_coverage.md`. Similar-topic coverage is not enough for exact value-binding obligations.
 
 ### Do NOT Merge If
 
 - Findings are in different severity tiers
 - The root causes are genuinely different (e.g., "missing event" vs "wrong event parameters")
+- **Same location, DIFFERENT mechanism is NOT a duplicate.** Two findings at the same
+  file/function but with different root-cause mechanisms (e.g. an assembly decoder that
+  reads a field at the WRONG WIDTH/corrupts valid input vs the SAME decoder reading
+  OUT-OF-BOUNDS on short input; or a wrong-binding bug vs a missing-check bug) require
+  DIFFERENT fixes and MUST stay separate. Do not normalize the less-obvious mechanism
+  into the more-obvious adjacent one — that silently drops a true positive.
 - Merging would exceed 6 locations per finding (split into 2 findings for readability)
 - Merging would drop, blur, or overwrite a distinct branch precondition or terminal failure mechanism. If two candidates fail through different branches or end in different mechanisms, keep them separate unless the shared report finding can state both without ambiguity.
 
@@ -204,6 +243,10 @@ Merge two hypotheses into ONE report finding if ALL of these are true:
 | Missing staleness checks | "no staleness on X" + "no max staleness on Y" | "Rate provider staleness not validated" |
 | Retroactive parameter changes | "paramA retroactive" + "paramB retroactive" | "Global parameter changes retroactively affect pending state" |
 | Same-role trust findings | "ROLE can do X" + "ROLE can do Y" (same role, same trust level) | "ROLE capabilities exceed stated trust level" |
+| Same missing-guard across entry points | "fn A permissionless" + "fn B permissionless via same missing check" (one absent access/precondition guard reached through several functions) | "Missing access/precondition guard exposes <asset/action> across multiple entry points" |
+| Same primitive abused several ways | "collision via path X" + "collision via path Y" (one underlying primitive: predictable id, unchecked write, missing CEI) reached through different call paths | "<primitive> enables <impact> via multiple paths" |
+
+Note: the merge is gated by the Consolidation Test (same fix, same tier, same class, no semantic loss) — distinct branches/mechanisms still stay separate. These two rows target the common fragmentation where ONE root cause (a single absent guard, or a single abused primitive) is reported as many findings; merge them only when a single fix at the root would resolve all listed locations.
 
 ### Output
 
@@ -253,7 +296,18 @@ Example: If chain hypothesis CH-1 (now C-01) references standalone hypothesis H-
 
 ## STEP 5: Verify Completeness (MANDATORY)
 
-Cross-check: For EVERY hypothesis in hypotheses.md AND every standalone finding ([VS-*], [BLIND-*], [SE-*], [EN-*], [SLITHER-*]) in findings_inventory.md:
+Enumerate the per-tier ID set from the tier seed shards
+(`report_index_seed_critical_high.md`, `report_index_seed_medium.md`,
+`report_index_seed_low_info.md`) — one shard per tier-batch — whose union is the
+full `report_index_coverage_seed.md`. When the shards are absent, fall back to
+the full `report_index_coverage_seed.md`; when that too is absent, derive the ID
+set from `verification_queue.md` + `verify_core.md` + `finding_mapping.md`. Do
+NOT bulk-read `hypotheses.md` or `findings_inventory.md` to re-derive the ID set
+— those are 100K+ of finding prose and pulling them into one turn is the
+context-collapse trigger this phase's scope prevents.
+
+Cross-check: For EVERY ID in that bounded set (covering every hypothesis and
+every standalone finding [VS-*], [BLIND-*], [SE-*], [EN-*], [SLITHER-*]):
 - Is it assigned a report ID in the Master Finding Index above?
 - If NO and NOT marked FALSE_POSITIVE by a verifier -> ASSIGN a report ID and tier
 
@@ -269,11 +323,18 @@ or an explicit duplicate/merge already listed with the absorbing report ID.
 Before finalizing the index, produce an accounting receipt in
 `report_coverage.md`. Keep this bounded: use `verification_queue.md`,
 `verify_core.md`, `finding_mapping.md`, and the final Master Finding Index as
-the coverage sources. Do NOT bulk-read raw breadth/depth/scanner artifacts in
-this phase. Raw promotion checks are enforced mechanically by the Python gate;
-the indexer owns the reportable verification-to-report mapping.
+the coverage sources. Also read `candidate_semantic_facets.md` when present;
+it is a compact driver-extracted preservation ledger, not a raw analysis
+artifact. Do NOT bulk-read raw breadth/depth/scanner artifacts in this phase.
+Raw promotion checks are enforced mechanically by the Python gate; the indexer
+owns the reportable verification-to-report mapping.
 
 Coverage reasoning must preserve upstream semantics, not re-derive them. For each candidate, keep the broken invariant, branch precondition, terminal failure mechanism, verification disposition, and source IDs visible in the existing `Report ID / Refutation / Reason` free-text field when those details affect whether the candidate is promoted, duplicated, false-positive, or deferred. If a candidate is marked `DUPLICATE`, the reason must make clear that no distinct branch precondition or terminal mechanism was dropped; otherwise assign it a separate report ID or mark it with the correct non-duplicate status.
+
+If `obligation_ledger.json` exists, include coverage rows for active Medium+ obligations:
+- `exact_value_binding`: preserve the exact `field_a <-> field_b` relationship in the report row/reason, or cite an absorbing report ID that names both fields and the relationship.
+- `chain_upgrade_retention`: preserve the `CH-*` chain/composition impact in a report heading, a Chain Impact subsection, or an absorbing report ID.
+- Do not close an obligation with `MERGED`, `DUPLICATE`, or `APPENDIX_ONLY` unless the absorbing report ID is named and the retained reason states the exact relationship or chain impact being preserved.
 
 For each verification/finding-mapping candidate, assign one of:
 - `PROMOTED`: mapped to a report ID
@@ -297,6 +358,9 @@ For each verification/finding-mapping candidate, assign one of:
    a report ID or explicitly mark it duplicate / false positive / deferred with
    reasoning.
 5. Do not use `DUPLICATE`, `MERGED`, `APPENDIX_ONLY`, or any `DROP_*` status as a convenience status when the candidate carries a distinct broken invariant, branch precondition, terminal mechanism, verification disposition, or source ID that is not retained by the absorbing report ID and ledger reason.
+6. In Thorough mode, do NOT use `DEFERRED: mode-limited` for Medium+ candidates.
+   Thorough runs the full methodology; a Medium+ non-body decision needs a real
+   verifier/judge/refutation reason or an absorbing report ID.
 
 ---
 

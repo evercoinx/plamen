@@ -22,21 +22,28 @@ Read:
 - {SCRATCHPAD}/verify_core.md — **OPTIONAL but primary when present**. Both current SC and L1 pipelines normally produce this via the verification aggregate phase. When absent, enumerate `verify_*.md` files directly and derive the per-hypothesis verdicts from them. Do NOT fail the phase on its absence.
 - {SCRATCHPAD}/rag_validation.md (historical support / contradiction)
 - {SCRATCHPAD}/finding_mapping.md (hypothesis → agent finding mapping)
+- {SCRATCHPAD}/verification_queue.md (the bounded per-hypothesis view — coverage source)
+- {SCRATCHPAD}/severity_binding.md (driver-computed expected severity per finding)
+- {SCRATCHPAD}/report_index_coverage_seed.md (OPTIONAL but PRIMARY for completeness when present — the driver-enumerated ID list of EVERY finding/hypothesis with its source verdict, expected tier, mapped hypothesis, and dedup absorbed→survivor relation. This is the mechanical completeness backbone for STEP 5/5.5 — enumerate the full ID set from here, NOT from the raw inventory.)
+- {SCRATCHPAD}/candidate_semantic_facets.md (compact preservation ledger for merges/deferred rows)
 - {SCRATCHPAD}/contract_inventory.md (component list for report header)
-- {SCRATCHPAD}/findings_inventory.md (complete agent finding inventory)
 - {SCRATCHPAD}/recon_summary.md (audit themes and risk areas)
 - {SCRATCHPAD}/template_recommendations.md (recommended niche/analysis lanes)
+- The index is a MAPPING task over BOUNDED ledgers. `findings_inventory.md`,
+  `hypotheses.md`, and the raw `depth_*` / `blind_spot_*` / `scanner_*` /
+  `validation_sweep_*` artifacts are **fallback-only, single-finding,
+  on-demand** reads — open a single finding's block ONLY when a bounded ledger
+  leaves THAT finding ambiguous. Do NOT bulk-read `findings_inventory.md` or
+  `hypotheses.md` in full; the full inventory can be 100K+ of finding prose and
+  pulling it into one turn is the context-collapse trigger this scope prevents.
+  This is now enforced by the driver scope override.
 - If `verify_core.md` exists and already provides the needed status, do NOT open
   `finding_mapping.md`, raw depth findings, or scanner findings up front.
   Treat those as fallback-only inputs for missing detail, not default reads.
   If `verify_core.md` is absent, read `verify_*.md` files directly
   — each contains its own hypothesis ID and verdict header.
-- {SCRATCHPAD}/depth_*_findings.md (raw depth findings and chain summaries)
-- {SCRATCHPAD}/blind_spot_*_findings.md or {SCRATCHPAD}/scanner_*_findings.md (scanner findings)
-- {SCRATCHPAD}/validation_sweep_findings.md or {SCRATCHPAD}/scanner_validation_findings.md (validation findings)
 - {SCRATCHPAD}/dedup_candidate_pairs.md (OPTIONAL — pre-computed same-file finding pairs with high title overlap or shared code identifiers, produced by the depth promotion pipeline. Use these pairs as HINTS for Step 1.5 consolidation — each pair is a candidate for merging, not a mandate.)
 - {SCRATCHPAD}/poc_demotions.md (OPTIONAL — mechanically-computed severity caps for findings where PoC execution disproved the claimed harm. If present, apply caps in STEP 1 rule 7.)
-- {SCRATCHPAD}/poc_demotion_carveouts.md (OPTIONAL — v2.x Fix 4 carveouts: when the demoted hypothesis absorbed multiple constituents and the verifier only tested ONE constituent's claim well, this file lists the spared constituents that should be split into separate report rows at their original severity. Apply in STEP 1.5 consolidation: emit each spared constituent as a standalone report finding using its original severity from findings_inventory.md, with a note "Verifier tested sibling constituent — this finding's claim was not tested.")
 
 Forbidden inputs:
 - Do NOT read `{SCRATCHPAD}/report_index.md`, `{SCRATCHPAD}/report_coverage.md`,
@@ -47,6 +54,37 @@ Forbidden inputs:
 
 Verification verdicts from orchestrator:
 {PASTE_VERDICTS}
+
+## Working-Set Discipline — PROCESS ONE TIER-BATCH PER TURN (MANDATORY)
+
+On a large audit, building the WHOLE Master Finding Index — all-tier STEP 1.5
+consolidation plus all-tier STEP 5/5.5 coverage — in a single turn is the
+context-collapse trigger that has frozen this phase for tens of minutes. Do NOT
+hold every finding's working set at once.
+
+The driver pre-partitions the coverage seed into bounded per-tier shards:
+
+- `report_index_seed_critical_high.md` (Critical + High IDs)
+- `report_index_seed_medium.md` (Medium IDs)
+- `report_index_seed_low_info.md` (Low + Informational IDs)
+
+Process the index **one tier-batch at a time**, in this order: Critical+High →
+Medium → Low+Info. For each tier-batch:
+
+1. Read ONLY that tier's seed shard (a small, bounded ID list).
+2. Run STEP 1.5 (root-cause consolidation) and STEP 5/5.5 (coverage) over
+   THOSE IDs only. Consolidation never crosses tiers (the consolidation test
+   already requires same-severity tier), so per-tier batching loses nothing.
+3. Append that tier's rows to the Master Finding Index, Excluded Findings,
+   Consolidation Map, and `report_coverage.md`, then move to the next tier.
+
+Every ID in EVERY shard MUST receive exactly one disposition (a report ID, an
+exclusion row, or a consolidation-absorbed entry). The union of the three
+shards equals the full `report_index_coverage_seed.md`; the driver reconciles
+the merged `report_index.md` against the FULL seed after you finish, so an ID
+that falls between tier-batches is mechanically detected and a retry hint names
+it. Cross-tier chains/cross-references are recorded once in the Cross-Reference
+Map after all tiers are written.
 
 ## Your Task
 
@@ -70,17 +108,12 @@ For every Master Finding Index row:
    contain one canonical reason with the original severity:
    - `TRUSTED-ACTOR(original_sev)`
    - `UNRESOLVED(original_sev)` or `PARTIAL(original_sev)`
+   - `SEVERITY_OVERRIDE(original_sev)` only when supplied by the
+     driver-only `_severity_override_ledger.json`
    - `POC-FAIL(original_sev)`
    - `PROVEN(original_sev)` only when `PROVEN_ONLY: true`
    - `CHAIN-UPGRADE(original_sev)` / `CHAIN-DOWNGRADE(original_sev)` with the
      chain ID and enabling relation
-   - `SEVERITY_OVERRIDE(upstream=<sev>, llm=<sev>, reason=...)` —
-     **DRIVER-ONLY token, v2.0.7**. Emitted automatically by
-     `_repair_report_index_severity_provenance` when the LLM's severity
-     is below upstream AND Trust Adj. was left empty. The Index Agent
-     MUST NOT emit this token manually — the driver's authenticity gate
-     will reject any `SEVERITY_OVERRIDE(...)` stamp that lacks a
-     matching record in `_severity_override_ledger.json`.
 5. A bare `-` / `—` Trust Adj. is valid only when final severity equals
    upstream severity.
 6. If no canonical adjustment applies, restore the upstream severity and
@@ -98,6 +131,10 @@ For each hypothesis, apply this priority order:
 6. **UNRESOLVED/PARTIAL**: Treat both tokens from `skeptic_*.md` or `judge_*.md` as unresolved verifier disagreement. Apply -1 tier downgrade (floor: Low), record `UNRESOLVED(original_sev)`, keep the finding in the body, and have the writer tag it `[UNRESOLVED - needs human review]`. Placing it in Excluded Findings is a workflow violation.
 7. **Skeptic-judge DOWNGRADE**: If `skeptic_judge_decisions.md` exists, for each row where Decision is `DOWNGRADE`, cap the finding's severity at the Final Severity column value. Record `SKEPTIC-DOWNGRADE(original_sev)` in Trust Adj. Do NOT apply to rows with Decision KEEP, UNRESOLVED, or PARTIAL (those are handled by rule 6). DOWNGRADE is deliberate severity calibration by the skeptic-judge — it takes priority over matrix defaults but yields to PoC mechanical evidence (rule 8).
 8. **PoC-fail caps**: If `poc_demotions.md` exists, apply each listed cap, record `POC-FAIL(original_sev)`, and keep the finding in the body. The driver computes this file from `[POC-FAIL]` evidence; the Index Agent must not override or skip entries.
+9. **Driver-only severity overrides**: If `_severity_override_ledger.json`
+   exists, apply only the listed override rows and record
+   `SEVERITY_OVERRIDE(original_sev)` in Trust Adj. Agents must not invent this
+   token without the driver-only ledger.
 
 ### STEP 1.25: Client-Worthiness Triage (CONSERVATIVE)
 
@@ -163,6 +200,20 @@ Before assigning report IDs, consolidate hypotheses that share the same root cau
 - Merging would exceed 6 locations per finding (split into 2 findings for readability)
 - Merging would drop, blur, or overwrite a distinct branch precondition or terminal mechanism. Different branches/mechanisms stay separate unless a shared finding can state both clearly.
 
+**Chain carve-out (EXCEPTION to the tier rule)**: When one finding is a chain
+hypothesis (its constituent set is recorded in `chain_hypotheses.md` /
+`finding_mapping.md`) and the other is its sole constituent — OR its two
+constituents share file+function and the same root cause — AND the chain
+carries NO Combined-Impact justification (`Severity-Upgrade-Justified: NO`,
+missing line, or `Combined-Impact: NONE`), then **MERGE the chain INTO the
+constituent at the constituent severity** and record `CHAIN-RESTATEMENT` in the
+Consolidation Reason. A tier difference created purely by an unjustified chain
+upgrade is NOT a reason to keep them separate. Set the merged row's `Trust Adj.`
+to `CHAIN-DOWNGRADE(<chain's original severity>)` so the trail is auditable and
+a reviewer can re-promote. A chain that DOES carry a justified Combined-Impact
+is a genuine compound finding — keep it separate and record
+`CHAIN-UPGRADE(<highest constituent severity>)` with the chain ID instead.
+
 **Common consolidation patterns**: missing events, invalid admin setter values, missing staleness checks, retroactive parameter changes, and same-role trust findings when severity/root cause/fix match.
 
 **Output**: For each consolidation, record:
@@ -203,8 +254,17 @@ Example: If chain hypothesis CH-1 (now C-01) references standalone hypothesis H-
 
 ### STEP 5: Verify Completeness (MANDATORY)
 
-Cross-check: For EVERY hypothesis in hypotheses.md AND every standalone finding
-([VS-*], [BLIND-*], [SE-*], [EN-*], [SLITHER-*]) in findings_inventory.md:
+Enumerate the per-tier ID set from the tier seed shards
+(`report_index_seed_critical_high.md`, `report_index_seed_medium.md`,
+`report_index_seed_low_info.md`) — one shard per tier-batch — whose union is
+the full `report_index_coverage_seed.md`. When the shards are absent, fall back
+to the full `report_index_coverage_seed.md`; when that too is absent, derive the
+full ID set from `verification_queue.md` + `verify_core.md` +
+`finding_mapping.md` — these bounded sources contain every hypothesis and every
+standalone finding ([VS-*], [BLIND-*], [SE-*], [EN-*], [SLITHER-*]) ID. Do NOT
+re-derive the ID set by bulk-reading `hypotheses.md` or `findings_inventory.md`.
+
+Cross-check: For EVERY ID in that bounded set:
 - Is it assigned a report ID in the Master Finding Index above?
 - If NO and NOT marked FALSE_POSITIVE by a verifier → ASSIGN a report ID and tier
 

@@ -237,7 +237,8 @@ def test_prepass_solana_triggers_sec3(tmp_path):
     scratch = tmp_path / ".scratchpad"
     proj = _mkproj(tmp_path, lang="solana")
     config = {"scratchpad": str(scratch), "project_root": str(proj),
-              "language": "solana", "pipeline": "sc"}
+              "language": "solana", "pipeline": "sc",
+              "prepass_external_scanners": True}  # RECON-1: exercise opt-in startup scan
 
     with mock.patch("recon_prepass._run_sec3_xray", return_value="SKIPPED:test") as m:
         with mock.patch("recon_prepass._run_opengrep_scan", return_value="SKIPPED:test"):
@@ -276,7 +277,8 @@ def test_prepass_sec3_failure_does_not_crash(tmp_path):
     scratch = tmp_path / ".scratchpad"
     proj = _mkproj(tmp_path, lang="solana")
     config = {"scratchpad": str(scratch), "project_root": str(proj),
-              "language": "solana", "pipeline": "sc"}
+              "language": "solana", "pipeline": "sc",
+              "prepass_external_scanners": True}  # RECON-1: exercise opt-in startup scan
 
     def boom():
         raise RuntimeError("Docker exploded")

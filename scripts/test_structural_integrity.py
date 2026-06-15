@@ -199,6 +199,31 @@ def test_no_orphan_star_import_consumers():
     source = driver_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
 
+    # A name is "defined locally" if it is bound ANYWHERE in the driver, not
+    # just at module top level: nested function defs (e.g. a `_real()` helper
+    # defined inside another function) and local variable bindings (e.g.
+    # `restore = getattr(...)` then `restore()`) are local callables, not
+    # orphan star-import consumers. Including them keeps this guard focused on
+    # its real target: names that exist ONLY via `import *` and are in no
+    # sub-module __all__.
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            driver_defined.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    driver_defined.add(tgt.id)
+                elif isinstance(tgt, (ast.Tuple, ast.List)):
+                    for elt in tgt.elts:
+                        if isinstance(elt, ast.Name):
+                            driver_defined.add(elt.id)
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and isinstance(node.target, ast.Name):
+            driver_defined.add(node.target.id)
+        elif isinstance(node, (ast.For, ast.comprehension)):
+            tgt = node.target
+            if isinstance(tgt, ast.Name):
+                driver_defined.add(tgt.id)
+
     # Find all bare function calls in the driver (name calls, not attr calls)
     called_names: set[str] = set()
     for node in ast.walk(tree):
@@ -812,6 +837,14 @@ def test_display_plain_output_for_captured_shell():
 # Runner (for standalone execution outside pytest)
 # ═══════════════════════════════════════════════════════════════════
 
+def test_display_spinner_cadence_is_smooth():
+    import importlib
+
+    d = importlib.import_module("plamen_display")
+
+    assert d._SPINNER_REDRAW_INTERVAL_S <= 0.5
+
+
 ALL_TESTS = [
     # Class 1: Export completeness
     test_all_defined_functions_are_exported,
@@ -840,6 +873,7 @@ ALL_TESTS = [
     test_build_phase_prompt_does_not_crash,
     test_codex_top_level_route_uses_deterministic_driver,
     test_display_plain_output_for_captured_shell,
+    test_display_spinner_cadence_is_smooth,
 ]
 
 

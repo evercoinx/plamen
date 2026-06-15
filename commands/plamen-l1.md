@@ -99,7 +99,7 @@ echo -n "  Targets: " && \
 Missing `scip-go`, `rust-analyzer`, or `ast-grep` is a **hard blocker** — L1 mode requires the primitive layer. Stop and instruct the user to install:
 
 ```
-scip-go:       go install github.com/sourcegraph/scip-go/cmd/scip-go@latest
+scip-go:       go install github.com/scip-code/scip-go/cmd/scip-go@latest
 rust-analyzer: rustup component add rust-analyzer  (or platform binary)
 ast-grep:      cargo install ast-grep --locked     (or brew install ast-grep)
 opengrep:      https://github.com/opengrep/opengrep/releases  (optional but recommended)
@@ -445,7 +445,7 @@ Soft cap: ≤3 for T1 scope. Log to `violations.md` if exceeded.
 
 ### 3c. Spawn
 
-For each layer, spawn ONE `general-purpose` Opus 4.6 agent (`model="claude-opus-4-6"`). Include the layer's skill set, paths to primitive artifacts, and the §WRITE-THEN-VERIFY directive. End with SCOPE CONTAINMENT.
+For each layer, spawn ONE `general-purpose` Opus 4.8 agent (`model="claude-opus-4-8"`). Include the layer's skill set, paths to primitive artifacts, and the §WRITE-THEN-VERIFY directive. End with SCOPE CONTAINMENT.
 
 After each agent returns, verify the file exists per §WRITE-THEN-VERIFY (`ls -lh` + `wc -l`). If missing, re-prompt for text fallback.
 
@@ -702,9 +702,9 @@ Spawn 5 depth agents in ONE message (all parallel), each as `general-purpose`:
 
 | Agent | Model | Reads (from `scip/`) | Skills |
 |---|---|---|---|
-| `depth-consensus-invariant` | claude-opus-4-6 | `call_graph_consensus.md`, `repo_map.md`, `xref_map.md` | consensus-safety, consensus-math-correctness (if difficulty / reward / EMA math detected), fork-choice, light-client, BLS, validator-lifecycle, hardfork, data-availability-enforcement (if `DATA_AVAILABILITY=true`) |
-| `depth-network-surface` | claude-opus-4-6 | `call_graph_p2p.md`, `concurrency_inventory.md`, `panic_sites.md` | p2p-dos, mempool, RPC |
-| `depth-state-trace` | claude-opus-4-6 | `call_graph_execution.md`, `type_hierarchy.md` | state-sync-pruning, execution-client-hardening |
+| `depth-consensus-invariant` | claude-opus-4-8 | `call_graph_consensus.md`, `repo_map.md`, `xref_map.md` | consensus-safety, consensus-math-correctness (if difficulty / reward / EMA math detected), fork-choice, light-client, BLS, validator-lifecycle, hardfork, data-availability-enforcement (if `DATA_AVAILABILITY=true`) |
+| `depth-network-surface` | claude-opus-4-8 | `call_graph_p2p.md`, `concurrency_inventory.md`, `panic_sites.md` | p2p-dos, mempool, RPC |
+| `depth-state-trace` | claude-opus-4-8 | `call_graph_execution.md`, `type_hierarchy.md` | state-sync-pruning, execution-client-hardening |
 | `depth-external` | sonnet | `xref_map.md`, `type_hierarchy.md` | dependency-audit-nodeclient, cross-environment-semantic-drift |
 | `depth-edge-case` | sonnet | `repo_map.md`, `xref_map.md` | zero-state, boundary checks |
 

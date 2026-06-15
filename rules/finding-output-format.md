@@ -14,7 +14,7 @@ Every finding MUST use this format:
 **Step Execution**: ✓1,2,3,5 | ✗4(N/A) | ?6,7(uncertain)
 **Rules Applied**: [R4:✓, R5:✓, R6:✗(no role), R8:✗(single-step), R10:✓]
 **Depth Evidence** (depth agents only): [BOUNDARY:tested X=0,MAX], [VARIATION:param changed from A→B], [TRACE:followed to revert at L120]
-**Preferred Tag** (verifier-friendly): [POC-PASS] / [POC-FAIL] / [CODE-TRACE] / [FUZZ-PASS] / [LSP-TRACE] etc. — the single dominant evidence tag for this finding. Aliases the parser also accepts: `Evidence Tag`, `Evidence Tags`, `Evidence` (any one of these labels is fine; pick ONE per finding).
+**Preferred Tag**: CODE-TRACE / POC-PASS / POC-FAIL / FUZZ-PASS / MEDUSA-PASS / CONTESTED
 **Severity**: Critical/High/Medium/Low/Informational
 **Location**: SourceFile:LineN
 **Description**: What's wrong
@@ -46,6 +46,7 @@ gate requirements unless validators are updated later.
 **Terminal Mechanism** (OPTIONAL): The final mechanism that creates, blocks, or resolves the candidate issue.
 **Refutation Basis** (OPTIONAL): The concrete reason a candidate is REFUTED or downgraded, when that reasoning should be preserved.
 **Composition Candidates** (OPTIONAL): Related conditions, findings, or mechanisms that may compose with this issue in later analysis.
+**Discovery Steer** (OPTIONAL): Compact hint for later pairing, such as shared variable/function/branch/effect or candidate ID; not proof and not a required field.
 ```
 
 Use these fields sparingly for semantic invariant, branch feasibility,

@@ -4,14 +4,25 @@
 Renders the startup UI in the user's real terminal, collects inputs
 via arrow-key selection menus, then hands off to Claude Code.
 """
-import sys, os, shutil, glob, subprocess, re, sqlite3
+import sys, os, shutil, glob, subprocess, re, sqlite3, platform
 
-# Windows: enable VT100 + force UTF-8 stdout before anything loads
-if sys.platform == "win32":
+# Windows: enable VT100 + force UTF-8 stdout before anything loads.
+# Guard against pytest/captured/non-buffer streams: rewrapping a capture object's
+# buffer detaches it and crashes pytest's teardown ("I/O operation on closed
+# file"). Only rewrap a real, buffer-backed, not-already-UTF-8 stream, never under
+# pytest. This keeps the terminal UI correct while letting plamen.py be imported
+# in tests cleanly.
+if sys.platform == "win32" and "pytest" not in sys.modules:
     import io
     os.system("")
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+    for _name in ("stdout", "stderr"):
+        _s = getattr(sys, _name, None)
+        _buf = getattr(_s, "buffer", None)
+        if _buf is not None and (getattr(_s, "encoding", "") or "").lower().replace("-", "") != "utf8":
+            try:
+                setattr(sys, _name, io.TextIOWrapper(_buf, encoding="utf-8"))
+            except Exception:
+                pass
 
 # ── Bootstrap: auto-install core deps on first run ──────────
 _BREAK_SYSTEM_PACKAGES_NOTICE_SHOWN = False
@@ -86,6 +97,22 @@ from InquirerPy import inquirer
 from InquirerPy.separator import Separator
 from InquirerPy.utils import InquirerPyStyle
 
+def _drain_stdin():
+    """Flush buffered keystrokes so a stray Enter from a prior prompt or
+    from scrolling output does not auto-submit the next interactive prompt.
+    Fixes the chained-prompt input-bleed where a checkbox returned [] before
+    the user could interact."""
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            while msvcrt.kbhit():
+                msvcrt.getwch()
+        else:
+            import termios
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
+
 # ── Paths ───────────────────────────────────────────────────
 # PLAMEN_HOME: where the Plamen repo actually lives (resolves through symlinks)
 # CLAUDE_HOME: where Claude Code reads config from (always ~/.claude)
@@ -119,9 +146,14 @@ def _check_claude_md_version():
     if marker not in content:
         return  # no injection found
     injected = content[content.index(marker):]
-    # Extract version from "# Plamen - Security Auditor (vX.Y.Z)"
+    # Extract the first "(vX.Y.Z)" version tag from the injected block. The
+    # injected header is version-line-agnostic: the current layout carries the
+    # version on line 4 ("...autonomous Web3 security auditing agent (v2.1.0).")
+    # rather than on the "Security Auditor" title line, so we scan the whole
+    # injected block for a "(vMAJOR.MINOR.PATCH)" tag instead of anchoring to a
+    # specific surrounding phrase.
     import re
-    m = re.search(r"Security Auditor \(v([0-9]+\.[0-9]+\.[0-9]+)\)", injected)
+    m = re.search(r"\(v(\d+\.\d+\.\d+)\)", injected)
     if not m:
         return
     injected_ver = m.group(1)
@@ -358,7 +390,7 @@ def _wizard_model_summary(backend: str, mode: str = "") -> str:
         return f"Codex CLI / {opus}, {sonnet}, {haiku_label}"
     if mode == "light":
         return "Claude Code / sonnet"
-    opus = os.environ.get("PLAMEN_OPUS_MODEL", "claude-opus-4-6").strip()
+    opus = os.environ.get("PLAMEN_OPUS_MODEL", "claude-opus-4-8").strip()
     return f"Claude Code / {opus}, sonnet, haiku"
 
 
@@ -556,13 +588,15 @@ def check_dependencies() -> bool:
             ("anvil",   _find_bin("anvil", ["~/.foundry/bin"])),
             ("cast",    _find_bin("cast", ["~/.foundry/bin"])),
             ("slither", _find_bin("slither") or _find_bin("slither-mcp")),
-            ("medusa",  _find_bin("medusa", ["~/go/bin"])),
+            # `go install` honors GOBIN/GOPATH — resolve the real bin dir so the
+            # re-check doesn't report medusa missing when it landed off ~/go/bin.
+            ("medusa",  _find_bin("medusa", _go_medusa_paths())),
         ]),
         ("Solana", [
             ("solana",  _find_bin("solana", ["~/.local/share/solana/install/active_release/bin"])),
             ("anchor",  _find_bin("anchor", ["~/.avm/bin"])),
             ("cargo",   _find_bin("cargo-build-sbf") or _find_bin("cargo")),
-            ("trident", _find_bin("trident")),
+            ("trident", _find_bin("trident", _CARGO_PATHS)),
             ("scout",   _find_bin("cargo-scout-audit", _CARGO_PATHS)),
         ]),
         ("Move", [
@@ -577,6 +611,7 @@ def check_dependencies() -> bool:
                                               "C:/Program Files (x86)/Stellar CLI",
                                               "C:/Program Files/Stellar CLI"])),
             ("scout",   _find_bin("cargo-scout-audit", ["~/.cargo/bin"])),
+            ("cargo-fuzz", _find_bin("cargo-fuzz", _CARGO_PATHS)),
         ]),
         ("L1 (Go)", [
             ("go",       _find_bin("go", _GO_PATHS)),
@@ -591,6 +626,7 @@ def check_dependencies() -> bool:
             ("ast-grep",       _find_bin("ast-grep", _CARGO_PATHS + (
                 ["/opt/homebrew/bin", "/usr/local/bin"] if sys.platform == "darwin" else []
             )) or _find_bin("sg", _CARGO_PATHS)),
+            ("cargo-fuzz",     _find_bin("cargo-fuzz", _CARGO_PATHS)),
         ]),
     ]
 
@@ -758,14 +794,86 @@ def _has_winget() -> bool:
     return sys.platform == "win32" and bool(shutil.which("winget"))
 
 
+def _has_c_compiler() -> bool:
+    """Probe for a working C compiler on PATH.
+
+    medusa (and any cgo build) needs a C toolchain at `go install` time; the Go
+    tarball installer guards curl/tar but nothing guards `cc`, so without this
+    `go install medusa` fails with a raw linker/exec error. On Windows MSVC
+    exposes `cl`, MinGW exposes `gcc`; Unix uses `cc`/`gcc`/`clang`.
+    """
+    candidates = ["cc", "gcc", "clang"]
+    if sys.platform == "win32":
+        candidates = ["cl", "gcc", "clang", "cc"]
+    return any(shutil.which(c) for c in candidates)
+
+
+def _c_compiler_install_cmds():
+    """No reliable cross-platform auto-install for a C toolchain.
+
+    Returning [] makes _ensure_prereq surface the manual-install guidance with a
+    clear reason instead of letting `go install medusa` fail opaquely.
+    """
+    return []
+
+
 # ── Prerequisite installers (auto-installed when needed) ────
 
 _FOUNDRY_PATHS = ["~/.foundry/bin"]
 _SOLANA_PATHS = ["~/.local/share/solana/install/active_release/bin"]
 _AVM_PATHS = ["~/.avm/bin"]
 _CARGO_PATHS = ["~/.cargo/bin"]
-_GO_PATHS = ["~/go/bin", "/usr/local/go/bin",
+_GO_PATHS = ["~/.local/go/bin", "~/go/bin", "/usr/local/go/bin",
              "/c/Program Files/Go/bin", "C:/Program Files/Go/bin"]
+
+
+_GO_BIN_DIR_CACHE = []  # memo box: [] = unresolved, [val] = resolved (val may be "")
+
+
+def _go_bin_dir() -> str:
+    """Resolve the directory `go install` drops binaries into.
+
+    `go install` honors GOBIN, then GOPATH/bin, defaulting to ~/go/bin. A dev
+    box or CI with GOPATH/GOBIN exported elsewhere lands binaries (e.g. medusa,
+    scip-go) off the hardcoded ~/go/bin search path, so the post-install
+    re-check and PATH-persist step report the tool missing and the fuzz/scan
+    phase silently degrades. Query `go env` to find the real dir.
+
+    Memoized: the `go env` subprocess runs at most once per process. Call it
+    lazily (never at module import) so phase imports stay subprocess-free.
+    Returns the resolved bin dir or "" if `go` is absent.
+    """
+    if _GO_BIN_DIR_CACHE:
+        return _GO_BIN_DIR_CACHE[0]
+    result = ""
+    go = _find_bin("go", _GO_PATHS)
+    if go:
+        try:
+            gobin = subprocess.run(
+                [go, "env", "GOBIN"], capture_output=True, text=True, timeout=15
+            ).stdout.strip()
+            gopath = subprocess.run(
+                [go, "env", "GOPATH"], capture_output=True, text=True, timeout=15
+            ).stdout.strip()
+            if gobin:
+                result = gobin
+            elif gopath:
+                result = os.path.join(gopath, "bin")
+            else:
+                result = os.path.expanduser("~/go/bin")
+        except (subprocess.SubprocessError, OSError):
+            result = os.path.expanduser("~/go/bin")
+    _GO_BIN_DIR_CACHE.append(result)
+    return result
+
+
+def _go_medusa_paths() -> list:
+    """Search/persist paths for medusa: the real `go install` bin dir first,
+    then the full static _GO_PATHS fallback list. Lazy — resolved at call time,
+    never at module import."""
+    d = _go_bin_dir()
+    return ([d] if d else []) + _GO_PATHS
+
 
 def _rust_install_cmds():
     if sys.platform == "win32":
@@ -778,12 +886,73 @@ def _rust_install_cmds():
     return ['curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y']
 
 
+_GO_TARBALL_VERSION = "1.23.4"
+
+
+def _go_unix_tarball_cmds(goos):
+    """Install Go on a Unix OS via the official tarball.
+
+    `goos` is the go.dev download platform token ("linux" or "darwin").
+    Prefers a root-free install into a user-writable prefix (~/.local/go,
+    whose bin dir is on _GO_PATHS) so no sudo is required. Only when running
+    as root does it write the system-wide /usr/local/go path documented at
+    go.dev/doc/install. Returns [] when no usable mechanism exists (no bash,
+    or curl/tar missing) so the caller shows the prereq URL with a clear
+    reason instead of failing opaquely mid-command.
+    """
+    if not _has_bash():
+        return []
+    # The tarball install chains curl (download) and tar (extract). On a
+    # minimal image bash can exist while curl or tar is absent; returning []
+    # here makes _ensure_prereq surface the manual go.dev/doc/install URL with
+    # a clear "prerequisite missing" reason instead of an opaque
+    # "curl: not found" that silently blocks medusa + scip-go.
+    if not shutil.which("curl") or not shutil.which("tar"):
+        return []
+    arch = "arm64" if platform.machine().lower() in ("aarch64", "arm64") else "amd64"
+    tarball = f"go{_GO_TARBALL_VERSION}.{goos}-{arch}.tar.gz"
+    url = f"https://go.dev/dl/{tarball}"
+
+    is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    if is_root:
+        # Running as root: /usr/local is writable directly, no sudo needed.
+        return [
+            f'curl -fsSL "{url}" -o /tmp/{tarball} '
+            f'&& rm -rf /usr/local/go '
+            f'&& tar -C /usr/local -xzf /tmp/{tarball} '
+            f'&& rm -f /tmp/{tarball}'
+        ]
+
+    # Non-root: install into a user-writable prefix so no sudo is required.
+    # ~/.local/go holds the SDK; ~/.local/go/bin is already on _GO_PATHS.
+    # `sudo` is intentionally NOT used here — it can hang on a password
+    # prompt with no controlling terminal, or fail outright on boxes with
+    # no sudo / a deny-by-policy sudoers, silently breaking medusa + scip-go.
+    return [
+        'mkdir -p "$HOME/.local" '
+        f'&& curl -fsSL "{url}" -o /tmp/{tarball} '
+        '&& rm -rf "$HOME/.local/go" '
+        f'&& tar -C "$HOME/.local" -xzf /tmp/{tarball} '
+        f'&& rm -f /tmp/{tarball}'
+    ]
+
+
 def _go_install_cmds():
-    if sys.platform == "win32" and _has_winget():
-        return ['winget install --id GoLang.Go -e --accept-source-agreements'
-                ' --accept-package-agreements']
-    if sys.platform == "darwin" and _has_brew():
-        return ['brew install go']
+    if sys.platform == "win32":
+        if _has_winget():
+            return ['winget install --id GoLang.Go -e --accept-source-agreements'
+                    ' --accept-package-agreements']
+        return []  # no winget — manual, show link
+    if sys.platform == "darwin":
+        if _has_brew():
+            return ['brew install go']
+        # No Homebrew: fall back to the official darwin tarball into
+        # ~/.local/go (root-free), mirroring the Linux path. Without this a
+        # brew-less Mac returns [] and the `go` prereq is unsatisfiable, so
+        # medusa (EVM) and scip-go (L1 Go) silently never install.
+        return _go_unix_tarball_cmds("darwin")
+    if sys.platform.startswith("linux"):
+        return _go_unix_tarball_cmds("linux")
     return []  # manual — show link
 
 
@@ -854,6 +1023,14 @@ _PREREQ_INSTALLERS = {
         "est": "~30s",
         "url": "https://slproweb.com/products/Win32OpenSSL.html",
     },
+    "cc": {
+        "check": _has_c_compiler,
+        "cmds_fn": _c_compiler_install_cmds,
+        "paths": [],
+        "label": "C compiler (build-essential / Xcode CLT / MSVC build tools)",
+        "est": "manual",
+        "url": "https://go.dev/wiki/cgo (medusa needs cgo; install gcc/clang or MSVC build tools)",
+    },
 }
 
 
@@ -908,13 +1085,15 @@ def _ensure_prereq(prereq_name: str, w) -> bool:
 
 
 def _foundry_cmds():
+    if sys.platform == "win32":
+        # Prefer the official Windows PowerShell installer even when Git Bash is
+        # present — Foundry's installer + foundryup are unreliable under Git Bash
+        # on Windows (path mangling, foundryup expecting a Unix env).
+        return ['powershell -Command "irm https://foundry.paradigm.xyz | iex"',
+                'foundryup']
     if _has_bash():
         return ['curl -L https://foundry.paradigm.xyz | bash',
                 'export PATH="$HOME/.foundry/bin:$PATH" && foundryup']
-    if sys.platform == "win32":
-        # PowerShell variant for Windows without bash
-        return ['powershell -Command "irm https://foundry.paradigm.xyz | iex"',
-                'foundryup']
     return ['curl -L https://foundry.paradigm.xyz | bash',
             'export PATH="$HOME/.foundry/bin:$PATH" && foundryup']
 
@@ -923,7 +1102,8 @@ def _solana_cmds():
     if sys.platform == "win32":
         script = os.path.join(PLAMEN_HOME,
                               "_solana_installer.py").replace('\\', '/')
-        return [f'python "{script}"']
+        py = _python_bin()
+        return [f'{py} "{script}"']
     return ['sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"']
 
 
@@ -933,7 +1113,8 @@ def _anchor_cmds():
         # AVM downloads prebuilt anchor binaries since v0.31.0
         script = os.path.join(PLAMEN_HOME,
                               "_avm_installer.py").replace('\\', '/')
-        return [f'python "{script}"',
+        py = _python_bin()
+        return [f'{py} "{script}"',
                 'avm install latest',
                 'avm use latest']
     return ['cargo install --git https://github.com/coral-xyz/anchor avm --force',
@@ -960,7 +1141,8 @@ def _sui_cmds():
         # No bash/sh needed — works in cmd.exe and PowerShell
         script = os.path.join(PLAMEN_HOME,
                               "_sui_installer.py").replace('\\', '/')
-        return [f'python "{script}"',
+        py = _python_bin()
+        return [f'{py} "{script}"',
                 'echo y | suiup install sui@testnet',
                 'suiup default set sui']
     # Unix/macOS: bash script works natively
@@ -996,10 +1178,35 @@ def _scip_go_cmds():
 
 
 def _opengrep_cmds():
+    # On Windows, the opengrep install.sh drops the binary in ~/.local/bin,
+    # which is generally NOT on the persistent User PATH and is not in the
+    # detection paths used here — so a Git-Bash install "succeeds" but the
+    # binary stays undetectable. Prefer the pip-installable semgrep (which is
+    # opengrep-compatible and lands on a pip scripts dir already covered by
+    # detection) before the Git-Bash path on win32.
+    if sys.platform == "win32":
+        return [' '.join(_pip_install_args()) + ' semgrep']
     if _has_bash():
         return ['curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash']
     # fallback: pip-installable semgrep works on all platforms (opengrep-compatible)
     return [' '.join(_pip_install_args()) + ' semgrep']
+
+
+def _cargo_fuzz_cmds():
+    """Install cargo-fuzz (libFuzzer harness runner for Rust).
+
+    cargo-fuzz requires a nightly toolchain to run `cargo +nightly fuzz`,
+    so we install the nightly toolchain first, then the cargo plugin itself.
+    Gates Soroban + L1-Rust Thorough-mode fuzzing. When rustup is absent
+    (e.g. Homebrew Rust), skip the toolchain step — `cargo install` still
+    works but `cargo +nightly fuzz` will require a nightly toolchain the
+    user must provide separately.
+    """
+    cmds = []
+    if shutil.which("rustup"):
+        cmds.append('rustup toolchain install nightly')
+    cmds.append('cargo install cargo-fuzz')
+    return cmds
 
 
 def _rust_analyzer_cmds():
@@ -1043,11 +1250,22 @@ _INSTALL_RECIPES = {
          lambda: [' '.join(_pip_install_args()) + ' slither-analyzer'],
          ["slither"], "~15s", [], None),
 
+        # medusa builds with cgo, so it needs BOTH Go and a C compiler.
+        # Listing "cc" as a prereq makes _ensure_prereq surface a clear
+        # "needs a C compiler" message before `go install` fails with a raw
+        # linker error on a minimal Linux image or a Windows box without MSVC.
+        # `go install` honors GOBIN/GOPATH, so resolve the real bin dir via
+        # `go env` (falling back through GOPATH/bin then ~/go/bin) and also
+        # carry the full _GO_PATHS list. Otherwise a box with GOPATH/GOBIN
+        # exported elsewhere installs medusa off the search path, the re-check
+        # reports it missing, and EVM Medusa fuzz silently degrades. The
+        # path_adds field is a callable so the `go env` probe stays lazy (never
+        # at module import) — the installer resolves it at use.
         ("medusa",
-         lambda: _find_bin("medusa", ["~/go/bin"]),
+         lambda: _find_bin("medusa", _go_medusa_paths()),
          lambda: ['go install github.com/crytic/medusa@latest'],
          ["medusa"], "~60s",
-         ["~/go/bin"], "go"),
+         _go_medusa_paths, ["go", "cc"]),
     ],
 
     "Solana": [
@@ -1064,10 +1282,10 @@ _INSTALL_RECIPES = {
          ["~/.avm/bin"], ["rust", "openssl"] if sys.platform == "win32" else "rust"),
 
         ("Trident fuzzer",
-         lambda: _find_bin("trident"),
+         lambda: _find_bin("trident", _CARGO_PATHS),
          lambda: ['cargo install trident-cli'],
          ["trident"], "~2-3 min",
-         [], ["rust", "openssl"] if sys.platform == "win32" else "rust"),
+         _CARGO_PATHS, ["rust", "openssl"] if sys.platform == "win32" else "rust"),
 
         ("Scout (Anchor + native Solana static analyzer)",
          lambda: _find_bin("cargo-scout-audit", _CARGO_PATHS),
@@ -1115,6 +1333,12 @@ _INSTALL_RECIPES = {
          _scout_soroban_cmds,
          ["cargo-scout-audit"], "~2-3 min",
          ["~/.cargo/bin"], "rust"),
+
+        ("cargo-fuzz (Soroban Thorough-mode fuzzing)",
+         lambda: _find_bin("cargo-fuzz", _CARGO_PATHS),
+         _cargo_fuzz_cmds,
+         ["cargo-fuzz"], "~2-3 min",
+         ["~/.cargo/bin"], "rust"),
     ],
 
     "L1 (Go)": [
@@ -1147,6 +1371,15 @@ _INSTALL_RECIPES = {
          _opengrep_cmds,
          ["opengrep", "semgrep"], "~30s",
          ["~/.local/bin"], None),
+
+        ("cargo-fuzz (L1-Rust Thorough-mode fuzzing)",
+         lambda: _find_bin("cargo-fuzz", _CARGO_PATHS),
+         _cargo_fuzz_cmds,
+         ["cargo-fuzz"], "~2-3 min",
+         ["~/.cargo/bin"],
+         # cargo install needs rustup-managed cargo; brew-Rust users get a
+         # plain `cargo install` (no nightly toolchain step).
+         "rust" if not (sys.platform == "darwin" and _has_brew()) else None),
     ],
 
     "L1 (ast-grep)": [
@@ -1187,6 +1420,15 @@ def _run_install_cmd(cmd: str, retries: int = 1, timeout: int = None) -> bool:
     bash = shutil.which("bash")
     if _needs_bash(cmd) and bash:
         run_kwargs = {"shell": True, "executable": bash}
+    elif _needs_bash(cmd) and not bash and sys.platform != "win32":
+        # On a non-Windows host with no bash on PATH (e.g. Alpine/Docker /bin/sh
+        # only, stripped CI runner), falling through to /bin/sh would run
+        # bash-only constructs (| bash chained installers, export PATH=...&&) and
+        # fail with an opaque sh syntax/exec error. Surface the prereq clearly.
+        w(f"  {_C_RED}  bash required for this installer but not found — "
+          f"install bash or run the documented manual command{_RST}\n")
+        sys.stdout.flush()
+        return False
     else:
         run_kwargs = {"shell": True}
 
@@ -1233,6 +1475,10 @@ _VERSION_PROBES = {
     # `scout-audit` subcommand. `--help` exits zero and prints the usage
     # block, which is enough to confirm the binary runs.
     "cargo-scout-audit":  "--help",
+    # cargo-fuzz ships a `cargo-fuzz` shim that accepts `--version` directly
+    # (runtime fuzzing still needs `cargo +nightly fuzz`, but the version
+    # probe only confirms the plugin binary runs).
+    "cargo-fuzz":         "--version",
     "aptos":              "--version",
     "sui":                "--version",
     "ast-grep":           "--version",
@@ -1305,7 +1551,7 @@ def _report_toolchain_visibility(w):
     """
     # (label, binary_name, install_cmd_hint, used_by)
     toolchains = [
-        ("Foundry (forge/cast/anvil)", "forge", "plamen setup → EVM, or `curl -L https://foundry.paradigm.xyz | bash && foundryup`", "EVM invariant + Medusa fuzz, Slither integration"),
+        ("Foundry (forge/cast/anvil)", "forge", "plamen setup → EVM, or (in a real terminal) `sh -c \"$(curl -L https://foundry.paradigm.xyz)\" && foundryup`", "EVM invariant + Medusa fuzz, Slither integration"),
         ("Medusa",                     "medusa", "plamen setup → EVM, or `go install github.com/crytic/medusa@latest`", "EVM Medusa stateful fuzz"),
         ("Slither",                    "slither", "plamen setup → EVM, or `pip install slither-analyzer`", "EVM static analysis"),
         ("Solana CLI",                 "solana", "plamen setup → Solana", "Solana / Anchor audits"),
@@ -1314,13 +1560,16 @@ def _report_toolchain_visibility(w):
         ("Sui CLI",                    "sui",    "plamen setup → Move", "Sui Move audits"),
         ("Stellar CLI",                "stellar","plamen setup → Soroban", "Soroban audits"),
         ("Go (scip-go, medusa)",       "go",     "plamen setup → installs Go, or system package manager", "L1 mode + Medusa"),
-        ("Rust (cargo)",               "cargo",  "plamen setup → installs Rust, or `curl https://sh.rustup.rs -sSf | sh`", "L1 mode + Soroban + Solana"),
+        ("Rust (cargo)",               "cargo",  "plamen setup → installs Rust, or (in a real terminal) `sh -c \"$(curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs)\"`", "L1 mode + Soroban + Solana"),
+        ("cargo-fuzz",                 "cargo-fuzz", "plamen setup → Soroban / L1, or `rustup toolchain install nightly && cargo install cargo-fuzz`", "Soroban + L1-Rust Thorough fuzz"),
     ]
     # Use the same search paths as check_dependencies() so we don't get
     # a different answer here than `plamen doctor` would give.
     search_paths = {
         "forge": _FOUNDRY_PATHS,
-        "medusa": ["~/go/bin"],
+        # `go install` honors GOBIN/GOPATH; mirror the install recipe's lazy
+        # resolution so medusa isn't reported missing when it landed off ~/go/bin.
+        "medusa": _go_medusa_paths(),
         "solana": _SOLANA_PATHS,
         "anchor": _AVM_PATHS,
         "aptos": ["~/.aptoscli/bin"],
@@ -1328,6 +1577,7 @@ def _report_toolchain_visibility(w):
         "stellar": _CARGO_PATHS + ["C:/Program Files/Stellar CLI", "C:/Program Files (x86)/Stellar CLI"],
         "go": _GO_PATHS,
         "cargo": _CARGO_PATHS,
+        "cargo-fuzz": _CARGO_PATHS,
     }
     found, missing = [], []
     for label, bin_name, install_hint, used_by in toolchains:
@@ -1394,6 +1644,75 @@ def _update_path_env(new_paths: list, persist: bool = False):
         # persistent Windows User PATH.
         if persist and sys.platform == "win32":
             _persist_path_windows(expanded)
+        elif persist:
+            # macOS/Linux: persist to the user's shell rc so audit subprocesses
+            # spawned from a future shell find the tool (mirrors the Windows
+            # registry persistence — without this, toolchains installed by
+            # `plamen setup` update only the in-process PATH and vanish).
+            _persist_path_posix(expanded)
+
+
+def _persist_path_posix(directory: str):
+    """Add a directory to the user's shell PATH permanently on macOS/Linux.
+
+    Maintains a single marker-delimited block in the user's shell rc file(s).
+    Idempotent and best-effort, mirroring `_persist_path_windows`. Without this,
+    tools installed by `plamen setup` (foundry -> ~/.foundry/bin, cargo, solana)
+    update only the in-process PATH and are invisible to the codex/claude audit
+    subprocesses launched from a future shell -> `COMPILATION_FAILED` mid-audit.
+    """
+    import re as _re
+    BEGIN = "# >>> plamen toolchain PATH >>>"
+    END = "# <<< plamen toolchain PATH <<<"
+    home = os.path.expanduser("~")
+    shell = os.environ.get("SHELL", "")
+    # ~/.profile (login-shell baseline) + the interactive rc for the active
+    # shell + any common rc that already exists (so we hit the file the user's
+    # interactive shell actually sources — zsh ignores ~/.profile).
+    candidates = [os.path.join(home, ".profile")]
+    if "zsh" in shell:
+        candidates.append(os.path.join(home, ".zshrc"))
+    elif "bash" in shell:
+        candidates.append(os.path.join(home, ".bashrc"))
+    for extra in (".zshrc", ".bashrc", ".bash_profile"):
+        p = os.path.join(home, extra)
+        if os.path.exists(p):
+            candidates.append(p)
+    targets = list(dict.fromkeys(candidates))  # dedupe, preserve order
+
+    for rc in targets:
+        try:
+            text = ""
+            if os.path.exists(rc):
+                with open(rc, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            dirs: list[str] = []
+            m = _re.search(
+                _re.escape(BEGIN) + r"\n(.*?)\n" + _re.escape(END), text, _re.S
+            )
+            if m:
+                em = _re.search(r'export PATH="([^"]*):\$PATH"', m.group(1))
+                if em:
+                    dirs = [d for d in em.group(1).split(":") if d]
+            if directory in dirs:
+                continue  # already persisted in this rc — idempotent
+            dirs.append(directory)
+            block = (
+                BEGIN + "\n"
+                + 'export PATH="' + ":".join(dirs) + ':$PATH"\n'
+                + END
+            )
+            if m:
+                new_text = text[:m.start()] + block + text[m.end():]
+            else:
+                prefix = text
+                if prefix and not prefix.endswith("\n"):
+                    prefix += "\n"
+                new_text = prefix + block + "\n"
+            with open(rc, "w", encoding="utf-8") as f:
+                f.write(new_text)
+        except Exception:
+            pass  # non-critical — user can add the export manually
 
 
 def _persist_path_windows(directory: str):
@@ -1681,9 +2000,25 @@ def _setup_python_deps(w):
     else:
         deep_ok = False
 
-    if core_ok and deep_ok:
+    # Version-aware idempotency: even when core+RAG imports are present, an
+    # upgrade (e.g. v2.0.0 -> v2.1.0) may have re-pinned an editable submodule
+    # (slither-mcp, solana-fender, ...) or added new transitive deps to it.
+    # Those are installed only by the `pip install -e` loop below, which the
+    # early-return would skip entirely. So when both import-checks pass but the
+    # recorded install version differs from the current VERSION, do NOT
+    # early-return — fall through to re-run the install loops so editable
+    # packages pick up new deps. The manifest already records the version.
+    _prev_version = _installed_version()
+    upgraded = core_ok and deep_ok and _prev_version is not None and _prev_version != VERSION
+    if core_ok and deep_ok and not upgraded:
         w(f"  {_C_GREEN}Python dependencies already installed{_RST}\n\n")
         return True
+
+    if upgraded:
+        w(f"  {_C_ORANGE}>{_RST} {_C_WHITE}Plamen upgraded to {VERSION} "
+          f"(was {_prev_version}) — re-installing editable packages to pick up "
+          f"new dependencies{_RST}\n")
+        sys.stdout.flush()
 
     w(f"  {_C_ORANGE}>{_RST} {_C_WHITE}Installing Python dependencies...{_RST}"
       f"  {_C_DARK_GRAY}~2-5 min (PyTorch is ~2GB){_RST}\n\n")
@@ -1753,6 +2088,40 @@ def _setup_python_deps(w):
     return all_ok
 
 
+def _mcp_node_modules_valid(pkg_json: str, nm_dir: str) -> bool:
+    """Return True only if node_modules contains the packages declared in package.json.
+
+    A returncode-0 npm install can still be incomplete (interrupted, partial
+    cache, killed mid-extract), leaving node_modules/ present but missing the
+    declared MCP server packages. Relying on directory existence alone would
+    treat such a partial install as success. This confirms that every declared
+    dependency actually has a package directory on disk.
+
+    Conservative: if package.json cannot be parsed or declares no deps, fall
+    back to plain directory existence so this never tightens past the prior
+    behavior for configs we cannot introspect.
+    """
+    import json as _json
+    if not os.path.isdir(nm_dir):
+        return False
+    try:
+        with open(pkg_json) as f:
+            pj = _json.load(f)
+    except Exception:
+        return os.path.isdir(nm_dir)
+    deps = {}
+    deps.update(pj.get("dependencies", {}) or {})
+    deps.update(pj.get("devDependencies", {}) or {})
+    if not deps:
+        return os.path.isdir(nm_dir)
+    for name in deps:
+        # Scoped packages (@scope/name) live at node_modules/@scope/name.
+        pkg_path = os.path.join(nm_dir, *name.split("/"))
+        if not os.path.isdir(pkg_path):
+            return False
+    return True
+
+
 def _setup_mcp_packages(w):
     """Install pinned MCP npm packages and update config to use them.
 
@@ -1763,6 +2132,8 @@ def _setup_mcp_packages(w):
     Target: ~/.claude/mcp.json (the MCP-specific config).
     NEVER writes to ~/.claude.json (global Claude config — not our file to touch).
     """
+    import json as _json
+
     mcp_dir = os.path.join(PLAMEN_HOME, "mcp-packages")
     pkg_json = os.path.join(mcp_dir, "package.json")
     update_script = os.path.join(mcp_dir, "update_config.py")
@@ -1801,8 +2172,8 @@ def _setup_mcp_packages(w):
                         break
                 if has_legacy_config:
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  [mcp-packages] legacy-config probe failed: {e}")
 
     if not has_local_install and not has_legacy_config:
         return  # New user with correct config from mcp.json.example — nothing to do
@@ -1820,21 +2191,50 @@ def _setup_mcp_packages(w):
         if npm_bin:
             w(f"  {_C_DARK_GRAY}  Installing pinned MCP packages...{_RST}\n")
             sys.stdout.flush()
-            r = subprocess.run([npm_bin, "install"], cwd=mcp_dir,
-                               capture_output=True, text=True, timeout=120)
-            if r.returncode == 0:
-                w(f"  {_C_GREEN}✓{_RST} MCP packages installed\n")
-            else:
-                w(f"  {_C_ORANGE}!{_RST} npm install failed: {r.stderr[:200]}\n")
+            # npm installs of MCP servers commonly exceed 120s on a cold cache
+            # (large transitive dep trees). Use a generous per-attempt timeout
+            # plus one retry so a slow first-time install does not return early
+            # leaving a partial node_modules behind.
+            installed = False
+            attempts = 2
+            for attempt in range(1, attempts + 1):
+                try:
+                    r = subprocess.run([npm_bin, "install"], cwd=mcp_dir,
+                                       capture_output=True, text=True, timeout=600)
+                except subprocess.TimeoutExpired:
+                    w(f"  {_C_ORANGE}!{_RST} npm install timed out (attempt "
+                      f"{attempt}/{attempts}) after 600s\n")
+                    sys.stdout.flush()
+                    continue
+                if r.returncode == 0:
+                    installed = True
+                    break
+                w(f"  {_C_ORANGE}!{_RST} npm install failed (attempt "
+                  f"{attempt}/{attempts}): {r.stderr[:200]}\n")
+                sys.stdout.flush()
+            if not installed:
                 return
+            # Validate node_modules integrity: a returncode-0 (or partial)
+            # install can still leave node_modules without the expected
+            # packages. Confirm declared MCP packages are actually present on
+            # disk before treating the install as usable downstream.
+            if not _mcp_node_modules_valid(pkg_json, nm_dir):
+                w(f"  {_C_ORANGE}!{_RST} MCP node_modules incomplete — "
+                  f"expected package(s) missing after install\n")
+                return
+            w(f"  {_C_GREEN}✓{_RST} MCP packages installed\n")
         else:
-            w(f"  {_C_ORANGE}!{_RST} npm not found — cannot install MCP packages\n")
+            w(f"  {_C_ORANGE}!{_RST} npm not found — cannot install MCP packages "
+              f"(node/npm absent on this OS; MCP servers will be unavailable)\n")
             return
     else:
         w(f"  {_C_GREEN}✓{_RST} MCP packages up to date\n")
 
-    # Step 2: Update ~/.claude/mcp.json to use pinned local paths + schema sanitizer
-    if os.path.isfile(update_script) and os.path.isdir(nm_dir):
+    # Step 2: Update ~/.claude/mcp.json to use pinned local paths + schema sanitizer.
+    # Gate on node_modules INTEGRITY (expected packages present), not mere dir
+    # existence — a half-finished install creates node_modules/ but lacks the
+    # declared packages, and must not be treated as success.
+    if os.path.isfile(update_script) and _mcp_node_modules_valid(pkg_json, nm_dir):
         r = subprocess.run([sys.executable, update_script],
                            capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
@@ -1864,6 +2264,103 @@ _CLAUDE_MD_START = "<!-- PLAMEN:START — managed by plamen install, do not edit
 _CLAUDE_MD_END = "<!-- PLAMEN:END -->"
 
 
+def _manifest_paths():
+    """Backend-agnostic list of candidate install-manifest locations.
+
+    The manifest records the installed VERSION so `_setup_python_deps` can
+    detect a v(N)->v(N+1) upgrade and re-run the editable `pip install -e`
+    loop even when core/RAG imports already succeed. It must be readable on
+    EVERY backend: Claude (~/.claude), Codex (~/.codex), and a neutral
+    PLAMEN_HOME fallback so neither-backend / CI installs are also covered.
+
+    Returns paths in read priority order; the first readable one wins.
+    """
+    return [
+        os.path.join(CLAUDE_HOME, _PLAMEN_MANIFEST),
+        os.path.join(os.path.normpath(os.path.expanduser("~/.codex")), _PLAMEN_MANIFEST),
+        os.path.join(PLAMEN_HOME, _PLAMEN_MANIFEST),
+    ]
+
+
+def _installed_version():
+    """Return the version recorded in any backend's install manifest, or None
+    if no manifest is readable. Used to detect v(N)->v(N+1) upgrades so the
+    editable `pip install -e` loop re-runs even when core/RAG imports already
+    succeed. Checks all backend locations so Codex-only and neither-backend
+    installs (where ~/.claude is never populated) still detect upgrades."""
+    import json as _json
+    for manifest_path in _manifest_paths():
+        try:
+            with open(manifest_path) as f:
+                v = _json.load(f).get("version")
+            if v is not None:
+                return v
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _write_install_manifest(installed=None, copied=None, copied_dirs=None):
+    """Write the install manifest to every backend home that exists.
+
+    Backend-agnostic and idempotent. Called unconditionally from run_install
+    so the recorded VERSION is present even on Codex-only machines where the
+    claude-gated `_run_symlink_install` (the historical sole writer) never
+    runs — which otherwise left `_installed_version()` returning None and
+    silently skipped the upgrade re-install loop.
+
+    `installed` (optional) is the list of installed destinations (links and, on
+    Windows without symlink privilege, copies). `copied` (optional) is the
+    subset of `installed` that was copied as a FILE rather than linked, and
+    `copied_dirs` (optional) is the subset copied as a DIRECTORY tree (Windows
+    cross-volume junction fallback). Uninstall uses both to remove copies the
+    link-only removal path would miss.
+
+    When the tracking args are all absent (the unconditional version-stamp call
+    in run_install, Codex-only, or neither-backend) the manifest still records
+    the version — but it MUST NOT clobber the installed/copied/copied_dirs lists
+    a prior `_run_symlink_install` already recorded, or uninstall would leak
+    every copied file/tree. So a no-tracking call PRESERVES any existing
+    installed/copied/copied_dirs at each target and only refreshes the version.
+    """
+    import json as _json
+    codex_home = os.path.normpath(os.path.expanduser("~/.codex"))
+    # Write to whichever backend homes exist. PLAMEN_HOME always exists (it's
+    # the running checkout), guaranteeing at least one durable manifest.
+    targets = []
+    if os.path.isdir(CLAUDE_HOME):
+        targets.append(os.path.join(CLAUDE_HOME, _PLAMEN_MANIFEST))
+    if os.path.isdir(codex_home):
+        targets.append(os.path.join(codex_home, _PLAMEN_MANIFEST))
+    targets.append(os.path.join(PLAMEN_HOME, _PLAMEN_MANIFEST))
+
+    # A version-only call (all tracking args None) preserves prior tracking.
+    preserve = installed is None and copied is None and copied_dirs is None
+    for manifest_path in targets:
+        prev = {}
+        if preserve and os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path) as f:
+                    prev = _json.load(f)
+            except (OSError, ValueError):
+                prev = {}
+        manifest = {
+            "plamen_home": PLAMEN_HOME,
+            "version": VERSION,
+            "installed": (installed if installed is not None
+                          else prev.get("installed", [])),
+            "copied": (copied if copied is not None
+                       else prev.get("copied", [])),
+            "copied_dirs": (copied_dirs if copied_dirs is not None
+                            else prev.get("copied_dirs", [])),
+        }
+        try:
+            with open(manifest_path, "w") as f:
+                _json.dump(manifest, f, indent=2)
+        except OSError:
+            continue
+
+
 def _is_junction(path):
     """Check if path is a Windows junction (reparse point). os.path.islink misses these."""
     if sys.platform != "win32" or not os.path.isdir(path):
@@ -1877,13 +2374,45 @@ def _is_junction(path):
 
 
 def _safe_link(src, dst, w):
-    """Create a symlink (or junction on Windows dirs). Back up existing non-link targets."""
+    """Create a symlink (or junction on Windows dirs). Back up existing non-link targets.
+
+    Returns one of:
+      - "linked": a symlink (or Windows directory junction) was created
+      - "copied": Windows had no symlink privilege, so the FILE was copied
+        (Developer Mode off / non-elevated shell) — see the OSError handler
+      - "copied_dir": Windows could not create a directory junction (e.g. the
+        junction would span volumes — src on D:, dst on C: — which `mklink /J`
+        rejects with a non-zero exit), so the whole DIRECTORY tree was copied
+        recursively as a fallback. Without this a cross-volume Codex-only
+        Windows install would have NO methodology tree and hard-fail at the
+        first audit phase.
+      - False: nothing was installed (e.g. an existing user file is in the way
+        and a backup already exists)
+
+    Callers must record "copied"/"copied_dir" destinations separately so
+    uninstall removes them — a copied file/tree is not a link, and the
+    link-only removal path would otherwise leak it.
+    """
     if os.path.islink(dst) or _is_junction(dst):
         # Existing symlink or junction — remove and recreate (idempotent re-install)
         if os.path.isdir(dst) and not os.path.islink(dst):
             os.rmdir(dst)  # junctions are removed with rmdir, not shutil.rmtree
         else:
             os.remove(dst)
+    elif os.path.isfile(dst) and os.path.exists(dst + ".pre-plamen"):
+        # An existing plain file with a sibling `.pre-plamen` backup means a
+        # prior install already preserved the user's original and what is at
+        # `dst` is our own copy (Windows privilege-fallback re-install).
+        # Overwrite it so re-install stays idempotent rather than hitting the
+        # "backup already exists" skip below.
+        os.remove(dst)
+    elif (os.path.isdir(dst) and not os.path.islink(dst)
+            and not _is_junction(dst) and os.path.exists(dst + ".pre-plamen")):
+        # A real directory (not a junction/symlink) with a sibling `.pre-plamen`
+        # backup means a prior install fell back to copytree (cross-volume
+        # junction failure). It is our own copied tree — remove it so the
+        # copytree fallback below re-creates it cleanly (idempotent re-install).
+        shutil.rmtree(dst, ignore_errors=True)
     elif os.path.exists(dst):
         backup = dst + ".pre-plamen"
         if not os.path.exists(backup):
@@ -1908,8 +2437,46 @@ def _safe_link(src, dst, w):
             )
         else:
             os.symlink(src, dst, target_is_directory=is_dir)
-        return True
-    except OSError as e:
+        return "linked"
+    except (OSError, subprocess.CalledProcessError) as e:
+        # `mklink /J` raises CalledProcessError (check=True, non-zero exit) when
+        # it cannot create the junction — most commonly because the junction
+        # would span volumes (src on D:, dst on C:), which junctions do not
+        # support. os.symlink raises OSError for a missing-privilege FILE
+        # symlink. Either way, falling through with no fallback would leave the
+        # install half-wired, so recover by copying.
+        #
+        # Directory case: copy the whole tree. This is the load-bearing path for
+        # a cross-volume Codex-only Windows install (~/.codex on C:, ~/.plamen
+        # on D:) — without it the entire methodology tree is absent and the
+        # backend hard-fails at the first audit phase.
+        if sys.platform == "win32" and os.path.isdir(src):
+            try:
+                # dst was already cleared above (idempotent branches); copytree
+                # requires the destination not to exist.
+                if os.path.exists(dst):
+                    shutil.rmtree(dst, ignore_errors=True)
+                shutil.copytree(src, dst)
+                w(f"  {_C_GRAY}  copied {os.path.basename(dst)}/ tree "
+                  f"(junction unavailable — likely cross-volume){_RST}\n")
+                return "copied_dir"
+            except OSError as e_copy:
+                e = e_copy  # report the copy failure below instead
+        # Windows file symlinks need SeCreateSymbolicLinkPrivilege (Developer
+        # Mode or an elevated shell). Without it os.symlink raises a privilege
+        # OSError. Rather than leave the install half-wired, fall back to
+        # copying the file (the same approach the Codex adapter uses) so a
+        # non-Developer-Mode Windows user still gets a working — if
+        # non-live-linked — install.
+        elif (sys.platform == "win32" and not os.path.isdir(src)
+                and "privilege" in str(e).lower()):
+            try:
+                shutil.copy2(src, dst)
+                w(f"  {_C_GRAY}  copied {os.path.basename(dst)} "
+                  f"(no symlink privilege — Developer Mode off){_RST}\n")
+                return "copied"
+            except OSError as e_copy:
+                e = e_copy  # report the copy failure below instead
         w(f"  {_C_RED}  failed to link {os.path.basename(dst)}: {e}{_RST}\n")
         if sys.platform == "win32" and "privilege" in str(e).lower():
             w(f"  {_C_GRAY}  Enable Developer Mode: Settings > System > For Developers{_RST}\n")
@@ -1939,6 +2506,19 @@ def _run_symlink_install(w):
     """Create symlinks from Plamen repo into ~/.claude/ for Claude Code discovery."""
     os.makedirs(CLAUDE_HOME, exist_ok=True)
     installed = []
+    copied = []       # subset copied as a FILE, not linked (Win, no priv)
+    copied_dirs = []  # subset copied as a DIRECTORY tree (Win, cross-volume)
+
+    def _install(src, dst):
+        """Run _safe_link, recording the destination in installed/copied."""
+        status = _safe_link(src, dst, w)
+        if status:
+            installed.append(dst)
+            if status == "copied":
+                copied.append(dst)
+            elif status == "copied_dir":
+                copied_dirs.append(dst)
+        return status
 
     # 1. Agent definition files (individual — user may have own agents)
     agents_dir = os.path.join(CLAUDE_HOME, "agents")
@@ -1946,8 +2526,7 @@ def _run_symlink_install(w):
     w(f"  {_C_ORANGE}>{_RST} Linking agent definitions\n")
     for f in sorted(glob.glob(os.path.join(PLAMEN_HOME, "agents", "*.md"))):
         dst = os.path.join(agents_dir, os.path.basename(f))
-        if _safe_link(f, dst, w):
-            installed.append(dst)
+        _install(f, dst)
     _clean_dangling_plamen_links(agents_dir, w)
 
     # 2. Skills directory (Plamen-only)
@@ -1955,8 +2534,7 @@ def _run_symlink_install(w):
     skills_dst = os.path.join(agents_dir, "skills")
     if os.path.isdir(skills_src):
         w(f"  {_C_ORANGE}>{_RST} Linking skills\n")
-        if _safe_link(skills_src, skills_dst, w):
-            installed.append(skills_dst)
+        _install(skills_src, skills_dst)
 
     # 3. Slash commands (all .md files in commands/)
     commands_dir = os.path.join(CLAUDE_HOME, "commands")
@@ -1966,8 +2544,7 @@ def _run_symlink_install(w):
         w(f"  {_C_ORANGE}>{_RST} Linking commands ({len(cmd_files)} files)\n")
         for f in cmd_files:
             dst = os.path.join(commands_dir, os.path.basename(f))
-            if _safe_link(f, dst, w):
-                installed.append(dst)
+            _install(f, dst)
     _clean_dangling_plamen_links(commands_dir, w)
 
     # 4. Rule files (individual — user may have own rules)
@@ -1979,8 +2556,7 @@ def _run_symlink_install(w):
         w(f"  {_C_ORANGE}>{_RST} Linking rules ({len(rule_files)} files)\n")
         for f in rule_files:
             dst = os.path.join(rules_dir, os.path.basename(f))
-            if _safe_link(f, dst, w):
-                installed.append(dst)
+            _install(f, dst)
     _clean_dangling_plamen_links(rules_dir, w)
 
     # 5. Prompts directory (Plamen-only — per-language prompt trees)
@@ -1988,53 +2564,49 @@ def _run_symlink_install(w):
     prompts_dst = os.path.join(CLAUDE_HOME, "prompts")
     if os.path.isdir(prompts_src):
         w(f"  {_C_ORANGE}>{_RST} Linking prompts\n")
-        if _safe_link(prompts_src, prompts_dst, w):
-            installed.append(prompts_dst)
+        _install(prompts_src, prompts_dst)
 
     # 6. Custom MCP server source (Plamen-only)
     mcp_src = os.path.join(PLAMEN_HOME, "custom-mcp")
     mcp_dst = os.path.join(CLAUDE_HOME, "custom-mcp")
     if os.path.isdir(mcp_src):
         w(f"  {_C_ORANGE}>{_RST} Linking MCP servers\n")
-        if _safe_link(mcp_src, mcp_dst, w):
-            installed.append(mcp_dst)
+        _install(mcp_src, mcp_dst)
 
     # 7. Scripts directory (driver + modules)
     scripts_src = os.path.join(PLAMEN_HOME, "scripts")
     scripts_dst = os.path.join(CLAUDE_HOME, "scripts")
     if os.path.isdir(scripts_src):
         w(f"  {_C_ORANGE}>{_RST} Linking scripts\n")
-        if _safe_link(scripts_src, scripts_dst, w):
-            installed.append(scripts_dst)
+        _install(scripts_src, scripts_dst)
 
     # 7c. L1 static analysis modules (SCIP reader, SARIF merge)
     l1_src = os.path.join(PLAMEN_HOME, "plamen_l1")
     l1_dst = os.path.join(CLAUDE_HOME, "plamen_l1")
     if os.path.isdir(l1_src):
         w(f"  {_C_ORANGE}>{_RST} Linking L1 modules\n")
-        if _safe_link(l1_src, l1_dst, w):
-            installed.append(l1_dst)
+        _install(l1_src, l1_dst)
 
     # 8. Utility files
     for fname in ("plamen", "plamen.py", "plamen.sh", "plamen.bat", "VERSION"):
         src = os.path.join(PLAMEN_HOME, fname)
         if os.path.isfile(src):
             dst = os.path.join(CLAUDE_HOME, fname)
-            if _safe_link(src, dst, w):
-                installed.append(dst)
+            _install(src, dst)
 
-    # 9. Write install manifest
-    import json as _json
-    manifest = {
-        "plamen_home": PLAMEN_HOME,
-        "version": VERSION,
-        "installed": installed,
-    }
-    manifest_path = os.path.join(CLAUDE_HOME, _PLAMEN_MANIFEST)
-    with open(manifest_path, "w") as f:
-        _json.dump(manifest, f, indent=2)
+    # 9. Write install manifest (records the linked items + version). `copied`
+    # records the subset that fell back to a file copy (Windows without symlink
+    # privilege) so uninstall removes them too — they are plain files, not
+    # links. The version stamp is also written unconditionally by run_install
+    # via _write_install_manifest so Codex-only/neither-backend installs still
+    # record the version even though this claude-gated path does not run there.
+    _write_install_manifest(installed, copied=copied, copied_dirs=copied_dirs)
 
-    w(f"\n  {_C_GREEN}Linked {len(installed)} items into {CLAUDE_HOME}{_RST}\n\n")
+    if copied:
+        w(f"\n  {_C_GREEN}Installed {len(installed)} items into {CLAUDE_HOME} "
+          f"({len(copied)} copied — enable Developer Mode for live symlinks){_RST}\n\n")
+    else:
+        w(f"\n  {_C_GREEN}Linked {len(installed)} items into {CLAUDE_HOME}{_RST}\n\n")
 
 
 def _ensure_python3_shim_windows(w):
@@ -2126,8 +2698,13 @@ def _heal_dangling_hooks(w):
 
     Convention: any hook whose `command` string contains `~/.claude/hooks/` is
     Plamen-owned. We check whether that target resolves. If not, strip the
-    entry. The subsequent symlink install re-wires the hooks dir fresh.
-    Non-Plamen hooks (anything else in the command field) are preserved.
+    entry. Non-Plamen hooks (anything else in the command field) are preserved.
+
+    Plamen no longer installs hooks: settings.json.example ships `"hooks": {}`
+    and _run_symlink_install does not link or create a ~/.claude/hooks/ dir, so
+    nothing re-wires the hooks dir. This heal is therefore purely defensive
+    cleanup of legacy entries left by older installs that did wire hooks; there
+    is no fresh-wiring step to follow it.
     """
     import json as _json
 
@@ -2207,8 +2784,8 @@ def _heal_dangling_hooks(w):
 
     w(f"  {_C_ORANGE}>{_RST} Healed {stripped} dangling Plamen hook entr"
       f"{'y' if stripped == 1 else 'ies'} in settings.json\n")
-    w(f"    {_C_GRAY}(previous install location was moved or removed; "
-      f"fresh hooks will be wired below){_RST}\n")
+    w(f"    {_C_GRAY}(legacy entries from an older install; Plamen no longer "
+      f"installs hooks, so these are removed and not re-wired){_RST}\n")
 
 
 def _merge_settings_json(w):
@@ -2236,26 +2813,58 @@ def _merge_settings_json(w):
             w(f"  {_C_GRAY}  Common cause: trailing commas or missing quotes.{_RST}\n")
             return
 
-    # Merge env vars (additive — don't overwrite existing keys)
+    # Record of what Plamen previously injected, so a re-install/upgrade can
+    # distinguish Plamen-managed list entries from user entries and respect
+    # deliberate user removals (mirrors the managed-block marker approach used
+    # for CLAUDE.md). Shape:
+    #   {"env": [keys...], "permissions": {"allow": [...], "deny": [...]}}
+    managed = existing.get("_plamenManaged")
+    if not isinstance(managed, dict):
+        managed = {}
+    managed_env = managed.get("env") if isinstance(managed.get("env"), list) else []
+    managed_perms = managed.get("permissions")
+    if not isinstance(managed_perms, dict):
+        managed_perms = {}
+
+    # Merge env vars (additive — don't overwrite existing keys). A key Plamen
+    # previously injected that the user has since deleted is NOT re-added.
     plamen_env = plamen.get("env", {})
     existing.setdefault("env", {})
+    removed_env = {k for k in managed_env if k not in existing["env"]}
     added_env = []
     for k, v in plamen_env.items():
-        if k not in existing["env"]:
+        if k not in existing["env"] and k not in removed_env:
             existing["env"][k] = v
             added_env.append(k)
+    new_managed_env = list(plamen_env.keys())
 
-    # Merge permissions (union of allow/deny lists)
+    # Merge permissions. Only re-add a Plamen-shipped entry the user has not
+    # explicitly removed since the last install. An entry that was in the prior
+    # Plamen baseline but is now absent from the existing list is treated as a
+    # deliberate user removal and skipped; user-added entries are preserved.
     plamen_perms = plamen.get("permissions", {})
     existing.setdefault("permissions", {})
+    new_managed_perms = {}
     for key in ("allow", "deny"):
         plamen_list = plamen_perms.get(key, [])
         existing_list = existing["permissions"].get(key, [])
-        merged = list(dict.fromkeys(existing_list + plamen_list))
+        prior_baseline = (managed_perms.get(key)
+                          if isinstance(managed_perms.get(key), list) else [])
+        removed = {e for e in prior_baseline if e not in existing_list}
+        to_add = [e for e in plamen_list if e not in removed]
+        merged = list(dict.fromkeys(existing_list + to_add))
         existing["permissions"][key] = merged
+        new_managed_perms[key] = list(plamen_list)
 
     if "defaultMode" not in existing["permissions"]:
         existing["permissions"]["defaultMode"] = plamen_perms.get("defaultMode", "acceptEdits")
+
+    # Refresh the managed baseline to the current Plamen shipment so the next
+    # upgrade can again detect user removals relative to what we just injected.
+    existing["_plamenManaged"] = {
+        "env": new_managed_env,
+        "permissions": new_managed_perms,
+    }
 
     with open(target, "w") as f:
         _json.dump(existing, f, indent=2)
@@ -2384,6 +2993,26 @@ def _merge_mcp_json(w):
         w(f"  {_C_GRAY}  Free keys: solodit.cyfrin.io, etherscan.io/apis, tavily.com{_RST}\n")
 
 
+def _strip_all_managed_blocks(text):
+    """Remove EVERY Plamen-managed block from `text`, idempotently.
+
+    Handles two corruption shapes so re-injection never accumulates a second or
+    third managed block across upgrades:
+      1. Well-formed START..END pairs (one or many) — all removed.
+      2. A leftover START with no matching END (user/install corruption) —
+         stripped from that START to EOF.
+    Returns the surviving non-managed text with trailing newlines collapsed.
+    """
+    # Remove all well-formed START..END pairs. Non-greedy + DOTALL so the
+    # multi-line block body is matched and each pair is removed independently.
+    pattern = re.escape(_CLAUDE_MD_START) + r".*?" + re.escape(_CLAUDE_MD_END)
+    text = re.sub(pattern, "", text, flags=re.DOTALL)
+    # Any START still present has no matching END (corrupted) — strip to EOF.
+    if _CLAUDE_MD_START in text:
+        text = text[:text.index(_CLAUDE_MD_START)]
+    return text.rstrip("\n")
+
+
 def _merge_claude_md(w):
     """Inject Plamen's CLAUDE.md into ~/.claude/CLAUDE.md between markers."""
     plamen_md = os.path.join(PLAMEN_HOME, "CLAUDE.md")
@@ -2403,36 +3032,45 @@ def _merge_claude_md(w):
     # canonical Plamen instructions. This prevents content doubling/tripling
     # when PLAMEN_HOME == CLAUDE_HOME.
     if _CLAUDE_MD_START in plamen_content:
-        start_idx = plamen_content.index(_CLAUDE_MD_START) + len(_CLAUDE_MD_START)
-        if _CLAUDE_MD_END in plamen_content:
-            end_idx = plamen_content.index(_CLAUDE_MD_END)
+        # Extract the FIRST well-formed START..END pair as the canonical block.
+        # Using a regex (non-greedy, DOTALL) rather than chained .index() keeps
+        # this correct even if duplicate/corrupt markers precede the real END,
+        # so re-injection emits exactly one block.
+        _pair = re.search(
+            re.escape(_CLAUDE_MD_START) + r"(.*?)" + re.escape(_CLAUDE_MD_END),
+            plamen_content,
+            flags=re.DOTALL,
+        )
+        if _pair:
+            plamen_content = _pair.group(1).strip()
         else:
-            end_idx = len(plamen_content)
-        plamen_content = plamen_content[start_idx:end_idx].strip()
-
-    if same_file:
-        # Same-dir install: file is both source and target.
-        # No separate user content to preserve — just write clean markers.
-        with open(target, "w", encoding="utf-8") as f:
-            f.write(f"{_CLAUDE_MD_START}\n{plamen_content}\n{_CLAUDE_MD_END}\n")
-        w(f"  {_C_GREEN}CLAUDE.md: refreshed Plamen instructions (same-dir){_RST}\n")
-        return
+            # START present but no END (corrupted source) — take START..EOF.
+            start_idx = plamen_content.index(_CLAUDE_MD_START) + len(_CLAUDE_MD_START)
+            plamen_content = plamen_content[start_idx:].strip()
 
     existing = ""
-    if os.path.isfile(target):
+    if same_file:
+        # Same-dir install: the file is both source and target. It may ALSO
+        # contain user content outside the marker region (personal global
+        # instructions). Preserve that the same way the normal branch does:
+        # strip only the marker region below and re-inject, rather than
+        # overwriting the whole file with just the managed block. Back up the
+        # original first so a re-install can never silently destroy user text.
+        with open(target, "r", encoding="utf-8") as f:
+            existing = f.read()
+        backup = target + ".pre-plamen"
+        if not os.path.exists(backup):
+            shutil.copy2(target, backup)
+            w(f"  {_C_GRAY}  backed up CLAUDE.md → {os.path.basename(backup)}{_RST}\n")
+    elif os.path.isfile(target):
         with open(target, "r", encoding="utf-8") as f:
             existing = f.read()
 
-    # Remove any prior Plamen section
+    # Remove ALL prior Plamen sections (idempotent against pre-existing
+    # duplicate/corrupt managed blocks left by buggy installs or manual edits)
+    # so re-injection below adds exactly one block instead of accumulating.
     if _CLAUDE_MD_START in existing:
-        if _CLAUDE_MD_END in existing:
-            before = existing[:existing.index(_CLAUDE_MD_START)]
-            after_end = existing.index(_CLAUDE_MD_END) + len(_CLAUDE_MD_END)
-            after = existing[after_end:]
-            existing = before.rstrip("\n") + after.lstrip("\n")
-        else:
-            # End marker missing (user corrupted file) — strip from start marker to EOF
-            existing = existing[:existing.index(_CLAUDE_MD_START)].rstrip("\n")
+        existing = _strip_all_managed_blocks(existing)
 
     # Append Plamen section with markers
     injected = f"\n\n{_CLAUDE_MD_START}\n{plamen_content}\n{_CLAUDE_MD_END}\n"
@@ -2440,7 +3078,10 @@ def _merge_claude_md(w):
     with open(target, "w", encoding="utf-8") as f:
         f.write(existing.rstrip("\n") + injected)
 
-    w(f"  {_C_GREEN}CLAUDE.md: injected Plamen instructions (with markers){_RST}\n")
+    if same_file:
+        w(f"  {_C_GREEN}CLAUDE.md: refreshed Plamen instructions (same-dir, user content preserved){_RST}\n")
+    else:
+        w(f"  {_C_GREEN}CLAUDE.md: injected Plamen instructions (with markers){_RST}\n")
 
 
 def run_uninstall():
@@ -2479,6 +3120,7 @@ def run_uninstall():
         # Non-TTY + PLAMEN_UNINSTALL_YES=1 path: skip the inquirer prompt.
         confirm = True
     else:
+        _drain_stdin()
         confirm = inquirer.select(
             message="Proceed with uninstall?",
             choices=[
@@ -2498,6 +3140,10 @@ def run_uninstall():
 
     removed = 0
     restored = 0
+    # Items copied (not linked) during a Windows non-Developer-Mode install are
+    # plain files, so the link check below would skip them and leak them. Remove
+    # them explicitly using the manifest's `copied` record.
+    copied_set = set(manifest.get("copied", []))
     for path in manifest.get("installed", []):
         is_link = os.path.islink(path) or _is_junction(path)
         if is_link:
@@ -2505,6 +3151,31 @@ def run_uninstall():
                 os.rmdir(path)  # junction
             else:
                 os.remove(path)  # symlink
+            removed += 1
+            backup = path + ".pre-plamen"
+            if os.path.exists(backup):
+                shutil.move(backup, path)
+                restored += 1
+        elif path in copied_set and os.path.isfile(path):
+            # Privilege-fallback copy — remove the plain file, then restore any
+            # backed-up user original (mirrors the link branch above).
+            os.remove(path)
+            removed += 1
+            backup = path + ".pre-plamen"
+            if os.path.exists(backup):
+                shutil.move(backup, path)
+                restored += 1
+
+    # Directory trees copied during a Windows cross-volume install (junctions
+    # cannot span volumes, so _safe_link fell back to copytree — e.g. the Codex
+    # ~/.codex/plamen methodology tree). These are real directories, so the
+    # link/junction branch above skips them and they would leak. Remove them
+    # explicitly via rmtree, then restore any backed-up user original.
+    for path in manifest.get("copied_dirs", []):
+        # Defensive: never rmtree a live link/junction (would also delete the
+        # link target). Only remove a real, non-symlink directory we copied.
+        if os.path.isdir(path) and not os.path.islink(path) and not _is_junction(path):
+            shutil.rmtree(path, ignore_errors=True)
             removed += 1
             backup = path + ".pre-plamen"
             if os.path.exists(backup):
@@ -2599,6 +3270,7 @@ def _install_codex_adapter(w):
     The repo dir is named `codex-adapter/` (not `codex/`) to avoid shadowing the
     Codex CLI binary when ~/.plamen is on PATH.
     """
+    import json as _json
     codex_home = os.path.normpath(os.path.expanduser("~/.codex"))
     codex_plamen = os.path.normpath(os.path.join(codex_home, "plamen"))
     codex_dir = os.path.normpath(os.path.join(PLAMEN_HOME, "codex-adapter"))
@@ -2636,7 +3308,28 @@ def _install_codex_adapter(w):
 
     # Step 3: Symlink ~/.codex/plamen/ → PLAMEN_HOME
     w(f"  {_C_ORANGE}>{_RST} Linking ~/.codex/plamen/ → {PLAMEN_HOME}\n")
-    if _safe_link(PLAMEN_HOME, codex_plamen, w):
+    link_status = _safe_link(PLAMEN_HOME, codex_plamen, w)
+    if link_status == "copied_dir":
+        # Cross-volume install (~/.codex on C:, ~/.plamen on D:): junctions
+        # cannot span volumes, so _safe_link copied the whole methodology tree
+        # instead. The Codex backend now has its files, but the copy is a real
+        # directory — record it in the manifest's copied_dirs so uninstall
+        # rmtree's it (the link-only removal path would leak it). Merge into any
+        # existing tracking (e.g. from the claude-side _run_symlink_install).
+        prev_dirs = []
+        for _mp in _manifest_paths():
+            if os.path.isfile(_mp):
+                try:
+                    with open(_mp) as _f:
+                        prev_dirs = _json.load(_f).get("copied_dirs", [])
+                    break
+                except (OSError, ValueError):
+                    continue
+        if codex_plamen not in prev_dirs:
+            prev_dirs = prev_dirs + [codex_plamen]
+        _write_install_manifest(copied_dirs=prev_dirs)
+        w(f"  {_C_GREEN}✓{_RST} Shared methodology copied (cross-volume — junction unavailable)\n")
+    elif link_status:
         w(f"  {_C_GREEN}✓{_RST} Shared methodology linked\n")
     else:
         w(f"  {_C_ORANGE}!{_RST} Could not create symlink — Codex may not find methodology files\n")
@@ -2654,6 +3347,11 @@ def _install_codex_adapter(w):
     agents_src = os.path.join(codex_dir, "agents")
     agents_dst = os.path.join(codex_home, "agents")
     if os.path.isdir(agents_src):
+        # Idempotent upgrade: this adapter fully owns ~/.codex/agents, so clear
+        # it before re-copying. Otherwise files removed upstream survive a
+        # v2.0.0->v2.1.0 upgrade (copy loops only overwrite/add, never delete),
+        # unlike the symlink-based ~/.claude side.
+        shutil.rmtree(agents_dst, ignore_errors=True)
         os.makedirs(agents_dst, exist_ok=True)
         for f in os.listdir(agents_src):
             src_f = os.path.join(agents_src, f)
@@ -2666,6 +3364,10 @@ def _install_codex_adapter(w):
     skills_src = os.path.join(codex_dir, "skills")
     skills_dst = os.path.join(codex_home, "skills")
     if os.path.isdir(skills_src):
+        # Idempotent upgrade: this adapter fully owns ~/.codex/skills, so clear
+        # the whole subtree before re-copying. Otherwise skill files removed
+        # upstream survive an upgrade and may be picked up by the Codex backend.
+        shutil.rmtree(skills_dst, ignore_errors=True)
         for root, dirs, files in os.walk(skills_src):
             rel = os.path.relpath(root, skills_src)
             dst_root = os.path.join(skills_dst, rel)
@@ -2679,6 +3381,10 @@ def _install_codex_adapter(w):
     commands_src = os.path.join(codex_dir, "commands")
     commands_dst = os.path.join(codex_home, "commands")
     if os.path.isdir(commands_src):
+        # Idempotent upgrade: this adapter fully owns ~/.codex/commands, so
+        # clear it before re-copying. Otherwise command files removed upstream
+        # survive a v2.0.0->v2.1.0 upgrade.
+        shutil.rmtree(commands_dst, ignore_errors=True)
         os.makedirs(commands_dst, exist_ok=True)
         for f in os.listdir(commands_src):
             src_f = os.path.join(commands_src, f)
@@ -3060,7 +3766,43 @@ def run_install():
             "~/.avm/bin",           # Anchor (Solana)
             "~/.npm-global/bin",    # User-local npm prefix (Codex CLI)
         ]
+        # `go install` honors GOBIN/GOPATH; persist the real go-bin dir too so a
+        # box with GOPATH/GOBIN exported off ~/go/bin still exposes medusa/scip-go
+        # to the audit subprocess.
+        _gobin = _go_bin_dir()
+        if _gobin and _gobin not in (os.path.normpath(os.path.expanduser(p)) for p in toolchain_dirs):
+            toolchain_dirs.insert(2, _gobin)
         _update_path_env(toolchain_dirs, persist=True)
+    else:
+        # POSIX equivalent (macOS / Linux): same bug class as Windows.
+        # A Codex / Claude audit subprocess inherits PATH from a parent shell
+        # that may not have sourced ~/.bashrc / ~/.zshrc, so out-of-band
+        # installed tools (foundry in ~/.foundry/bin, ~/.cargo/bin, ~/go/bin,
+        # ~/.local/bin, ...) are invisible -> COMPILATION_FAILED /
+        # "forge: command not found" mid-audit. run_setup's per-recipe
+        # _update_path_env(..., persist=True) only fires for tools plamen
+        # itself installs, not pre-existing ones — so a user who runs
+        # `plamen install` (not interactive `setup`) with tools already
+        # present gets zero PATH persistence. Mirror the Windows branch:
+        # scan the standard toolchain dirs; for any that EXIST on disk,
+        # persist them to the shell rc via _persist_path_posix. Idempotent.
+        posix_toolchain_dirs = [
+            "~/.foundry/bin",       # Foundry (forge / cast / anvil / chisel)
+            "~/go/bin",             # Medusa, scip-go, ast-grep (Go-based)
+            "~/.cargo/bin",         # Rust tooling (Stellar CLI, Scout, rust-analyzer)
+            "~/.local/bin",         # Opengrep + npm/pip user-local prefix
+            "~/.local/share/solana/install/active_release/bin",  # Solana
+            "~/.avm/bin",           # Anchor (Solana)
+            "~/.npm-global/bin",    # User-local npm prefix (Codex CLI)
+            "~/.aptoscli/bin",      # Aptos CLI
+        ]
+        # `go install` honors GOBIN/GOPATH; persist the real go-bin dir too so a
+        # box with GOPATH/GOBIN exported off ~/go/bin still exposes medusa/scip-go
+        # to the audit subprocess.
+        _gobin = _go_bin_dir()
+        if _gobin and _gobin not in (os.path.normpath(os.path.expanduser(p)) for p in posix_toolchain_dirs):
+            posix_toolchain_dirs.insert(2, _gobin)
+        _update_path_env(posix_toolchain_dirs, persist=True)
 
     # ── Cross-OS toolchain visibility report (all platforms) ────
     # Tell the user which chain-specific toolchains are detected and
@@ -3080,16 +3822,47 @@ def run_install():
         w(f"  {_C_GRAY}Claude Code not detected -- skipping ~/.claude/ symlinks{_RST}\n")
 
     # ── Submodules ─────────────────────────────────────────────
-    slither_dir = os.path.join(PLAMEN_HOME, "custom-mcp", "slither-mcp")
-    if os.path.isdir(slither_dir) and not os.listdir(slither_dir):
+    # Init must fire when ANY git submodule is empty, not just slither-mcp.
+    # The opengrep-rules/* submodules self-heal at recon time, but the
+    # custom-mcp/* ones (slither-mcp, farofino-mcp) do not — so on a partial
+    # clone or upgrade where slither-mcp happens to be populated but
+    # farofino-mcp is empty, EVM/Aderyn integration would silently stay broken.
+    # Check all submodule paths from .gitmodules so init covers every case.
+    _gitmodules = os.path.join(PLAMEN_HOME, ".gitmodules")
+    _submodule_paths = []
+    if os.path.isfile(_gitmodules):
+        try:
+            with open(_gitmodules, "r", encoding="utf-8") as _gm:
+                for _line in _gm:
+                    _line = _line.strip()
+                    if _line.startswith("path") and "=" in _line:
+                        _submodule_paths.append(_line.split("=", 1)[1].strip())
+        except OSError:
+            pass
+    if not _submodule_paths:
+        # No readable .gitmodules — fall back to the known custom-mcp/* dirs,
+        # which are the ones that do NOT self-heal at recon.
+        _submodule_paths = ["custom-mcp/slither-mcp", "custom-mcp/farofino-mcp"]
+
+    _empty_subs = []
+    for _sub in _submodule_paths:
+        _sub_dir = os.path.join(PLAMEN_HOME, *_sub.split("/"))
+        if os.path.isdir(_sub_dir) and not os.listdir(_sub_dir):
+            _empty_subs.append(_sub_dir)
+
+    if _empty_subs:
+        _empty_rel = ", ".join(
+            os.path.relpath(d, PLAMEN_HOME).replace(os.sep, "/") + "/"
+            for d in _empty_subs
+        )
         if not os.path.isdir(os.path.join(PLAMEN_HOME, ".git")):
             # ZIP download — `git submodule` would fail with "not a git
             # repository". Tell the user how to fix it explicitly.
-            w(f"  {_C_ORANGE}!{_RST} Empty submodule {os.path.relpath(slither_dir, PLAMEN_HOME)}/ but no .git/ — looks like a ZIP download.\n")
+            w(f"  {_C_ORANGE}!{_RST} Empty submodule(s) {_empty_rel} but no .git/ — looks like a ZIP download.\n")
             w(f"    {_C_GRAY}Re-clone via `git clone --recurse-submodules <repo-url>`,{_RST}\n")
             w(f"    {_C_GRAY}or run `git submodule update --init --recursive` after `git init`.{_RST}\n\n")
         else:
-            w(f"  {_C_ORANGE}>{_RST} Initializing git submodules...\n")
+            w(f"  {_C_ORANGE}>{_RST} Initializing git submodules ({_empty_rel} empty)...\n")
             sys.stdout.flush()
             _run_install_cmd(f'cd "{PLAMEN_HOME}" && git submodule update --init --recursive', retries=1)
             w("\n")
@@ -3108,7 +3881,33 @@ def run_install():
         _setup_config_files(w)
     else:
         w(f"  {_C_GRAY}Claude Code not detected -- skipping ~/.claude/ config merge{_RST}\n")
-        w(f"  {_C_GRAY}(Codex side, if installed, is handled by `plamen install --codex`){_RST}\n")
+
+    # ── Codex adapter (auto) ──────────────────────────────────
+    # `plamen install` (no flag) must wire the Codex backend on Codex-only and
+    # dual machines without requiring the user to know the `--codex` flag.
+    # _install_codex_adapter warns-but-continues when the codex bin is absent,
+    # so it is safe to run when staging configs for a machine where Codex will
+    # be installed later. When neither backend is detected we STILL stage the
+    # adapter so a Codex-only new user is not left with a non-functional
+    # backend (no ~/.codex/plamen symlink, no AGENTS.md/config.toml, no agents
+    # /skills/commands) that hard-fails at the first audit phase.
+    has_codex = bool(_find_codex_bin()) or os.path.isdir(
+        os.path.normpath(os.path.expanduser("~/.codex"))
+    )
+    if has_codex or not has_claude:
+        console.print(Rule(title="Codex Adapter", style="color(238)"))
+        _install_codex_adapter(w)
+
+    # ── Install manifest (backend-agnostic, unconditional) ─────
+    # The claude-gated _run_symlink_install above is the only place that wrote
+    # the version manifest historically, so a Codex-only machine (has_claude
+    # False) never recorded a version. That left _installed_version() == None
+    # and _setup_python_deps' upgrade detection inert, silently skipping the
+    # editable `pip install -e` re-install loop on a v(N)->v(N+1) upgrade.
+    # Stamp the version now into every backend home that exists (and always
+    # PLAMEN_HOME) so upgrade detection fires on all backends. Runs after the
+    # Codex adapter so ~/.codex exists when present.
+    _write_install_manifest()
 
     return 0
 
@@ -3160,7 +3959,7 @@ def run_setup():
     else:
         for group, recipes in _INSTALL_RECIPES.items():
             names = ", ".join(d for d, _, _, _, _, _, _ in recipes)
-            item_choices.append({"name": f"{group:8s} {names}  {_C_GREEN}✓{_RST}",
+            item_choices.append({"name": f"{group:8s} {names}  ✓",
                                  "value": group, "enabled": False})
 
     if rag_empty:
@@ -3169,6 +3968,22 @@ def run_setup():
     else:
         rag_label = f"RAG DB   rebuild ({rag_count:,} entries)" if rag_count > 0 else "RAG DB   build vulnerability knowledge base"
         item_choices.append({"name": rag_label, "value": "__rag__"})
+
+    # Codex adapter toggle — gated on codex backend presence. run_install()
+    # now auto-installs the Codex adapter on Codex-only and dual machines, so
+    # ~/.codex/plamen, AGENTS.md, and config.toml are already staged by the
+    # time we reach this checkbox. This toggle remains as an explicit
+    # refresh/reinstall path for the interactive user.
+    codex_present = bool(_find_codex_bin())
+    codex_linked = (os.path.isdir(os.path.expanduser("~/.codex/plamen"))
+                    or os.path.islink(os.path.expanduser("~/.codex/plamen")))
+    if codex_present:
+        codex_label = (
+            "Codex    refresh ~/.codex adapter (AGENTS.md, config.toml, agents, plamen link)"
+            if codex_linked else
+            "Codex    install ~/.codex adapter — REQUIRED for the Codex backend"
+        )
+        item_choices.append({"name": codex_label, "value": "__codex__"})
 
     all_values = [c["value"] for c in item_choices]
 
@@ -3202,8 +4017,16 @@ def run_setup():
     else:
         w(f"  {_C_GREEN}All tools installed ({rag_count:,} RAG entries).{_RST}\n")
         w(f"  {_C_GRAY}Select components to reinstall/rebuild, or Skip to go back.{_RST}\n\n")
+    if codex_present and not codex_linked:
+        w(f"  {_C_ORANGE}! Codex backend detected, but ~/.codex is NOT linked.{_RST}\n")
+        w(f"  {_C_GRAY}  Claude-side setup does NOT wire Codex. Toggle 'Codex' below{_RST}\n")
+        w(f"  {_C_GRAY}  (or run `plamen install --codex`), or Codex audits will fail to{_RST}\n")
+        w(f"  {_C_GRAY}  load methodology (needs ~/.codex/plamen, AGENTS.md, config.toml).{_RST}\n\n")
+    elif codex_present and codex_linked:
+        w(f"  {_C_GRAY}Codex adapter linked (~/.codex). Toggle 'Codex' to refresh it.{_RST}\n\n")
     sys.stdout.flush()
 
+    _drain_stdin()
     selected = inquirer.checkbox(
         message="Select components (space to toggle):",
         choices=choices,
@@ -3231,6 +4054,11 @@ def run_setup():
         if group == "__skip__":
             continue
 
+        if group == "__codex__":
+            console.print(Rule(title="Codex Adapter", style="color(238)"))
+            _install_codex_adapter(w)
+            continue
+
         if group == "__rag__":
             w(f"\n  {_BOLD}{_C_WHITE}Building RAG vulnerability database...{_RST}"
               f"  {_C_DARK_GRAY}~3-5 min{_RST}\n\n")
@@ -3247,6 +4075,11 @@ def run_setup():
 
         entries = missing.get(group, _INSTALL_RECIPES.get(group, []))
         for display, check_fn, cmds_fn, provides, est, paths, requires in entries:
+            # path_adds may be a callable (lazy resolution, e.g. medusa's
+            # `go env`-derived bin dir). Resolve to a concrete list here so all
+            # downstream uses (pre-create, PATH persist, runtime probe) see a list.
+            if callable(paths):
+                paths = paths()
             w(f"  {_C_ORANGE}>{_RST} {_C_WHITE}{display}{_RST}"
               f"  {_C_DARK_GRAY}{est}{_RST}\n")
             sys.stdout.flush()
@@ -3963,7 +4796,9 @@ def estimate_cost(target: str, mode: str,
         # default; env overrides may change real billing.
         pricing = {"opus": (5.0, 30.0), "sonnet": (2.5, 15.0), "haiku": (0.20, 1.25)}
     else:
-        # Claude pricing (Opus 4.6 $5/$25, Sonnet 4.6 $3/$15, Haiku 4.5 $1/$5)
+        # Claude pricing per tier estimate (Opus 4.8 ~$5/$25, Sonnet 4.6 $3/$15,
+        # Haiku 4.5 $1/$5). Keyed by tier, not model ID, so the opus default
+        # bump to 4.8 does not affect this lookup.
         pricing = {"opus": (5.0, 25.0), "sonnet": (3.0, 15.0), "haiku": (1.0, 5.0)}
     api_cost = 0.0
     for m in ("opus", "sonnet", "haiku"):
@@ -4086,6 +4921,7 @@ def _cap(s: str, n: int = 44) -> str:
 
 def select_pipeline() -> str:
     """Returns 'sc', 'l1', 'compare', or 'setup'."""
+    _drain_stdin()
     result = inquirer.select(
         message="What are you auditing?",
         choices=[
@@ -4130,6 +4966,7 @@ def select_audit_mode(pipeline: str) -> str:
              "value": "thorough"},
             *_back_separator(),
         ]
+    _drain_stdin()
     return inquirer.select(
         message="Select audit depth:",
         choices=choices,
@@ -4177,6 +5014,7 @@ def select_target() -> tuple:
     choices.append({"name": "Browse...    enter a different path", "value": "__browse__"})
     choices.extend(_back_separator())
 
+    _drain_stdin()
     result = inquirer.select(
         message="Target project to audit:",
         choices=choices,
@@ -4203,6 +5041,7 @@ def select_target() -> tuple:
 
 
 def select_docs() -> str:
+    _drain_stdin()
     result = inquirer.select(
         message=_wrap_msg(
             "Docs describing trust roles or permissions?",
@@ -4235,6 +5074,7 @@ def select_docs() -> str:
         return os.path.abspath(path)
 
     if result == "url":
+        _drain_stdin()
         return inquirer.text(
             message="Docs URL:",
             validate=lambda v: v.startswith("http") or "Enter a valid URL",
@@ -4246,6 +5086,7 @@ def select_docs() -> str:
 
 def select_scope() -> tuple:
     """Returns (scope_file_path, scope_notes). Both can be empty."""
+    _drain_stdin()
     result = inquirer.select(
         message="Scope constraints?",
         choices=[
@@ -4279,6 +5120,7 @@ def select_scope() -> tuple:
             choices = [{"name": os.path.basename(f), "value": f} for f in scope_files]
             choices.append(Separator())
             choices.append({"name": "Browse...  pick a different file", "value": "__browse__"})
+            _drain_stdin()
             chosen = inquirer.select(
                 message="Select scope file:",
                 choices=choices,
@@ -4303,6 +5145,7 @@ def select_scope() -> tuple:
             return (os.path.abspath(path), "")
 
     if result == "notes":
+        _drain_stdin()
         notes = inquirer.text(
             message="Scope notes (e.g., 'focus on vault module, ignore governance'):",
             style=_STYLE, qmark=">", amark="✓",
@@ -4330,6 +5173,7 @@ def select_report(message: str, allow_back: bool = True) -> str:
     if allow_back:
         choices.extend(_back_separator())
 
+    _drain_stdin()
     result = inquirer.select(
         message=message,
         choices=choices,
@@ -4356,6 +5200,7 @@ def select_report(message: str, allow_back: bool = True) -> str:
 
 def confirm_launch() -> str:
     """Returns 'launch', 'back', or 'cancel'."""
+    _drain_stdin()
     return inquirer.select(
         message="Ready to launch?",
         choices=[
@@ -4378,6 +5223,7 @@ def select_l1_tier(detected_tier: str, loc: int) -> str:
         marker = " ←" if tid == detected_tier else ""
         choices.append({"name": f"{label:22s} {desc}{marker}", "value": tid})
     choices.extend(_back_separator())
+    _drain_stdin()
     result = inquirer.select(
         message=f"Select audit tier (detected: {detected_tier.upper()} based on {loc:,} LOC):",
         choices=choices,
@@ -4398,6 +5244,7 @@ def select_l1_modules(modules: list) -> list:
         {"name": f"{name:20s} {loc:>7,} LOC   {path}", "value": (name, path, loc)}
         for name, path, loc in modules
     ]
+    _drain_stdin()
     result = inquirer.checkbox(
         message="Select modules to audit (space=toggle, enter=confirm, empty=back):",
         choices=choices,
@@ -4413,6 +5260,7 @@ def select_l1_modules(modules: list) -> list:
 
 def select_l1_fork() -> str:
     """Select fork analysis mode. Returns 'diff'/'standalone'/'both' or _BACK."""
+    _drain_stdin()
     result = inquirer.select(
         message="Fork detected. Upstream comparison?",
         choices=[
@@ -4627,18 +5475,34 @@ def _find_existing_audit(cwd: str = "") -> "dict | None":
         os.path.join(cwd, "contracts", ".scratchpad"),
     ]
 
+    # First configless-but-artifacts stub seen. Only used as a LAST resort if NO
+    # candidate yields a valid/recoverable config. This stops a configless stub
+    # in a PARENT dir (e.g. cwd/.scratchpad, created when the wizard is launched
+    # from a parent and the audit is scoped to a subdir) from masking the real
+    # audit in cwd/contracts/.scratchpad or cwd/src/.scratchpad.
+    best_missing = None
+
     for scratchpad in scratchpad_dirs:
         config_path = os.path.join(scratchpad, "config.json")
         checkpoint_path = os.path.join(scratchpad, "_v2_checkpoint.json")
 
-        # ── Primary: config.json exists ──
+        # ── Primary: config.json exists AND parses ──
+        # A halt landing mid-write (or a partial reconstruct) can leave
+        # config.json present but TRUNCATED/corrupt. That must NOT skip the
+        # candidate: the full config is also embedded in _v2_checkpoint.json,
+        # so a corrupt config.json is recoverable exactly like a missing one.
+        # Treat a parse failure as "no usable config" and fall through to the
+        # checkpoint-reconstruction fallback below (which self-heals
+        # config.json), instead of `continue`-ing past the whole scratchpad.
+        config = None
         if os.path.isfile(config_path):
             try:
                 with open(config_path, encoding="utf-8") as f:
                     config = _json.load(f)
             except Exception:
-                continue
+                config = None
 
+        if config is not None:
             completed = []
             if os.path.isfile(checkpoint_path):
                 try:
@@ -4661,7 +5525,8 @@ def _find_existing_audit(cwd: str = "") -> "dict | None":
                 "phases_done": progress["phases_done"],
             }
 
-        # ── Fallback: scratchpad dir exists but config.json is missing ──
+        # ── Fallback: scratchpad dir exists but config.json is missing OR
+        #    corrupt (parse failed above) ──
         if not os.path.isdir(scratchpad):
             continue
 
@@ -4693,13 +5558,22 @@ def _find_existing_audit(cwd: str = "") -> "dict | None":
             except Exception:
                 pass
 
-        # Try to reconstruct config from checkpoint's embedded copy
+        # Try to reconstruct config from checkpoint's embedded copy.
+        # Atomic temp+replace: a halt during this write must never leave
+        # config.json truncated (that would re-create the corruption this
+        # recovery exists to undo). os.replace is atomic same-volume.
         if recovered_config:
             try:
-                with open(config_path, "w", encoding="utf-8") as f:
+                _tmp = config_path + ".tmp"
+                with open(_tmp, "w", encoding="utf-8") as f:
                     _json.dump(recovered_config, f, indent=2)
+                os.replace(_tmp, config_path)
             except Exception:
-                pass
+                try:
+                    if os.path.isfile(config_path + ".tmp"):
+                        os.unlink(config_path + ".tmp")
+                except Exception:
+                    pass
             progress = _resolve_resume_progress(recovered_config, completed)
             return {
                 "config_path": config_path,
@@ -4714,22 +5588,28 @@ def _find_existing_audit(cwd: str = "") -> "dict | None":
                 "recovered": True,
             }
 
-        # Last resort: scratchpad has artifacts but no recoverable config.
-        # We know an audit happened but can't reconstruct its settings.
-        return {
-            "config_path": None,
-            "scratchpad": scratchpad,
-            "mode": "?",
-            "pipeline": "?",
-            "language": "?",
-            "target": os.path.dirname(scratchpad),
-            "last_phase": completed[-1] if completed else "(unknown)",
-            "next_phase": "(unknown)",
-            "phases_done": len(completed),
-            "config_missing": True,
-        }
+        # Artifacts but no recoverable config. Do NOT return immediately — a
+        # LATER candidate (e.g. cwd/contracts/.scratchpad) may hold the real
+        # config + checkpoint. Remember the FIRST such stub only as a last-resort
+        # fallback and keep scanning the remaining candidates.
+        if best_missing is None:
+            best_missing = {
+                "config_path": None,
+                "scratchpad": scratchpad,
+                "mode": "?",
+                "pipeline": "?",
+                "language": "?",
+                "target": os.path.dirname(scratchpad),
+                "last_phase": completed[-1] if completed else "(unknown)",
+                "next_phase": "(unknown)",
+                "phases_done": len(completed),
+                "config_missing": True,
+            }
+        continue
 
-    return None
+    # No candidate had a valid/recoverable config; fall back to the first
+    # configless stub (if any) so the user still gets a Clean-up/Cancel choice.
+    return best_missing
 
 
 def _resume_audit_prompt(info: dict) -> str:
@@ -4779,6 +5659,7 @@ def _resume_audit_prompt(info: dict) -> str:
         ]
         default = "resume"
 
+    _drain_stdin()
     result = inquirer.select(
         message="What would you like to do?",
         choices=choices,
@@ -4877,8 +5758,15 @@ def launch_v2(pipeline: str, mode: str, target: str, language: str,
         config["docs_path"] = docs
 
     config_path = os.path.join(scratchpad, "config.json")
-    with open(config_path, "w", encoding="utf-8") as f:
+    # Atomic temp+replace: a halt during the initial config write must never
+    # leave a truncated config.json on disk (the launcher can recover a corrupt
+    # config from the checkpoint, but only the driver writes that later -- at
+    # setup time there is no fallback yet, so the write itself must be all-or
+    # -nothing).
+    _cfg_tmp = config_path + ".tmp"
+    with open(_cfg_tmp, "w", encoding="utf-8") as f:
         _json.dump(config, f, indent=2)
+    os.replace(_cfg_tmp, config_path)
 
     driver = os.path.join(PLAMEN_HOME, "scripts", "plamen_driver.py")
     if not os.path.isfile(driver):
@@ -4895,7 +5783,19 @@ def launch_v2(pipeline: str, mode: str, target: str, language: str,
 
     if sys.platform == "win32":
         os.system("")
-    result = subprocess.run([sys.executable, driver, config_path])
+    # launch_v2 just wrote a BRAND-NEW config.json, so this is a fresh run by
+    # definition. If a stale `_v2_checkpoint.json` survived in this scratchpad
+    # (e.g. the "New audit" path's shutil.rmtree(ignore_errors=True) silently
+    # skipped a Windows-locked file), launching WITHOUT --fresh makes the driver
+    # load that stale checkpoint and hard-halt on a mode/graph mismatch
+    # ("checkpoint references phases outside the active graph"). Pass --fresh so
+    # the driver's _purge_scratchpad clears it; config.json + dotfiles survive
+    # the purge, so the just-written config is safe.
+    _driver_cmd = [sys.executable, driver]
+    if os.path.isfile(os.path.join(scratchpad, "_v2_checkpoint.json")):
+        _driver_cmd.append("--fresh")
+    _driver_cmd.append(config_path)
+    result = subprocess.run(_driver_cmd)
 
     if result.returncode == 0:
         report = os.path.join(target, "AUDIT_REPORT.md")
@@ -5330,6 +6230,7 @@ def main():
                     "value": "codex",
                 })
             choices.extend(_back_separator())
+            _drain_stdin()
             result = inquirer.select(
                 message="AI runtime?",
                 choices=choices,
@@ -5382,6 +6283,7 @@ def main():
                 step = 35; continue
 
             if step == 35:
+                _drain_stdin()
                 result = inquirer.select(
                     message="Proven-only mode?",
                     choices=[

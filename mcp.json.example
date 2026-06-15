@@ -54,6 +54,11 @@
         "HELIUS_API_KEY": "YOUR_HELIUS_API_KEY"
       },
       "_comment": "Optional: Solana on-chain data. Free key: https://helius.dev"
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory@2026.1.26"],
+      "_comment": "Persistent memory across sessions"
     }
   }
 }

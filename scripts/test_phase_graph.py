@@ -361,14 +361,16 @@ def test_MX_thorough_strict_superset_of_core():
 def test_MX_critical_phases_have_artifacts_or_any_of():
     """Every phase marked `critical=True` declares artifacts or any_of OR is
     a verify shard (manifest-driven)."""
-    import re as _re
-    shard_re = _re.compile(r"^(?:sc_)?verify_(crithigh|high_[a-j]|medium_[a-f]|low_[a-d])$")
+    # Verify shards are manifest-driven (empty expected_artifacts by design):
+    # exempt every name registered in the SC/L1 verify-shard manifests so the
+    # check stays correct as the slot pools grow.
+    shard_names = set(D.SC_VERIFY_PHASE_NAMES) | set(D.L1_VERIFY_PHASE_NAMES)
     bad = []
     for phases, lbl in [(D.SC_PHASES, "sc"), (D.L1_PHASES, "l1")]:
         for p in phases:
             if not p.critical:
                 continue
-            if shard_re.match(p.name):
+            if p.name in shard_names:
                 continue  # exempt
             if not p.expected_artifacts and not p.any_of:
                 bad.append(f"{lbl}/{p.name}")

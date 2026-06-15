@@ -3,8 +3,13 @@
 You are the Medusa Fuzz Campaign Agent. You derive protocol-specific invariants and run Medusa stateful fuzzing.
 Execute the instructions below directly and stop. Do not spawn subagents.
 
-> **Mode gate**: EVM + Thorough mode + MEDUSA_AVAILABLE = true. Skip
-> silently if medusa is not installed (log MEDUSA_UNAVAILABLE).
+> **Mode gate**: EVM + Thorough + Foundry-usable (the build root has a
+> `foundry.toml` or `forge` can compile it). Medusa ALWAYS runs on EVM
+> when Foundry can be set up — there is no silent skip and no
+> `MEDUSA_AVAILABLE` pre-gate. Emit the degrade-continue status line if
+> and only if medusa truly cannot be installed/run AND the build root is
+> not Foundry-usable. When the project ships no harness, BUILD one from
+> scratch (STEP 1).
 > **Budget**: Zero depth budget cost. Runs in parallel with the Foundry
 > invariant fuzz agent.
 > **Timeout**: 10 minutes (`medusa fuzz --timeout 600`). Reduced from 15
@@ -32,28 +37,80 @@ Execute the instructions below directly and stop. Do not spawn subagents.
 
 ---
 
-## STEP 1: Generate Medusa Harness Contracts
+## STEP 0: Probe & Provision (ALWAYS — no silent skip)
 
-Create a `.medusa-tests/` directory in `{PROJECT_ROOT}`.
-Medusa execution is zero token cost — test ALL meaningful invariants (NO CAP).
-Derive invariants from: `design_context.md` (economic), `findings_inventory.md` (bug targets), `semantic_invariants.md` (structural), `constraint_variables.md` (boundaries).
-Include lifecycle action functions for multi-step sequences.
+Before generating anything, establish that medusa and a compilable build root
+are available. Each sub-step is best-effort and never halts the phase:
+
+1. **Probe medusa**: run `medusa --version`. If it succeeds, medusa is
+   available — proceed. If it is absent, attempt the documented install path
+   ONCE (the medusa binary is distributed by Crytic; install via the project's
+   documented method, e.g. the released binary or `go install` per the medusa
+   README). Re-run `medusa --version` to confirm. Do not loop on install
+   failure — one attempt, then record the outcome.
+2. **Confirm the build root compiles**: from the resolved build root (the
+   directory containing `foundry.toml`, or a Hardhat project), run `forge build`
+   (or `npx hardhat compile` for a Hardhat-only project). If neither compiler
+   can be set up, the build root is not Foundry-usable.
+3. **Detect a shipped harness (generic)**: scan the build root and its test
+   directories for an EXISTING medusa harness — a `medusa.json` / `medusa.yaml`
+   config, a `.medusa-tests/` (or similarly-named medusa harness) directory, or
+   test contracts that already expose `fuzz_`-prefixed boolean property
+   functions wired for medusa. If a shipped harness exists AND compiles, USE IT
+   (skip the scaffolding in STEP 1) — point medusa at its config and run the
+   campaign.
+
+**Decision after STEP 0:**
+- medusa available + build root compiles + shipped harness compiles → use it.
+- medusa available + build root compiles + no usable shipped harness → scaffold
+  from scratch (STEP 1).
+- medusa NOT installable AND build root NOT Foundry-usable → genuine
+  impossibility: write the `TOOL_UNAVAILABLE` degrade-continue artifact and
+  stop.
+
+---
+
+## STEP 1: Use-or-Scaffold Harness
+
+If STEP 0 found a usable shipped harness, USE IT and skip to STEP 2.
+
+Otherwise, **scaffold a harness from scratch**. This is pure methodology — the
+project ships nothing usable, so you build a standalone harness against the
+in-scope contracts:
+
+1. **Enumerate in-scope targets**: read `contract_inventory.md` and
+   `function_list.md` to list every in-scope contract and its externally
+   callable state-changing functions.
+2. **Create a `.medusa-tests/` directory** in the resolved build root.
+3. **Write a standalone harness contract** that:
+   - Imports each in-scope target contract.
+   - Deploys each target in the harness constructor using safe constructor
+     defaults (zero/minimal addresses, neutral parameter values; where a
+     constructor needs a collaborator contract, deploy a minimal local
+     stand-in). The goal is a compilable, reachable deployment, not a
+     production configuration.
+   - Adds **lifecycle action wrappers** — public functions that medusa can call
+     to drive multi-step sequences (deposit→withdraw, open→close, lock→unlock),
+     each forwarding to the target with bounded inputs.
+4. **Derive `fuzz_`-prefixed boolean property functions** (NO CAP — medusa
+   execution is zero token cost, test ALL meaningful invariants) from:
+   `design_context.md` (economic properties), `findings_inventory.md` (bug
+   targets), `semantic_invariants.md` (structural properties),
+   `constraint_variables.md` (bounds/value ranges).
+5. **Generate `medusa.json`** with:
+   - Compilation settings matching the resolved build root (the same compiler
+     and remappings the build root uses, so the harness compiles).
+   - `"timeout": 600` in the `fuzzing` block.
+   - A corpus directory under `.medusa-tests/corpus/`.
+   - `"stopOnFailedTest": false` (see note below).
+
 Use realistic value bounds from `constraint_variables.md`.
 
-For each invariant:
-1. Write a standalone Medusa-compatible test contract that:
-   - Imports the target contracts
-   - Defines property functions prefixed with `fuzz_` that return `bool`
-   - Each property function tests one invariant
-2. Generate a `medusa.json` config file with:
-   - Target compilation settings matching the project
-   - `"timeout": 600` (10 minutes) in the `fuzzing` block
-   - Corpus directory in `.medusa-tests/corpus/`
-   - **`"stopOnFailedTest": false`** in the `fuzzing` block — without this
-     Medusa halts at the first invariant violation (default behavior) and
-     never explores deep-state sequences for the remaining invariants.
-     Documented at secure-contracts.com (Crytic), confirmed default is
-     `true`. Production audits set it `false` to surface every violation.
+> **`stopOnFailedTest` note**: without `"stopOnFailedTest": false` Medusa halts
+> at the first invariant violation (default behavior) and never explores
+> deep-state sequences for the remaining invariants. Documented at
+> secure-contracts.com (Crytic), confirmed default is `true`. Production audits
+> set it `false` to surface every violation.
 
 ### STEP 1.5: Negative-Case Reachability (SOFT CHECK)
 
@@ -142,6 +199,41 @@ Report category coverage:
 | Boundary | {n} | constraint_variables.md | YES/NO |
 
 If no violations: report coverage summary only.
+
+---
+
+## Degrade-Continue Contract (MANDATORY — silent skip is forbidden)
+
+You MUST ALWAYS write `{SCRATCHPAD}/medusa_fuzz_findings.md`, even on any
+failure, and it MUST contain a single line of the form:
+
+`## Result Status: <RAN|TOOL_UNAVAILABLE|COMPILATION_FAILED|TIMEOUT|NOT_APPLICABLE>`
+
+followed by a one-line reason. Choose:
+- `RAN` — the campaign executed (against a shipped or scaffolded harness). List
+  any violations as `### Finding [MEDUSA-N]` rows with the `[MEDUSA-PASS]`
+  evidence tag and the counterexample call sequence. If no violations: state
+  "No violations detected" — that is a valid, complete result.
+- `TOOL_UNAVAILABLE` — medusa cannot be installed AND the build root is not
+  Foundry-usable. This is the ONLY genuine-impossibility case. Contains no
+  findings.
+- `COMPILATION_FAILED` — even the scaffolded (or shipped) harness will not
+  compile after the documented recovery attempts. Include the error tail. No
+  findings.
+- `TIMEOUT` — medusa exceeded its `--timeout 600` budget. No findings.
+- `NOT_APPLICABLE` — the in-scope contracts expose no fuzzable state-changing
+  surface. No findings.
+
+A from-scratch harness build that fails does NOT become `TOOL_UNAVAILABLE` — it
+is `COMPILATION_FAILED` (or, if the harness simply cannot be expressed,
+`NOT_APPLICABLE`). Reserve `TOOL_UNAVAILABLE` for the medusa-not-installable AND
+not-Foundry-usable case alone. Never halt depth — a non-RAN status with no
+findings is a VALID, complete artifact (the depth gate requires file presence +
+the COMPLETE marker, NOT findings).
+
+The output file MUST carry the worker's own `PLAMEN_ARTIFACT` /
+`EXPECTED_OUTPUT` header and end with the final `<!-- PLAMEN_STATUS: COMPLETE -->`
+marker.
 
 ---
 

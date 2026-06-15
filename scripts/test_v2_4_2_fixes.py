@@ -171,16 +171,40 @@ def test_large_candidate_set_is_bounded_not_skipped(tmp_path):
 
     total = P._compute_dedup_candidate_pairs(scratchpad)
     live = (scratchpad / "dedup_candidate_pairs.md").read_text(encoding="utf-8")
-    full = (scratchpad / "dedup_candidate_pairs_full.md").read_text(encoding="utf-8")
     focus = (scratchpad / "dedup_focus_inventory.md").read_text(encoding="utf-8")
     live_rows = [line for line in live.splitlines() if line.startswith("| INV-")]
-    full_rows = [line for line in full.splitlines() if line.startswith("| INV-")]
 
     assert total > 60
-    assert len(live_rows) == 24
-    assert len(full_rows) == total
-    assert "Bounded work packet" in live
-    assert "dedup_candidate_pairs_full.md" in live
+    # Turn-safe dedup bound (dedup-overflow fix): the live-pair cap is 50 (env-
+    # overridable) and chunk == cap, so the candidate set is BOUNDED to ONE
+    # turn-safe round of <= cap pairs. Feeding 200+ pairs to a single dedup
+    # subprocess overflowed the 32K output-token cap and hung; capping at one
+    # round prevents that. Pairs beyond the cap are DEFERRED to
+    # dedup_candidate_pairs_full.md (full traceability) -- never silently skipped.
+    cap = P._dedup_live_pair_cap()
+    assert cap <= 60, f"live cap must stay turn-safe (one subprocess turn); got {cap}"
+    # Live packet is exactly one cap-sized round (cap == _DEDUP_ROUND_CHUNK).
+    assert len(live_rows) == cap, (
+        f"round-1 unified packet should carry exactly {cap} live pairs"
+    )
+    # BOUNDED-NOT-SKIPPED: total (210) > cap, so the remainder is preserved in
+    # the full/deferred file with ZERO loss -- bounding never drops a pair.
+    assert total > cap
+    full = scratchpad / "dedup_candidate_pairs_full.md"
+    assert full.exists(), (
+        "pairs beyond the live cap must be DEFERRED to "
+        "dedup_candidate_pairs_full.md, never silently skipped"
+    )
+    full_rows = [
+        l for l in full.read_text(encoding="utf-8").splitlines()
+        if l.startswith("| INV-")
+    ]
+    assert len(full_rows) == total, (
+        f"the full/deferred file must enumerate ALL {total} candidate pairs "
+        f"with zero loss (found {len(full_rows)})"
+    )
+    assert "deferred" in live.lower()
+
     assert "Dedup Focus Inventory" in focus
     assert "### Finding [INV-001]" in focus
 

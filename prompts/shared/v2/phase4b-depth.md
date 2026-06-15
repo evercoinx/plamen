@@ -18,6 +18,15 @@ skill execution gaps, invariant fuzz results, Medusa fuzz findings, and the
 depth lifecycle markers. Record any extra context inside a depth-owned
 output and stop.
 
+If `{SCRATCHPAD}/asset_binding_matrix.md` exists, treat it as a compact
+driver-generated value-binding checklist. It is not an expected-finding list.
+For each row relevant to your assigned role, either produce a normal finding
+with file:line evidence for an unbound asset/amount/recipient/provenance pair,
+or record why the pair is bound, unreachable, or irrelevant. Close rows exactly:
+if the row asks about `A <-> B`, do not treat a nearby issue involving only
+`A`, only `B`, or a sibling field as coverage. Your finding or dismissal must
+name both fields and the relationship between them.
+
 ## Light Mode Override
 
 When `MODE == light`, skip the standard 8-agent spawn. Instead spawn 4 merged sonnet agents, but still write the canonical output files that the driver gates:
@@ -50,6 +59,14 @@ Each depth agent reads:
 - `{SCRATCHPAD}/spec_expectations.md` (if present; tests/mocks/harnesses as
   expectation evidence only, not as reportable production targets)
 - Source files relevant to their domain
+
+### Discovery Stance (amplify, do not self-refute) — COPY INTO EACH OF THE 4 PROMPTS
+
+> During depth DISCOVERY your job is to AMPLIFY a candidate attack, not filter
+> it. If a path looks blocked, escalate to the worst reachable variant and
+> RECORD it as a candidate with its precondition — never argue yourself out of
+> one. Refutation is a later gate's job (e.g. the ANCHORING REJECTION LIST in
+> the language depth template), not discovery's — do not filter candidates here.
 
 ### Standard Depth Agent Semantic Proof Block (COPY INTO EACH OF THE 4 PROMPTS)
 
@@ -92,6 +109,12 @@ In your output file, include a section named exactly:
 
 Summarize the challenged invariant(s), read-site expectation(s), branch matrix
 entries, and intent evidence or evidence gap for each relevant candidate.
+
+For live findings, you MAY add the optional `**Discovery Steer**:` finding
+field when it preserves a bounded downstream pairing hint (shared
+variable/function, branch condition, postcondition/precondition link,
+terminal mechanism, or candidate ID). This is not proof, not a required
+section, and must stay inside your assigned output file.
 ```
 
 ### Finding Severity / Disposition Contract (MANDATORY)
@@ -156,6 +179,7 @@ Before investigating findings, read or check these four graph artifacts:
 2. `{SCRATCHPAD}/callee_map.md`
 3. `{SCRATCHPAD}/state_write_map.md`
 4. `{SCRATCHPAD}/function_summary.md`
+5. `{SCRATCHPAD}/security_obligations.md` when present
 
 In your output file, include a section named exactly:
 
@@ -185,6 +209,89 @@ causes the Python gate to fail the whole depth phase.
 
 Before returning from the depth phase, re-open the four standard depth output files and verify each contains `## Graph Artifact Consumption` plus all four graph-artifact basenames. If any output is missing the section, repair that output before returning; do not rely on the driver retry.
 
+### Standard Depth Agent Artifact Marker Block (COPY INTO EACH OF THE 4 PROMPTS)
+
+When spawning `depth-token-flow`, `depth-state-trace`, `depth-edge-case`, and
+`depth-external`, paste this block verbatim into each agent prompt. It is the
+depth analog of the breadth Subagent Prompt Template's marker contract. On a
+fresh audit the driver's gate requires each canonical depth output file to
+carry a `COMPLETE` marker AND pass a depth-appropriate structural check; an
+agent that exhausts its context window before its final `Write` would
+otherwise leave NO artifact (the DODO 2026-05-21 breadth failure class). The
+IN_PROGRESS-first Write makes that survivable: the file is on disk in
+`IN_PROGRESS` state and the driver's supervision loop continues the agent.
+
+```
+AGENT_ROW: {role}
+EXPECTED_OUTPUT: depth_{role}_findings.md
+
+(The two lines above are routing markers consumed by the driver's
+continuation loop -- keep them verbatim, do not echo them in your final
+response. `{role}` is one of: token_flow, state_trace, edge_case, external.)
+
+Step 1 -- REQUIRED FIRST TOOL CALL: Write.
+Create {SCRATCHPAD}/depth_{role}_findings.md with EXACTLY this header
+(do not omit any marker line):
+
+    <!-- PLAMEN_ARTIFACT: depth_{role}_findings.md -->
+    <!-- PLAMEN_OWNER: depth-{role} -->
+    <!-- PLAMEN_STATUS: IN_PROGRESS -->
+    <!-- PLAMEN_PHASE: depth -->
+    <!-- PLAMEN_VERSION: 1 -->
+    <!-- AGENT_ROW: {role} -->
+    <!-- EXPECTED_OUTPUT: depth_{role}_findings.md -->
+
+    # Depth Analysis: {role}
+
+Do NOT call Read, Glob, or Grep before this Write completes -- the marker
+file is your crash-safety net.
+
+Steps 2-N -- Analyze and Edit (not Write).
+Read your inputs, perform the role's analysis per the language template, and
+APPEND each `### Finding [ID]:` block to the file using the Edit tool. Edit
+preserves prior findings and the marker header; a second Write would
+overwrite them. Include the mandatory `## Semantic Proof Checks`,
+`## Graph Artifact Consumption`, and `## Obligation Receipts` sections per
+the other blocks in this prompt.
+
+OUTPUT-BUDGET DISCIPLINE (avoid a single oversized turn that hits the output-
+token cap mid-write and leaves the file IN_PROGRESS):
+- Write your findings FIRST, then the four required section headers, then APPEND
+  the `PLAMEN_STATUS: COMPLETE` marker AS SOON AS findings + the four section
+  headers exist. Add any remaining receipt detail AFTER the marker — a complete-
+  but-terse file is far better than an uncapped turn that never marks COMPLETE.
+- Keep every Obligation Receipt to ONE line.
+- If your `function_summary.md` partition exceeds ~40 rows, emit individual
+  receipts for all Reported (R) and Carried (C) rows, but BATCH Dismissed (D)
+  rows into grouped one-line receipts:
+  `[OBLIG:function_summary.md:<contract>.*] STATUS:D KEY:<shared reason> -> rows: f1,f2,...`
+  (the receipt gate is WARNING-only, so batching D-rows cannot fail a gate).
+
+Final Step -- Edit: mark COMPLETE.
+Once all findings and required sections are written, APPEND at the END of the
+file:
+
+    <!-- PLAMEN_STATUS: COMPLETE -->
+    <!-- PLAMEN_FINDINGS_COUNT: {N} -->
+
+`{N}` is the count of `### Finding [ID]:` blocks you wrote. If `{N} == 0`
+(no confirmed findings in your domain), you MUST ALSO include a
+`## No Findings` section with a brief rationale describing what you analyzed
+and why nothing rose to a reportable finding. A `PLAMEN_FINDINGS_COUNT: 0`
+file without a `## No Findings` (or `## Negative Result`) rationale fails the
+structural check and the driver treats the file as still IN_PROGRESS. Do not
+leave residual placeholder strings (`TODO:`, `FILL_ME`, `<placeholder>`) in a
+COMPLETE file. Note: depth findings use the `### Finding [ID]:` block format,
+NOT a breadth-style `## Findings` heading -- the depth structural check does
+NOT require a `## Findings` heading.
+```
+
+The driver's depth gate (`compute_depth_row_statuses`) checks the canonical
+four `depth_{role}_findings.md` files (derived from this phase's role set).
+On fresh audits each must be COMPLETE + structurally sound; on legacy/resumed
+scratchpads the legacy quorum applies and unmarked files are tolerated with a
+warning.
+
 ### Two Mandatory Additions to Each Depth Agent Prompt
 
 When constructing each depth agent's Task() prompt, include the two
@@ -195,6 +302,16 @@ are now hard obligations with worked examples. They are still compact
 
 For all 4 standard depth roles (token-flow, state-trace, edge-case,
 external):
+
+> **MANDATORY — Generic Security Obligations.** If
+> `{SCRATCHPAD}/security_obligations.md` exists, read it before finalizing your
+> output. It is a generic feature-derived obligation ledger, not a list of
+> expected findings. Address obligations relevant to your role and emit a
+> receipt for each one you directly evaluated:
+> `[OBLIG:security_obligations.md:<SO-ID>] STATUS:R|D|C KEY:<one-line> -> <finding_id|reason|phase>`.
+> Use `R` only when you reported a finding, `D` only with concrete code
+> evidence for safety/refutation, and `C` only when a named later phase owns
+> the remaining work.
 
 > **MANDATORY — Obligation Receipts.** If `{SCRATCHPAD}/function_summary.md`
 > exists, your output file is INCOMPLETE until it ends with a single
@@ -282,8 +399,17 @@ expires. Close or abandon only that stalled agent, then split its assigned scope
 into 2 "lite" agents (max 3 findings each, no static analyzer, max 5 files).
 2 lite agents = 1 budget unit.
 
-The phase may return only after every required output file below exists and is
-substantial, or after a replacement lite agent has produced the missing output:
+The phase may return only after every required output file below passes disk
+verification, or after a replacement lite agent has produced and finalized the
+missing output:
+
+Disk verification means:
+- the file exists;
+- if the file is a depth/scanner/niche findings artifact, the LAST
+  `PLAMEN_STATUS:` marker in the file is `COMPLETE`;
+- findings artifacts contain at least one real `### Finding [` / `## Finding [`
+  block OR a `## No Findings` / `## Negative Result` rationale;
+- files are not header-only reservation stubs.
 
 - `depth_token_flow_findings.md`
 - `depth_state_trace_findings.md`
@@ -496,35 +622,33 @@ LOG checkpoint result to {SCRATCHPAD}/checkpoint_postdepth.md
 
 ---
 
-## THOROUGH CHECKPOINT: Pre-Depth (EVM only)
+## THOROUGH FUZZ CAMPAIGN (driver-scheduled — do NOT spawn from here)
 
-When `MODE == thorough` AND `LANGUAGE == evm`:
+In V2 the invariant/Medusa fuzz campaign is scheduled by the Python driver as a
+Thorough-only **depth fuzz sidecar worker** (one per ecosystem, plus EVM Medusa
+when `MEDUSA_AVAILABLE`). It is NOT a coordinator spawn:
 
-**Step A: Invariant Fuzz Campaign** (MANDATORY — zero budget cost)
-Read template: `~/.claude/prompts/{LANGUAGE}/phase4b-invariant-fuzz.md`
-Spawn agent. Await completion. Write results to `invariant_fuzz_results.md`.
-The template has a 5-minute timeout built in. Do NOT skip this to save time.
-
-**Step B: Medusa Campaign** (MANDATORY if MEDUSA_AVAILABLE — zero budget cost)
-Read the standalone Medusa prompt:
-`~/.claude/prompts/shared/v2/phase4b-medusa.md`.
-Spawn agent IN PARALLEL with Step A. Await completion.
-Write results to `medusa_fuzz_findings.md`.
-
-**Step C: Assert Completion**
-```
-ASSERT: invariant_fuzz_results.md exists (or COMPILATION_FAILED logged)
-ASSERT: medusa_fuzz_findings.md exists (or MEDUSA_UNAVAILABLE logged)
-IF either missing AND no failure logged -> VIOLATION: "Fuzz campaign skipped without failure reason"
-```
+- The driver emits the worker(s) per `(mode == thorough, ecosystem,
+  build_status tool flags)` and points each at the canonical per-ecosystem
+  worker prompt (`prompts/{LANGUAGE}/v2/phase4b-invariant-fuzz.md`, and EVM
+  `prompts/evm/v2/phase4b-medusa-fuzz.md`). The worker runs forge/medusa/cargo
+  /sui via Bash itself.
+- It is **additive and non-blocking**: fuzz results add `[FUZZ-N]`/`[MEDUSA-N]`
+  invariant-violation findings only. A tool-absent/failed/timed-out run writes a
+  degrade-continue results artifact (`## Result Status: TOOL_UNAVAILABLE /
+  COMPILATION_FAILED / TIMEOUT`) and never halts depth. Fuzz artifacts are NOT
+  in the depth hard gate and NOT never-cut.
+- Do **NOT** spawn a fuzz agent from this prompt, and do not ASSERT fuzz-artifact
+  existence here — the driver owns completion via the worker pool, and the
+  artifacts are intentionally outside the depth hard gate.
 
 ---
 
 ## Depth Exit
 
-When all depth-owned artifacts are present and substantial, write
-`depth_exit.md` with the structured format below and stop. Do not continue into
-later pipeline phases.
+When all depth-owned artifacts pass disk verification, write `depth_exit.md`
+with the structured format below and stop. Do not continue into later pipeline
+phases.
 
 ```markdown
 - criterion: {1-4}

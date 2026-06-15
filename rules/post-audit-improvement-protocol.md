@@ -7,6 +7,23 @@
 
 ---
 
+## Part 0: HARD RULE — NO CODEBASE OVERFITTING (NEVER NEVER NEVER)
+
+Audit methodology (skills, rules, prompts, scanner checks) and persistent memory MUST encode **HOW to analyze**, NEVER **WHAT to find in a specific protocol**.
+
+**Forbidden:**
+- A specific project/protocol/token/contract/struct/function name used as a "check for X" hint, a floor-catalog row, or a dedicated section (e.g. a "ZetaChain Gateway: check native ZETA vs WZETA" row). Naming the answer is overfitting.
+- Storing specific past-audit FINDING descriptions, finding IDs, or file:line locations in memory. Memory may store ONLY recall %, precision %, and RC-distribution counts — never the bugs themselves.
+- RAG/web queries that pull the SAME-CONTEST judging/answer repo (`*-judging`, the contest's own issues) when measuring recall.
+
+**Allowed:** a generic mechanism with ONE illustrative example (e.g. "native vs wrapped gas token, like ETH/WETH") — never a dedicated protocol row, never the protocol whose audit motivated it as the example.
+
+**The test, applied before adding ANY skill/rule/memory content:** "Does this teach a general method, or does it name a specific codebase's answer?" If the latter → genericize it, route it to RAG-as-generic-vuln-class, or drop it.
+
+**Why this exists (permanent record):** the DODO Crosschain Dex benchmark was found primed by (a) a ZetaChain-specific HARD_OVERFIT floor row + §0c-bis in integration-hazard-research, (b) RAG electing the same-contest Sherlock judging repo as precedent, and (c) memory files storing DODO finding descriptions + a file:line. The generic methodology found the bugs on its own (0/4 recalls were load-bearing on the overfit) — so overfitting adds NO recall and only fakes the benchmark. Never again.
+
+---
+
 ## Part 1: The Problem This Protocol Solves
 
 ### Current state
@@ -247,6 +264,8 @@ A new check should be always-on (in scanner/depth templates) ONLY if:
 ---
 
 ## Part 5: Regression Protection
+
+> **MANDATORY GATE — applies before ANY skill/rule/memory change**: Every proposed change MUST first pass the **Part 0: HARD RULE — NO CODEBASE OVERFITTING** test. If the change names a specific codebase's answer (protocol/token/contract/struct/function as a check-for-X hint or floor row, a stored finding description/ID/file:line, or a same-contest judging/answer source), it is REJECTED here — genericize it, route it to RAG-as-generic-vuln-class, or drop it. No change proceeds past this gate without clearing Part 0.
 
 ### How regression is prevented WITHOUT storing audit data
 

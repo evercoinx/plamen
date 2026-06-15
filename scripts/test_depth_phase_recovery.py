@@ -252,6 +252,21 @@ def test_s16_core_absent_on_empty_scratchpad(tmp_path):
     assert _depth_core_artifacts_present(tmp_path) is False
 
 
+def test_s16_l1_core_uses_l1_role_files(tmp_path):
+    l1_core = (
+        "depth_consensus_invariant_findings.md",
+        "depth_network_surface_findings.md",
+        "depth_state_trace_findings.md",
+        "depth_external_findings.md",
+        "depth_edge_case_findings.md",
+    )
+    for name in l1_core:
+        (tmp_path / name).write_text("# F\n\n" + _FINDINGS + "x" * 400, encoding="utf-8")
+
+    assert _depth_core_artifacts_present(tmp_path, pipeline="l1", mode="core") is True
+    assert _depth_core_artifacts_present(tmp_path, pipeline="sc", mode="core") is False
+
+
 # ---------------------------------------------------------------------------
 # S1.5 — targeted repair hint
 # ---------------------------------------------------------------------------
@@ -653,13 +668,13 @@ def test_a1_execution_contract_claude_for_task_phases():
     assert "run_in_background" in _render_execution_contract(
         "depth", "sc", backend="claude"
     )
-    # breadth and recon are also Task-using on Claude.
+    # breadth is Task-using on Claude.
     assert "run_in_background" in _render_execution_contract(
         "breadth", "sc", backend="claude"
     )
-    assert "run_in_background" in _render_execution_contract(
-        "recon", "sc", backend="claude"
-    )
+    # Recon is driver-owned worker-pool/direct handoff now; do not reintroduce
+    # a coordinator Task contract.
+    assert _render_execution_contract("recon", "sc", backend="claude") == ""
 
 
 def test_a1_execution_contract_codex_for_multi_agent_phases():

@@ -12,6 +12,11 @@ Every agent spawned from this file MUST follow this protocol for each CHECK/step
 2. **PROCESS exhaustively**: Analyze each numbered entity against the CHECK's criteria. Mark each "DONE" or "N/A (reason)" before moving to the next.
 3. **COVERAGE GATE**: Count enumerated vs processed. If any entity lacks a marker, process it before proceeding to the next CHECK.
 
+Agents MAY add optional `Discovery Steer: ...` text inside live finding blocks
+or Chain Summary notes when it gives a compact generic pairing hint (shared
+variable/function, branch, terminal effect, or candidate ID). It is not proof,
+not required, and must not create additional output files.
+
 ---
 
 ## Blind Spot Scanner A: Tokens & Parameters
@@ -134,6 +139,7 @@ Write to {SCRATCHPAD}/blind_spot_a_findings.md
 Return: 'DONE: {N} blind spots - Check1: {A} token gaps, Check2: {B} parameter gaps'
 ")
 ```
+
 
 ---
 
@@ -533,7 +539,7 @@ Read:
 For each Medium+ CONFIRMED or PARTIAL finding in findings_inventory.md:
 
 1. Extract the ROOT CAUSE PATTERN in one sentence (e.g., 'state variable updated inside conditional block that can be skipped', 'paired operation asymmetry between deposit/withdraw paths')
-2. Grep ALL other functions in scope for the SAME pattern (same variable types, same code structure, same operation sequence)
+2. Grep ALL other functions AND contracts in scope for the SAME pattern (same variable types, same code structure, same operation sequence). Sweep EVERY other in-scope contract/sibling, not just sibling functions in the same contract — a repeat instance left unreported is an audit miss.
 3. For each sibling function found: does it exhibit the SAME bug?
 4. If YES and no existing finding covers it â†’ new finding [SP-N]
 
@@ -633,4 +639,3 @@ Write to {SCRATCHPAD}/design_stress_findings.md:
 Return: 'DONE: {N} design stress findings'
 ")
 ```
-

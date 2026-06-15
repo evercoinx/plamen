@@ -117,15 +117,16 @@ Human reviewer: confirm deployment-context assumption {X} before triage. If veri
 
 The Trust Adj. column in `report_index.md` Master Finding Index records `UNRESOLVED(original_sev)`.
 
-**v2.0.7 (P1) — `SEVERITY_OVERRIDE(...)` is a DRIVER-ONLY token distinct from `UNRESOLVED(...)`.** It is emitted automatically by `_repair_report_index_severity_provenance` when the LLM's severity is below upstream AND Trust Adj. was left empty. Format:
-
-```
-SEVERITY_OVERRIDE(upstream=<sev>, llm=<sev>, reason=<...>)
-```
-
-The Index Agent must NOT emit this token manually. Every such token in `report_index.md` MUST have a matching entry in `_severity_override_ledger.json` (driver-owned); the authenticity gate rejects unbacked stamps. `UNRESOLVED(...)` and `SEVERITY_OVERRIDE(...)` are validated independently by separate gate paths.
-
 **Why body and not Appendix A**: in security audits, the cost of missing a real exploit (false negative) exceeds the cost of an extra body section flagged for human triage (false positive). Burying UNRESOLVED in Appendix A inverts that tradeoff and historically caused real findings to disappear from human attention.
+
+### SEVERITY_OVERRIDE token
+
+`SEVERITY_OVERRIDE(original_sev)` is a driver-only Trust Adj. token. It may be
+used only when `_severity_override_ledger.json` exists and names the affected
+finding, original severity, final severity, and reason. Report agents must not
+invent severity overrides from prose; without the ledger, use the normal
+severity matrix, verifier result, UNRESOLVED/PARTIAL, trusted-actor, chain, or
+PoC-fail rules.
 
 **Rules for descriptions**:
 - Write as if the reader has never seen the audit pipeline. No "as identified by the breadth agent" or "this chain combines H-1 with H-3."

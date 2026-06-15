@@ -166,23 +166,32 @@ AskUserQuestion(questions=[{
 After all questions are answered, write the config to the project's scratchpad:
 
 ```python
-Before writing config, detect the language:
+Before writing config, detect the language using the driver's MECHANICAL
+ecosystem detector — the SAME deterministic code path the driver uses at
+startup, so the wizard and driver share ONE source of truth (no LLM-prose or
+hand-rolled bash if/elif). Do NOT ask the user when detection is confident.
 
 ```bash
-cd "{PROJECT_PATH}" && \
-SOL=$(find . -name "*.sol" -not -path "*/node_modules/*" | head -1) && \
-RS=$(find . -name "*.rs" -not -path "*/target/*" | head -1) && \
-MOVE=$(find . -name "*.move" | head -1) && \
-if [ -n "$SOL" ]; then echo "evm"; \
-elif [ -n "$RS" ]; then \
-  grep -rq "soroban" Cargo.toml 2>/dev/null && echo "soroban" || \
-  grep -rq "anchor" Cargo.toml 2>/dev/null && echo "solana" || echo "soroban"; \
-elif [ -n "$MOVE" ]; then \
-  grep -rq "AptosFramework\|aptos" Move.toml 2>/dev/null && echo "aptos" || echo "sui"; \
-else echo "evm"; fi
+# Single source of truth: the driver's mechanical detector. Prints
+# "<language>\t<confidence>" where confidence is high | medium | none.
+python ~/.claude/scripts/plamen_driver.py --detect-language "{PROJECT_PATH}"
+# Example outputs:
+#   evm      high     (.sol dominant — unambiguous)
+#   solana   high     (.rs + anchor-lang/solana-program or Anchor.toml)
+#   soroban  high     (.rs + soroban-sdk)
+#   sui      high     (.move + sui-framework)
+#   aptos    high     (.move + aptos-framework)
+#   solana   medium   (.rs only, no manifest marker — common-case default)
+#   sui      medium   (.move only, no manifest marker — common-case default)
+#   indeterminate  none   (no recognized sources OR conflicting markers)
 ```
 
-Set `LANGUAGE` to the output.
+Parse the two tab-separated fields as `DETECTED` and `CONFIDENCE`:
+- If `CONFIDENCE` is `high` or `medium` → set `LANGUAGE=DETECTED` and do NOT
+  prompt the user.
+- If `CONFIDENCE` is `none` (no sources, or genuinely conflicting manifest
+  markers) → fall back to the existing `AskUserQuestion` confirm and let the
+  user pick the language explicitly.
 
 ```python
 config = {
@@ -202,6 +211,12 @@ config = {
 ```
 
 Write this JSON to `{PROJECT_PATH}/.scratchpad/config.json` (create .scratchpad/ if needed).
+
+> Note: even if the language ends up wrong, the driver **auto-corrects** a wrong
+> `language` at startup from the same mechanical detector (and rewrites
+> config.json) — it does NOT halt and ask you to re-run. You only confirm the
+> language when detection is genuinely ambiguous (no recognized sources or
+> conflicting build-manifest markers).
 
 Before launching, print the pre-launch message so the user knows what to expect:
 

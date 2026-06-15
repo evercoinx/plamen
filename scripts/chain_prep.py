@@ -64,6 +64,32 @@ _STOPWORD_IDENTIFIERS = frozenset({
     "caller", "callers", "called", "revert", "reverts", "reverted",
 })
 
+_DISCOVERY_FIELDS = (
+    "discovery_steer",
+    "missing_precondition",
+    "precondition_type",
+    "postconditions_created",
+    "postcondition_types",
+    "semantic_invariant",
+    "branch_preconditions",
+    "terminal_mechanism",
+    "composition_candidates",
+)
+
+_DISCOVERY_GENERIC_TERMS = _STOPWORD_IDENTIFIERS | frozenset({
+    "access", "accounting", "arithmetic", "authorization", "balance",
+    "blocked", "branch", "branches", "callback", "candidate", "candidates",
+    "category", "condition", "conditions", "configuration", "created",
+    "creates", "effect", "effects", "enabled", "enables", "external",
+    "flow", "flows", "guard", "guards", "impact", "invariant", "issue",
+    "lifecycle", "match", "mechanism", "missing", "mode", "path", "paths",
+    "permission", "precondition", "preconditions", "postcondition",
+    "postconditions", "precision", "reachability", "rounding", "semantic",
+    "state", "status", "terminal", "timing", "token", "tokens", "type",
+    "types", "unit", "units", "value", "values", "write", "writes",
+    "read", "reads",
+})
+
 
 # ---------------------------------------------------------------------------
 # Shared parsing
@@ -145,6 +171,63 @@ def _extract_identifiers(text: str) -> set[str]:
     return out
 
 
+def _entry_text(entry: dict, field: str) -> str:
+    """Return a bounded string value from an inventory entry field."""
+    try:
+        val = entry.get(field, "")
+    except Exception:
+        return ""
+    if val is None:
+        return ""
+    if isinstance(val, (list, tuple, set)):
+        val = " ".join(str(x) for x in val)
+    else:
+        val = str(val)
+    return re.sub(r"\s+", " ", val).strip()[:500]
+
+
+def _discovery_text(entry: dict) -> str:
+    return " ".join(_entry_text(entry, f) for f in _DISCOVERY_FIELDS).strip()
+
+
+def _extract_discovery_terms(text: str) -> set[str]:
+    """Concrete terms from optional discovery metadata.
+
+    Mechanism/category words alone are intentionally ignored so fields like
+    `Discovery Steer: arithmetic rounding` do not pair unrelated findings.
+    """
+    terms = {tok.lower() for tok in _extract_identifiers(text)}
+    for m in re.finditer(r"`([A-Za-z_][A-Za-z0-9_]{3,})`", text or ""):
+        terms.add(m.group(1).lower())
+    for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{4,})\b", text or ""):
+        tok = m.group(1)
+        norm = tok.lower()
+        if "_" in tok or re.search(r"[a-z][A-Z]", tok) or re.search(r"\d", tok):
+            terms.add(norm)
+    return {
+        t for t in terms
+        if len(t) >= 4 and t not in _DISCOVERY_GENERIC_TERMS
+    }
+
+
+def _extract_finding_refs(text: str) -> set[str]:
+    return {
+        m.group(0).upper()
+        for m in re.finditer(r"\b[A-Z][A-Z0-9]{0,10}-\d+\b", text or "", re.IGNORECASE)
+    }
+
+
+def _entry_aliases(entry: dict, final_id: str) -> set[str]:
+    """All finding IDs that may identify this entry across pipeline stages."""
+    aliases: set[str] = set()
+    for val in (final_id, entry.get("local_id", "")):
+        if val:
+            aliases |= _extract_finding_refs(str(val))
+    for sid in entry.get("source_ids", []) or []:
+        aliases |= _extract_finding_refs(str(sid))
+    return aliases or {str(final_id).upper()}
+
+
 _LOC_RE = re.compile(
     r"([A-Za-z0-9_]+\.(?:sol|rs|move|go))\s*:?\s*L?(\d+)\s*(?:-\s*L?(\d+))?"
 )
@@ -216,6 +299,8 @@ def compute_chain_candidate_pairs(scratchpad: Path) -> dict:
       - a state variable (STATE Pairs table) — strongest signal
       - a discriminative code identifier (TYPE Pairs table)
       - the same source file with line ranges within 60 lines (TYPE Pairs)
+      - optional discovery metadata with a concrete shared term or explicit
+        finding reference; generic mechanism-only overlap is not a signal
 
     The bounded file holds the top _BOUNDED_PAIR_CAP pairs ranked by signal
     strength + combined severity (cross-class pairs prioritized). The full
@@ -234,8 +319,10 @@ def compute_chain_candidate_pairs(scratchpad: Path) -> dict:
         meta: list[dict] = []
         for idx, e in enumerate(entries, start=1):
             blob = f"{e.get('root_cause', '')} {e.get('description', '')} {e.get('title', '')}"
+            discovery = _discovery_text(e)
             meta.append({
                 "id": _entry_id(e, idx),
+                "aliases": _entry_aliases(e, _entry_id(e, idx)),
                 "severity": str(e.get("severity") or "Medium"),
                 "sev_rank": _SEVERITY_RANK.get(str(e.get("severity") or "medium").strip().lower(), 2),
                 "title": re.sub(r"\s+", " ", str(e.get("title") or "")).strip()[:90],
@@ -243,6 +330,8 @@ def compute_chain_candidate_pairs(scratchpad: Path) -> dict:
                 "locs": _extract_locations(str(e.get("location") or "")),
                 "state": _finding_state_vars(e, state_vars),
                 "idents": _extract_identifiers(blob),
+                "discovery_terms": _extract_discovery_terms(discovery),
+                "discovery_refs": _extract_finding_refs(discovery),
             })
 
         state_pairs: list[dict] = []
@@ -255,17 +344,28 @@ def compute_chain_candidate_pairs(scratchpad: Path) -> dict:
                 shared_state = a["state"] & b["state"]
                 shared_ident = a["idents"] & b["idents"]
                 proximate = _line_proximity(a["locs"], b["locs"])
+                shared_discovery = a["discovery_terms"] & b["discovery_terms"]
+                explicit_discovery_ref = (
+                    bool(a["discovery_refs"] & b["aliases"])
+                    or bool(b["discovery_refs"] & a["aliases"])
+                )
                 # A candidate needs a REAL signal: shared state variable,
-                # shared discriminative identifier, or line proximity. Bare
+                # shared discriminative identifier, line proximity, or a
+                # concrete discovery term/reference. Bare
                 # same-file (no proximity) is NOT a signal — in a 3-contract
-                # codebase that pairs everything. Provably-unrelated pairs
-                # (none of the three) are the only thing excluded.
-                if not (shared_state or shared_ident or proximate):
+                # codebase that pairs everything. Generic mechanism-only
+                # discovery overlap is also not a signal.
+                if not (
+                    shared_state or shared_ident or proximate
+                    or shared_discovery or explicit_discovery_ref
+                ):
                     continue
                 cross_class = a["sev_rank"] != b["sev_rank"]
                 score = (
                     3 * len(shared_state)
                     + 2 * len(shared_ident)
+                    + 2 * len(shared_discovery)
+                    + (2 if explicit_discovery_ref else 0)
                     + (1 if proximate else 0)
                     + (1 if cross_class else 0)
                     + (a["sev_rank"] + b["sev_rank"]) / 10.0
@@ -274,6 +374,8 @@ def compute_chain_candidate_pairs(scratchpad: Path) -> dict:
                     "a": a["id"], "b": b["id"], "score": score,
                     "shared_state": sorted(shared_state),
                     "shared_ident": sorted(shared_ident)[:4],
+                    "shared_discovery": sorted(shared_discovery)[:4],
+                    "discovery_ref": explicit_discovery_ref,
                     "a_sev": a["severity"], "b_sev": b["severity"],
                     "a_title": a["title"], "b_title": b["title"],
                 }
@@ -294,12 +396,16 @@ def compute_chain_candidate_pairs(scratchpad: Path) -> dict:
                 "|-----------|-----------|-----------|-----------|---------------|",
             ]
             for r in rows:
+                parts: list[str] = []
                 if r["shared_state"]:
-                    sig = "state: " + ", ".join(r["shared_state"][:3])
-                elif r["shared_ident"]:
-                    sig = "ident: " + ", ".join(r["shared_ident"][:3])
-                else:
-                    sig = "co-located (same file)"
+                    parts.append("state: " + ", ".join(r["shared_state"][:3]))
+                if r["shared_ident"]:
+                    parts.append("ident: " + ", ".join(r["shared_ident"][:3]))
+                if r["shared_discovery"]:
+                    parts.append("discovery: " + ", ".join(r["shared_discovery"][:3]))
+                if r["discovery_ref"]:
+                    parts.append("discovery: explicit finding reference")
+                sig = "; ".join(parts) if parts else "co-located (same file)"
                 out.append(
                     f"| {r['a']} | {r['a_sev']} | {r['b']} | {r['b_sev']} | {sig} |"
                 )

@@ -37,6 +37,8 @@ from plamen_parsers import (  # noqa: E402
 from plamen_validators import (  # noqa: E402
     _generate_id_ledger_collision_retry_hint,
     _parse_hypothesis_id_title_pairs,
+    _promote_depth_findings_to_inventory,
+    _repair_chain_anti_absorption_splits,
     _validate_consumer_ids_in_ledger,
     _validate_id_ledger_collisions,
 )
@@ -75,6 +77,98 @@ def test_p21_title_hash_stable_across_minor_variations():
     assert _title_hash(f"  {base}  ") == h_base
     assert _title_hash(f"[GRP-01]: {base}") == h_base
     assert _title_hash(f"Finding [GRP-01]: {base}") == h_base
+
+
+def test_fix2_title_hash_dash_family_collapses():
+    """Em/en/figure-dash and minus all normalize to ASCII hyphen (FIX 2)."""
+    base_hyphen = "GCC trusts inbound externalId verbatim - no provenance"
+    for dash in "‒–—―−":
+        variant = base_hyphen.replace("-", dash)
+        assert _title_hash(variant) == _title_hash(base_hyphen)
+
+
+def test_fix2_title_hash_backtick_and_emphasis_ignored():
+    """Code-framing/emphasis punctuation does not change identity (FIX 2)."""
+    a = "GatewayCrossChain.withdraw() is public"
+    b = "GatewayCrossChain.`withdraw()` is **public**"
+    assert _title_hash(a) == _title_hash(b)
+
+
+def test_fix2_titles_collide_false_on_dash_reword():
+    """The exact DODO cascade: em-dash reword is NOT a collision (FIX 2)."""
+    from plamen_parsers import _titles_collide
+    a = "GCC trusts inbound externalId verbatim — no provenance check"
+    b = "GCC trusts inbound externalId verbatim - no provenance check"
+    assert _titles_collide(a, b) is False
+
+
+def test_fix2_titles_collide_false_on_abbrev_expansion():
+    """Abbreviation expanded with otherwise-identical wording is same finding."""
+    from plamen_parsers import _titles_collide
+    a = "GCC trusts inbound externalId verbatim — no provenance"
+    b = "GatewayCrossChain trusts inbound externalId verbatim - no provenance"
+    assert _titles_collide(a, b) is False
+
+
+def test_fix2_titles_collide_false_on_added_trailing_detail():
+    """Added trailing detail (prefix containment) is same finding, not collision."""
+    from plamen_parsers import _titles_collide
+    a = "GatewayCrossChain trusts inbound externalId verbatim"
+    b = "GatewayCrossChain trusts inbound externalId verbatim, enabling spoof"
+    assert _titles_collide(a, b) is False
+
+
+def test_fix2_titles_collide_true_on_genuinely_different_finding():
+    """Different findings reusing an ID MUST still be a collision (recall-safe)."""
+    from plamen_parsers import _titles_collide
+    a = "GatewayTransferNative.withdraw() Is Public — Permissionless Drain"
+    b = "Missing reinitializer() function blocks upgrade"
+    assert _titles_collide(a, b) is True
+
+
+def test_fix2_register_reuses_on_cosmetic_reword(tmp_path):
+    """Ledger register: cosmetic chain reword -> REUSED, not COLLISION (FIX 2)."""
+    id_ledger_register(
+        tmp_path, finding_id="GRP-01", owner_phase="chain",
+        owner_attempt=1, owning_artifact="hypotheses.md",
+        title="GCC trusts inbound externalId verbatim — no provenance check",
+    )
+    r = id_ledger_register(
+        tmp_path, finding_id="GRP-01", owner_phase="chain",
+        owner_attempt=2, owning_artifact="hypotheses.md",
+        title="GatewayCrossChain trusts inbound externalId verbatim - no provenance check",
+    )
+    assert r["status"] == "REUSED"
+
+
+def test_fix2_register_still_collides_on_different_finding(tmp_path):
+    """Ledger register: genuinely different finding for same ID -> COLLISION."""
+    id_ledger_register(
+        tmp_path, finding_id="GRP-01", owner_phase="chain",
+        owner_attempt=1, owning_artifact="hypotheses.md",
+        title="GatewayTransferNative.withdraw() Is Public — Permissionless Drain",
+    )
+    r = id_ledger_register(
+        tmp_path, finding_id="GRP-01", owner_phase="chain",
+        owner_attempt=2, owning_artifact="hypotheses.md",
+        title="Missing reinitializer() function blocks contract upgrade",
+    )
+    assert r["status"] == "COLLISION"
+
+
+def test_fix2_collision_gate_no_false_alarm_on_chain_reword(tmp_path):
+    """End-to-end: chain retry that reworded its OWN titles does NOT collide."""
+    (tmp_path / "hypotheses.md").write_text(
+        "### GRP-01 — GCC trusts inbound externalId verbatim — no check\n",
+        encoding="utf-8",
+    )
+    assert _validate_id_ledger_collisions(tmp_path, "chain", attempt=1) == []
+    # Retry reworded the SAME finding (abbrev expanded, em-dash -> hyphen).
+    (tmp_path / "hypotheses.md").write_text(
+        "### GRP-01 - GatewayCrossChain trusts inbound externalId verbatim - no check\n",
+        encoding="utf-8",
+    )
+    assert _validate_id_ledger_collisions(tmp_path, "chain", attempt=2) == []
 
 
 def test_p21_id_prefix_of():
@@ -230,6 +324,58 @@ def test_p24_parse_hypothesis_id_title_pairs():
     assert pair_dict.get("CH-01", "").startswith("chain title")
 
 
+def test_p24_collision_gate_registers_table_hypotheses(tmp_path):
+    """Chain hypotheses emitted as markdown rows still enter the ledger."""
+    (tmp_path / "hypotheses.md").write_text(
+        "| Hypothesis ID | Severity | Title | Source |\n"
+        "|---------------|----------|-------|--------|\n"
+        "| HM-01 | Medium | No emergency pause mechanism | BLIND-B-3 |\n"
+        "| HH-01 | High | Public withdraw drain | INV-001 |\n",
+        encoding="utf-8",
+    )
+
+    issues = _validate_id_ledger_collisions(tmp_path, "chain", attempt=1)
+
+    assert issues == []
+    assert id_ledger_lookup(tmp_path, "HM-01") is not None
+    assert id_ledger_lookup(tmp_path, "HH-01") is not None
+
+
+def test_chain_anti_absorption_repair_registers_split_ids(tmp_path):
+    (tmp_path / "_audit_started_with_markers.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "findings_inventory.md").write_text(
+        "# Findings Inventory\n\n"
+        "### Finding [INV-001]: Public withdraw drain\n"
+        "**Severity**: High\n"
+        "**Location**: A.sol:withdraw\n"
+        "**Root Cause**: public withdraw drains funds\n\n"
+        "### Finding [INV-002]: Unsafe transfer delivery failure\n"
+        "**Severity**: Low\n"
+        "**Location**: B.sol:onCall\n"
+        "**Root Cause**: transfer uses 2300 gas\n\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "hypotheses.md").write_text(
+        "| Hypothesis ID | Severity | Title | Source Findings |\n"
+        "|---------------|----------|-------|-----------------|\n"
+        "| H-01 | High | Over-merged group | INV-001, INV-002 |\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "finding_mapping.md").write_text(
+        "| Finding ID | Hypothesis ID | Mapping Status |\n"
+        "|------------|---------------|----------------|\n"
+        "| INV-001 | H-01 | GROUPED |\n"
+        "| INV-002 | H-01 | GROUPED |\n",
+        encoding="utf-8",
+    )
+
+    repaired = _repair_chain_anti_absorption_splits(tmp_path)
+
+    assert repaired == 2
+    assert id_ledger_lookup(tmp_path, "HH-01") is not None
+    assert id_ledger_lookup(tmp_path, "HL-01") is not None
+
+
 def test_p24_collision_gate_passes_on_first_attempt(tmp_path):
     """Attempt 1: no prior allocations → no collisions."""
     (tmp_path / "hypotheses.md").write_text(
@@ -270,6 +416,56 @@ def test_p24_collision_gate_no_false_positive_on_same_content(tmp_path):
     _validate_id_ledger_collisions(tmp_path, "chain", attempt=2)
     issues = _validate_id_ledger_collisions(tmp_path, "chain", attempt=2)
     assert issues == []
+
+
+def test_p24_chain_agent2_ignores_referenced_upstream_ids(tmp_path):
+    """chain_agent2 mints CH-* only; referenced H-* IDs are consumers."""
+    id_ledger_register(
+        tmp_path,
+        finding_id="H-01",
+        owner_phase="chain",
+        owner_attempt=1,
+        owning_artifact="hypotheses.md",
+        title="claimRefund authorization bypass",
+    )
+    (tmp_path / "chain_hypotheses.md").write_text(
+        "# Chain Hypotheses\n\n"
+        "| Chain ID | Finding A | Missing Precondition | Finding B | Chain Severity |\n"
+        "|---|---|---|---|---|\n"
+        "| CH-01 | H-09: fee mismatch | refund entry exists | H-01: auth bypass | Critical |\n\n"
+        "## Chain Hypothesis CH-01\n"
+        "### Blocked Finding (A)\n"
+        "- **ID**: H-09, **Title**: fee mismatch\n"
+        "### Enabler Finding (B)\n"
+        "- **ID**: H-01, **Title**: claimRefund authorization bypass\n",
+        encoding="utf-8",
+    )
+
+    issues = _validate_id_ledger_collisions(tmp_path, "chain_agent2", attempt=1)
+
+    assert issues == []
+    assert id_ledger_lookup(tmp_path, "CH-01") is not None
+    assert id_ledger_lookup(tmp_path, "H-01") is not None
+
+
+def test_p24_chain_agent2_retry_prunes_failed_same_phase_allocations(tmp_path):
+    """Expanded wording for the same CH source pair must not collide on retry."""
+    (tmp_path / "chain_hypotheses.md").write_text(
+        "| Chain ID | Finding A | Missing Precondition | Finding B | Chain Severity |\n"
+        "|---|---|---|---|---|\n"
+        "| CH-01 | H-09 (GTN no-fee bypass missing) | refund entry | H-01 (auth bypass) | Critical |\n",
+        encoding="utf-8",
+    )
+    assert _validate_id_ledger_collisions(tmp_path, "chain_agent2", attempt=1) == []
+
+    (tmp_path / "chain_hypotheses.md").write_text(
+        "| Chain ID | Finding A | Missing Precondition | Finding B | Chain Severity |\n"
+        "|---|---|---|---|---|\n"
+        "| CH-01 | H-09: GatewayTransferNative.onCall() Missing amount -= platformFeesForTx | refund entry | H-01: claimRefund() Authorization Bypass for Non-EVM Wallets | Critical |\n",
+        encoding="utf-8",
+    )
+
+    assert _validate_id_ledger_collisions(tmp_path, "chain_agent2", attempt=2) == []
 
 
 def test_p24_retry_hint_format(tmp_path):
@@ -334,6 +530,51 @@ def test_p25_backstop_flags_unregistered_refs(tmp_path):
     assert "consumer-backstop" in issues[0]
 
 
+def test_p25_skeptic_backstop_ignores_prose_local_ids(tmp_path):
+    """Skeptic prose may mention local concern IDs; structural keys matter."""
+    id_ledger_register(
+        tmp_path, finding_id="HH-09", owner_phase="chain",
+        owner_attempt=1, owning_artifact="hypotheses.md", title="real high",
+    )
+    (tmp_path / "skeptic_findings.md").write_text(
+        "# Skeptic Findings\n\n"
+        "## HH-09 - real high\n\n"
+        "The verifier also cited CC-09, EX-1, INV-4, and OR-2 as local "
+        "context labels, but those are not the reviewed finding IDs.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "skeptic_judge_decisions.md").write_text(
+        "| Finding ID | Original Severity | Final Severity | Decision | Rationale |\n"
+        "|---|---|---|---|---|\n"
+        "| HH-09 | High | High | KEEP | Prose references are contextual only. |\n",
+        encoding="utf-8",
+    )
+
+    assert _validate_consumer_ids_in_ledger(tmp_path, "skeptic") == []
+
+
+def test_p25_skeptic_backstop_flags_unregistered_structural_id(tmp_path):
+    id_ledger_register(
+        tmp_path, finding_id="HH-09", owner_phase="chain",
+        owner_attempt=1, owning_artifact="hypotheses.md", title="real high",
+    )
+    (tmp_path / "skeptic_findings.md").write_text(
+        "# Skeptic Findings\n\n## CC-09 - hallucinated structural key\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "skeptic_judge_decisions.md").write_text(
+        "| Finding ID | Original Severity | Final Severity | Decision | Rationale |\n"
+        "|---|---|---|---|---|\n"
+        "| CC-09 | High | High | KEEP | Bad key. |\n",
+        encoding="utf-8",
+    )
+
+    issues = _validate_consumer_ids_in_ledger(tmp_path, "skeptic")
+
+    assert len(issues) == 1
+    assert "CC-09" in issues[0]
+
+
 def test_p25_backstop_silent_when_ledger_empty(tmp_path):
     """No ledger (legacy audit) → backstop skips silently (no false halt)."""
     (tmp_path / "report_index.md").write_text(
@@ -359,6 +600,22 @@ def test_p25_backstop_ignores_report_tier_ids(tmp_path):
     assert issues == []
 
 
+def test_p25_backstop_ignores_asset_binding_matrix_ids(tmp_path):
+    """AB-* IDs are scope/asset-binding rows, not finding ledger IDs."""
+    id_ledger_register(
+        tmp_path, finding_id="HH-01", owner_phase="chain",
+        owner_attempt=1, owning_artifact="hypotheses.md", title="real high",
+    )
+    (tmp_path / "cross_batch_consistency.md").write_text(
+        "| Finding ID | Status | Notes |\n"
+        "|---|---|---|\n"
+        "| HH-01 | CONSISTENT | Related asset-binding row AB-001 was checked. |\n",
+        encoding="utf-8",
+    )
+    issues = _validate_consumer_ids_in_ledger(tmp_path, "crossbatch")
+    assert issues == []
+
+
 def test_p25_backstop_ignores_inv_for_now(tmp_path):
     """INV-* allowed without ledger entry (legacy compatibility)."""
     # No ledger entries; but consumer references INV-099.
@@ -373,3 +630,145 @@ def test_p25_backstop_ignores_inv_for_now(tmp_path):
     # INV-099 is NOT in ledger but is allowed (P2.2 exception).
     issues = _validate_consumer_ids_in_ledger(tmp_path, "sc_verify_queue")
     assert issues == []
+
+
+def test_p25_backstop_backfills_real_inventory_inv_rows_on_fresh_audit(tmp_path):
+    """Fresh audits should not warn when a real inventory row missed registration."""
+    (tmp_path / "_audit_started_with_markers.json").write_text("{}", encoding="utf-8")
+    id_ledger_register(
+        tmp_path, finding_id="GRP-01", owner_phase="chain",
+        owner_attempt=1, owning_artifact="hypotheses.md", title="registered",
+    )
+    (tmp_path / "findings_inventory.md").write_text(
+        "### Finding [INV-60]: Depth promoted issue\n\n"
+        "**Severity**: High\n"
+        "**Location**: src/A.sol:L10\n"
+        "**Source IDs**: DCI-1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "verify_core.md").write_text(
+        "| INV-60 | CONFIRMED | [CODE-TRACE] | src/A.sol:L10 |\n",
+        encoding="utf-8",
+    )
+
+    issues = _validate_consumer_ids_in_ledger(tmp_path, "sc_verify_aggregate")
+
+    assert issues == []
+    assert id_ledger_lookup(tmp_path, "INV-60") is not None
+
+
+def test_p25_depth_promotion_allocates_registered_three_digit_inv_ids(tmp_path):
+    """Depth promotion appends first-class inventory IDs and registers them."""
+    id_ledger_register(
+        tmp_path, finding_id="INV-059", owner_phase="inventory",
+        owner_attempt=1, owning_artifact="findings_inventory.md",
+        title="Existing inventory finding",
+    )
+    (tmp_path / "findings_inventory.md").write_text(
+        "### Finding [INV-059]: Existing inventory finding\n\n"
+        "**Severity**: High\n"
+        "**Location**: src/A.sol:L1\n"
+        "**Source IDs**: AC-1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "depth_external_findings.md").write_text(
+        "### Finding [DX-1]: Depth-only issue\n\n"
+        "**Severity**: High\n"
+        "**Location**: src/B.sol:L20\n"
+        "**Preferred Tag**: [CODE-TRACE]\n"
+        "**Description**: Real depth issue.\n",
+        encoding="utf-8",
+    )
+
+    promoted = _promote_depth_findings_to_inventory(tmp_path)
+    inv_text = (tmp_path / "findings_inventory.md").read_text(encoding="utf-8")
+
+    assert promoted == ["DX-1"]
+    assert "### Finding [INV-060]: Depth-only issue" in inv_text
+    assert id_ledger_lookup(tmp_path, "INV-060") is not None
+
+
+def test_p25_backstop_accepts_traceable_depth_local_ids(tmp_path):
+    """Synthetic depth IDs are accepted only when traceable to depth artifacts."""
+    id_ledger_register(
+        tmp_path, finding_id="GRP-01", owner_phase="chain_agent1",
+        owner_attempt=1, owning_artifact="hypotheses.md", title="t",
+    )
+    (tmp_path / "depth_state_trace_findings.md").write_text(
+        "### Finding [DCI-3]: state trace issue\n", encoding="utf-8",
+    )
+    (tmp_path / "report_index.md").write_text(
+        "| H-01 | Title | High | ... | DCI-3 |\n", encoding="utf-8",
+    )
+
+    issues = _validate_consumer_ids_in_ledger(tmp_path, "report_index")
+
+    assert issues == []
+    synthetic_map = json.loads(
+        (tmp_path / "_id_ledger_synthetic_map.json").read_text(encoding="utf-8")
+    )
+    assert synthetic_map["traces"][0]["id"] == "DCI-3"
+    assert synthetic_map["traces"][0]["source_artifact"] == "depth_state_trace_findings.md"
+
+
+def test_p25_backstop_accepts_traceable_report_local_ids(tmp_path):
+    """Report index may reference local EN/ST/VS methodology IDs with trace."""
+    id_ledger_register(
+        tmp_path, finding_id="INV-001", owner_phase="inventory",
+        owner_attempt=1, owning_artifact="findings_inventory.md", title="seed",
+    )
+    (tmp_path / "enabler_results.md").write_text(
+        "### EN-01\nEnabler evidence.\n", encoding="utf-8"
+    )
+    (tmp_path / "design_stress_findings.md").write_text(
+        "### ST-2\nStress finding.\n", encoding="utf-8"
+    )
+    (tmp_path / "validation_sweep_findings.md").write_text(
+        "### VS-1\nValidation sweep finding.\n", encoding="utf-8"
+    )
+    (tmp_path / "report_index.md").write_text(
+        "| H-01 | Title | High | ... | EN-01, ST-2, VS-1 |\n",
+        encoding="utf-8",
+    )
+
+    issues = _validate_consumer_ids_in_ledger(tmp_path, "report_index")
+
+    assert issues == []
+    synthetic_map = json.loads(
+        (tmp_path / "_id_ledger_synthetic_map.json").read_text(encoding="utf-8")
+    )
+    trace_ids = {t["id"] for t in synthetic_map["traces"]}
+    assert {"EN-01", "ST-2", "VS-1"} <= trace_ids
+
+
+def test_p25_backstop_still_flags_untraceable_synthetic_ids(tmp_path):
+    id_ledger_register(
+        tmp_path, finding_id="GRP-01", owner_phase="chain_agent1",
+        owner_attempt=1, owning_artifact="hypotheses.md", title="t",
+    )
+    (tmp_path / "report_index.md").write_text(
+        "| H-01 | Title | High | ... | DCI-404 |\n", encoding="utf-8",
+    )
+
+    issues = _validate_consumer_ids_in_ledger(tmp_path, "report_index")
+
+    assert len(issues) == 1
+    assert "DCI-404" in issues[0]
+
+
+def test_p25_backstop_does_not_synthetic_accept_ledger_owned_chain_ids(tmp_path):
+    id_ledger_register(
+        tmp_path, finding_id="GRP-01", owner_phase="chain",
+        owner_attempt=1, owning_artifact="hypotheses.md", title="registered",
+    )
+    (tmp_path / "hypotheses.md").write_text(
+        "### HM-99 - stale unregistered hypothesis\n", encoding="utf-8",
+    )
+    (tmp_path / "report_index.md").write_text(
+        "| H-01 | Title | High | ... | HM-99 |\n", encoding="utf-8",
+    )
+
+    issues = _validate_consumer_ids_in_ledger(tmp_path, "report_index")
+
+    assert len(issues) == 1
+    assert "HM-99" in issues[0]

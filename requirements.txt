@@ -1,3 +1,4 @@
 # Plamen core — terminal UI only
 rich==15.0.0
 InquirerPy==0.3.4
+pywinpty>=2.0.14; platform_system=="Windows"

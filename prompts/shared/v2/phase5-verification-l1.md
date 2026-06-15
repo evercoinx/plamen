@@ -85,6 +85,20 @@ Return ONLY: "DONE: {FINDING_ID} verdict={VERDICT} tag={TAG}"
 
 ---
 
+## Driver owns the final Evidence Tag (read this first)
+
+A mechanical executor RE-RUNS your test after this phase using the node client's
+own toolchain (`go test` for Go, `cargo test` for Rust), and the DRIVER — not
+you — stamps the authoritative `[POC-PASS]`/`[POC-FAIL]` from that run. A
+`[POC-PASS]` you write that is NOT backed by a test the executor can locate and
+run to a real pass is **auto-demoted to `[CODE-TRACE]` and your `Verdict:` flips
+`CONFIRMED → CONTESTED [INTEGRITY-DOWNGRADE]`.** To earn a real `[POC-PASS]`,
+write a real test asserting the harm and fill `Test File:`/`Test Function:`/
+`Command:` with the exact values. `[DIFF-PASS]`/`[CONFORMANCE-PASS]`/
+`[NON-DET-PASS]`/`[FUZZ-PASS]`/`[LSP-TRACE]` are unaffected (the cargo/go
+executor only governs `[POC-PASS]`). If you cannot run a test, declare it
+honestly — the executor degrades to UNPROVEN without penalty and never halts.
+
 ## Output File Schema
 
 Each `verify_{FINDING_ID}.md` MUST contain:
@@ -95,6 +109,22 @@ Each `verify_{FINDING_ID}.md` MUST contain:
 **Preferred Tag**: {TAG from queue row}
 **Evidence Tag**: {ACTUAL_TAG_USED}
 **Verdict**: CONFIRMED / REFUTED / CONTESTED / INFEASIBLE / FALSE_POSITIVE
+**Test File**: {path under the test dir, *_test.go (Go) or tests/*.rs (Rust), or N/A}
+**Test Function**: {exact test function name the executor runs, or N/A}
+**Command**: {full `go test`/`cargo test` command, or N/A}
+
+### PoC Attempt
+- PoC Required: YES/NO
+- PoC Class: {unit|property|integration|structural}
+- Attempted: YES/NO
+- PoC Not Attempted Because: {NO_BUILD_ENVIRONMENT|EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS|DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL|PURE_SPEC_OR_DOCS_ONLY|STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION|N/A}
+- Test File: {path or N/A}
+- Command: {command or N/A}
+
+### Execution Result
+- Compiled: YES/NO/N/A
+- Result: PASS/FAIL/REVERT/NOT_EXECUTED
+- Output: {assertions, revert reasons, or skip justification}
 
 ## Execution Output
 {Mechanical evidence: diff output, test output, SCIP citation, or code trace}
@@ -103,10 +133,36 @@ Each `verify_{FINDING_ID}.md` MUST contain:
 {If CONFIRMED — minimal diff-style fix. Omit if REFUTED/FALSE_POSITIVE.}
 ```
 
+**Ledger honesty — `Attempted:` is about a real executed test, not analysis**:
+For rust/go node-client findings where NO local build, fork, or test harness is
+available, the HONEST ledger answer is `Attempted: NO` with blocker
+`NO_BUILD_ENVIRONMENT` (or `EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS` when a live
+external dependency cannot be forked or addressed). Doing a manual code trace is
+NOT execution — a `[CODE-TRACE]` finding is `Attempted: NO`, never
+`Attempted: YES`. Only write `Attempted: YES` when a named test file AND a
+runnable `go test`/`cargo test` command actually exist and were run; in that
+case `Test File:`/`Command:` MUST be filled with the real values. Do not guess
+`Attempted: YES` to look thorough, and do not guess `Attempted: NO` to avoid
+work — fill the ledger to match what you actually did. This is a documentation
+rule only: it does NOT instruct you to skip analysis, and the driver's executor
+degrades an unproven finding to UNPROVEN without penalty and never halts.
+
 **Schema rules**:
 - Missing `Preferred Tag:` line is a schema failure.
 - `Evidence Tag` must be one of the 7 tags from the routing table above.
+- For a `[POC-PASS]` claim, `Test File:`/`Test Function:` MUST name a real
+  executable test (the executor re-runs it; an unbacked claim is demoted).
 - If the preferred tag workflow fails and fallback is used, document why in Execution Output.
+- **MANDATORY for `unit`/`property` PoC Class**: the `### PoC Attempt` AND
+  `### Execution Result` ledger sections above are NOT optional — they are a
+  hard per-finding contract gate. A `unit`/`property` verify file missing
+  either section is rejected. If you legitimately cannot execute, still write
+  BOTH sections with `Attempted: NO` and a real blocker code; do not omit them.
+- **POST-WRITE VERIFICATION**: after writing `verify_{FINDING_ID}.md`, READ THE
+  FILE BACK and confirm it contains both the `### PoC Attempt` and
+  `### Execution Result` sections (for `unit`/`property` findings) before
+  returning. This guarantees the ledger is flushed to disk and prevents the
+  gate from reading a partially-written file.
 
 ---
 

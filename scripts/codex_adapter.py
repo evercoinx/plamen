@@ -218,11 +218,22 @@ def generate_config_toml(out_dir: Path) -> None:
     lines = [
         '# Model for the orchestrator and agents that inherit from global config.',
         '# Change to match your Codex account:',
-        '#   API accounts:       "gpt-5.3-codex", "o4-mini"',
-        '#   ChatGPT Plus/Pro:   run `codex --available-models` for supported models',
-        '#   Common alternatives: "gpt-4.1", "o4-mini"',
-        'model = "gpt-5.3-codex"',
-        'model_context_window = 272000',
+        '#   ChatGPT Plus/Pro/Team: use an ENTITLED base model (gpt-5.5 / gpt-5.4).',
+        '#     `-codex`/preview suffixes (e.g. gpt-5.3-codex) are REJECTED on ChatGPT',
+        '#     auth with HTTP 400 "model is not supported when using Codex with a',
+        '#     ChatGPT account" (openai/codex #14735). Run `codex --available-models`.',
+        '#   API key (OPENAI_API_KEY): any model, incl. larger-context variants.',
+        'model = "gpt-5.4"',
+        '# DO NOT set model_context_window: codex bug #16068 corrupts the token',
+        '# counter when it is set, producing a bogus "context window exceeded',
+        '# (~N tokens)" PERMANENT failure even on small prompts. Use server defaults',
+        '# and force early compaction instead (#19409 workaround).',
+        'model_auto_compact_token_limit = 220000',
+        '# service_tier MUST be a built-in value (flex|fast). "default"/"priority"',
+        '# are rejected by older parsers (#27297) and break spawn_agent child-model',
+        '# resolution ("could not resolve the child model for service tier validation").',
+        '# Children inherit model + service_tier from this top-level config.',
+        'service_tier = "flex"',
         'approval_mode = "full-auto"',
         'approval_policy = "never"',
         'sandbox_mode = "danger-full-access"',
@@ -393,10 +404,13 @@ PLATFORM_DIRECTIVE = (
 try:
     from plamen_types import _CODEX_MODEL_MAP as CODEX_MODEL_TIERS  # noqa: N811
 except ImportError:
+    # PARITY-7: these MUST equal plamen_types._CODEX_MODEL_MAP exactly so an
+    # import failure is a true no-op, not a silent tier drift (the old values
+    # reintroduced the documented 7x-cost sonnet drift).
     CODEX_MODEL_TIERS: dict[str, str] = {
         "opus": os.environ.get("PLAMEN_CODEX_OPUS_MODEL", "gpt-5.5"),
-        "sonnet": os.environ.get("PLAMEN_CODEX_SONNET_MODEL", "gpt-5.4-mini"),
-        "haiku": os.environ.get("PLAMEN_CODEX_HAIKU_MODEL", "gpt-5.4-nano"),
+        "sonnet": os.environ.get("PLAMEN_CODEX_SONNET_MODEL", "gpt-5.4"),
+        "haiku": os.environ.get("PLAMEN_CODEX_HAIKU_MODEL", "gpt-5.4-mini"),
     }
 
 # Role definitions: (filename, name, description, developer_instructions)

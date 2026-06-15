@@ -213,6 +213,30 @@ def test_run_phase_launches_isolated_process_group():
     assert "killpg" in helper_src
 
 
+def test_halt_message_does_not_promise_fake_three_seconds(capsys):
+    display.print_halt_acknowledged()
+    out = capsys.readouterr()
+    combined = out.out + out.err
+    assert "within 3s" not in combined
+    assert "options will follow" in combined
+
+
+def test_worker_pool_halt_cancels_pending_futures():
+    class _Executor:
+        def __init__(self):
+            self.shutdown_args = None
+
+        def shutdown(self, **kwargs):
+            self.shutdown_args = kwargs
+
+    fut = MagicMock()
+    executor = _Executor()
+    D._cancel_pending_worker_futures({fut}, executor)
+    fut.cancel.assert_called_once()
+    assert executor.shutdown_args["wait"] is False
+    assert executor.shutdown_args["cancel_futures"] is True
+
+
 # ─── detect_rate_limit ─────────────────────────────────────────────────
 
 
@@ -313,6 +337,76 @@ def test_rate_limit_empty_file():
 # ─── estimate_rate_limit_wait_seconds ──────────────────────────────────
 
 
+def test_rate_limit_worker_pool_sentinel_detected_after_clean_json():
+    """Worker-pool sentinel overrides a clean transcript JSON envelope."""
+    envelope = json.dumps({
+        "is_error": False,
+        "stop_reason": "end_turn",
+        "total_cost_usd": 0.01,
+    })
+    p = _write_log(f"{envelope}\n")
+    D._append_rate_limit_sentinel(
+        p,
+        phase_name="depth",
+        source="depth_worker_pool",
+    )
+    try:
+        assert D.detect_rate_limit(p) is True
+    finally:
+        p.unlink()
+
+
+def test_worker_pool_rate_limit_sentinel_is_structured():
+    """The sentinel carries a structured 429 marker for fallback parsers."""
+    p = _write_log("")
+    D._append_rate_limit_sentinel(
+        p,
+        phase_name="breadth",
+        source="breadth_worker_pool",
+    )
+    try:
+        text = p.read_text(encoding="utf-8")
+        assert "PLAMEN_RATE_LIMIT_DETECTED=1" in text
+        assert "api_error_status=429" in text
+        assert "type=rate_limit_error" in text
+        assert D.detect_rate_limit(p) is True
+    finally:
+        p.unlink()
+
+
+def test_all_claude_pty_worker_pools_stamp_rate_limit_sentinel():
+    src = inspect.getsource(D.run_phase)
+    for source in (
+        "recon_worker_pool",
+        "breadth_worker_pool",
+        "rescan_worker_pool",
+        "depth_worker_pool",
+    ):
+        assert source in src
+    assert "PLAMEN_RATE_LIMIT_DETECTED=1" in src
+
+
+def test_worker_pools_fail_fast_on_child_rate_limit():
+    for fn in (
+        D._run_recon_worker_pool_pty,
+        D._run_breadth_worker_pool_pty,
+        D._run_rescan_worker_pool_pty,
+        D._run_depth_worker_batch,
+    ):
+        src = inspect.getsource(fn)
+        assert 'result.get("status") == "rate_limited"' in src
+        assert "hit rate limit; stopping" in src
+        assert "_cancel_pending_worker_futures" in src
+
+
+def test_rate_limit_recovery_preserves_normal_gate_retry_budget():
+    src = inspect.getsource(D.main)
+    assert "if False and not passed and rate_limit_consumed_retry" not in src
+    assert "gate failed after rate-limit recovery" in src
+    assert "preserving normal retry budget" in src
+    assert "rate_limit_consumed_retry = False" in src
+
+
 def test_estimate_retry_after_seconds():
     p = _write_log("Error 429. Retry-After: 120 seconds")
     result = D.estimate_rate_limit_wait_seconds(p)
@@ -344,12 +438,20 @@ def test_failure_diagnosis_decodes_non_cp1252_stdout(tmp_path):
         "prompt", encoding="utf-8"
     )
 
-    class FakeResult:
-        stdout = b"### What Happened\nbad byte: \x90\n### Root Cause\nok"
-        stderr = b""
+    class FakePopen:
+        pid = 12345
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def poll(self):
+            return 0
+
+        def communicate(self, timeout=None):
+            return b"### What Happened\nbad byte: \x90\n### Root Cause\nok", b""
 
     with patch.object(display, "_find_claude_bin", return_value="claude"), \
-         patch.object(display.subprocess, "run", return_value=FakeResult()):
+         patch.object(display.subprocess, "Popen", FakePopen):
         display.print_failure_diagnosis(
             "breadth",
             str(tmp_path),
@@ -381,17 +483,26 @@ def test_failure_diagnosis_extracts_codex_jsonl_agent_message(tmp_path):
         },
     }
 
-    class FakeResult:
-        stdout = (
+    class FakePopen:
+        pid = 12345
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def poll(self):
+            return 0
+
+        def communicate(self, timeout=None):
+            stdout = (
             b'{"type":"thread.started","thread_id":"t"}\n'
             + json.dumps(payload).encode("utf-8")
             + b"\n"
             b'{"type":"turn.completed","usage":{"input_tokens":1}}\n'
-        )
-        stderr = b""
+            )
+            return stdout, b""
 
     with patch.object(display, "_find_codex_bin", return_value="codex"), \
-         patch.object(display.subprocess, "run", return_value=FakeResult()):
+         patch.object(display.subprocess, "Popen", FakePopen):
         display.print_failure_diagnosis(
             "depth",
             str(tmp_path),
@@ -409,6 +520,56 @@ def test_failure_diagnosis_extracts_codex_jsonl_agent_message(tmp_path):
     assert "Depth stopped early" in out
     assert '"thread.started"' not in out
     assert '"turn.completed"' not in out
+
+
+def test_failure_diagnosis_second_esc_cancels_running_diagnosis(tmp_path):
+    """Esc during advisory diagnosis terminates it instead of waiting for timeout."""
+    (tmp_path / "_stdio_depth.attempt2.log").write_text(
+        "missing depth_token_flow_findings.md\n", encoding="utf-8"
+    )
+    (tmp_path / "_prompt_depth.attempt2.md").write_text("prompt", encoding="utf-8")
+
+    old_requested = display.graceful_stop.requested
+    killed = {"terminated": False}
+
+    class FakePopen:
+        pid = 12345
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def poll(self):
+            if killed["terminated"]:
+                return -15
+            display.graceful_stop.requested = True
+            return None
+
+        def terminate(self):
+            killed["terminated"] = True
+
+        def wait(self, timeout=None):
+            return -15
+
+        def kill(self):
+            killed["terminated"] = True
+
+    try:
+        display.graceful_stop.requested = False
+        with patch.object(display, "_find_claude_bin", return_value="claude"), \
+             patch.object(display.subprocess, "Popen", FakePopen), \
+             patch.object(display.sys, "platform", "linux"):
+            display.print_failure_diagnosis(
+                "depth",
+                str(tmp_path),
+                ["depth_token_flow_findings.md"],
+                {"pipeline": "sc", "mode": "thorough", "language": "evm"},
+            )
+    finally:
+        display.graceful_stop.requested = old_requested
+
+    assert killed["terminated"] is True
+    out = (tmp_path / "_diagnosis_depth.md").read_text(encoding="utf-8")
+    assert "diagnosis cancelled because user requested stop" in out
 
 
 def test_estimate_missing_file():

@@ -25,13 +25,15 @@ Eleven scenarios:
      L1 writes `phase4b_manifest.md` declaring 5 depth agents. Depth writes
      only 3 `depth_*_findings.md` files. Assert depth halts despite clearing
      the old fixed floor of 3.
-  E. Depth pre-baked gatefail enforcement
+  E. Depth pre-baked gatefail -> degrade-and-continue (v2.8.16)
      L1 depth writes enough artifacts to satisfy the glob gate, but appends a
      `[GATE FAIL] ... pre-baked reads` violation. Assert the driver retries
-     depth once, then degrades/halts on the second violation.
-  F. Never-cut checkpoint/artifact enforcement
+     depth once + one S1.5 targeted-repair attempt (3 depth calls), degrades,
+     and CONTINUES past depth (L1 now mirrors SC; haltless-on-any-mode).
+  F. Never-cut tail-gap -> degrade-and-continue (v2.8.16)
      L1 depth clears quorum but omits one required post-depth artifact and
-     checkpoint entry. Assert the driver retries once, then degrades/halts.
+     checkpoint entry. Assert retry + S1.5 repair (3 depth calls), degrade,
+     and continue to later thorough-mode phases (no force-halt).
   G. Depth exit validation
      L1 depth clears quorum and writes all artifacts, but `depth_exit.md`
      has an invalid criterion / insufficient explored paths. Assert retry and
@@ -115,6 +117,28 @@ _STUB_BODY = (
     "This file is written by test_driver_smoke.py to clear the "
     "min_artifact_bytes gate. It has no semantic content.\n"
     "padding " * 20 + "\n"
+)
+
+# Ship 8.1: depth is now a supervised phase, so on a fresh audit (which
+# the smoke test is -- main() plants the fresh-audit sentinel) each
+# canonical depth file must carry COMPLETE markers and pass the
+# depth-appropriate structural check. This body is a marker-complete,
+# zero-findings depth stub (No Findings rationale present) used wherever
+# a scenario writes a depth_*_findings.md that should COUNT as complete.
+# Scenarios that intentionally omit depth files still fail the gate via
+# the MISSING bucket, preserving their quorum/halt intent.
+_DEPTH_COMPLETE_BODY = (
+    "<!-- PLAMEN_ARTIFACT: depth_role_findings.md -->\n"
+    "<!-- PLAMEN_STATUS: IN_PROGRESS -->\n"
+    "<!-- PLAMEN_PHASE: depth -->\n"
+    "<!-- PLAMEN_VERSION: 1 -->\n"
+    "# Depth findings (smoke stub)\n\n"
+    "## No Findings\n\n"
+    "Smoke-test stub: no findings; body clears min_artifact_bytes.\n"
+    + "padding " * 20 + "\n"
+    "## Semantic Proof Checks\n\nstub\n"
+    "<!-- PLAMEN_STATUS: COMPLETE -->\n"
+    "<!-- PLAMEN_FINDINGS_COUNT: 0 -->\n"
 )
 
 # Real-ish manifest with 5 breadth agent rows. Parsed by
@@ -236,6 +260,25 @@ def _analysis_low_unique(fid, line):
 def _write(p, text):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, encoding="utf-8")
+
+
+def _breadth_marked(name, body, count):
+    # Ship 8.1: when a multi-row spawn_manifest.md is present (scenarios
+    # B/C), breadth runs manifest-exact and -- on a fresh audit (sentinel
+    # planted by main()) -- requires each output to be COMPLETE-marked and
+    # structurally sound (## Findings heading + FINDINGS_COUNT). Wrap the
+    # analysis body so the success-path scenario's breadth files pass.
+    return (
+        f"<!-- PLAMEN_ARTIFACT: {name} -->\n"
+        "<!-- PLAMEN_STATUS: IN_PROGRESS -->\n"
+        "<!-- PLAMEN_PHASE: breadth -->\n"
+        "<!-- PLAMEN_VERSION: 1 -->\n"
+        "# Analysis\n\n"
+        "## Findings\n\n"
+        f"{body}\n"
+        "<!-- PLAMEN_STATUS: COMPLETE -->\n"
+        f"<!-- PLAMEN_FINDINGS_COUNT: {count} -->\n"
+    )
 
 
 def _write_depth_support_artifacts(scratch, *, valid_checkpoint=True,
@@ -503,9 +546,10 @@ def stub_run_phase(phase, config, attempt):
                 _write(scratch / name, _STUB_BODY)
             return 0
         if SCENARIO == "C":
-            # Pass the manifest-exact gate comfortably (5 files).
+            # Pass the manifest-exact gate comfortably (5 files). Fresh
+            # mode requires COMPLETE markers + ## Findings structure.
             for name in _MANIFEST_5_OUTPUTS:
-                _write(scratch / name, _ANALYSIS_LOW_ONLY)
+                _write(scratch / name, _breadth_marked(name, _ANALYSIS_LOW_ONLY, 2))
             return 0
         if SCENARIO in ("D", "E", "F", "G", "I"):
             for i in range(5):
@@ -527,11 +571,11 @@ def stub_run_phase(phase, config, attempt):
         # depth is critical and needs >=3 substantial depth_*_findings.md.
         # Scenario C requires clearing this to reach verify short-circuit.
         if SCENARIO == "K":
-            _write(scratch / "depth_consensus_invariant_findings.md", _STUB_BODY)
-            _write(scratch / "depth_network_surface_findings.md", _STUB_BODY)
-            _write(scratch / "depth_state_trace_findings.md", _STUB_BODY)
-            _write(scratch / "depth_external_findings.md", _STUB_BODY)
-            _write(scratch / "depth_edge_case_findings.md", _STUB_BODY)
+            _write(scratch / "depth_consensus_invariant_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_network_surface_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_state_trace_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_external_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_edge_case_findings.md", _DEPTH_COMPLETE_BODY)
             _write_depth_support_artifacts(scratch)
             _write(
                 scratch / "depth_exit.md",
@@ -547,49 +591,49 @@ def stub_run_phase(phase, config, attempt):
             )
             return 0
         if SCENARIO == "D":
-            _write(scratch / "depth_consensus_invariant_findings.md", _STUB_BODY)
-            _write(scratch / "depth_network_surface_findings.md", _STUB_BODY)
-            _write(scratch / "depth_state_trace_findings.md", _STUB_BODY)
+            _write(scratch / "depth_consensus_invariant_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_network_surface_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_state_trace_findings.md", _DEPTH_COMPLETE_BODY)
             _write_depth_support_artifacts(scratch)
             return 0
         if SCENARIO == "E":
-            _write(scratch / "depth_consensus_invariant_findings.md", _STUB_BODY)
-            _write(scratch / "depth_network_surface_findings.md", _STUB_BODY)
-            _write(scratch / "depth_state_trace_findings.md", _STUB_BODY)
-            _write(scratch / "depth_external_findings.md", _STUB_BODY)
-            _write(scratch / "depth_edge_case_findings.md", _STUB_BODY)
+            _write(scratch / "depth_consensus_invariant_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_network_surface_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_state_trace_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_external_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_edge_case_findings.md", _DEPTH_COMPLETE_BODY)
             _write_depth_support_artifacts(scratch)
             with (scratch / "violations.md").open("a", encoding="utf-8") as f:
                 f.write("[GATE FAIL] depth_consensus_invariant: 0 pre-baked reads (need >=2)\n")
             return 0
         if SCENARIO == "F":
-            _write(scratch / "depth_consensus_invariant_findings.md", _STUB_BODY)
-            _write(scratch / "depth_network_surface_findings.md", _STUB_BODY)
-            _write(scratch / "depth_state_trace_findings.md", _STUB_BODY)
-            _write(scratch / "depth_external_findings.md", _STUB_BODY)
-            _write(scratch / "depth_edge_case_findings.md", _STUB_BODY)
+            _write(scratch / "depth_consensus_invariant_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_network_surface_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_state_trace_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_external_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_edge_case_findings.md", _DEPTH_COMPLETE_BODY)
             _write_depth_support_artifacts(
                 scratch, valid_checkpoint=False, include_skill_gap=False
             )
             return 0
         if SCENARIO == "G":
-            _write(scratch / "depth_consensus_invariant_findings.md", _STUB_BODY)
-            _write(scratch / "depth_network_surface_findings.md", _STUB_BODY)
-            _write(scratch / "depth_state_trace_findings.md", _STUB_BODY)
-            _write(scratch / "depth_external_findings.md", _STUB_BODY)
-            _write(scratch / "depth_edge_case_findings.md", _STUB_BODY)
+            _write(scratch / "depth_consensus_invariant_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_network_surface_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_state_trace_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_external_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_edge_case_findings.md", _DEPTH_COMPLETE_BODY)
             _write_depth_support_artifacts(scratch, valid_exit=False)
             return 0
         if SCENARIO == "H":
-            _write(scratch / "depth_consensus_invariant_findings.md", _STUB_BODY)
-            _write(scratch / "depth_network_surface_findings.md", _STUB_BODY)
-            _write(scratch / "depth_state_trace_findings.md", _STUB_BODY)
-            _write(scratch / "depth_external_findings.md", _STUB_BODY)
-            _write(scratch / "depth_edge_case_findings.md", _STUB_BODY)
+            _write(scratch / "depth_consensus_invariant_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_network_surface_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_state_trace_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_external_findings.md", _DEPTH_COMPLETE_BODY)
+            _write(scratch / "depth_edge_case_findings.md", _DEPTH_COMPLETE_BODY)
             _write_depth_support_artifacts(scratch)
             return 0
         for role in ("token_flow", "state_trace", "edge_case", "external"):
-            _write(scratch / f"depth_{role}_findings.md", _STUB_BODY)
+            _write(scratch / f"depth_{role}_findings.md", _DEPTH_COMPLETE_BODY)
         if SCENARIO == "C":
             _write_depth_support_artifacts(scratch)
         return 0
@@ -773,8 +817,15 @@ def _run_driver(tmp: Path, config_path: Path, call_log: Path,
               .replace("__CALL_LOG__", str(call_log))
               .replace("__CONFIG_PATH__", str(config_path))
               .replace("__SCENARIO__", scenario))
+    # Write the runner to a temp file rather than passing it inline via
+    # `python -c "<script>"`. The template grows as the pipeline gains
+    # phases/fixtures and on Windows an inline `-c` argument is capped at
+    # ~32K chars (CreateProcess lpCommandLine -> WinError 206 "filename or
+    # extension is too long"). A temp file has no such limit.
+    runner_path = tmp / "_smoke_runner.py"
+    runner_path.write_text(script, encoding="utf-8")
     proc = subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, str(runner_path)],
         capture_output=True,
         text=True,
         cwd=str(tmp),
@@ -838,8 +889,9 @@ def test_scenario_a_breadth_halt_and_resume() -> None:
 
         breadth_attempts = [c for c in call_log.read_text(encoding="utf-8").splitlines()
                             if c.startswith("breadth:")]
-        _assert(len(breadth_attempts) == 2,
-                f"A.run1: breadth should retry once (2 attempts); got {breadth_attempts}")
+        _assert(len(breadth_attempts) == 3,
+                f"A.run1: breadth is a RECOVERING phase -> 3 hinted attempts before "
+                f"degrade (all-backend extended retry budget); got {breadth_attempts}")
 
         # Run 2: resume, expect breadth retried, recon/instantiate skipped
         call_log.write_text("", encoding="utf-8")
@@ -847,8 +899,8 @@ def test_scenario_a_breadth_halt_and_resume() -> None:
         _assert(rc2 == 3, f"A.run2 exit: got {rc2}, expected 3 (still degraded)")
 
         calls2 = call_log.read_text(encoding="utf-8").splitlines()
-        _assert(len([c for c in calls2 if c.startswith("breadth:")]) == 2,
-                f"A.run2: breadth should retry; got {calls2}")
+        _assert(len([c for c in calls2 if c.startswith("breadth:")]) == 3,
+                f"A.run2: breadth (recovering) retries to 3 hinted attempts; got {calls2}")
         _assert(len([c for c in calls2 if c.startswith("recon:")]) == 0,
                 f"A.run2: recon must NOT rerun; got {calls2}")
         _assert(len([c for c in calls2 if c.startswith("instantiate:")]) == 0,
@@ -975,26 +1027,40 @@ def test_scenario_d_depth_manifest_quorum() -> None:
 
 @pytest.mark.integration
 def test_scenario_e_depth_gatefail_enforced() -> None:
-    """Depth pre-baked gatefail enforcement."""
+    """Depth pre-baked gatefail -> degrade-and-continue (v2.8.16).
+
+    L1 depth used to force-halt on a tail-artifact/violation gap. v2.8.16
+    makes L1 mirror SC: when the 5 core depth role findings are present, the
+    driver retries once, runs one S1.5 targeted-repair attempt (3 depth calls
+    total), marks depth degraded, then DEGRADES-AND-CONTINUES instead of
+    halting. The audit must progress past depth on the core findings
+    (haltless-on-any-mode goal). Any later non-zero exit comes from a
+    downstream stub-artifact gap, not from depth policy.
+    """
     tmp, project, scratch, cfg_path, call_log = _make_project(
         "plamen_smoke_e_", pipeline="l1"
     )
     try:
-        rc = _run_driver(tmp, cfg_path, call_log, "E")
-        _assert(rc == 3, f"E exit: got {rc}, expected 3 (depth policy halt)")
+        _run_driver(tmp, cfg_path, call_log, "E")
 
         calls = call_log.read_text(encoding="utf-8").splitlines()
         depth_calls = [c for c in calls if c.startswith("depth:")]
-        _assert(len(depth_calls) == 2,
-                f"E: depth should retry once; got {depth_calls}")
+        _assert(len(depth_calls) == 3,
+                f"E: depth should retry once + one S1.5 repair (3 calls); got {depth_calls}")
 
         ckpt = json.loads(
             (scratch / "_v2_checkpoint.json").read_text(encoding="utf-8")
         )
         _assert("depth" in ckpt["degraded"],
                 f"E: depth must be degraded; got {ckpt['degraded']}")
+        _assert("depth" not in ckpt.get("completed", []),
+                f"E: degraded depth must not be completed; got {ckpt.get('completed')}")
         _assert((scratch / "depth.degraded").exists(),
                 "E: depth.degraded marker missing")
+        # The defining v2.8.16 contract: the pipeline does NOT halt at depth.
+        # It continues to the post-depth phase (verify_queue) on the core findings.
+        _assert("verify_queue" in ckpt.get("completed", []),
+                f"E: pipeline must continue past degraded depth; completed={ckpt.get('completed')}")
 
         print("[scenario E] PASS")
     finally:
@@ -1003,24 +1069,35 @@ def test_scenario_e_depth_gatefail_enforced() -> None:
 
 @pytest.mark.integration
 def test_scenario_f_never_cut_enforced() -> None:
-    """Never-cut checkpoint/artifact enforcement (Thorough — checkpoint gate)."""
+    """Never-cut tail-gap on depth -> degrade-and-continue (v2.8.16, Thorough).
+
+    F omits a required post-depth artifact + checkpoint entry. As with E,
+    L1 depth no longer force-halts: it retries once + one S1.5 repair (3 depth
+    calls), marks depth degraded, then continues to the later thorough-mode
+    phases (attention_repair runs after depth) on the core findings.
+    """
     tmp, project, scratch, cfg_path, call_log = _make_project(
         "plamen_smoke_f_", pipeline="l1", mode="thorough"
     )
     try:
-        rc = _run_driver(tmp, cfg_path, call_log, "F")
-        _assert(rc == 3, f"F exit: got {rc}, expected 3 (never-cut halt)")
+        _run_driver(tmp, cfg_path, call_log, "F")
 
         calls = call_log.read_text(encoding="utf-8").splitlines()
         depth_calls = [c for c in calls if c.startswith("depth:")]
-        _assert(len(depth_calls) == 2,
-                f"F: depth should retry once; got {depth_calls}")
+        _assert(len(depth_calls) == 3,
+                f"F: depth should retry once + one S1.5 repair (3 calls); got {depth_calls}")
 
         ckpt = json.loads(
             (scratch / "_v2_checkpoint.json").read_text(encoding="utf-8")
         )
         _assert("depth" in ckpt["degraded"],
                 f"F: depth must be degraded; got {ckpt['degraded']}")
+        _assert("depth" not in ckpt.get("completed", []),
+                f"F: degraded depth must not be completed; got {ckpt.get('completed')}")
+        # Haltless: depth degrades and the pipeline advances to a later
+        # thorough-mode phase (attention_repair is invoked after depth).
+        _assert(any(c.startswith("attention_repair:") for c in calls),
+                f"F: pipeline must continue past degraded depth; calls={calls}")
 
         print("[scenario F] PASS")
     finally:
@@ -1133,8 +1210,13 @@ def test_scenario_i_phase_containment_detector() -> None:
 
         calls = call_log.read_text(encoding="utf-8").splitlines()
         inventory_calls = [c for c in calls if c.startswith("inventory:")]
+        # CONTAINMENT failures are NOT hint-recoverable, so inventory does NOT
+        # get the extra hinted retry here — it stays at 2 attempts and falls to
+        # the standard quarantine + halt path (the extended retry budget applies
+        # only to coverage/content gaps, e.g. scenario A's breadth).
         _assert(len(inventory_calls) == 2,
-                f"I: inventory should retry once; got {inventory_calls}")
+                f"I: inventory containment violation -> no extra hinted retry "
+                f"(2 attempts), straight to quarantine+halt; got {inventory_calls}")
         depth_calls = [c for c in calls if c.startswith("depth:")]
         _assert(len(depth_calls) == 0,
                 f"I: driver must halt at inventory before depth; got {depth_calls}")

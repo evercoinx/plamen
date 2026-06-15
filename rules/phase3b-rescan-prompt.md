@@ -259,11 +259,41 @@ Maximum 5 findings per agent - prioritize by severity.
 ## File Coverage Checkpoint (MANDATORY)
 Before writing findings, list EVERY source file in your cluster and confirm you opened it:
 | File | Lines | Opened? | Functions Analyzed |
-If any file shows Opened: NO " open and analyze it before returning.
+If any file shows Opened: NO â€” open and analyze it before returning.
 
 ## Quality Gate
 Every finding MUST include a specific code location (file:line). Findings without code references will be discarded.
 Do NOT re-report findings from the exclusion list.
+
+### EXCLUSION SOURCE RULE (MANDATORY — recall-safe, no belief-based drops)
+You may exclude a candidate as a duplicate ONLY if you cite a CONCRETE entry that
+exists in the provided Already-Known Findings (Exclusion List) above — a real
+finding ID (e.g. `[B1-2]`, `[RS1-3]`) or a real `file:Lnnn` location drawn from
+`analysis_*.md` / `analysis_rescan_*.md`.
+- A bug you BELIEVE is "already known" but cannot point to in the provided
+  exclusion list MUST be emitted as a new `[PC{N}-k]` finding. When in doubt, EMIT.
+- Self-generated exclusion sections (e.g. `## Exclusion List (Already Found - Not
+  Duplicated)`, "already known", "not duplicated") that assert prior knowledge
+  WITHOUT a cited provided-list referent are PROHIBITED. Your belief about prior
+  coverage is NOT authoritative — only the provided exclusion set is.
+- Every exclusion entry you do write MUST carry its referent inline, e.g.
+  `EXCLUDED [PC{N}-x] dup of [B1-2]` or
+  `EXCLUDED [PC{N}-x] dup of AccountEncoder.sol:L88`.
+- Every exclusion entry MUST ALSO carry the EXCLUDED CANDIDATE'S OWN content:
+  its concrete `file:Lnnn` location, the mechanism (WHAT is wrong), and a
+  one-line harm (WHAT goes wrong if real), e.g. `EXCLUDED [PC{N}-x] encoder
+  byte-width mismatch at AccountEncoder.sol:L412 — truncates the high byte so a
+  crafted account passes validation → asset mis-routing; dup of [B1-2]`. A bare
+  `EXCLUDED [PC{N}-x] already known` with no location and no harm is a
+  CONTENT-LESS stub: if its referent is also missing it cannot be dedup'd or
+  resolved, and downstream it is routed to an APPENDIX-only disposition (it will
+  NOT reach the client body). Carry real content so a genuinely-unique excluded
+  bug becomes a concrete finding instead of an unverifiable stub.
+A referent-less exclusion is treated by the driver as a suppressed real bug and
+the candidate is re-emitted downstream so it cannot vanish. A content-BEARING
+re-emit (own location + harm) is dedup'd or resolved normally; a CONTENT-LESS
+re-emit is kept at Informational in the appendix for human review (downgraded,
+never dropped).
 
 Return: 'DONE: {N} new findings in {CLUSTER_NAME}'
 ")

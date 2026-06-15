@@ -56,9 +56,12 @@ ADAPTIVE_DEPTH_LOOP(findings_inventory):
   // Read template: ~/.claude/prompts/solana/phase4b-invariant-fuzz.md
   // Trigger: semantic_invariants.md exists AND trident_available == true in build_status.md
   // If trident_available == false â†’ skip (proptest fallback handled in Phase 5)
-  if trident_available AND file_exists(SCRATCHPAD + "/semantic_invariants.md"):
-    spawn invariant_fuzz_agent(model="sonnet", SCRATCHPAD, PROJECT_ROOT)
-    await invariant_fuzz_agent  // 5-min timeout built into template
+  // NOTE (V2): the fuzz campaign runs as a driver-scheduled depth fuzz sidecar
+  // worker, not a coordinator spawn. See prompts/solana/v2/phase4b-invariant-fuzz.md.
+  // The driver always emits the invariant worker in Thorough; the worker
+  // self-selects Trident (primary) vs proptest/boundary (fallback) from
+  // trident_available in build_status.md, and degrade-continues without halting
+  // depth. Do NOT spawn an agent from here.
 
   // â•â•â• ITERATION 1: Full coverage (ALWAYS) â•â•â•
   // Read template_recommendations.md for REQUIRED niche agents

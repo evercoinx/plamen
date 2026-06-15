@@ -64,6 +64,45 @@ For protocols handling multiple token types:
 
 **Check**: If function A handles TokenX and function B handles TokenY, can TokenX reach function B's logic? Also: within a single function, if some code paths branch on token type (e.g., input handling), do ALL code paths branch consistently (e.g., refund, fee, return)?
 
+### 4a. Native / ETH-sentinel vs ERC-20 path divergence (MANDATORY when any swap/approve/transfer handles a native or sentinel token)
+
+A single token variable that may be either an ERC-20 address OR a native/sentinel
+pseudo-address (`address(0)`, `0xEeee...EEeE`, a wrapped-native address) is a
+recurring source of reverts and silent no-ops. For EACH `approve()`,
+`transferFrom()`, `safeTransfer()`, `.call{value:}` on a token that CAN be native/
+sentinel, trace BOTH branches:
+- **Typed ERC-20 call on a native/sentinel address** (`IERC20(token).approve(...)`,
+  `transferFrom`) → reverts (no ERC-20 code at that address) → **breaks the native
+  swap/transfer path entirely**. Is the native case branched BEFORE the typed call?
+- **Low-level `.call`/`safeTransfer` to the sentinel** → may **silently succeed/no-op**
+  (no code to revert), so value is lost without an error. Is success actually verified?
+- **Unconditional `approve(fromToken, ...)`** before a swap, where `fromToken` may be
+  native/sentinel → the unconditional approve reverts the whole operation.
+
+**Check**: list every token op on a possibly-native/sentinel token; for each, state
+whether the native branch is handled separately. A typed ERC-20 op on a
+native/sentinel address that is NOT branched is a confirmed finding (path broken /
+value lost), independent of severity.
+
+**Cross-ref (cross-chain bridge/gateway callbacks)**: this §4a covers the
+native/sentinel-vs-ERC20 *token op*. A separate asset-FORM mismatch (the bridge
+delivers/expects an asset that may be in a different form (native vs wrapped) —
+e.g. ETH/WETH — verify the conversion is present) is checked in
+INTEGRATION_HAZARD_RESEARCH §0c-bis. Apply both for any cross-chain bridge/gateway
+callback handler: a token op can be type-correct yet still revert/trap funds
+because the delivered form was never reconciled.
+
+**SIBLING ASYMMETRY (promote, do not bury)**: if one function guards the
+native/sentinel (or any edge) case — e.g. `if (token != _ETH_ADDRESS_) approve(...)`
+— and a *paired/sibling* function performing the same operation does NOT, that
+asymmetry is itself a confirmed finding (the unguarded sibling reverts / mis-handles
+the edge). You MUST write it as its own `## Finding` using the Finding Template below
+— **recording it only as a ✓ or a note in the Step Execution Checklist is a recall
+loss**: the checklist row attests you ran the check, but the report is built from
+`## Finding` sections, so a bug that lives only in a checklist cell is silently
+dropped at inventory promotion. One sibling guards and the other does not ⇒ emit a
+finding, every time.
+
 ## 5. Unsolicited Transfer Analysis
 
 Can tokens be sent to the contract without calling `deposit()`?
@@ -204,6 +243,7 @@ When this skill identifies an issue:
 | 2. Token State Tracking | YES | ✓/✗/? | |
 | 3. Token Exit Points | YES | ✓/✗/? | |
 | 4. Token Type Separation | IF multi-token | ✓/✗(N/A)/? | |
+| 4a. Native/ETH-sentinel vs ERC-20 path | IF any native/sentinel token | ✓/✗(N/A)/? | typed ERC-20 op on native/sentinel reverts; low-level no-ops; **sibling-asymmetry (one guards, sibling does not) ⇒ MUST also be a `## Finding`, not only this row** |
 | 5. Unsolicited Transfer Analysis | YES | ✓/✗/? | |
 | 5b. Unsolicited Transfer Matrix (All Types) | **YES** | ✓/✗/? | **MANDATORY** - never skip |
 | 6. Token Flow Checklist | YES | ✓/✗/? | |

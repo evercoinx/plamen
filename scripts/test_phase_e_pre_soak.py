@@ -335,6 +335,8 @@ def test_RETRY_hint_empty_when_body_clean(tmp_path: Path):
 **Severity**: High
 **Location**: src/F.sol:L1
 **Description**: ok
+**Impact**: An attacker can withdraw more than their share.
+**PoC Result**: Test confirms the excess withdrawal; assertion passed.
 **Recommendation**: ok
 """, encoding="utf-8")
     hint = D._generate_body_writer_retry_hint(sp, "report_body_writer_critical_high")

@@ -207,6 +207,15 @@ Write to {SCRATCHPAD}/build_status.md:
 - **SCOUT_AUDIT_AVAILABLE**: {true/false} (probe `cargo-scout-audit --version`; same crate as Soroban. Supports Anchor + native Solana programs. If true, TASK 2 runs `cargo scout-audit` and appends results to static_analysis.md.)
 ```
 
+**MANDATORY — Chosen build root**: the audit scope dir is often source-only;
+the real `Cargo.toml`/`Anchor.toml` workspace root frequently lives in a
+sibling or ancestor directory. After resolving where the build actually
+compiled, emit EXACTLY this line into `build_status.md` (the mechanical PoC
+executor parses it verbatim): `**Chosen build root**: ` followed by the
+absolute path of the directory that owns the build manifest, wrapped in
+backticks — e.g. `` **Chosen build root**: `/abs/path/to/program` ``. If no
+build environment exists at all, emit `` **Chosen build root**: `(none)` ``.
+
 ## TASK 2: Static Analysis Artifacts
 
 ### Static Analysis Policy

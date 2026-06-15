@@ -65,12 +65,41 @@ complete verifier methodology.
    the next row.
    On resume/retry, if the row's exact `verify_<ID>.md` file already exists
    and contains `Severity:`, `Evidence Tag:`, and `Verdict:`, count that row as
-   complete and skip to the next row. Do not rewrite completed verifier files
+   complete only if either the row is not `unit`/`property`, or the file also
+   contains `### PoC Attempt` and `### Execution Result` with a real attempted
+   test or a valid blocker. Do not skip a ledgerless `unit`/`property`
+   verifier file; repair it in place. Do not rewrite completed verifier files
    just because the previous shard run was interrupted.
 4. Prove or refute the claimed harm using the language-specific methodology
    and PoC execution protocol.
 5. Do not bulk-read unrelated `verify_*.md`, unrelated depth artifacts, or the
    whole scratchpad.
+
+### Driver owns the final Evidence Tag (read this first)
+
+A mechanical executor RE-RUNS your test after this phase, in the audit's own
+ecosystem toolchain (Foundry `forge`, Solana/Soroban `cargo`, Aptos/Sui Move
+`aptos`/`sui`, L1 Go/Rust `go`/`cargo`), and the DRIVER — not you — stamps the
+authoritative Evidence Tag from that run. Therefore:
+
+- A `[POC-PASS]` you write that is NOT backed by a test the executor can locate
+  and run to a real pass is **automatically demoted to `[CODE-TRACE]` and your
+  `Verdict:` is flipped `CONFIRMED → CONTESTED [INTEGRITY-DOWNGRADE]`.** Claiming
+  proof you don't have is worse than useless — it gets caught and your finding
+  drops out of the verified set.
+- To get a real `[POC-PASS]`, write a REAL test that asserts the claimed HARM,
+  at a concrete path the executor can find, using the ecosystem framework named
+  in the cost-directive block. Populate `Test File:`, `Command:`, and
+  `Test Function:` with the exact values you used — these are the executor's
+  inputs, not decoration. The test path must use the ecosystem-correct extension
+  (`*.t.sol` / `*.rs` / `*.move` / `*_test.go`) under the project's test
+  directory.
+- If you genuinely cannot run a test (no toolchain, external-only dependency
+  with no fork), say so honestly via the skip ledger. The executor degrades that
+  to UNPROVEN without penalty — it never fabricates a pass and never halts.
+
+This is the single mechanism that keeps the verified set honest. Write the test
+for real, or declare the blocker for real.
 
 ### PoC Testability Triage (Mandatory)
 
@@ -95,8 +124,9 @@ Every verifier file MUST include this ledger:
 - PoC Class: <unit|property|integration|structural>
 - Attempted: YES/NO
 - PoC Not Attempted Because: <NO_BUILD_ENVIRONMENT|EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS|DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL|PURE_SPEC_OR_DOCS_ONLY|STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION|CROSS_VM_ENCODING_NO_RUNTIME|N/A>
-- Test File: <path or N/A>
-- Command: <command or N/A>
+- Test File: <ecosystem-correct path under the test dir (*.t.sol/*.rs/*.move/*_test.go), or N/A>
+- Test Function: <exact test function name the executor runs, or N/A>
+- Command: <full build/test command in the audit ecosystem, or N/A>
 
 ### Execution Result
 - Compiled: YES/NO (attempts: N)
@@ -110,6 +140,23 @@ environmental blocker. Do not use `STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION`
 for a `unit` or `property` queue row; that means the queue classification must
 be challenged, not silently bypassed.
 
+For `unit` and `property` rows, default to `Attempted: YES`.
+`Attempted: NO` is allowed only if all of the following are true:
+
+1. The skip code is one of the exact allowed codes in the ledger.
+2. You cite the concrete blocker in the verifier file, with a source/config/log
+   reference where applicable.
+3. You explain why a minimal mock, harness, fork, or property test cannot
+   assert the claimed harm.
+4. You do not mark the finding `CONFIRMED` on the basis of the skipped PoC
+   alone. If the harm is still plausible but unexecuted, use `CONTESTED` or
+   a non-PoC evidence tag with the blocker documented.
+
+Before writing each `verify_<ID>.md`, self-check: if the queue row says
+`PoC Class = unit` or `property`, the file must either contain a real attempted
+test command/result or a mechanically valid skip reason with concrete blocker
+evidence. The driver audits invalid skips and records them as violations.
+
 **Skip codes have validity preconditions** — see `phase5-poc-execution.md`
 § "Skip-Reason Validity Preconditions". In short: `NO_BUILD_ENVIRONMENT` is
 invalid when the build succeeded; `EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS` is
@@ -118,6 +165,15 @@ invalid when the dependency can be mocked (mock it and run the PoC);
 `N/A` is invalid on a `unit`/`property` row when a build harness exists. The
 driver mechanically audits these and logs violations to
 `verifier_skip_audit.md`.
+
+**For Critical/High/Medium `unit`/`property` rows, "needs a mock", "complex
+setup", "disproportionate for this severity", "full mock setup required", and
+"not necessary" are NOT valid blockers.** If the project's own test suite
+already mocks the dependency (look for a `*Mock`/`*Stub`/`*Fake`/`*Harness`
+used by any passing test), you MUST build the same minimal harness and run the
+PoC. The driver hard-gates this exact skip for Medium+ rows: the shard is
+retried until you either attempt a real PoC or non-silently reclassify the PoC
+Class (`structural`/`integration`) with justification in your own ledger.
 
 ### Output
 

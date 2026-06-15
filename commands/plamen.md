@@ -293,7 +293,7 @@ If `plamen.py --estimate` is not available (old version), use this fallback:
 
 ```bash
 PY_CMD=$(command -v python3 2>/dev/null || command -v python 2>/dev/null) && "$PY_CMD" -c "
-import sys; sys.path.insert(0, '$HOME/.claude')
+import sys, os; sys.path.insert(0, os.path.expanduser('~/.claude'))
 from plamen import estimate_cost
 import json
 r = estimate_cost('{PROJECT_PATH}', '{MODE}', scope_file='{SCOPE_FILE}', scope_notes='{SCOPE_NOTES}')
@@ -414,15 +414,15 @@ Detect the target language before anything else:
 | `*.move` files + `Move.toml` with `sui::object`/`sui::transfer`/`sui::tx_context`/`sui::coin` | **Sui Move** | `sui` |
 | `*.rs` files + `Cargo.toml` with `soroban-sdk` | **Soroban/Stellar** | `soroban` |
 
-**Detection procedure**:
-1. `ls` project root for `foundry.toml`, `hardhat.config.*`, `Anchor.toml`, `Move.toml`, `Cargo.toml`
-2. If `Move.toml` found: grep dependencies for Aptos indicators (`AptosFramework`, `aptos_framework`, `AptosStdlib`, `aptos_std`, `AptosToken`, `aptos_token`) or Sui indicators (`Sui`, `sui::object`, `sui::transfer`, `sui::tx_context`, `sui::coin`)
-3. If ambiguous Move: grep `*.move` for `use aptos_framework::` (Aptos) or `use sui::` (Sui)
-4. If `*.rs` files + `Cargo.toml`: grep `Cargo.toml` for `soroban-sdk` â†’ if found, set `LANGUAGE=soroban`
-5. If `*.rs` files + NOT soroban: grep `Cargo.toml` for `anchor-lang` or `solana-program`
-6. If still ambiguous Rust: grep `*.rs` for `#[program]` or `#[derive(Accounts)]` (Anchor markers)
-7. Set `LANGUAGE` variable: `evm`, `solana`, `aptos`, `sui`, or `soroban`
-8. Set `ANCHOR` variable: `true` or `false` (Solana only)
+**Detection procedure** (decide PRIMARILY from the dominant source EXTENSION; use manifests only to disambiguate within a language family):
+1. **Count source files recursively** under PROJECT_PATH (excluding `node_modules/`, `target/`, `build/`, `lib/`): how many `*.sol`, how many `*.rs`, how many `*.move`. The most common recognized suffix is the dominant signal.
+2. **Walk UP** from PROJECT_PATH to the nearest `Cargo.toml` / `Move.toml` — the manifest is commonly an ancestor of a scope-dir PROJECT_PATH (e.g. `.../<crate>/src/`), so a manifest grep in the literal project root alone is unreliable. Locate the manifest by ascending parent directories until found.
+3. **If `*.sol` dominant** → `LANGUAGE=evm`.
+4. **If `*.rs` dominant**: grep the located `Cargo.toml` — `soroban-sdk` → `soroban`; `anchor-lang`/`solana-program` (or `*.rs` markers `#[program]`/`#[derive(Accounts)]`) → `solana` with `ANCHOR=true`; native Rust Solana → `solana` with `ANCHOR=false`. The manifest grep ONLY disambiguates solana-vs-soroban; it never overrides the dominant-extension decision.
+5. **If `*.move` dominant**: grep the located `Move.toml` for Aptos indicators (`AptosFramework`, `aptos_framework`, `aptos_std`, `aptos_token`, `fungible_asset`) → `aptos`; Sui indicators (`sui::object`, `sui::transfer`, `sui::tx_context`, `sui::coin`) → `sui`. If still ambiguous, grep `*.move` for `use aptos_framework::` (Aptos) or `use sui::` (Sui).
+6. **Use explicit if/elif blocks** — never a chained `&&`/`||` one-liner (precedence is wrong). Do NOT silently default to `evm`: if no recognized source files are found, treat the language as **indeterminate** and confirm explicitly rather than guessing. The Python driver runs a STARTUP language<->source-extension consistency gate that HALTS the run on a definite contradiction (e.g. `language=evm` but only `*.rs` found), so a misroute is caught before breadth rather than after a multi-hour run.
+7. Set `LANGUAGE` variable: `evm`, `solana`, `aptos`, `sui`, or `soroban`.
+8. Set `ANCHOR` variable: `true` or `false` (Solana only).
 
 ## Step 1.5: Scratchpad + Artifact Folders
 
@@ -555,7 +555,7 @@ This file survives compaction (read from disk). After any compaction event, the 
 |-------|----------|--------|-------|------|----------|
 | **Phase 1** | Recon Agent(s) | Artifacts + templates | 2 sonnet (no RAG/fork) | 4 agents | 4 agents |
 | **Phase 2** | Orchestrator | Instantiated prompts | All | All | All |
-| **Phase 3** | Breadth Agents | Findings files | 3-4 sonnet | 5-9 claude-opus-4-6 | 5-9 claude-opus-4-6 |
+| **Phase 3** | Breadth Agents | Findings files | 3-4 sonnet | 5-9 claude-opus-4-8 | 5-9 claude-opus-4-8 |
 | **Phase 3b** | Re-Scan + Per-Contract | Masked findings | Skip | Skip | Thorough only |
 | **Phase 4a** | Inventory Agent | Findings inventory | 1 sonnet | 1 sonnet | 1 sonnet |
 | **Phase 4a.5** | Semantic Invariant Agent | Write-sites + invariants | Skip | Pass 1 | Pass 1+2 |
@@ -572,7 +572,7 @@ When `MODE == light`, the orchestrator applies these overrides:
 
 1. **All agents use Sonnet or Haiku** " no Opus spawns. Use `model="sonnet"` for all analysis/verification agents, `model="haiku"` for assembler only.
 2. **Recon**: Spawn 2 sonnet agents (not 4). Agent L1 = build + static analysis + tests (Tasks 1,2,8,9). Agent L2 = docs + patterns + surface + templates (Tasks 3,4,5,6,7,10). Skip RAG meta-buffer (Task 0) and fork ancestry entirely.
-3. **Breadth**: Cap at 3-4 sonnet agents (not 5-9 claude-opus-4-6). Use same merge hierarchy.
+3. **Breadth**: Cap at 3-4 sonnet agents (not 5-9 claude-opus-4-8). Use same merge hierarchy.
 4. **Semantic Invariants**: Skip entirely. Depth agents read `state_variables.md` directly.
 5. **Depth Loop**: Spawn 4 merged sonnet agents " (a) combined token-flow + state-trace, (b) combined edge-case + external, (c) combined scanner A+B+C, (d) validation sweep. No niche agents, no injectable investigation agents. Iteration 1 only, no confidence scoring. **Note**: Merges (a) and (c) are deliberate exceptions to the standard merge hierarchy " token-flow + state-trace and 3-scanner compression reduce agent count at the cost of per-domain attention depth. This is a known tradeoff accepted for Pro plan rate limit compliance.
 6. **Chain Analysis**: Single sonnet agent performs both enabler enumeration and chain matching in one pass.
@@ -606,9 +606,9 @@ Replace placeholders: `{path}`, `{scratchpad}`, `{docs_path_or_url_if_provided}`
 | Agent | Spawn | Model | Await? |
 |-------|-------|-------|--------|
 | **1A (RAG)** | `run_in_background: true` | sonnet | **NO** " fire-and-forget |
-| **1B (Docs + External)** | foreground | claude-opus-4-6 (Core/Thorough) or sonnet (Light) | YES |
+| **1B (Docs + External)** | foreground | claude-opus-4-8 (Core/Thorough) or sonnet (Light) | YES |
 | **2 (Build + Slither)** | foreground | sonnet | YES |
-| **3 (Patterns + Surface)** | foreground | claude-opus-4-6 (Core/Thorough) or sonnet (Light) | YES |
+| **3 (Patterns + Surface)** | foreground | claude-opus-4-8 (Core/Thorough) or sonnet (Light) | YES |
 
 **Agent 1A is FIRE-AND-FORGET**: spawn in background, never block on it. If it hasn't returned when 1B/2/3 finish, write fallback `meta_buffer.md` and proceed.
 
@@ -1144,8 +1144,8 @@ Read `{SCRATCHPAD}/hypotheses.md` (first 100 lines ONLY " hypothesis table). Cou
 | Mode | Scope |
 |------|-------|
 | Light | ALL Medium+ (all sonnet) |
-| Core | ALL Medium+ (claude-opus-4-6 for High/Chain, sonnet for Medium) |
-| Thorough | ALL severities (claude-opus-4-6 for High/Chain, sonnet for Medium, sonnet for Low/Info) + fuzz variants |
+| Core | ALL Medium+ (claude-opus-4-8 for High/Chain, sonnet for Medium) |
+| Thorough | ALL severities (claude-opus-4-8 for High/Chain, sonnet for Medium, sonnet for Low/Info) + fuzz variants |
 
 **Step 5.0.1: Crash resume " skip already-verified hypotheses**
 
@@ -1159,12 +1159,12 @@ If total verifiers to spawn **> 8**: split into severity-tier batches. Spawn eac
 
 | Batch | Contains | Model | Max parallel agents |
 |-------|----------|-------|---------------------|
-| A | Chain hypotheses (CH-*) + High standalone | claude-opus-4-6 | all (typically 7-10) |
+| A | Chain hypotheses (CH-*) + High standalone | claude-opus-4-8 | all (typically 7-10) |
 | B | Medium (first half, up to 6) | sonnet | 6 |
 | C | Medium (second half) | sonnet | 6 |
 | D | Low + Info (single agent covering ALL) | sonnet | 1 |
 
-> **Batch sizing**: If a tier has â‰¤ 6 hypotheses, it fits in one batch. If > 6, split into sub-batches of â‰¤ 6. Chains + High are always in the same batch (both claude-opus-4-6, rarely > 10 combined).
+> **Batch sizing**: If a tier has â‰¤ 6 hypotheses, it fits in one batch. If > 6, split into sub-batches of â‰¤ 6. Chains + High are always in the same batch (both claude-opus-4-8, rarely > 10 combined).
 
 > **Between batches**: Do NOT read the `verify_*.md` files written by the completed batch. Only note the short return message from each agent. Detailed output lives on disk " the orchestrator does not need it until Phase 5.5/6.
 

@@ -30,17 +30,19 @@ from plamen_validators import _check_dedup_decision_coverage  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-def test_p42_breadth_has_forbidden_output_block():
+def test_p42_breadth_has_output_allowlist_block():
     """The DODO percontract leak class is the canonical target. Breadth's
     forbidden-output block now explicitly names the rescan/percontract
     files (so the LLM can't 'helpfully' write them during breadth)."""
     block = _render_forbidden_output_block("breadth")
-    assert "FORBIDDEN OUTPUT FILES" in block
-    assert "analysis_rescan_*.md" in block
-    assert "analysis_percontract_*.md" in block
+    assert "OUTPUT ALLOWLIST (HARD)" in block
+    assert "spawn_manifest.md" in block
+    assert "manifest rows" in block
+    assert "analysis_rescan" not in block
+    assert "analysis_percontract" not in block
 
 
-def test_p42_breadth_block_lists_later_phase_artifacts():
+def test_p42_breadth_block_does_not_list_later_phase_artifacts():
     """Breadth's block also names later-phase artifacts (depth, chain,
     verify, report) for completeness — the LLM can drift into any of them."""
     block = _render_forbidden_output_block("breadth")
@@ -49,25 +51,27 @@ def test_p42_breadth_block_lists_later_phase_artifacts():
         "findings_inventory", "semantic_invariants.md",
         "report_index.md", "AUDIT_REPORT.md",
     ):
-        assert token in block, f"breadth block missing token: {token}"
+        assert token not in block, f"breadth block leaked token: {token}"
 
 
-def test_p42_rescan_block_has_forbidden_outputs():
+def test_p42_rescan_block_has_output_allowlist():
     """Rescan also gets a forbidden-output block — different namespace
     from breadth (owns rescan_*.md + percontract_*.md, must not touch
     breadth's analysis_<focus_area>.md)."""
     block = _render_forbidden_output_block("rescan")
-    assert "FORBIDDEN OUTPUT FILES" in block
-    assert "depth_*_findings.md" in block
-    assert "hypotheses.md" in block
+    assert "OUTPUT ALLOWLIST (HARD)" in block
+    assert "current prompt and manifest" in block
+    assert "depth_*_findings.md" not in block
+    assert "hypotheses.md" not in block
 
 
 def test_p42_depth_block_preserved_for_non_regression():
     """Non-regression: depth's existing forbidden-output block is unchanged."""
     block = _render_forbidden_output_block("depth")
-    assert "FORBIDDEN OUTPUT FILES" in block
-    assert "hypotheses.md" in block
-    assert "verify_*.md" in block
+    assert "OUTPUT ALLOWLIST (HARD)" in block
+    assert "Expected Output Contract" in block
+    assert "hypotheses.md" not in block
+    assert "verify_*.md" not in block
 
 
 def test_p42_non_task_phases_get_no_block():

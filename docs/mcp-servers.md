@@ -1,6 +1,14 @@
 # MCP Servers
 
-Plamen uses 9 MCP servers configured in `mcp.json` (Claude Code) or `config.toml` (Codex, with tool translation via `codex_adapter.py`). All keys are optional -- the pipeline degrades gracefully. MCP servers are a Claude Code feature; on Codex, the adapter translates tool calls to equivalent Codex sandbox operations where possible, and falls back to grep/WebSearch where not.
+Plamen uses 9 MCP servers configured in `mcp.json` (Claude Code) or `[mcp_servers.*]` TOML sections in `~/.codex/config.toml` (Codex). All keys are optional — the pipeline degrades gracefully.
+
+MCP runs natively under both backends. On Claude Code the servers are loaded from `~/.claude/mcp.json`; on Codex the servers are loaded from `[mcp_servers.*]` blocks in `~/.codex/config.toml`, which `scripts/codex_adapter.py:generate_config_toml` generates from `mcp.json.example` at install time and `plamen install --codex` copies into place. The "tool translation" sometimes referenced elsewhere is prompt-text rewriting in `plamen_driver.py` (paths, `Task()` → `spawn_agent`, bash → PowerShell) — it is NOT an MCP transport shim.
+
+Two Codex-specific caveats:
+1. `evm-chain-data` is currently disabled on Codex due to an MCP protocol version mismatch (`scripts/codex_adapter.py:276`).
+2. Four Python MCP servers (`slither-analyzer`, `unified-vuln-db`, `farofino`, `solana-fender`) are wrapped through `mcp-packages/schema-sanitizer.js` to strip `oneOf`/`allOf` JSON-schema constructs Codex rejects (`scripts/codex_adapter.py:270-275`).
+
+Tool permissions on Codex cannot be pre-configured: select "Always allow" on the first prompt per MCP server (`plamen.py:_install_codex_adapter`, ~L2690-2694).
 
 ## Bundled (custom-mcp/)
 
@@ -42,7 +50,7 @@ Plamen uses 9 MCP servers configured in `mcp.json` (Claude Code) or `config.toml
 
 **Claude Code**: See `mcp.json.example` for the full 9-server configuration. After `plamen install`, `mcp.json` is placed in `~/.claude/`.
 
-**Codex**: MCP servers are not natively supported. The V2 driver's `codex_adapter.py` translates RAG and static analysis tool calls. For full MCP support, use the Claude Code backend.
+**Codex**: MCP servers are loaded from `[mcp_servers.*]` TOML blocks in `~/.codex/config.toml`, generated at install time by `scripts/codex_adapter.py` from `mcp.json.example`. After `plamen install --codex` the config is at `~/.codex/config.toml`. Tool permissions are interactive on first use per server. See the two Codex caveats above (disabled `evm-chain-data`, schema-sanitized Python servers).
 
 Key `mcp.json` entries:
 
@@ -63,4 +71,4 @@ Key `mcp.json` entries:
 }
 ```
 
-Path notes: `cwd` fields use relative paths resolved from `~/.plamen/`. On Codex, these paths are rewritten to `~/.codex/plamen/` equivalents by the installer.
+Path notes: `cwd` fields use relative paths resolved from `~/.plamen/`. On Codex, paths inside generated `config.toml` resolve via `~/.codex/plamen/`, which is a symlink to `~/.plamen/` created by `plamen install --codex` — same source tree, different runtime root.

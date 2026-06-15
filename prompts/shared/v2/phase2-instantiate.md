@@ -17,6 +17,8 @@
 
 **Minimum always**: 1 core state, 1 access control, 1 per major external dep (overrides Simple tier if needed)
 
+**Tier floor (HARD)**: the Merge Hierarchy (Step 2a.1) reduces toward the tier's agent count but **NEVER below its lower bound** — **Complex never below 7**, Medium never below 5. If merges would drop the AGENT-row count below the floor, keep skills in **separate** AGENT rows instead (the 300-line cap is an upper bound on per-agent payload, NOT a license to collapse below the tier floor). Merging away whole lenses on a large codebase is a recall loss. The driver **mechanically enforces the Complex floor (>=7)** and will reject a sub-floor manifest, so produce >=7 AGENT rows up front for any Complex codebase.
+
 **Breadth-to-depth redirect**: When actual breadth agent count is below the Medium baseline (5), the saved slots increase the depth budget floor: `depth_floor = 12 + (5 - actual_breadth_count)`.
 
 ---
@@ -45,6 +47,21 @@ For Aptos and Sui audits, the 4 always-required skills (ABILITY_ANALYSIS, BIT_SH
 The Move-Safety Agent prompt: load all 4 always-required SKILLs into a single agent with scope = "full Move-specific safety analysis." It is a breadth producer and MUST write exactly one first-pass analysis file, `analysis_move_safety.md`. Its findings feed into `findings_inventory.md` because inventory reads `analysis_*.md`; it must not write `findings_inventory.md` directly. Depth agents still receive full skills per their injection rules (depth agents have separate context windows, not subject to the breadth merge cap).
 
 **EVM/Solana**: No Move-Safety Agent needed. EVM has no always-required skills. Solana has ACCOUNT_VALIDATION (130 lines) which fits within the 300-line cap.
+
+---
+
+## Step 2a.3: Breadth Floor-Fill — NEVER invent skill templates
+
+The Complex tier requires >=7 breadth agents (Step 2a). When the recon-recommended REAL skills yield FEWER agents than the floor, you MUST reach the floor **without inventing skill names**. The `Template` column of every AGENT row must contain ONLY:
+- a **real** skill/template name that exists at `~/.claude/agents/skills/{LANGUAGE|injectable|niche}/<lowercase-hyphenated-name>/SKILL.md` (the names in `skill-index.md` and your `template_recommendations.md`), a baseline focus (`CORE_STATE`, `ACCESS_CONTROL`), **or**
+- the literal sentinel `GENERAL` — a focus-only breadth pass with no skill methodology (the driver runs it as a general agent over that focus area; this is expected, not an error).
+
+To fill extra agents up to the floor, **in this order**:
+1. **Split a broad real skill's scope** across multiple agents by file/subsystem (e.g. `ORACLE_ANALYSIS` on RNG contracts as one agent, on price contracts as another) — same real `Template`, different `Focus Area` + file scope.
+2. **Bind the closest applicable real skill** to an under-covered domain. Examples: reward/payout accounting -> `ECONOMIC_DESIGN_AUDIT` or `SHARE_ALLOCATION_FAIRNESS`; game/round/RNG outcome logic -> `OUTCOME_DETERMINISM`; auxiliary swap/pricing -> the relevant real skill (`ORACLE_ANALYSIS`, `TOKEN_FLOW_TRACING`, ...).
+3. **Only if no real skill applies**, create a focus-only agent with `Template = GENERAL`.
+
+**PROHIBITED**: inventing a skill-like `Template` name that has no `SKILL.md` (e.g. `REWARD_ACCOUNTING`, `GAME_LOGIC_CORRECTNESS`, `MINIGAME_AUXILIARY`). A fabricated `Template` silently drops methodology and emits a binding-loss warning. The manifest schema gate rejects fabricated templates and you will be asked to retry — bind a real skill (split scope or closest-fit) or use `GENERAL`.
 
 ---
 
@@ -166,6 +183,15 @@ Rules:
 - Record skill/injectable bindings in a separate section titled
   `## Skill Bindings`; those rows are not spawned agents and must not be
   mixed into the machine-read AGENT table.
+- The `## Skill Bindings` table MUST use these exact columns:
+  `Skill | Type | Inject Into | Delivery Mode`.
+  `Inject Into` MUST be a parseable breadth agent id such as `B2` or a depth
+  role such as `depth-external`; do not use prose-only targets.
+- If recon evidence includes `NON_EVM_TARGET`, Solana, Bitcoin, `AccountEncoder`,
+  pubkey/base58/bech32/Borsh, or any EVM-to-foreign-VM outbound encoding,
+  `CROSS_VM_SERIALIZATION_CONFORMANCE` is REQUIRED and MUST appear in
+  `## Skill Bindings` twice: once injected into the cross-chain/encoding
+  breadth agent by `B#`, and once injected into `depth-external`.
 - Before returning, re-read the manifest and confirm the number of AGENT
   rows equals the number of first-pass breadth output files the breadth phase
   must produce.

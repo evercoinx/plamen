@@ -527,7 +527,13 @@ def test_candidate_pairs_source_id_subset(tmp_path):
 
 
 def test_candidate_pairs_source_id_subset_cross_file(tmp_path):
-    """Source-ID subset should fire even across different files."""
+    """Source-ID subset should fire even across different files.
+
+    Superset kept at <=4 source IDs so the subset signal is NOT suppressed by
+    the aggregate rule (>4 source IDs suppresses subset/PERT hints). The
+    aggregate boundary itself is covered by
+    test_dedup_aggregate_threshold_boundary.
+    """
     sp = tmp_path / "scratchpad"
     sp.mkdir()
 
@@ -538,7 +544,7 @@ def test_candidate_pairs_source_id_subset_cross_file(tmp_path):
         "**Severity**: Medium\n"
         "**Location**: crates/domain/src/block_tree.rs:L89\n\n"
         "### Finding [INV-002]: RwLock cascade in storage_module\n"
-        "**Source IDs**: [D-57, D-58, D-59, D-60, D-62]\n"
+        "**Source IDs**: [D-57, D-58, D-59, D-60]\n"
         "**Severity**: Medium\n"
         "**Location**: crates/domain/src/storage_module.rs:L120\n\n"
     )

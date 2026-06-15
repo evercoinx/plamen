@@ -338,25 +338,19 @@ Write `{SCRATCHPAD}/phase4b_manifest.md`:
 
 ---
 
-## THOROUGH CHECKPOINT: Pre-Depth Fuzz Campaigns
+## THOROUGH FUZZ CAMPAIGN (driver-scheduled — do NOT spawn from here)
 
-When `{MODE}` is `thorough` AND `{LANGUAGE}` is `evm`, run these BEFORE spawning depth agents:
+In V2 the invariant/Medusa fuzz campaign is scheduled by the Python driver as a
+Thorough-only **depth fuzz sidecar worker**, not a coordinator spawn:
 
-### Invariant Fuzz Campaign (MANDATORY, zero budget cost)
-Read template: `~/.claude/prompts/evm/phase4b-invariant-fuzz.md`
-Spawn agent. Await completion. Results written to `{SCRATCHPAD}/invariant_fuzz_results.md`.
-The template has a 5-minute timeout built in.
-
-### Medusa Campaign (MANDATORY if MEDUSA_AVAILABLE, zero budget cost)
-Read Medusa section from `~/.claude/prompts/evm/phase4b-loop.md`.
-Spawn agent IN PARALLEL with the invariant fuzz agent. Await completion.
-Results written to `{SCRATCHPAD}/medusa_fuzz_findings.md`.
-
-### Assert Completion
-```
-ASSERT: invariant_fuzz_results.md exists (or COMPILATION_FAILED logged)
-ASSERT: medusa_fuzz_findings.md exists (or MEDUSA_UNAVAILABLE logged)
-IF either missing AND no failure logged -> log VIOLATION to violations.md
-```
+- The driver emits the worker(s) per `(mode == thorough, ecosystem,
+  build_status tool flags)` and points each at the canonical worker prompt
+  (`~/.claude/prompts/evm/v2/phase4b-invariant-fuzz.md`, and EVM
+  `~/.claude/prompts/evm/v2/phase4b-medusa-fuzz.md` when `MEDUSA_AVAILABLE`).
+- It is **additive and non-blocking**: a tool-absent/failed/timed-out run writes
+  a degrade-continue results artifact and never halts depth. Fuzz artifacts are
+  NOT in the depth hard gate and NOT never-cut, so do not ASSERT their existence
+  here.
+- Do **NOT** spawn a fuzz agent from this prompt.
 
 After all agents return, verify output files exist on disk and stop.

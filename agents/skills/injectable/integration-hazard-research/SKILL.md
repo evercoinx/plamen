@@ -82,6 +82,14 @@ tavily_search(query="{protocol_name} smart contract integration pitfalls known i
 - NO: The audited code does not interact with the affected function/state (document why)
 - CHECK: Cannot determine without deeper analysis — flag for depth trace
 
+### 0c-bis. Asset-Form Delivery Check (MANDATORY for every bridge/gateway/router callback + outbound deposit/withdraw)
+
+Cross-chain gateways frequently deliver the gas token in a DIFFERENT FORM than the handler assumes — native vs wrapped (e.g. ETH vs WETH). This is an asset-FORM mismatch, distinct from the asset-IDENTITY (declared-output-token vs delivered-token) mismatch. For EACH inbound callback (`onCall`/`onReceive`/`onRevert`/router callback) and EACH outbound `deposit`/`withdraw`:
+1. From the external protocol's docs/source, determine whether it DELIVERS/EXPECTS the asset in **NATIVE or WRAPPED** form (many gas-token bridges auto-unwrap to native on delivery and auto-wrap on send).
+2. Assert the handler's FIRST value-moving op matches that form: a wrapped-ERC20 `approve`/`transferFrom`/`swap` requires the asset to already be wrapped; a `.call{value:}`/native send requires it to be native.
+3. **RED FLAG → emit a CHECK candidate** (never a silent `UNVERIFIED`): the callback names a wrapped-token address as the asset param but the handler moves it via ERC20 `approve`/`transfer` with NO `deposit{value:}`/`withdraw()` reconciliation (or vice-versa). The missing inbound native→wrapped (or wrapped→native) conversion is a candidate asset-form mismatch — verify reachability and impact.
+4. If the delivery form cannot be confirmed from docs/source, escalate to a CHECK candidate for depth tracing — do NOT drop it as `UNVERIFIED`.
+
 ### 0d. Hardcoded Hazard Floor (Fallback if RAG/Web Search Fails)
 
 If Solodit AND Tavily BOTH fail, check EACH applicable protocol against this minimum catalog:
@@ -120,6 +128,7 @@ If Solodit AND Tavily BOTH fail, check EACH applicable protocol against this min
 | Thala | ThalaSwap stable pool invariant at low liquidity | Amplification factor causes extreme slippage at pool edges | Swap calls into Thala stable pools near depletion |
 | Liquidswap | Unchecked curve type | Stable vs uncorrelated curve selection affects pricing | Hardcoded curve type assumption |
 | Pyth (Aptos) | Stale price from `pyth::get_price()` | Price staleness not enforced by default | Price reads without `get_price_no_older_than()` |
+| Wrapped-native gas-token gateway | Gas/native token delivered in a different FORM than the handler's first value-moving op assumes | Gateway may auto-(un)wrap; handler assumes the other form and skips the conversion | Any gateway that may auto-(un)wrap: verify the inbound native↔wrapped conversion is present and the first value-moving op's form (native send vs ERC20 transfer) matches the delivered form |
 
 **Note**: This floor catalog covers only the most critical hazards. RAG/web results typically surface 3-5x more per protocol. Treat the floor as minimum coverage, not exhaustive.
 

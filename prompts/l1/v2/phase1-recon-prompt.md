@@ -465,6 +465,16 @@ If any primitive failed, document the fallback state in `bake_validation.md`:
 - PRIMITIVE_FALLBACK_RUST: [false | true]
 ```
 
+**MANDATORY — Chosen build root**: the audit scope dir is often a source-only
+subpath; the real `go.mod` / `Cargo.toml` module root frequently lives in a
+sibling or ancestor directory. After resolving where `go test` / `cargo test`
+actually runs, emit EXACTLY this line into `{scratchpad}/build_status.md` (the
+mechanical PoC executor parses it verbatim): `**Chosen build root**: `
+followed by the absolute path of the directory that owns `go.mod` (Go) or the
+workspace `Cargo.toml` (Rust), wrapped in backticks — e.g.
+`` **Chosen build root**: `/abs/path/to/module` ``. If no build environment
+exists at all, emit `` **Chosen build root**: `(none)` ``.
+
 ## TASK 7: Opengrep sweep analysis
 
 Read `{scratchpad}/opengrep_hits.json`. Group findings by rule, rank by confidence, deduplicate near-duplicates. Write a ranked hit list to `opengrep_hits_ranked.md` that the depth agents can consume directly:

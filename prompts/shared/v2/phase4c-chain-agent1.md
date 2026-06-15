@@ -29,6 +29,7 @@ Read:
 - `{SCRATCHPAD}/confidence_scores.md` (for prioritization)
 - `{SCRATCHPAD}/attack_surface.md` (for enabler enumeration)
 - `{SCRATCHPAD}/depth_*_findings.md` (for STEP 0-pre: scan for `[CROSS-DOMAIN-DEP]` tags)
+- `{SCRATCHPAD}/dedup_absorbed_map.md` (OPTIONAL — driver-written record of semantic-dedup merges: each row is an `Absorbed ID -> Survivor ID` pair with the absorbed finding's distinct content. If present, every absorbed ID MUST be recorded as a Constituent Finding of the survivor's hypothesis row in `finding_mapping.md` and `hypotheses.md`, and the absorbed finding's distinct attack path / route / call-site / impact MUST be preserved in the survivor hypothesis description so the tier-writer Rule 10 path can couple both. Do NOT re-create the absorbed finding as its own standalone hypothesis — it is consolidated into the survivor with zero content loss.)
 
 For specific findings referenced in enabler enumeration, read the relevant source files directly.
 
@@ -129,6 +130,11 @@ Check if reaching state S1 (from Finding A) also reaches state S2 (from Finding 
 4. RECOVER dismissed findings if contradicted by evidence in your inputs
 5. ANALYZE compound exploits
 6. VERIFY coverage — every finding has a status
+
+When finding details include optional Discovery Steer or semantic preservation
+fields, use them only as prioritization hints for grouping/enabler review.
+They are not proof, do not require a new section, and do not create any new
+artifact or gate.
 
 ### GROUPING RULES (MANDATORY)
 1. **Max 5 findings per hypothesis**. If grouping would exceed 5, split by exploit path.

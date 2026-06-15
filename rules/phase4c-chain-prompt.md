@@ -55,10 +55,15 @@ Before semantic grouping, physically create all three handoff files on disk:
 - `{SCRATCHPAD}/finding_mapping.md`
 - `{SCRATCHPAD}/enabler_results.md`
 
-If the files already contain a driver-written `MECHANICAL_BASELINE`, you may
-overwrite them as you improve the analysis. Do not merely return a summary
-saying the files were written. Only return `DONE` after all three files exist
-on disk and contain the final content for this phase.
+A `**Status**: MECHANICAL_BASELINE` stamp in `hypotheses.md` /
+`finding_mapping.md` / `enabler_results.md` is a driver-written scaffold and is
+NOT prior completion. You MUST perform PHASE 1 grouping and PHASE 0 enabler
+enumeration and OVERWRITE all three files, removing the `MECHANICAL_BASELINE`
+stamp. Returning `DONE` while any of these files still carries the
+`MECHANICAL_BASELINE` stamp is a phase failure that the driver will detect and
+retry. Do not merely return a summary saying the files were written. Only
+return `DONE` after all three files exist on disk, carry no `MECHANICAL_BASELINE`
+stamp, and contain the final grouped/enumerated content for this phase.
 
 ## PHASE 0: ENABLER ENUMERATION (Rule 12)
 
@@ -100,31 +105,6 @@ For EACH dangerous state S, fill the 5-actor-category table:
 Check if reaching state S1 (from Finding A) also reaches state S2 (from Finding B):
 - If YES → document the combined attack path
 
-## Hypothesis ID Taxonomy (SC)
-
-When you group findings into hypotheses, use **one** of the canonical SC
-hypothesis ID prefixes below. The driver's parity gate, the verification
-queue, and the report-index parser all recognize exactly this set — emitting
-a prefix outside this list silently drops every constituent INV-* from the
-audit-completeness accounting.
-
-| Prefix | Meaning | When to use |
-|---|---|---|
-| `HC-NN` | Hypothesis, Critical severity | Grouped hypothesis whose worst constituent is Critical |
-| `HH-NN` | Hypothesis, High severity | Grouped hypothesis whose worst constituent is High |
-| `HM-NN` | Hypothesis, Medium severity | Grouped hypothesis whose worst constituent is Medium |
-| `HL-NN` | Hypothesis, Low severity | Grouped hypothesis whose worst constituent is Low |
-| `HI-NN` | Hypothesis, Informational | Grouped hypothesis whose worst constituent is Informational |
-| `GRP-NN` | Severity-agnostic group | Multi-finding group that genuinely spans tiers and uses an explicit anti-absorption override |
-| `CH-NN` | Chain hypothesis | Agent 2's chain hypotheses (combined attack from blocked + enabler findings) |
-| `H-NN` | Generic hypothesis (legacy) | Backward-compatible fallback — prefer the severity-bucketed forms above when possible |
-
-Numbering is per-prefix and sequential from `01` (zero-padded to 2 digits is
-fine, single-digit is fine). All constituents of a hypothesis (e.g. `HC-02`
-absorbs `INV-001, INV-002`) must be recorded in `finding_mapping.md` and
-shown under the hypothesis section in `hypotheses.md`, so the parity gate
-can expand the grouped row back to its INV-* constituents.
-
 ## PHASE 1: GROUPING AND DEDUP
 
 ### Grouping Steps
@@ -142,86 +122,12 @@ can expand the grouped row back to its INV-* constituents.
 3. **Group by exploit path, not component**. Two findings affecting the same component but using different exploit mechanisms → separate hypotheses.
 4. **Orphan findings** each become their own single-finding hypothesis.
 5. **LOW_CONFIDENCE orphans**: each becomes a standalone hypothesis at its original severity.
-6. **Anti-absorption (MECHANICALLY ENFORCED)**: Before grouping two findings, apply this check:
+6. **Anti-absorption**: Before grouping two findings, apply this check:
    (a) Same fix required for both (if fixes differ → separate hypotheses)
    (b) Grouping does not obscure a severity difference > 1 tier
    (c) Reader can understand BOTH attack paths from a single description
    (d) **Fix comparison test**: Write a 1-line fix for each. If fixes modify DIFFERENT functions → separate hypotheses.
-
-   This rule is NOT advisory — the driver runs a mechanical validator on
-   your output (`_validate_chain_anti_absorption`) that checks:
-   - Constituents span distinct `(file, function)` pairs → SPLIT
-   - Constituent severity tier span > 1 (e.g., a Medium and a High
-     cannot share a Medium hypothesis) → SPLIT
-   - Pairwise root-cause text Jaccard similarity < 0.30 → SPLIT
-
-   **Jaccard worked example (so you can self-check before emitting):**
-   The metric is `|A ∩ B| / |A ∪ B|` on lowercased word tokens of the two
-   root-cause descriptions. A pair below 0.30 → SPLIT into separate
-   hypotheses; ≥ 0.30 → grouping is allowed.
-
-   - **OK to group (Jaccard ≈ 0.50)**:
-     A = "missing zero address check in setFeeRecipient admin setter"
-     B = "missing zero address check in setVault admin setter"
-     A tokens = `{missing, zero, address, check, in, setfeerecipient, admin, setter}` (8)
-     B tokens = `{missing, zero, address, check, in, setvault, admin, setter}` (8)
-     Intersection = `{missing, zero, address, check, in, admin, setter}` (7)
-     Union = 9. Jaccard = 7/9 ≈ 0.78 → same root cause + same fix → group.
-
-   - **MUST SPLIT (Jaccard ≈ 0.14)**:
-     A = "reentrancy via external call before state write in withdraw"
-     B = "integer overflow on fee calculation in setFee"
-     Intersection ≈ `{in}` (1)
-     Union ≈ 14. Jaccard ≈ 1/14 ≈ 0.07 → distinct mechanisms / distinct
-     fixes → separate hypotheses, even if they share severity.
-
-   Violations trigger a retry with a hint listing the offending groups.
-   If you believe a violation is intentional (two findings are TRULY
-   redundant detections of the same single bug), add inside the
-   hypothesis section body:
-
-       Anti-absorption override: <one-sentence reason>
-
-   Without an explicit override, mechanical splits are mandatory.
-
 7. **Severity inheritance**: When grouping findings of different severities, the hypothesis inherits the HIGHEST severity from its constituent findings.
-
-### MANDATORY FULL-EVIDENCE RE-READ (multi-constituent groups)
-
-Before grouping **≥3 candidate findings into one hypothesis**, you MUST:
-
-1. Locate each candidate's full finding text in its source file
-   (`depth_*_findings.md`, `niche_*_findings.md`, `blind_spot_*_findings.md`,
-   `analysis_*.md`, or `validation_sweep_findings.md`). The
-   `chain_summaries_compact.md` row tells you the source filename — open it
-   and find the finding by its ID.
-2. Read each candidate's full **Description**, **Impact**, **Evidence**,
-   **Root Cause** sections — not just the compact-summary one-liner. The
-   compact summary preserves *what* but loses *how*, and you need the *how*
-   to apply the anti-absorption fix-comparison test.
-3. Apply rule 6(a)–(d) using the full text. If any two constituents have:
-   distinct fix locations (different file:function), severity tier
-   difference > 1, OR root causes describing different mechanisms — SPLIT.
-
-ANTI-PATTERN EXAMPLE — do NOT merge findings that share a file but have
-distinct fixes:
-
-> Finding A: attacker-controlled `len` parameter → out-of-bounds read.
->   Fix: add `require(2 + len*33 <= input.length)` validation.
-> Finding B: assembly `mload(ptr)` reads 32 bytes for a 1-byte boolean
->   field, corrupting it with adjacent data.
->   Fix: replace `mload(ptr)` with `byte(0, mload(ptr))`.
-> Finding C: pointer-table memory layout where Solidity ABI expects
->   inline struct layout.
->   Fix: rewrite the assembly block to write structs inline.
->
-> **Correct grouping: 3 separate hypotheses** (each requires editing a
-> different code location with a different fix). Same source file is
-> NOT a valid merge criterion. Rule 6(d): fix-comparison test fails.
-
-The skipping cost of full re-read for ≥3-constituent candidates is small
-(typically <50 KB extra context per group). The cost of an over-merge is
-losing all constituents when the verifier picks the weakest one's PoC.
 
 **Confidence-aware grouping**: Group LOW_CONFIDENCE findings with CONFIDENT findings of the same root cause where possible. Flag CONTESTED findings for verification priority.
 
@@ -314,6 +220,40 @@ Chain Severity Matrix:
 Chain severity is NEVER lower than the higher of Finding A or Finding B.
 Upgrade if: combined impact > $100k AND profitability > 2x → CRITICAL
 Upgrade if: combined impact > $10k AND profitability > 2x → minimum HIGH
+
+### Chain Self-Containment Guard (MANDATORY — anti-restatement)
+
+A chain hypothesis is **INVALID** if it is merely a restatement of a single
+constituent. Before emitting ANY chain hypothesis, apply this guard:
+
+1. **Single-actor satisfiability**: If the Combined Attack Sequence is
+   satisfiable by a single constituent finding acting ALONE (i.e. Finding B's
+   step is not actually required to reach Finding A's impact, or vice versa),
+   the candidate is NOT a new finding.
+2. **Same-root-cause restatement**: If Finding A and Finding B resolve to the
+   SAME root cause / SAME fix / overlapping location (same file and function),
+   the "chain" is two descriptions of one bug, not a composition.
+
+For an INVALID candidate: do **NOT** emit a chain hypothesis. Instead record it
+in `composition_coverage.md` with `Result=SELF-CONTAINED` and leave the
+constituent(s) at their original severity.
+
+A chain may be reported at a tier **ABOVE** the highest constituent **only**
+when you state an explicit **Combined-Impact Justification**: a concrete
+loss / privilege / liveness consequence that NEITHER constituent produces
+alone, quantified per Rule 10. Absent that justification, the chain INHERITS
+the highest constituent severity and is MERGED into that constituent — emit no
+separate hypothesis.
+
+**Machine-parseable chain line (REQUIRED for every chain you DO emit)**: add
+exactly one line in that chain's section of `chain_hypotheses.md`, in this
+form:
+
+    Constituents: <A-id>,<B-id> | Severity-Upgrade-Justified: YES/NO | Combined-Impact: <one line or NONE>
+
+`Severity-Upgrade-Justified: YES` is permitted ONLY when `Combined-Impact` is a
+non-empty concrete consequence absent from both constituents. Otherwise use
+`Severity-Upgrade-Justified: NO` and `Combined-Impact: NONE`.
 
 ### Composition Coverage Map
 

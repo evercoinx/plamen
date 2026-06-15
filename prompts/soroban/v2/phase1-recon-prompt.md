@@ -206,6 +206,15 @@ Write to {SCRATCHPAD}/build_status.md:
 - **COMPILE_WEIGHT**: light/moderate/heavy
 ```
 
+**MANDATORY — Chosen build root**: the audit scope dir is often source-only;
+the real `Cargo.toml` workspace root frequently lives in a sibling or
+ancestor directory. After resolving where the build actually compiled, emit
+EXACTLY this line into `build_status.md` (the mechanical PoC executor parses
+it verbatim): `**Chosen build root**: ` followed by the absolute path of the
+directory that owns `Cargo.toml`, wrapped in backticks — e.g.
+`` **Chosen build root**: `/abs/path/to/contract` ``. If no build environment
+exists at all, emit `` **Chosen build root**: `(none)` ``.
+
 ## TASK 2: Static Analysis Artifacts
 
 ### Scout (CoinFabrik) Fail-Fast Policy

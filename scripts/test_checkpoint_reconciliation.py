@@ -152,3 +152,42 @@ def test_checkpoint_load_rejects_schema_invalid_json(tmp_path: Path):
 
     with pytest.raises(RuntimeError, match="completed must be a list"):
         D.Checkpoint.load(tmp_path)
+
+
+def test_checkpoint_load_corrupt_json_keeps_blocking_file(tmp_path: Path):
+    checkpoint = tmp_path / "_v2_checkpoint.json"
+    checkpoint.write_text('{"completed": ["recon"],', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Corrupt checkpoint"):
+        D.Checkpoint.load(tmp_path)
+
+    assert checkpoint.exists()
+    assert (tmp_path / "_v2_checkpoint.corrupt").exists()
+    assert list(tmp_path.glob("_v2_checkpoint.corrupt-*.json"))
+
+
+def test_checkpoint_load_accepts_utf8_bom_json(tmp_path: Path):
+    """Manual/editor repairs may save JSON with a UTF-8 BOM."""
+    (tmp_path / "_v2_checkpoint.json").write_text(
+        '{"completed": ["recon"], "degraded": [], "rate_limited_at": null}',
+        encoding="utf-8-sig",
+    )
+
+    checkpoint = D.Checkpoint.load(tmp_path)
+
+    assert checkpoint.completed == ["recon"]
+    assert checkpoint.degraded == []
+
+
+def test_checkpoint_save_writes_utf8_without_bom(tmp_path: Path):
+    checkpoint = D.Checkpoint(
+        completed=["recon"],
+        degraded=[],
+        rate_limited_at="depth",
+    )
+
+    checkpoint.save(tmp_path)
+
+    raw = (tmp_path / "_v2_checkpoint.json").read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert D.Checkpoint.load(tmp_path).rate_limited_at == "depth"

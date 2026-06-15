@@ -28,6 +28,13 @@ def _v():
     return importlib.import_module("plamen_validators")
 
 
+def _m():
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    if "plamen_mechanical" in sys.modules:
+        del sys.modules["plamen_mechanical"]
+    return importlib.import_module("plamen_mechanical")
+
+
 # ---------------------------------------------------------------------------
 # Receipt regex
 # ---------------------------------------------------------------------------
@@ -61,6 +68,83 @@ def test_oblig_receipt_re_unicode_arrow():
     m = v._OBLIG_RECEIPT_RE.search(line)
     assert m
     assert m.group("status").upper() == "DISMISSED"
+
+
+def test_asset_binding_matrix_ignores_stale_report_coverage(tmp_path):
+    m = _m()
+    (tmp_path / "design_context.md").write_text(
+        "Gateway swap path mentions params.fromToken, zrc20, params.toToken, targetZRC20, amount, and value moves.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "report_index.md").write_text(
+        "Stale prior report says params.fromToken is checked against zrc20.\n",
+        encoding="utf-8",
+    )
+    rows, gaps = m._write_asset_binding_matrix(tmp_path, "thorough")
+    assert rows > 0
+    assert gaps > 0
+    ledger = (tmp_path / "obligation_ledger.json").read_text(encoding="utf-8")
+    assert "exact_value_binding" in ledger
+    assert '"status": "active"' in ledger
+
+
+def test_asset_binding_matrix_accepts_attention_repair_exact_closure(tmp_path):
+    m = _m()
+    (tmp_path / "design_context.md").write_text(
+        "Swap gateway value path mentions params.fromToken and zrc20 before value moves.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "attention_repair_summary.md").write_text(
+        "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+        "|---|---|---|---|---|---|\n"
+        "| 1 | asset-binding-gap | `AB-001: params.fromToken <-> zrc20` | SAFE | Router.sol:L10 proves params.fromToken is validated against zrc20 before transfer | SAFE_REASON:EXPLICIT_BINDING_CHECK |\n",
+        encoding="utf-8",
+    )
+    rows, gaps = m._write_asset_binding_matrix(tmp_path, "thorough")
+    assert rows >= 1
+    assert gaps == 0
+
+
+def test_obligation_retention_requires_exact_value_pair_or_absorber(tmp_path):
+    v = _v()
+    (tmp_path / "obligation_ledger.json").write_text(
+        '{\n'
+        '  "schema_version": "plamen.obligation_ledger.v1",\n'
+        '  "obligations": [\n'
+        '    {"id":"OBL-AB-001","class":"exact_value_binding","status":"active",'
+        '"severity_signal":"High","field_a":"params.fromToken","field_b":"zrc20"}\n'
+        '  ]\n'
+        '}\n',
+        encoding="utf-8",
+    )
+    bad = v._validate_obligation_ledger_retention(
+        tmp_path,
+        "A nearby token-flow issue is covered, but the exact pair is never named.",
+    )
+    assert bad
+    good = v._validate_obligation_ledger_retention(
+        tmp_path,
+        "H-01 preserves params.fromToken not validated against zrc20 before transfer.",
+    )
+    assert good == []
+
+
+def test_report_coverage_parser_does_not_read_obligation_status_as_severity():
+    v = _v()
+    text = (
+        "# Report Coverage\n\n"
+        "| Source File | Candidate ID / Label | Severity Signal | Status | Report ID / Refutation / Reason |\n"
+        "|---|---|---|---|---|\n"
+        "| depth_token_flow_findings.md | H-01 (INV-001) | High | PROMOTED | H-01 |\n\n"
+        "## Asset Binding Obligations\n\n"
+        "| Obligation ID | Field Binding | Status | Covered By |\n"
+        "|---|---|---|---|\n"
+        "| OBL-AB-001 | params.toToken <-> decoded.targetZRC20 | covered | H-01 |\n"
+        "| OBL-AB-002 | params.fromToken <-> zrc20 | covered | M-01 |\n"
+    )
+    rows = v._parse_report_coverage_rows_for_contract(text)
+    assert len(rows) == 1
+    assert rows[0]["severity signal"] == "High"
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +379,21 @@ def test_perturbation_gate_fires_on_confirmed_high_without_block(tmp_path):
     assert "DST-2" not in issues[0]
 
 
+def test_perturbation_gate_detects_h3_finding_without_block(tmp_path):
+    v = _v()
+    (tmp_path / "depth_token_flow_findings.md").write_text(
+        "### Finding [DT-1]: Approval lingering\n"
+        "**Verdict**: CONFIRMED\n"
+        "**Severity**: Medium\n"
+        "**Location**: `Router.sol:L50`\n\n"
+        "Description: bug present.\n",
+        encoding="utf-8",
+    )
+    issues = v._check_perturbation_block_per_finding(tmp_path)
+    assert issues
+    assert "DT-1" in issues[0]
+
+
 def test_perturbation_gate_clears_when_block_present(tmp_path):
     v = _v()
     (tmp_path / "depth_state_trace_findings.md").write_text(
@@ -321,6 +420,55 @@ def test_perturbation_gate_clears_when_block_present(tmp_path):
     )
     issues = v._check_perturbation_block_per_finding(tmp_path)
     assert issues == []
+
+
+def test_perturbation_gate_accepts_bold_label_block(tmp_path):
+    v = _v()
+    (tmp_path / "depth_state_trace_findings.md").write_text(
+        "## Finding [DST-1]: Token drain\n"
+        "**Verdict**: CONFIRMED\n"
+        "**Severity**: High\n"
+        "**Location**: `Vault.sol:L100`\n\n"
+        "**Perturbation Block**:\n"
+        "- SIBLING: checked `Vault.sol:L120`; same invariant fails.\n",
+        encoding="utf-8",
+    )
+    assert v._check_perturbation_block_per_finding(tmp_path) == []
+
+
+def test_perturbation_gate_accepts_common_section_label_variants(tmp_path):
+    v = _v()
+    (tmp_path / "depth_state_trace_findings.md").write_text(
+        "## Finding [DST-1]: Token drain\n"
+        "**Verdict**: CONFIRMED\n"
+        "**Severity**: High\n"
+        "**Location**: `Vault.sol:L100`\n\n"
+        "#### Perturbation Matrix for DST-1\n"
+        "- SIBLING: checked `Vault.sol:L120`; same invariant fails.\n\n"
+        "## Finding [DST-2]: Token drain mirror\n"
+        "**Verdict**: CONFIRMED\n"
+        "**Severity**: Medium\n"
+        "**Location**: `Vault.sol:L150`\n\n"
+        "Perturbation analysis:\n"
+        "- ACTOR: checked keeper/user split; only keeper path is reachable.\n",
+        encoding="utf-8",
+    )
+    assert v._check_perturbation_block_per_finding(tmp_path) == []
+
+
+def test_perturbation_gate_does_not_accept_inline_future_promise(tmp_path):
+    v = _v()
+    (tmp_path / "depth_state_trace_findings.md").write_text(
+        "## Finding [DST-1]: Token drain\n"
+        "**Verdict**: CONFIRMED\n"
+        "**Severity**: High\n"
+        "**Location**: `Vault.sol:L100`\n\n"
+        "A perturbation block should be added later by another phase.\n",
+        encoding="utf-8",
+    )
+    issues = v._check_perturbation_block_per_finding(tmp_path)
+    assert issues
+    assert "DST-1" in issues[0]
 
 
 def test_perturbation_gate_ignores_low_and_refuted(tmp_path):

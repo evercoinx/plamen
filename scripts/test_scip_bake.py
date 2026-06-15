@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from recon_prepass import (
     _bake_rust_scip,
+    _bake_go_scip,
     _scip_to_graph_artifacts,
     run_recon_prepass,
 )
@@ -197,7 +198,13 @@ def test_scip_to_graph_artifacts_writes_all_four(tmp_path):
         f = scratch / name
         assert f.exists(), f"{name} not written"
         content = f.read_text(encoding="utf-8")
-        assert "POPULATED" in content
+        # RECON-3: callee_map is a file-co-occurrence heuristic, so its status
+        # is HEURISTIC (or PARTIAL above the node cap), not POPULATED. The other
+        # three remain POPULATED.
+        if name == "callee_map.md":
+            assert ("HEURISTIC" in content or "PARTIAL" in content), content[:200]
+        else:
+            assert "POPULATED" in content
 
 
 def test_scip_artifacts_have_correct_content(tmp_path):
@@ -285,6 +292,7 @@ def test_prepass_solana_triggers_scip_bake(tmp_path):
         "project_root": str(proj),
         "language": "solana",
         "pipeline": "sc",
+        "prepass_external_scanners": True,  # RECON-2: exercise opt-in startup bake
     }
     with mock.patch("recon_prepass._bake_rust_scip", return_value="SKIPPED:test") as m:
         results = run_recon_prepass(config)
@@ -301,6 +309,7 @@ def test_prepass_soroban_triggers_scip_bake(tmp_path):
         "project_root": str(proj),
         "language": "soroban",
         "pipeline": "sc",
+        "prepass_external_scanners": True,  # RECON-2: exercise opt-in startup bake
     }
     with mock.patch("recon_prepass._bake_rust_scip", return_value="SKIPPED:test") as m:
         results = run_recon_prepass(config)
@@ -363,6 +372,7 @@ def test_prepass_scip_bake_failure_does_not_crash(tmp_path):
         "project_root": str(proj),
         "language": "solana",
         "pipeline": "sc",
+        "prepass_external_scanners": True,  # RECON-2: exercise opt-in startup bake
     }
     with mock.patch("recon_prepass._bake_rust_scip", side_effect=RuntimeError("boom")):
         results = run_recon_prepass(config)
@@ -433,3 +443,110 @@ def test_bake_moves_index_to_scratchpad(tmp_path):
     # index.scip should be moved, not copied
     assert not fake_index.exists(), "index.scip should be moved from project root"
     assert (scratch / "scip_rust.index").exists(), "index should be in scratchpad"
+
+
+# ── _bake_go_scip: skip/fail paths (mirror of _bake_rust_scip) ───────────
+
+def _mkproj_go(tmp_path: Path, *, gomod: bool = True) -> Path:
+    p = tmp_path / "goproject"
+    p.mkdir()
+    if gomod:
+        (p / "go.mod").write_text("module test\n\ngo 1.21\n", encoding="utf-8")
+    return p
+
+
+def test_bake_go_skip_no_scip_go(tmp_path):
+    """No scip-go on PATH -> SKIPPED."""
+    scratch = _mkscratch(tmp_path)
+    proj = _mkproj_go(tmp_path)
+    with mock.patch("shutil.which", return_value=None):
+        result = _bake_go_scip(scratch, proj)
+    assert result.startswith("SKIPPED:")
+    assert "scip-go" in result
+
+
+def test_bake_go_skip_no_gomod(tmp_path):
+    """scip-go + go present but no go.mod -> SKIPPED."""
+    scratch = _mkscratch(tmp_path)
+    proj = _mkproj_go(tmp_path, gomod=False)
+    with mock.patch("shutil.which", return_value="/usr/bin/x"):
+        result = _bake_go_scip(scratch, proj)
+    assert result.startswith("SKIPPED:")
+    assert "go.mod" in result
+
+
+def test_bake_go_fail_nonzero_exit(tmp_path):
+    """scip-go returns nonzero -> FAILED."""
+    scratch = _mkscratch(tmp_path)
+    proj = _mkproj_go(tmp_path)
+    fake_proc = mock.Mock(returncode=1, stdout="", stderr="error")
+    with mock.patch("shutil.which", return_value="/usr/bin/x"), \
+         mock.patch("subprocess.run", return_value=fake_proc):
+        result = _bake_go_scip(scratch, proj)
+    assert result.startswith("FAILED:")
+    assert "exit 1" in result
+
+
+def test_bake_go_fail_no_index_produced(tmp_path):
+    """scip-go exit 0 but no index file -> FAILED."""
+    scratch = _mkscratch(tmp_path)
+    proj = _mkproj_go(tmp_path)
+    fake_proc = mock.Mock(returncode=0, stdout="", stderr="")
+    with mock.patch("shutil.which", return_value="/usr/bin/x"), \
+         mock.patch("subprocess.run", return_value=fake_proc):
+        result = _bake_go_scip(scratch, proj)
+    assert result.startswith("FAILED:")
+    assert "not produced" in result
+
+
+def test_bake_go_fail_timeout(tmp_path):
+    """scip-go times out -> FAILED with timeout message."""
+    import subprocess as sp
+    scratch = _mkscratch(tmp_path)
+    proj = _mkproj_go(tmp_path)
+    with mock.patch("shutil.which", return_value="/usr/bin/x"), \
+         mock.patch("subprocess.run", side_effect=sp.TimeoutExpired("scip-go", 600)):
+        result = _bake_go_scip(scratch, proj)
+    assert result.startswith("FAILED:")
+    assert "timeout" in result
+
+
+# ── large-index PARTIAL path (callee node cap) must not NameError ─────────
+
+class _BigScipReader:
+    """Reader with >callee-node-cap function defs to hit the PARTIAL path.
+
+    Regression: _scip_to_graph_artifacts emitted log.warning on this path with
+    no module-level `log` defined -> NameError on big repos (cosmos-sdk), which
+    surfaced as SCIP bake FAILED -> grep fallback.
+    """
+    def __init__(self, index_path, n=1600):
+        self._definitions = {f"scip . fn{i}()": _FakeOccurrence("a.go", i) for i in range(n)}
+        self._references = {f"scip . fn{i}()": [_FakeOccurrence("a.go", i)] for i in range(n)}
+        self._symbol_info = {f"scip . fn{i}()": _FakeSymbolInfo("Function") for i in range(n)}
+        self._file_symbols = {}
+
+    @staticmethod
+    def _extract_name_from_symbol(sym: str) -> str:
+        return sym.rstrip("()").split()[-1]
+
+    def stats(self):
+        return {"definitions": len(self._definitions), "documents": 1}
+
+
+def test_scip_to_graph_large_index_partial_no_nameerror(tmp_path):
+    """>1500 functions -> PARTIAL callee_map via log.warning; must not raise
+    NameError (regression for the missing module logger)."""
+    import types
+    scratch = _mkscratch(tmp_path)
+    index = scratch / "scip_go.index"
+    index.write_bytes(b"x" * 200)
+    proj = _mkproj(tmp_path)
+    fake_l1 = types.ModuleType("plamen_l1")
+    fake_mod = types.ModuleType("plamen_l1.scip_reader")
+    fake_mod.ScipReader = _BigScipReader
+    fake_l1.scip_reader = fake_mod
+    with mock.patch.dict("sys.modules", {"plamen_l1": fake_l1, "plamen_l1.scip_reader": fake_mod}):
+        result = _scip_to_graph_artifacts(scratch, index, proj)
+    assert result.startswith("WRITTEN:"), result
+    assert "PARTIAL" in (scratch / "callee_map.md").read_text(encoding="utf-8")

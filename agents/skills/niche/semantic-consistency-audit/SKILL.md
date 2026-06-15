@@ -41,11 +41,13 @@ For each CHECK, execute three steps in order:
 
 ## Pre-Commit Dimension Enumeration (MANDATORY — fill BEFORE any finding)
 
-The DODO ETH-sentinel-approve regression class: this agent confirmed the
-bug for one of three sibling contracts then **self-refuted across the
-other two in the same paragraph**, because no structure forced per-sibling
-disposition. To prevent that failure mode, every audit run begins with the
-four dimension tables below. Fill them by reading recon artifacts
+**Per-sibling disposition rule**: When a finding holds for one contract in
+a sibling set, force a per-sibling disposition row; do not self-refute
+across siblings in one paragraph. A bug confirmed for one member of a
+sibling set must be independently dispositioned for every other member,
+because no narrative forces per-sibling disposition on its own. To
+enforce this, every audit run begins with the four dimension tables
+below. Fill them by reading recon artifacts
 (`contract_inventory.md`, `function_summary.md`, `caller_map.md`,
 `attack_surface.md`) — NOT from your own analysis.
 
@@ -131,6 +133,32 @@ For EVERY magic number (literal constant not assigned to a named constant - e.g.
 |-------------|--------------|-----------|-------------|----------|
 
 **Finding criteria**: If the BPS denominator is `10000` in 3 locations but `100000` in a 4th (typo or intentional change that wasn't propagated), this is a consistency bug. Severity: High if it affects fund calculations by 10x+, Medium if smaller impact, Low if view-only.
+
+### CHECK 4: Struct / ABI Layout Consistency
+
+For EVERY pair of structs (or `abi.encode`/`abi.decode` layouts) where one is
+built/encoded from, decoded into, or mirrors the other across an encode↔decode,
+serialize↔deserialize, or message-build↔message-parse boundary:
+
+1. **Identify the paired structs/layouts**: e.g. a `*Params` struct passed into an
+   encoder vs the `Decoded*`/`*Message` struct produced by the matching decoder; an
+   `abi.encode(...)` field order vs the `abi.decode(..., (T1,T2,...))` types.
+2. **Compare field count AND order AND type**: do both sides have the SAME number of
+   fields, in the SAME order, with matching types/widths? A field-count or order
+   mismatch means the decoder reads the wrong bytes into the wrong field.
+3. **Trace the consequence**: if the layouts differ, which field is mis-read? Does a
+   mis-read field reach a token address, amount, recipient, or auth check (then it is
+   a value/security bug, not cosmetic)?
+
+| Struct/Layout A (fields) | Struct/Layout B (fields) | Same count/order/type? | Mis-read field | Finding? |
+|--------------------------|--------------------------|------------------------|----------------|----------|
+
+**Finding criteria**: a `<EncodedParams>`(N fields) vs `<DecodedMessage>`(M≠N fields)
+mismatch, or an `abi.encode` order that differs from the `abi.decode` type list, that
+causes a token/amount/recipient field to be mis-read, is a confirmed finding
+(arbitrary/mis-validated withdrawal class). Pure off-by-layout in a non-value field is
+Low/Informational. Report the distinct layout-mismatch root cause even if an adjacent
+value-binding finding already touches the same function.
 
 **Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 

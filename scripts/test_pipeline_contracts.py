@@ -217,6 +217,45 @@ def test_P4a_failure_zero_upstream_signal_with_inventory_halts():
     )
 
 
+def test_AP_HF_1_inventory_degrade_branch_precedes_critical_funnel():
+    """AP-HF-1: the inventory degrade-and-continue branch must run BEFORE the
+    generic `elif phase.critical:` FC4 → wait_critical_halt_choice funnel, so a
+    structure-gate failure on an inventory with usable blocks continues instead
+    of halting. Verified structurally against the run-loop source (ecosystem-
+    agnostic: the same branch covers SC and L1)."""
+    import inspect
+    src = inspect.getsource(D.main)
+    # B2: the inventory degrade branch now routes through the B1-floor-aware
+    # helper `_inventory_degrade_floor_ok` (reconstructs an honest inventory
+    # from completed artifacts before any halt) instead of the bare
+    # `_inventory_has_usable_findings` precondition. The structural invariant
+    # (degrade branch precedes the critical-halt funnel) is unchanged.
+    degrade_idx = src.find('phase.name == "inventory" and _inventory_degrade_floor_ok')
+    critical_idx = src.find("elif phase.critical:")
+    assert degrade_idx != -1, "inventory degrade branch missing from run loop"
+    assert critical_idx != -1, "critical-halt funnel missing from run loop"
+    assert degrade_idx < critical_idx, (
+        "inventory degrade branch must precede the critical-halt funnel"
+    )
+
+
+def test_AP_HF_1_inventory_usable_findings_functional_both_pipelines():
+    """The degrade precondition helper is ecosystem-agnostic: it gates on
+    parseable finding blocks regardless of SC vs L1 ID conventions."""
+    # SC-style INV ids and L1-style INV ids both parse as usable.
+    for prefix in ("INV", "L1-H"):
+        body = "# Finding Inventory\n\n## Findings\n\n" + "\n".join(
+            f"### Finding [{prefix}-{i:02d}]: bug {i}\n"
+            f"**Severity**: Medium\n**Location**: src/F{i}:L{i}\n"
+            f"**Source IDs**: AC-{i}\n**Preferred Tag**: CODE-TRACE\n"
+            f"**Description**: Finding {i} describes a concrete state "
+            f"inconsistency in the accounting path with material user impact.\n"
+            for i in range(1, 4)
+        )
+        sp = _mkscratch({"findings_inventory.md": body})
+        assert D._inventory_has_usable_findings(sp) is True, prefix
+
+
 def test_P4a_loss_sc_feeder_ids_in_promotion_files():
     """P4a loss: SC feeder file patterns are in _DEPTH_PROMOTION_FILES."""
     pat_text = "\n".join(D._DEPTH_PROMOTION_FILES)
@@ -2426,6 +2465,8 @@ TESTS = [
     test_P4a_loss_chunk_truncation_halts,
     test_P4a_loss_distinct_sibling_bugs_at_same_line_kept,
     test_P4a_failure_zero_upstream_signal_with_inventory_halts,
+    test_AP_HF_1_inventory_degrade_branch_precedes_critical_funnel,
+    test_AP_HF_1_inventory_usable_findings_functional_both_pipelines,
     test_P4a_loss_sc_feeder_ids_in_promotion_files,
     test_P4a_loss_sc_feeder_ids_match_canonical_regex,
     # Phase 4b — Depth

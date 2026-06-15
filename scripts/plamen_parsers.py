@@ -23,6 +23,7 @@ from plamen_types import (
     SC_VERIFY_CRITHIGH_PHASE_NAMES,
     _VALID_PIPELINES, _VALID_MODES,
     EVIDENCE_TAGS_PROOF, EVIDENCE_TAG_DEFAULT, EVIDENCE_TAG_NAMES_RE,
+    DEPTH_EVIDENCE_TAG_RE, FINDING_BLOCK_HEADING_RE,
     SEVERITY_ORDER, SEVERITY_LETTER, SEVERITY_FROM_LETTER,
     has_mechanical_proof, normalize_severity, severity_letter_from_name,
     severity_rank,
@@ -30,6 +31,10 @@ from plamen_types import (
 
 __all__ = [
     "DedupSignature",
+    "_manifest_row_from_cells",
+    "_manifest_row_is_spawned_breadth_agent",
+    "_normalize_manifest_header",
+    "_split_markdown_table_row",
     "_BODY_REPORT_ID_RE",
     "_BODY_SHARD_CAPS",
     "_BRACKETED_ID_RE",
@@ -62,6 +67,7 @@ __all__ = [
     "_id_ledger_save",
     "_id_prefix_of",
     "_title_hash",
+    "_titles_collide",
     "id_ledger_register",
     "id_ledger_next_available",
     "id_ledger_lookup",
@@ -113,8 +119,12 @@ __all__ = [
     "_dedup_signature_for_finding",
     "_demote_severity_once",
     "_detect_dedup_clusters",
+    "_artifact_has_findings",
     "_enforce_severity_matrix",
     "_expected_depth_agent_roles",
+    "_extract_artifact_status",
+    "_findings_section_has_body",
+    "_strip_fenced_code_blocks",
     "_extract_finding_ids_from_text",
     "_extract_finding_signals",
     "_extract_first_tag",
@@ -124,8 +134,13 @@ __all__ = [
     "_extract_ids_from_text",
     "_extract_report_ids_from_body",
     "_extract_severity_inputs",
+    "_field_anywhere",
+    "_negation_governs_keyword",
+    "_niche_heading_match",
+    "_niche_required_cell_yes",
     "_field_from_markdown",
     "_field_or_section",
+    "parse_plamen_signals",
     "_find_report_index_cut_for_active_recovery",
     "_first_heading_title",
     "_inventory_blocks",
@@ -139,6 +154,7 @@ __all__ = [
     "_match_canonical_header",
     "_merge_inventory_entries",
     "_compute_dedup_candidate_pairs",
+    "_dedup_live_pair_cap",
     "_extract_chain_summaries_compact",
     "_chain_iter2_has_no_unexplored_pairs",
     "_line_ranges_overlap",
@@ -155,6 +171,8 @@ __all__ = [
     "_normalize_subsystem_scope",
     "_load_scope_file_paths",
     "_path_in_scope_file",
+    "_chain_severity_upgrade_justified",
+    "_parse_chain_constituents",
     "_parse_chunk_heading_inventory",
     "_parse_chunk_table_inventory",
     "_parse_hypothesis_constituents",
@@ -188,17 +206,22 @@ __all__ = [
     "_severity_rank",
     "_split_source_id_tokens",
     "_strip_md",
+    "_structural_completeness_ok",
     "_validate_source_token",
     "_verifier_status_from_text",
     "_verify_file_for_id",
     "_write_mechanical_verification_queue_from_inventory",
+    "_filter_verification_queue_by_mode",
     "_filter_sc_verification_queue_by_mode",
     "_write_queue_json_sidecar",
+    "_read_queue_json_sidecar",
     "_write_queue_excluded_manifest",
     "_write_queue_subset_manifest",
+    "_queue_rows_from_inventory_with_exclusions",
     "compute_report_medium_shards",  # backward compat wrapper
     "compute_report_tier_shards",
     "classify_poc_testability",
+    "VERIFY_TARGET_PER_SHARD",
     "compute_sc_verify_shards",
     "compute_verify_shards",
     "derive_tier_assignments_from_verify_queue",
@@ -207,8 +230,11 @@ __all__ = [
     "ensure_sc_verify_shard_manifests",
     "ensure_verify_shard_manifests",
     "get_tier_assignments",
+    "is_artifact_complete",
+    "is_artifact_legacy_unmarked",
     "merge_report_medium_shards",  # backward compat wrapper
     "merge_report_tier_shards",
+    "parse_breadth_manifest_agents",
     "parse_breadth_manifest_count",
     "parse_breadth_manifest_outputs",
     "parse_depth_manifest_count",
@@ -333,6 +359,23 @@ def _is_separator_row(s: str) -> bool:
     return bool(_SEPARATOR_ROW_RE.match(s.strip()))
 
 
+def _breadth_roster_text(text: str) -> str:
+    """Ship B: bound breadth-manifest parsing to the `## Breadth Agents`
+    section so a later table (e.g. `## Required Template Coverage`, whose header
+    also matches the template+required heuristic) cannot bleed into the roster.
+    This was the DODO instantiate HALT (count=16/outputs=None on a VALID
+    manifest). Uses section-scoped Markdown AST (plamen_markdown.section_text);
+    falls back to the full text when no `## Breadth Agents` heading exists
+    (legacy manifests that put the roster table directly under `# Spawn
+    Manifest`)."""
+    try:
+        import plamen_markdown as _mdast
+        sect = _mdast.section_text(text, r"\bbreadth\s+agents?\b")
+        return sect if sect.strip() else text
+    except Exception:
+        return text
+
+
 def parse_breadth_manifest_count(scratchpad: Path) -> Optional[int]:
     """Return the number of breadth agents declared in spawn_manifest.md.
 
@@ -355,6 +398,7 @@ def parse_breadth_manifest_count(scratchpad: Path) -> Optional[int]:
         text = _llm_norm(p.read_text(encoding="utf-8", errors="replace"))
     except Exception:
         return None
+    text = _breadth_roster_text(text)  # Ship B: kill cross-section bleed
     count = 0
     in_table = False
     headers: list[str] = []
@@ -579,6 +623,7 @@ def parse_breadth_manifest_outputs(scratchpad: Path) -> Optional[list[str]]:
         text = _llm_norm(p.read_text(encoding="utf-8", errors="replace"))
     except Exception:
         return None
+    text = _breadth_roster_text(text)  # Ship B: kill cross-section bleed
 
     headers: list[str] = []
     outputs: list[str] = []
@@ -650,6 +695,91 @@ def parse_breadth_manifest_outputs(scratchpad: Path) -> Optional[list[str]]:
     if row_count <= 0 or not outputs:
         return None
     return outputs
+
+
+def parse_breadth_manifest_agents(scratchpad: Path) -> list[dict[str, str]]:
+    """Parse spawn_manifest.md and return spawned breadth agent rows
+    as ``[{"agent_id", "focus_area"}, ...]``. Empty when the manifest
+    is absent or has no spawned-agent rows.
+
+    Ship 7 of the artifact-complete PTY supervision plan. Consumed by
+    ``plamen_driver.shard_opengrep_obligations`` to derive per-agent
+    obligation shard filenames.
+
+    Walks the same manifest table that ``parse_breadth_manifest_outputs``
+    walks (template / skill / merged-into rows are excluded by
+    ``_manifest_row_is_spawned_breadth_agent``); extracts the
+    ``agent_id`` and ``focus_area`` columns rather than the output
+    filename. Deduplicates by case-insensitive agent_id so two manifest
+    rows with the same agent never produce a redundant shard.
+
+    Fills in defaults when only one column is present (agent_id only
+    -> focus_area = agent_id, or vice versa), so the sharder always
+    has both fields to slugify.
+    """
+    p = scratchpad / "spawn_manifest.md"
+    if not p.exists():
+        return []
+    try:
+        text = _llm_norm(p.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+
+    out: list[dict[str, str]] = []
+    headers: list[str] = []
+    in_table = False
+    seen_agent_ids: set[str] = set()
+
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not in_table:
+            s_lc = s.lower()
+            if s.startswith("|") and "template" in s_lc and "required" in s_lc:
+                headers = [
+                    _normalize_manifest_header(c)
+                    for c in _split_markdown_table_row(s)
+                ]
+                in_table = True
+            continue
+        if not s.startswith("|"):
+            in_table = False
+            headers = []
+            continue
+        if _is_separator_row(s):
+            continue
+        cells = _split_markdown_table_row(s)
+        if not cells:
+            continue
+        row = _manifest_row_from_cells(headers, cells)
+        req = (
+            row.get("required")
+            or row.get("required_")
+            or row.get("required?")
+        )
+        if req and re.match(
+            r"(?i)^(?:no|n|false|skip|optional|merged)\b", req.strip()
+        ):
+            continue
+        if not _manifest_row_is_spawned_breadth_agent(row, cells):
+            continue
+        agent_id = _strip_md(
+            row.get("agent_id", "") or row.get("agent", "")
+        ).strip()
+        focus_area = _strip_md(
+            row.get("focus_area", "") or row.get("focus", "")
+        ).strip()
+        if not agent_id and not focus_area:
+            continue
+        if not agent_id:
+            agent_id = focus_area
+        if not focus_area:
+            focus_area = agent_id
+        key = agent_id.lower()
+        if key in seen_agent_ids:
+            continue
+        seen_agent_ids.add(key)
+        out.append({"agent_id": agent_id, "focus_area": focus_area})
+    return out
 
 
 def _count_markdown_table_rows(text: str,
@@ -1038,6 +1168,16 @@ def _severity_bucket(sev: str) -> str:
     return "info" if n == "Informational" else n.lower()
 
 
+# ROOT FIX (verify-shard sizing): every severity tier shards by FINDING COUNT
+# at the same small per-shard target so heavy tiers (e.g. 37 Low, 30 Medium)
+# spread across enough shards to stay in the High "fast lane" instead of being
+# crammed 10-18 findings into one near-timeout shard. The slot pools in
+# SC_VERIFY_SHARD_MANIFESTS / L1_VERIFY_SHARD_MANIFESTS must be large enough
+# that the `min(len(names), ...)` ceiling never throttles a tier below this
+# target; over-provisioned slots are harmless (empty manifests are no-ops).
+VERIFY_TARGET_PER_SHARD = 4
+
+
 def compute_verify_shards(scratchpad: Path) -> dict[str, list[dict[str, str]]]:
     rows = parse_verification_queue_rows(scratchpad)
     crit_high = [r for r in rows if _severity_bucket(r.get("severity", "")) in {"critical", "high"}]
@@ -1073,17 +1213,17 @@ def compute_verify_shards(scratchpad: Path) -> dict[str, list[dict[str, str]]]:
     shards.update(assign_chunks(
         list(L1_VERIFY_CRITHIGH_PHASE_NAMES),
         crit_high,
-        8,
+        VERIFY_TARGET_PER_SHARD,
     ))
     shards.update(assign_chunks(
         ["verify_medium_a", "verify_medium_b", "verify_medium_c", "verify_medium_d", "verify_medium_e", "verify_medium_f"],
         medium,
-        12,
+        VERIFY_TARGET_PER_SHARD,
     ))
     shards.update(assign_chunks(
         ["verify_low_a", "verify_low_b", "verify_low_c", "verify_low_d"],
         low_info,
-        18,
+        VERIFY_TARGET_PER_SHARD,
     ))
     return shards
 
@@ -1199,8 +1339,13 @@ def _parse_skeptic_judge_table(text: str) -> list[dict]:
         s = line.strip()
         if not s.startswith("|"):
             continue
-        cells = [c.strip() for c in s.split("|")]
-        cells = [c for c in cells if c]
+        # PARSE-1: preserve empty interior cells so positional reads stay
+        # aligned to the documented 5-column contract. The prior empty-filter
+        # collapsed a blank cell and shifted every later index, silently
+        # dropping DOWNGRADE/UNRESOLVED rulings whose Final-Severity (or any
+        # interior) cell was blank. Matches the empties-preserving split used by
+        # every sibling manifest/table parser.
+        cells = [c.strip() for c in s.strip().strip("|").split("|")]
         if len(cells) < 4:
             continue
         first = cells[0]
@@ -1255,24 +1400,111 @@ def _id_ledger_path(scratchpad: Path) -> Path:
     return scratchpad / _ID_LEDGER_NAME
 
 
+# Dash family: em-dash, en-dash, figure-dash, horizontal-bar, minus-sign,
+# non-breaking-hyphen, and the small/full-width variants. Cosmetic reword
+# (`—` → `-`) across retries must NOT change identity (FIX 2, validated on
+# the DODO GatewayCrossChain rewording cascade).
+_DASH_VARIANTS = "‒–—―−‑﹘﹣－"
+_DASH_TRANS = {ord(c): "-" for c in _DASH_VARIANTS}
+
+
+def _title_normalize(title: str) -> str:
+    """Canonical normalized form of a finding title for identity comparison.
+
+    Shared by `_title_hash` (exact fast-path) and `_titles_collide` (fuzzy
+    same-finding detection). Normalization is intentionally aggressive on
+    COSMETIC variation only — dash family, case, whitespace, code-framing
+    punctuation, and trailing punctuation — so a phase that re-states the
+    SAME finding with a reworded title (em-dash → hyphen, backtick changes,
+    expanded abbreviation suffix) collapses to the same/near form, while a
+    GENUINELY different finding stays distinct.
+    """
+    import re as _re
+    s = (title or "")
+    # Map every dash variant to ASCII hyphen BEFORE other steps so prefix
+    # stripping and trailing-punctuation stripping see a uniform character.
+    s = s.translate(_DASH_TRANS)
+    s = s.strip().lower()
+    # Strip leading ID-like prefixes ("GRP-01:", "Finding [HC-02]:")
+    s = _re.sub(r"^\s*(?:finding\s+)?\[?[a-z]{1,8}-\d+[a-z0-9-]*\]?\s*[:.]?\s*", "", s)
+    # Drop markdown emphasis / code framing characters entirely (not just at
+    # the edges) — `withdraw()` vs withdraw() must match.
+    s = s.replace("`", "").replace("*", "").replace("_", " ")
+    # Collapse all whitespace
+    s = _re.sub(r"\s+", " ", s)
+    # Strip residual edge punctuation that does not affect meaning.
+    s = s.strip(" -:.,;")
+    return s
+
+
 def _title_hash(title: str) -> str:
     """v2.0.6 (P2): canonical content-hash for a finding title.
 
-    Normalizes by lowercasing, collapsing whitespace, and stripping
-    common ID/punctuation framing so legitimate retry-with-same-content
-    produces an identical hash while different-content rewrites produce
-    a different hash (collision detection).
+    Normalizes by lowercasing, collapsing whitespace, mapping every dash
+    variant to ASCII hyphen, and stripping common ID/punctuation framing so
+    legitimate retry-with-same-content (including cosmetic dash/backtick
+    rewordings) produces an identical hash while different-content rewrites
+    produce a different hash (collision detection fast-path).
     """
     import hashlib
-    import re as _re
-    s = (title or "").strip().lower()
-    # Strip leading ID-like prefixes ("GRP-01:", "Finding [HC-02]:")
-    s = _re.sub(r"^\s*(?:finding\s+)?\[?[a-z]{1,8}-\d+[a-z0-9-]*\]?\s*[:.]?\s*", "", s)
-    # Collapse all whitespace
-    s = _re.sub(r"\s+", " ", s)
-    # Strip a few common punctuation chars that don't affect meaning
-    s = s.strip(" -_:`*")
+    s = _title_normalize(title)
     return "sha256:" + hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _title_tokens(title: str) -> set[str]:
+    """Content-word token set of a normalized title.
+
+    Drops short/stop tokens so that an abbreviation expanded into a full word
+    (`gcc` → `gatewaycrosschain`) and surrounding identical wording compare on
+    their shared, meaningful tokens rather than the differing label token.
+    """
+    import re as _re
+    norm = _title_normalize(title)
+    raw = [t for t in _re.split(r"[^a-z0-9]+", norm) if t]
+    # Tokens of length <= 2 (a, is, of, to) carry no identity signal.
+    return {t for t in raw if len(t) > 2}
+
+
+def _titles_collide(title_a: str, title_b: str) -> bool:
+    """Return True only when two titles denote GENUINELY DIFFERENT findings.
+
+    Recall-safe collision predicate (FIX 2). Two titles are treated as the
+    SAME finding (NOT a collision) when ANY of:
+      1. Normalized forms are identical (exact fast-path, == `_title_hash`).
+      2. One normalized form is a prefix of the other (abbreviation expanded,
+         trailing detail added: "gcc trusts inbound externalid verbatim" vs
+         "gatewaycrosschain trusts inbound externalid verbatim ...").
+      3. Token-set Jaccard similarity >= 0.6 (cosmetic reword / synonym swap
+         leaving most meaningful words intact).
+
+    Only when none of these hold is it a real different-finding ID reuse, i.e.
+    a collision. This predicate ONLY relaxes false collisions; it never turns a
+    same-content reuse into a collision (an identical title is rule 1).
+    """
+    na = _title_normalize(title_a)
+    nb = _title_normalize(title_b)
+    if na == nb:
+        return False
+    if not na or not nb:
+        # An empty title carries no identity — never assert a collision on it.
+        return False
+    # Prefix / containment: one is the other plus added detail.
+    shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
+    if longer.startswith(shorter):
+        return False
+    ta, tb = _title_tokens(title_a), _title_tokens(title_b)
+    if not ta or not tb:
+        return False
+    inter = len(ta & tb)
+    union = len(ta | tb)
+    # High token-set overlap => cosmetic reword / synonym swap / abbreviation
+    # expansion (the expanded label inflates the union but the bulk of
+    # meaningful words is shared). This threshold deliberately does NOT collapse
+    # one-word semantic swaps like "old root cause" vs "new root cause"
+    # (Jaccard 0.5), which ARE different findings.
+    if union and (inter / union) >= 0.6:
+        return False
+    return True
 
 
 def _id_ledger_load(scratchpad: Path) -> dict:
@@ -1368,6 +1600,14 @@ def id_ledger_register(
     for record in ledger.get("allocations", []):
         if record.get("id", "").upper() == finding_id:
             if record.get("title_hash") == new_hash:
+                return {"status": "REUSED", "existing": record, "current": None}
+            # Hashes differ — but a cosmetic reword (dash family, abbreviation
+            # expansion, backtick changes, added trailing detail) is NOT a
+            # collision. Only flag when the titles denote GENUINELY DIFFERENT
+            # findings. `title_preview` holds the prior full-ish title (120
+            # chars); fall back to it when no separate full title is stored.
+            prior_title = record.get("title_preview", "") or ""
+            if not _titles_collide(prior_title, title or ""):
                 return {"status": "REUSED", "existing": record, "current": None}
             return {"status": "COLLISION", "existing": record, "current": {
                 "id": finding_id,
@@ -1730,12 +1970,12 @@ def compute_sc_verify_shards(scratchpad: Path) -> dict[str, list[dict[str, str]]
     shards.update(assign_chunks(
         list(SC_VERIFY_CRITHIGH_PHASE_NAMES),
         crit_high,
-        3,
+        VERIFY_TARGET_PER_SHARD,
     ))
     sc_medium_names = [k for k in SC_VERIFY_SHARD_MANIFESTS if k.startswith("sc_verify_medium")]
     sc_low_names = [k for k in SC_VERIFY_SHARD_MANIFESTS if k.startswith("sc_verify_low")]
-    shards.update(assign_chunks(sc_medium_names, medium, 12))
-    shards.update(assign_chunks(sc_low_names, low_info, 18))
+    shards.update(assign_chunks(sc_medium_names, medium, VERIFY_TARGET_PER_SHARD))
+    shards.update(assign_chunks(sc_low_names, low_info, VERIFY_TARGET_PER_SHARD))
     return shards
 
 
@@ -1744,6 +1984,66 @@ def ensure_sc_verify_shard_manifests(scratchpad: Path) -> dict[str, list[dict[st
     for phase_name, rows in shards.items():
         _write_queue_subset_manifest(scratchpad / SC_VERIFY_SHARD_MANIFESTS[phase_name], rows)
     return shards
+
+
+_POC_KW_BOUNDARY_CACHE: dict[str, re.Pattern] = {}
+
+
+def _poc_kw_present(pattern: str, *texts: str) -> bool:
+    """Word-boundary + negation-aware keyword presence for PoC classification.
+
+    Replaces the legacy bare `pattern in text` substring test (which produced
+    two failure modes the plan calls out):
+
+      * NO WORD BOUNDARY — a narrow-unit keyword like `overflow` matched inside
+        an unrelated longer word, and broad nouns matched substrings.
+      * NO NEGATION AWARENESS — "no overflow check" / "without overflow" hit the
+        `overflow` keyword and routed the finding to `narrow_unit`, demanding an
+        impossible single-call unit harness for what is actually a MISSING-check
+        bug. When the keyword is governed by a negation in its own clause, the
+        keyword is NOT asserting the mechanism is present, so it must not drive
+        the testable-class routing.
+
+    A keyword that itself contains a space/hyphen (a multi-word phrase, already
+    specific) is matched as a tolerant substring (whitespace/hyphen-insensitive)
+    — these never over-fired on a single-word boundary. Single bare-word
+    keywords are matched with `\\b` boundaries.
+
+    Recall-direction: suppressing a NEGATED narrow-unit/property keyword routes
+    the finding toward `structural` (the default), which never demands a
+    mandatory unit/property PoC — so this can only RELAX an over-strict PoC
+    demand, never drop a finding or add an unwinnable retry.
+    """
+    rx = _POC_KW_BOUNDARY_CACHE.get(pattern)
+    if rx is None:
+        has_space = " " in pattern or "-" in pattern
+        if has_space:
+            # Tolerant phrase match: a space/hyphen in the pattern matches any
+            # run of spaces/hyphens in the text, so "off-by-one" matches
+            # "off by one" and vice versa. Boundary-anchored at both ends.
+            # Build from the RAW pattern (split on space/hyphen, re.escape each
+            # word, rejoin with a space/hyphen class) to avoid replacement-string
+            # escaping hazards.
+            words = [w for w in re.split(r"[\s\-]+", pattern) if w]
+            inner = r"[\s\-]+".join(re.escape(w) for w in words)
+            rx = re.compile(r"(?<!\w)" + inner + r"(?!\w)", re.IGNORECASE)
+        else:
+            # Whole-word stem: "overflow" matches "overflow"/"overflows" but not
+            # an embedded substring inside an unrelated word.
+            rx = re.compile(r"(?<!\w)" + re.escape(pattern) + r"\w*", re.IGNORECASE)
+        _POC_KW_BOUNDARY_CACHE[pattern] = rx
+    for text in texts:
+        if not text:
+            continue
+        km = rx.search(text)
+        if not km:
+            continue
+        # Negation guard: if the keyword occurrence is governed by a negation in
+        # its clause, it is not asserting the mechanism is present.
+        if _negation_governs_keyword(text, re.compile(re.escape(km.group(0)), re.IGNORECASE)):
+            continue
+        return True
+    return False
 
 
 def classify_poc_testability(bug_class: str, preferred_tag: str, title: str, severity: str) -> str:
@@ -1761,28 +2061,66 @@ def classify_poc_testability(bug_class: str, preferred_tag: str, title: str, sev
         "toctou", "crash-recovery", "crash recovery", "timing", "race condition",
         "cross-client", "non-determinism", "nondeterminism", "eclipse",
         "network partition", "byzantine",
+        "missing setter", "no admin setter", "has no admin setter",
+        "no setter", "missing function", "absent function",
+        "event emission missing", "missing event", "no event",
+        "event missing", "without emitting events", "without event",
+        "emit no event", "emits no event", "no events",
+        "no admin setter", "missing admin setter", "without a setter",
     ]
     if any(p in bc or p in title_lc for p in structural_patterns):
         if "map" in title_lc and ("iter" in title_lc or "order" in title_lc):
             return "property"
         return "structural"
 
-    unit_patterns = [
+    # VERIF-3: property/accounting/invariant bugs are multi-step and must be
+    # property-class, not unit -- mislabeling them 'unit' forces an impossible
+    # single-call harness and a false mandatory-PoC demand. Property is defined
+    # BEFORE unit so a unit match via a BROAD noun (fee/share/deposit/...) that
+    # CO-OCCURS with a strong property signal routes to property. NARROW,
+    # unambiguous unit signals (overflow, access control, onlyOwner, ...) always
+    # win regardless.
+    property_patterns = [
+        "state corruption", "invariant", "accumulator", "counter",
+        "monotonic", "idempotent", "commutativ",
+        "reentrancy", "accounting", "liquidation", "oracle", "price",
+        "collateral", "debt", "ltv", "solvency", "interest", "reward",
+        "custody", "escrow", "residual", "dust", "share price",
+    ]
+    narrow_unit_patterns = [
         "panic", "unwrap", "overflow", "underflow", "arithmetic",
         "validation", "bounds check", "off-by-one", "division by zero",
         "index out of", "assertion", "type cast", "truncat",
+        "access control", "permission", "onlyowner", "only owner",
+        "onlycreator", "unauthorized", "public withdraw", "missing guard",
+        "slippage", "minout", "min out", "minreturn", "min return",
     ]
-    if any(p in bc or p in title_lc for p in unit_patterns):
+    broad_unit_nouns = [
+        "fee", "rounding", "share", "deposit", "withdraw", "approve",
+        "allowance", "transferfrom", "transfer from",
+    ]
+    # Word-boundary + negation-aware matching for the TESTABLE-class keyword
+    # scans (narrow-unit / broad-unit / property). A negated mechanism keyword
+    # ("no overflow check", "without reentrancy") must NOT route the finding to
+    # an impossible unit/property harness — it falls through to structural,
+    # which is recall-safe (structural never demands a mandatory PoC). The
+    # structural_patterns scan above is INTENTIONALLY left as substring match:
+    # several of its patterns ARE negated phrases ("no event", "missing setter")
+    # that legitimately describe structural bugs.
+    narrow_unit_hit = any(_poc_kw_present(p, bc, title_lc) for p in narrow_unit_patterns)
+    broad_unit_hit = any(_poc_kw_present(p, bc, title_lc) for p in broad_unit_nouns)
+    property_hit = any(_poc_kw_present(p, bc, title_lc) for p in property_patterns)
+    if narrow_unit_hit:
         return "unit"
+    if broad_unit_hit:
+        # A broad financial noun alone is unit; combined with a property signal
+        # (accounting/invariant/reward/...) it is a property-class invariant bug.
+        return "property" if property_hit else "unit"
 
     if "poc-pass" in tag or "poc" in tag:
         return "unit"
 
-    property_patterns = [
-        "state corruption", "invariant", "accumulator", "counter",
-        "monotonic", "idempotent", "commutativ",
-    ]
-    if any(p in bc or p in title_lc for p in property_patterns):
+    if property_hit:
         return "property"
 
     if "fuzz" in tag or "non-det" in tag:
@@ -1884,12 +2222,18 @@ def _write_mechanical_verification_queue_from_inventory(scratchpad: Path) -> int
     return len(rows)
 
 
-def _filter_sc_verification_queue_by_mode(scratchpad: Path, mode: str) -> int:
-    """Remove SC Low/Info rows from active verification outside Thorough mode.
+def _filter_verification_queue_by_mode(
+    scratchpad: Path,
+    mode: str,
+    *,
+    pipeline_label: str,
+) -> int:
+    """Remove Low/Info rows from active verification outside Thorough mode.
 
-    SC low verifier shards only exist in Thorough mode. Keeping Low/Info rows
-    in the active queue for Light/Core creates an impossible contract: no phase
-    owns their `verify_<ID>.md` files, but aggregate parity still expects them.
+    Low verifier shards only exist in Thorough mode for both SC and L1. Keeping
+    Low/Info rows in the active queue for Light/Core creates an impossible
+    contract: no phase owns their `verify_<ID>.md` files, but aggregate parity
+    still expects them.
     Preserve traceability by moving them to the explicit evidence-excluded
     sidecar/markdown artifact instead of silently dropping them.
     """
@@ -1905,7 +2249,7 @@ def _filter_sc_verification_queue_by_mode(scratchpad: Path, mode: str) -> int:
         if bucket in {"low", "info"}:
             item = dict(row)
             item["exclusion reason"] = (
-                f"Excluded from active SC verification in {mode} mode "
+                f"Excluded from active {pipeline_label} verification in {mode} mode "
                 "(Low/Info verify shards run only in Thorough mode)"
             )
             excluded.append(item)
@@ -1929,6 +2273,15 @@ def _filter_sc_verification_queue_by_mode(scratchpad: Path, mode: str) -> int:
         combined,
     )
     return len(excluded)
+
+
+def _filter_sc_verification_queue_by_mode(scratchpad: Path, mode: str) -> int:
+    """Backward-compatible SC wrapper used by existing tests/imports."""
+    return _filter_verification_queue_by_mode(
+        scratchpad,
+        mode,
+        pipeline_label="SC",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1980,13 +2333,32 @@ def _parse_hypothesis_constituents(scratchpad: Path) -> dict[str, list[str]]:
         except Exception:
             pass
 
+    # --- Source 3 (chain): ingest chain_hypotheses.md mapping so a chain row
+    # collapses with its constituent standalone rows. Run this UNCONDITIONALLY,
+    # before any early return, so it applies even when hypotheses.md is absent.
+    # Justified compound chains are excluded by _parse_chain_constituents.
+    def _merge_chain_links() -> None:
+        try:
+            chain_links = _parse_chain_constituents(scratchpad)
+        except Exception:
+            return
+        for chain_id, constituents in chain_links.items():
+            if not constituents:
+                continue
+            existing = mapping.setdefault(chain_id, [])
+            for cid in constituents:
+                if cid != chain_id and cid not in existing:
+                    existing.append(cid)
+
     # --- Source 2: hypotheses.md (section-based parse)
     hyp = scratchpad / "hypotheses.md"
     if not hyp.exists():
+        _merge_chain_links()
         return mapping
     try:
         text = _llm_norm(hyp.read_text(encoding="utf-8", errors="replace"))
     except Exception:
+        _merge_chain_links()
         return mapping
 
     # Source 2a: hypotheses.md tables. Chain hypotheses are commonly table
@@ -2034,7 +2406,122 @@ def _parse_hypothesis_constituents(scratchpad: Path) -> dict[str, list[str]]:
                 c for c in constituents if c not in mapping.get(hypo_id, [])
             )
 
+    # --- Source 3 (chain): merge chain_hypotheses.md links (see closure above).
+    _merge_chain_links()
+
     return mapping
+
+
+# Prose anchors per phase4c-chain-prompt.md "Chain Hypothesis Format":
+#   ### Blocked Finding (A)
+#   - **ID**: [XX-N], ...
+#   ### Enabler Finding (B)
+#   - **ID**: [YY-M], ...
+# plus the machine-parseable line:
+#   Constituents: <A>,<B> | Severity-Upgrade-Justified: YES/NO | Combined-Impact: ...
+_CHAIN_HYP_HEADING_RE = re.compile(
+    r"^#{1,4}\s*Chain\s+Hypothesis\s+(CH-\d+)\b",
+    re.MULTILINE | re.IGNORECASE,
+)
+_CHAIN_BLOCKED_RE = re.compile(
+    r"Blocked\s+Finding\s*\(A\)", re.IGNORECASE
+)
+_CHAIN_ENABLER_RE = re.compile(
+    r"Enabler\s+Finding\s*\(B\)", re.IGNORECASE
+)
+_CHAIN_ID_FIELD_RE = re.compile(
+    r"\*\*ID\*\*\s*:\s*\[?\s*(" + _ID_ALL_INTERNAL + r")\s*\]?",
+    re.IGNORECASE,
+)
+_CHAIN_MACHINE_LINE_RE = re.compile(
+    r"Constituents\s*:\s*(?P<ids>[^|]+)\|"
+    r"\s*Severity-Upgrade-Justified\s*:\s*(?P<just>YES|NO)\b"
+    r"(?:\s*\|\s*Combined-Impact\s*:\s*(?P<impact>.*))?",
+    re.IGNORECASE,
+)
+
+
+def _chain_severity_upgrade_justified(section: str) -> bool:
+    """True when the chain section carries an explicit, justified upgrade.
+
+    Per the STEP 3 guard, a chain is treated as a GENUINE compound finding
+    (and therefore NOT linked to its constituents for collapse) only when the
+    machine-parseable line shows `Severity-Upgrade-Justified: YES` AND a
+    non-empty `Combined-Impact` (not 'NONE'/blank).
+    """
+    m = _CHAIN_MACHINE_LINE_RE.search(section)
+    if not m:
+        return False
+    if (m.group("just") or "").strip().upper() != "YES":
+        return False
+    impact = (m.group("impact") or "").strip()
+    if not impact:
+        return False
+    if impact.strip().lower() in ("none", "n/a", "na", "-", "—"):
+        return False
+    return True
+
+
+def _parse_chain_constituents(scratchpad: Path) -> dict[str, list[str]]:
+    """Parse chain_hypotheses.md → {chain_id: [Finding A id, Finding B id]}.
+
+    Uses the 'Blocked Finding (A)' / 'Enabler Finding (B)' prose anchors from
+    phase4c-chain-prompt.md "Chain Hypothesis Format". A chain whose
+    machine-parseable line shows a justified severity upgrade with a non-empty
+    Combined-Impact is EXCLUDED from the map (genuine compound finding — kept
+    separate, never collapsed into a constituent).
+
+    Empty/unparseable file → {} (no merge = status quo, which is recall-safe).
+    """
+    chain_path = scratchpad / "chain_hypotheses.md"
+    if not chain_path.exists():
+        return {}
+    try:
+        text = _llm_norm(chain_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+
+    out: dict[str, list[str]] = {}
+    headings = list(_CHAIN_HYP_HEADING_RE.finditer(text))
+    for i, hm in enumerate(headings):
+        chain_id = hm.group(1).upper()
+        start = hm.end()
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
+        section = text[start:end]
+
+        # Genuine compound finding → do not link (keep separate).
+        if _chain_severity_upgrade_justified(section):
+            continue
+
+        constituents: list[str] = []
+
+        # Prefer the explicit Blocked/Enabler anchors (most precise).
+        for anchor_re in (_CHAIN_BLOCKED_RE, _CHAIN_ENABLER_RE):
+            am = anchor_re.search(section)
+            if not am:
+                continue
+            # The ID field appears on the next bullet after the anchor.
+            tail = section[am.end():am.end() + 400]
+            idm = _CHAIN_ID_FIELD_RE.search(tail)
+            if idm:
+                cid = idm.group(1).upper()
+                if cid != chain_id and cid not in constituents:
+                    constituents.append(cid)
+
+        # Fallback: the machine-parseable Constituents line.
+        if not constituents:
+            mm = _CHAIN_MACHINE_LINE_RE.search(section)
+            if mm:
+                for tok in re.split(r"[,\s]+", mm.group("ids") or ""):
+                    tok = tok.strip().upper()
+                    if tok and re.fullmatch(r"(?:" + _ID_ALL_INTERNAL + r")", tok, re.IGNORECASE):
+                        if tok != chain_id and tok not in constituents:
+                            constituents.append(tok)
+
+        if constituents:
+            out[chain_id] = constituents
+
+    return out
 
 
 _CHAIN_SUMMARY_HEADING_RE = re.compile(
@@ -2192,6 +2679,11 @@ def _dedup_queue_by_hypothesis(scratchpad: Path) -> int:
     # Build reverse map: constituent_id → hypothesis_id
     constituent_to_hypo: dict[str, str] = {}
     for hypo_id, constituents in mapping.items():
+        # Map the hypothesis/chain ID to ITSELF so a queue row carrying the
+        # hypothesis ID (e.g. a CH-* chain row) joins its own group rather than
+        # staying solo — otherwise an unjustified chain's inflated row survives
+        # alongside the collapsed constituent representative.
+        constituent_to_hypo.setdefault(hypo_id.upper(), hypo_id)
         for cid in constituents:
             # First mapping wins (a finding shouldn't be in two hypotheses)
             if cid not in constituent_to_hypo:
@@ -2222,10 +2714,36 @@ def _dedup_queue_by_hypothesis(scratchpad: Path) -> int:
             rep["finding id"] = hypo_id
             collapsed.append(rep)
         else:
-            # Multiple constituents — pick highest severity, merge context
-            group_rows.sort(key=lambda r: -_severity_rank(r.get("severity", "")))
-            rep = dict(group_rows[0])
-            rep["finding id"] = hypo_id
+            # Multiple constituents — pick highest severity, merge context.
+            #
+            # Chain carve-out: a CH-* hypothesis only reaches this map when it
+            # is UNJUSTIFIED (genuine compound chains are excluded upstream in
+            # _parse_chain_constituents). For an unjustified chain, the chain
+            # tier is an inflated restatement — inherit the constituent
+            # severity, NOT the highest (which would be the inflated chain
+            # severity). The constituent rows are the non-chain rows in the
+            # group; if a chain row is itself present we ignore its severity.
+            is_chain = bool(re.fullmatch(r"CH-\d+", hypo_id, re.IGNORECASE))
+            if is_chain:
+                non_chain_rows = [
+                    r for r in group_rows
+                    if not re.fullmatch(
+                        r"CH-\d+", (r.get("finding id") or "").strip(),
+                        re.IGNORECASE,
+                    )
+                ]
+                sev_rows = non_chain_rows or group_rows
+                sev_rows.sort(key=lambda r: -_severity_rank(r.get("severity", "")))
+                inherited_sev = sev_rows[0].get("severity", "")
+                group_rows.sort(key=lambda r: -_severity_rank(r.get("severity", "")))
+                rep = dict(sev_rows[0])
+                rep["finding id"] = hypo_id
+                if inherited_sev:
+                    rep["severity"] = inherited_sev
+            else:
+                group_rows.sort(key=lambda r: -_severity_rank(r.get("severity", "")))
+                rep = dict(group_rows[0])
+                rep["finding id"] = hypo_id
             # Aggregate title: use the first (highest-sev) constituent's title
             # Aggregate location: list unique locations
             locations = []
@@ -2863,12 +3381,55 @@ def _field_from_markdown(text: str, labels: tuple[str, ...]) -> str:
     for label in labels:
         m = re.search(
             rf"(?im)^\s*(?:[-*]\s*|#{{1,6}}\s+)?(?:\*\*)?{re.escape(label)}(?:\*\*)?"
-            rf"\s*(?::|-|=)\s*(.+)$",
+            rf"(?:\s*\([^)]*\))?\s*(?::|-|=)\s*(.+)$",
             text,
         )
         if m:
             return m.group(1).strip().strip("`")
     return ""
+
+
+_OPTIONAL_FINDING_METADATA_LABELS: dict[str, tuple[str, ...]] = {
+    "discovery_steer": ("Discovery Steer", "Discovery Steering"),
+    "missing_precondition": ("Missing Precondition", "Missing Preconditions"),
+    "precondition_type": ("Precondition Type", "Precondition Types"),
+    "postconditions_created": (
+        "Postconditions Created",
+        "Postcondition Created",
+        "Postconditions",
+        "Postcondition",
+    ),
+    "postcondition_types": ("Postcondition Types", "Postcondition Type"),
+    "semantic_invariant": ("Semantic Invariant", "Semantic Invariants"),
+    "branch_preconditions": ("Branch Preconditions", "Branch Precondition"),
+    "terminal_mechanism": ("Terminal Mechanism", "Terminal Mechanisms"),
+    "composition_candidates": ("Composition Candidates", "Composition Candidate"),
+}
+
+_OPTIONAL_FINDING_METADATA_FIELDS: tuple[str, ...] = tuple(
+    _OPTIONAL_FINDING_METADATA_LABELS.keys()
+)
+
+
+def _optional_finding_metadata_defaults() -> dict[str, str]:
+    return {field: "" for field in _OPTIONAL_FINDING_METADATA_FIELDS}
+
+
+def _optional_finding_metadata_field_for_label(label: str) -> str:
+    key = _norm_key(label)
+    for field, labels in _OPTIONAL_FINDING_METADATA_LABELS.items():
+        if any(key == _norm_key(alias) for alias in labels):
+            return field
+    return ""
+
+
+def _extract_optional_finding_metadata(text: str) -> dict[str, str]:
+    out = _optional_finding_metadata_defaults()
+    for field, labels in _OPTIONAL_FINDING_METADATA_LABELS.items():
+        val = _field_from_markdown(text, labels)
+        if val:
+            out[field] = _strip_md(val)
+    return out
 
 
 def _first_heading_title(text: str) -> str:
@@ -2894,7 +3455,11 @@ def _sanitize_client_title(title: str) -> str:
     s = re.sub(r"\b(?:" + internal + r")\b", "", s, flags=re.IGNORECASE)
     s = re.sub(r"(?i)\b(?:and|or|of)\s+(?:and|or|of)\b", " ", s)
     s = re.sub(r"(?i)\bduplicate\s+of\s*(?:/|\band\b|\bor\b)?\s*$", "duplicate", s)
-    s = re.sub(r"\s+", " ", s).strip(" -–—:")
+    # Strip a leading agent-finding-ID prefix the mechanical index recovery
+    # sometimes leaves on titles, e.g. "/ EXT-001: ..." or "STATE-001 - ...".
+    s = re.sub(r"^[\s/]*[A-Z]{2,6}-\d{1,4}\s*[:\-–—]\s*", "", s)
+    s = s.lstrip("/ ")
+    s = re.sub(r"\s+", " ", s).strip(" -–—:/")
     return s or "Verified finding"
 
 
@@ -2914,7 +3479,18 @@ def _sanitize_client_body(text: str) -> str:
         text or "",
         flags=re.IGNORECASE,
     )
-    return _CLIENT_BODY_INTERNAL_ID_RE.sub("upstream finding", clean).strip()
+    clean = _CLIENT_BODY_INTERNAL_ID_RE.sub("upstream finding", clean)
+    # Drop internal-status narration the body writer sometimes leaks into prose.
+    # The manifest's report_blocked flag is meant to drive a heading tag the
+    # assembler strips, NOT client-facing sentences. Remove whole sentences
+    # mentioning the internal status so no dangling fragment remains.
+    clean = re.sub(
+        r"(?is)(?:(?<=[.!?])\s+|^)[^.!?\n]*(?:report[\s-]?blocked|shard\s+inputs?)[^.!?\n]*[.!?]",
+        " ",
+        clean,
+    )
+    clean = re.sub(r"[ \t]{2,}", " ", clean)
+    return clean.strip()
 
 
 def _markdown_section(text: str, headings: tuple[str, ...], max_chars: int = 3500) -> str:
@@ -3008,6 +3584,531 @@ def _norm_key(text: str) -> str:
     s = s.lower()
     s = re.sub(r"[^a-z0-9]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
+
+
+# ── L1: PLAMEN_SIGNALS machine-readable channel (regex-fragility plan §4) ────
+#
+# Extends the proven `<!-- PLAMEN_X: value -->` HTML-comment channel
+# (driver `re.finditer(r"<!--\s*PLAMEN_([A-Z_]+):\s*([^>]+?)\s*-->", text)`)
+# with a `PLAMEN_SIGNALS` family carrying single-line JSON:
+#
+#     <!-- PLAMEN_SIGNALS: {"sync_gaps":5,"conditional_writes":2} -->
+#
+# JSON inside an HTML comment is deterministic by construction; no markdown
+# shape variance is possible. This is the L1 authoritative source — when the
+# block is present and parseable, the driver trusts it over any L2 prose
+# extraction. When it is missing or malformed, the parser returns {} and LOGS
+# (never raises, never silently fabricates a signal). Multiple blocks merge
+# left-to-right (a later block overrides an earlier key); this matches the
+# existing STATUS/ARTIFACT channel's last-wins convention.
+_PLAMEN_SIGNALS_BLOCK_RE = re.compile(
+    r"<!--\s*PLAMEN_SIGNALS\s*:\s*(\{.*?\})\s*-->",
+    re.DOTALL,
+)
+
+
+def parse_plamen_signals(text: str) -> dict:
+    """Parse all ``<!-- PLAMEN_SIGNALS: {json} -->`` blocks out of *text*.
+
+    Returns the merged JSON object (later blocks override earlier keys).
+    Tolerant of:
+      - missing block        -> {} (no log; absence is normal, not an error)
+      - malformed/partial JSON inside an otherwise well-formed block
+                             -> that block is skipped + a WARNING is logged
+                                (zero-harvest-with-evidence tripwire)
+      - non-object JSON (list/scalar) inside a block
+                             -> skipped + WARNING
+      - None / empty text    -> {}
+
+    Never raises. The HTML-comment delimiter is matched format-invariantly
+    (whitespace-tolerant, DOTALL so the JSON may legally contain newlines),
+    mirroring the driver's existing PLAMEN_X channel parser.
+    """
+    if not text:
+        return {}
+    s = _llm_norm(text)
+    out: dict = {}
+    saw_block = False
+    bad_block = False
+    for m in _PLAMEN_SIGNALS_BLOCK_RE.finditer(s):
+        saw_block = True
+        raw = m.group(1).strip()
+        try:
+            obj = json.loads(raw)
+        except (ValueError, TypeError):
+            bad_block = True
+            continue
+        if not isinstance(obj, dict):
+            bad_block = True
+            continue
+        out.update(obj)
+    if bad_block and not out:
+        # Zero-harvest tripwire: a PLAMEN_SIGNALS block was present (evidence)
+        # yet nothing parsed. This is the strictly-worse-than-no-gate signature
+        # — surface it instead of silently returning {}.
+        log.warning(
+            "parse_plamen_signals: PLAMEN_SIGNALS block(s) present but no "
+            "valid JSON object harvested (malformed channel) — falling back "
+            "to prose extraction"
+        )
+    elif bad_block and out:
+        log.warning(
+            "parse_plamen_signals: %d key(s) harvested but at least one "
+            "PLAMEN_SIGNALS block was malformed and skipped",
+            len(out),
+        )
+    _ = saw_block  # documented: presence-without-harvest handled above
+    return out
+
+
+# ── L2: one shared tolerant field extractor (regex-fragility plan §4 L2) ─────
+#
+# Converges the ~15 scattered raw `**Field**:` / `Field:` / table-cell regexes
+# onto the existing tolerant toolkit (`_llm_norm`, `_field_from_markdown`,
+# `_split_markdown_table_row`, `_is_separator_row`). The single capability it
+# ADDS over `_field_from_markdown` is **table-cell key/value extraction**
+# (`| Field | value |`, the #1 live miss) plus an opt-in **clause-scoped
+# negation guard** (fixing the `_valid_poc_skip` cross-sentence false-fire).
+#
+# STRICT-SUPERSET CONTRACT (the one rule): for every input the legacy
+# extractors accepted, `_field_anywhere` returns a value-identical result.
+# It only ever matches MORE shapes, never fewer.
+
+# Negation tokens for the clause-scoped guard. Word-boundary anchored at the
+# call site so `id` != `invalid`, `covered` != `uncovered`.
+_NEGATION_TOKENS: tuple[str, ...] = (
+    "not", "no", "never", "without", "n't", "cannot", "can't",
+    "isn't", "wasn't", "aren't", "doesn't", "don't", "didn't",
+    "false", "absent", "lacking", "lacks", "missing",
+)
+_NEGATION_GUARD_RE = re.compile(
+    r"(?i)(?<!\w)(?:" + "|".join(re.escape(t) for t in _NEGATION_TOKENS) + r")(?!\w)"
+)
+
+# Clause boundary: sentence end, list-item break, table-cell pipe, or a hard
+# newline. Used to scope the negation guard to the trigger's own clause rather
+# than the failed 80-char DOTALL proximity window.
+_CLAUSE_SPLIT_RE = re.compile(r"[.;!?\n]|(?:\s\|\s)")
+
+
+def _clause_around(text: str, start: int, end: int) -> str:
+    """Return the clause (sentence/list-item/table-cell) that spans
+    [start, end) within *text*. Boundaries are sentence punctuation, hard
+    newlines, or table-cell pipes — NOT a fixed character window."""
+    left = 0
+    for m in _CLAUSE_SPLIT_RE.finditer(text, 0, start):
+        left = m.end()
+    right = len(text)
+    rm = _CLAUSE_SPLIT_RE.search(text, end)
+    if rm is not None:
+        right = rm.start()
+    return text[left:right]
+
+
+def _negation_in_clause(text: str, start: int, end: int) -> bool:
+    """True if a negation token shares the same clause as the [start,end)
+    trigger. Word-boundary matched so `id` does not trip on `invalid`."""
+    clause = _clause_around(text, start, end)
+    return bool(_NEGATION_GUARD_RE.search(clause))
+
+
+def _negation_governs_keyword(text: str, keyword_re) -> bool:
+    """True iff ANY occurrence of *keyword_re* in *text* shares its clause
+    (sentence / list-item / table-cell — NOT a fixed character window) with a
+    negation token.
+
+    This is the clause-scoped replacement for the legacy `.{0,80}` DOTALL
+    proximity rule used by `_valid_poc_skip`'s mock-feasibility blocker. The old
+    rule fired whenever a negation appeared within 80 characters of `mock`,
+    even across sentence boundaries (e.g. "...used a Mock harness. The address
+    does not exist." wrongly suppressed). Clause scoping suppresses ONLY when
+    the negation governs the same clause as the keyword — strictly recall-safe
+    for the PoC-skip decision: the old rule OVER-rejected valid skips, so the
+    narrower clause guard can only let MORE valid skips through, never drop a
+    finding.
+
+    The keyword occurrence itself is blanked inside its clause before the
+    negation scan so a keyword that happens to contain or abut a negation
+    substring cannot self-trigger.
+    """
+    if not text:
+        return False
+    s = _llm_norm(text)
+    if isinstance(keyword_re, str):
+        keyword_re = re.compile(keyword_re, re.IGNORECASE)
+    for km in keyword_re.finditer(s):
+        clause = _clause_around(s, km.start(), km.end())
+        # Blank the matched keyword span within the clause so the keyword text
+        # cannot be misread as a negation source.
+        kw_local_start = clause.find(km.group(0))
+        if kw_local_start >= 0:
+            blanked = (
+                clause[:kw_local_start]
+                + " " * len(km.group(0))
+                + clause[kw_local_start + len(km.group(0)):]
+            )
+        else:
+            blanked = clause
+        if _NEGATION_GUARD_RE.search(blanked):
+            return True
+    return False
+
+
+def _table_cell_field(
+    text: str,
+    norm_labels: tuple[str, ...],
+    *,
+    short_labels: frozenset,
+) -> str:
+    """Scan markdown tables for a `| label | value |` key/value pair.
+
+    Handles two table renderings the LLM uses interchangeably:
+      (a) header/row:   a header row naming the label as a column, with the
+                        value in the aligned cell of a following data row
+                        (`| Impact | Likelihood |` / `| High | Medium |`).
+                        Detected when a separator row (`|---|---|`) immediately
+                        follows the candidate header.
+      (b) vertical kv:  a 2-(or-more)-column row whose first cell is the label
+                        and whose next non-empty cell is the value
+                        (`| Severity | High |`). Used when the row is NOT a
+                        separator-confirmed header.
+
+    Header/row is tried first (separator-confirmed) so a 2-column matrix header
+    like `| Impact | Likelihood |` is not misread as a vertical kv pair. Then
+    vertical-kv is tried. Separator rows are never values. Returns "" if no
+    match.
+    """
+    # Parse into (is_sep, cells) keeping document order; non-table lines reset
+    # the local table context.
+    rows: list[tuple[bool, list[str]]] = []
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s.startswith("|"):
+            rows.append((False, []))  # context break sentinel (empty cells)
+            continue
+        if _is_separator_row(s):
+            rows.append((True, []))
+            continue
+        cells = _split_markdown_table_row(s)
+        rows.append((False, cells))
+
+    def _label_columns(cells: list[str]) -> dict[int, str]:
+        out: dict[int, str] = {}
+        for i, cell in enumerate(cells):
+            ck = _norm_key(cell)
+            if not ck:
+                continue
+            for lbl in norm_labels:
+                if lbl in short_labels:
+                    if re.search(r"(?<!\w)" + re.escape(lbl) + r"(?!\w)", ck):
+                        out[i] = lbl
+                        break
+                elif lbl in ck:
+                    out[i] = lbl
+                    break
+        return out
+
+    # ── Pass (a): separator-confirmed header/row ──
+    for idx, (is_sep, cells) in enumerate(rows):
+        if is_sep or not cells:
+            continue
+        # A header is a row whose NEXT non-empty table row is a separator.
+        nxt = idx + 1
+        if nxt >= len(rows):
+            continue
+        nxt_sep, nxt_cells = rows[nxt]
+        if not nxt_sep:
+            continue
+        cols = _label_columns(cells)
+        if not cols:
+            continue
+        # Read the aligned value cell from the first data row after the
+        # separator.
+        for j in range(idx + 2, len(rows)):
+            d_sep, d_cells = rows[j]
+            if d_sep:
+                continue
+            if not d_cells:
+                break  # context break -> no data row
+            for ci in sorted(cols):
+                if ci < len(d_cells):
+                    v = d_cells[ci].strip()
+                    if v:
+                        return v
+            break
+
+    # ── Pass (b): vertical kv (first cell is the label) ──
+    for is_sep, cells in rows:
+        if is_sep or not cells:
+            continue
+        first_key = _norm_key(cells[0])
+        if first_key in norm_labels:
+            for cell in cells[1:]:
+                v = cell.strip()
+                if v:
+                    return v
+
+    return ""
+
+
+_FIELD_ANYWHERE_HEADING_RE_CACHE: dict[str, re.Pattern] = {}
+
+
+def _heading_field(text: str, labels: tuple[str, ...]) -> str:
+    """Extract a value rendered as a markdown heading `#{1,6} Label: value`
+    or `#{1,6} Label` followed by the next non-blank line's content.
+
+    `_field_from_markdown` already handles the inline `# Label: value` form;
+    this adds the `# Label` / next-line-value form used by some agents."""
+    for label in labels:
+        m = re.search(
+            rf"(?im)^\s*#{{1,6}}\s+(?:\*\*)?{re.escape(label)}(?:\*\*)?\s*$",
+            text,
+        )
+        if m:
+            tail = text[m.end():].lstrip("\n")
+            for ln in tail.splitlines():
+                if ln.strip():
+                    return ln.strip().strip("`").strip()
+    return ""
+
+
+def _field_anywhere(
+    text: str,
+    labels,
+    *,
+    value_pattern: Optional[str] = None,
+    table_ok: bool = True,
+    negation_guard: bool = False,
+    first_match: bool = True,
+) -> tuple[str, str]:
+    """Single shared tolerant field extractor (regex-fragility plan §4 L2).
+
+    Returns ``(value, shape_tag)`` where ``shape_tag`` is one of
+    ``{"kv", "bullet", "bold", "backtick", "table", "heading", "none"}`` —
+    callers may ignore the tag. ``value`` is ``""`` when nothing matched.
+
+    Tolerance (strict superset of every legacy single-shape regex):
+      - `_llm_norm` normalizes CRLF / smart quotes / HTML entities / zero-width
+        BEFORE matching (so a new rendering variant cannot break a parser).
+      - kv / bullet / bold(`**Field**:` and `**Field:**`) / backtick label
+        forms with `:` / `-` / `=` separators -> delegated to
+        `_field_from_markdown` (legacy behavior preserved verbatim).
+      - table-cell kv (`| Field | value |`) and header/row tables -> ADDED via
+        `_table_cell_field` (the #1 live miss; only matched when table_ok).
+      - heading-as-value (`# Field` then next line) -> ADDED.
+      - case-insensitive throughout; label aliases longest-first; word-boundary
+        match for short (<=3 char) aliases so `id` != `invalid`.
+      - ``value_pattern`` (optional): the extracted value must contain a match
+        for this regex, else that candidate is rejected and the search
+        continues. Lets callers constrain to e.g. a severity enum.
+      - ``negation_guard`` (optional): suppress a match when a negation token
+        shares the *same clause* as the matched label (NOT an 80-char proximity
+        window). Recall-safe narrowing per plan §4.
+      - ``first_match`` (default True): return the first accepted value.
+
+    Zero-harvest tripwire: when *text* clearly contains one of the labels yet
+    nothing is harvested, a WARNING is logged (the strictly-worse-than-no-gate
+    signature). Detection-only — never raises, never drops a candidate.
+    """
+    if not text:
+        return ("", "none")
+    if isinstance(labels, str):
+        labels = (labels,)
+    labels = tuple(l for l in labels if l)
+    if not labels:
+        return ("", "none")
+
+    s = _llm_norm(text)
+
+    # Longest-first so a long alias wins over a short substring of it
+    # (`location` before `loc`), mirroring `_match_canonical_header`.
+    ordered = sorted(set(labels), key=len, reverse=True)
+    norm_labels = tuple(_norm_key(l) for l in ordered)
+    short_labels = frozenset(nl for nl in norm_labels if len(nl) <= 3)
+
+    vpat = re.compile(value_pattern, re.IGNORECASE) if value_pattern else None
+
+    def _accept(value: str) -> bool:
+        if not value:
+            return False
+        if vpat is not None and not vpat.search(value):
+            return False
+        return True
+
+    # ── Pass 1: inline kv / bullet / bold / backtick (legacy superset) ──
+    # `_field_from_markdown` already covers `:`/`-`/`=`, `**bold**`,
+    # `**label:**`, backtick, leading bullet, `#{1,6}` heading-inline, and
+    # parenthetical-suffix labels. We reproduce its core match here so we can
+    # apply the negation guard and value_pattern per-candidate.
+    for label in ordered:
+        for m in re.finditer(
+            # The label group tolerates wrappers on BOTH sides, including the
+            # `**label:**` form where the separator colon is INSIDE the closing
+            # bold/backtick markers. The closing-wrapper-with-inner-colon branch
+            # (`open`) only fires when the label was OPENED with a wrapper, so a
+            # bold VALUE like `Severity: **High**` is not mis-consumed.
+            rf"(?im)^\s*(?:[-*]\s*|#{{1,6}}\s+)?"
+            rf"(?P<lbl>(?P<open>\*\*|`|_|\[)?\s*{re.escape(label)})\s*"
+            rf"(?:\s*\([^)]*\))?"
+            rf"(?:(?(open)(?::|-|=)?\s*(?:\*\*|`|_|\])\s*(?::|-|=)?|(?!x)x)"
+            rf"|\s*(?::|-|=))"
+            rf"\s*(?P<val>.+)$",
+            s,
+        ):
+            # Value cleanup mirrors legacy `_field_from_markdown` (strip
+            # backticks) plus balanced bold; brackets are MEANINGFUL (e.g.
+            # `[POC-PASS]`) and are NOT stripped.
+            value = m.group("val").strip()
+            if value.startswith("**") and value.endswith("**") and len(value) > 4:
+                value = value[2:-2].strip()
+            value = value.strip("`").strip()
+            if not _accept(value):
+                continue
+            # Negation guard is scoped to the LABEL clause (the trigger), NOT
+            # the whole captured value — fixing the `_valid_poc_skip`
+            # cross-sentence false-fire where a negation in a later sentence of
+            # the value wrongly suppressed a valid field.
+            if negation_guard and _negation_in_clause(
+                s, m.start("lbl"), m.end("lbl")
+            ):
+                continue
+            # shape tag: best-effort classification of the matched line
+            line = m.group(0)
+            lbl_txt = m.group("lbl")
+            if line.lstrip().startswith(("-", "*")) and not lbl_txt.lstrip().startswith("*"):
+                tag = "bullet"
+            elif "**" in lbl_txt:
+                tag = "bold"
+            elif "`" in lbl_txt:
+                tag = "backtick"
+            else:
+                tag = "kv"
+            if first_match:
+                return (value, tag)
+
+    # ── Pass 2: table-cell kv / header-row (the ADDED capability) ──
+    if table_ok:
+        tv = _table_cell_field(s, norm_labels, short_labels=short_labels)
+        if _accept(tv):
+            ok = True
+            if negation_guard:
+                idx = s.find(tv)
+                if idx >= 0 and _negation_in_clause(s, idx, idx + len(tv)):
+                    ok = False
+            if ok:
+                return (tv, "table")
+
+    # ── Pass 3: heading-as-value (`# Field` then next line) ──
+    hv = _heading_field(s, ordered)
+    if _accept(hv):
+        if not (negation_guard and (lambda i: i >= 0 and _negation_in_clause(s, i, i + len(hv)))(s.find(hv))):
+            return (hv, "heading")
+
+    # ── Zero-harvest tripwire ──
+    # Evidence = a label clearly appears in the text, yet we harvested nothing.
+    label_present = False
+    for nl in norm_labels:
+        if not nl:
+            continue
+        if nl in short_labels:
+            if re.search(r"(?<!\w)" + re.escape(nl) + r"(?!\w)", _norm_key(s)):
+                label_present = True
+                break
+        elif nl in _norm_key(s):
+            label_present = True
+            break
+    if label_present:
+        log.warning(
+            "_field_anywhere: label(s) %r present in text but no value "
+            "harvested (table_ok=%s, value_pattern=%r, negation_guard=%s) — "
+            "possible shape miss, falling back",
+            list(labels), table_ok, value_pattern, negation_guard,
+        )
+    return ("", "none")
+
+
+# ── Site 2 (regex-fragility plan): niche spawn-manifest tolerance ────────────
+#
+# Two sibling parsers read the `## Niche Agents` manifest table and decide which
+# niche analysis lanes spawn: `_required_niche_worker_jobs` (driver, the
+# consumer) and `_niche_tokens_from_required_table` (validators, the producer
+# reconciler). A MISSED Required row means a whole analysis lane never spawns —
+# a silent recall hole. Both used:
+#   * an EXACT `## Niche Agents` heading (`re.match(r"^##+\s+Niche Agents\b")`),
+#     missing `# Niche Agents` / synonym renderings; and
+#   * a literal `YES` substring in the Required cell, missing `Required` / `Y` /
+#     the `✓`/`✔` check glyphs the LLM uses interchangeably.
+# These two helpers are the shared, fixture-hardened tolerance both call.
+
+# Heading synonyms for the niche manifest section. The matcher below is
+# `#{1,6}` tolerant (strict superset of the old `##+`) and accepts the
+# documented synonym renderings.
+_NICHE_HEADING_SYNONYMS: tuple[str, ...] = (
+    "Niche Agents",
+    "Niche Agent Manifest",
+    "Niche Analysis Agents",
+    "Niche Depth Agents",
+)
+_NICHE_HEADING_RE = re.compile(
+    r"^\s*#{1,6}\s+(?:\*\*|`)?\s*(?:"
+    + "|".join(re.escape(s) for s in _NICHE_HEADING_SYNONYMS)
+    + r")\b",
+    re.IGNORECASE,
+)
+
+# Affirmative tokens for a manifest Required cell. Matched with word boundaries
+# (so `Y` does not fire on `YET`, `Required` does not fire on `not required`'s
+# negation — guarded below). The check glyphs are bare-codepoint matched.
+_NICHE_REQUIRED_AFFIRMATIVE: tuple[str, ...] = (
+    "yes", "required", "y", "true", "mandatory",
+)
+_NICHE_REQUIRED_WORD_RE = re.compile(
+    r"(?<!\w)(?:" + "|".join(_NICHE_REQUIRED_AFFIRMATIVE) + r")(?!\w)",
+    re.IGNORECASE,
+)
+_NICHE_REQUIRED_GLYPHS: frozenset = frozenset({"✓", "✔", "☑", "✅"})
+
+
+def _niche_heading_match(line: str) -> bool:
+    """True iff `line` is a niche-manifest section heading (any level/synonym)."""
+    return bool(_NICHE_HEADING_RE.match(_llm_norm(line)))
+
+
+def _niche_required_cell_yes(cell: str) -> bool:
+    """True iff a manifest Required cell affirmatively marks the row required.
+
+    Strict superset of the legacy `"YES" in cell.upper()`:
+      * `YES` (legacy) still matches.
+      * `Required` / `Y` / `True` / `Mandatory` newly match (word-boundary, so
+        `Y` does not fire on `MAYBE`/`YET`, and a longer word is not partially
+        matched).
+      * check glyphs `✓ ✔ ☑ ✅` newly match.
+    A clause-scoped negation guard suppresses an affirmative governed by a
+    negation in the same cell (`not required`, `no` → row is NOT required),
+    mirroring the Site 5 recall-safe negation discipline. Recall-direction:
+    this only ever marks MORE rows required (more lanes spawn), except the
+    negation guard which removes a FALSE affirmative — both are recall-safe for
+    the spawn decision (a falsely-required lane wastes a slot; a falsely-skipped
+    lane silently drops findings, the worse error this widening prevents).
+    """
+    if not cell:
+        return False
+    s = _llm_norm(cell)
+    if any(g in s for g in _NICHE_REQUIRED_GLYPHS):
+        return True
+    m = _NICHE_REQUIRED_WORD_RE.search(s)
+    if not m:
+        return False
+    # Negation guard: if a negation token shares the cell-clause with the
+    # affirmative, the cell is asserting the row is NOT required. Blank the
+    # affirmative token itself first so e.g. "required" is not read as a
+    # negation source; then look for an EXTERNAL negation in the cell-clause.
+    clause = _clause_around(s, m.start(), m.end())
+    blanked = clause.replace(m.group(0), " " * len(m.group(0)), 1)
+    if _NEGATION_GUARD_RE.search(blanked):
+        return False
+    return True
 
 
 _SUFFIX_STRIP_RE = re.compile(r"(tion|ing|ness|ment|able|ible|ful|less|ous|ive|ed|er|ly|es|s)$")
@@ -3121,21 +4222,31 @@ def _parse_source_findings_for_ids(path: Path) -> list[dict[str, str]]:
     except Exception:
         return []
     findings: list[dict[str, str]] = []
-    cur: Optional[dict[str, str]] = None
-    for line in text.splitlines():
-        s = line.strip()
-        m = re.match(r"^###\s+Finding\s+\[([A-Z][A-Z0-9]{0,6}-\d+)\]", s)
-        if m:
-            if cur:
-                findings.append(cur)
-            cur = {"id": m.group(1), "title": s, "location": ""}
-            continue
-        if cur:
-            m = re.match(r"^\*\*Location\*\*:\s*(.+)$", s, re.IGNORECASE)
-            if m:
-                cur["location"] = _norm_loc(m.group(1))
-    if cur:
-        findings.append(cur)
+    # Heading tolerance (Tier C): accept `#{2,6} Finding [ID]` instead of the
+    # H3-exact `^###` form (strict superset — every old H3 still matches). The
+    # per-block Location is harvested with the shared `_field_anywhere`
+    # extractor, which accepts bold (`**Location**:`), plain, bullet,
+    # `**Location:**`, backtick, `=`-separated, and TABLE-CELL renderings — the
+    # old literal `^**Location**:` regex missed all but the bold-colon form.
+    heading_re = re.compile(
+        r"(?im)^\s*#{2,6}\s+Finding\s+\[([A-Z][A-Z0-9]{0,6}-\d+)\]"
+    )
+    matches = list(heading_re.finditer(text))
+    for i, m in enumerate(matches):
+        fid = m.group(1)
+        start = m.end()
+        # title = the heading line as written (preserve legacy "title" value:
+        # the stripped heading line).
+        line_end = text.find("\n", m.start())
+        title = text[m.start():(line_end if line_end != -1 else len(text))].strip()
+        block_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block = text[start:block_end]
+        loc_val, _ = _field_anywhere(block, ("Location", "Locations"), table_ok=True)
+        findings.append({
+            "id": fid,
+            "title": title,
+            "location": _norm_loc(loc_val) if loc_val else "",
+        })
     return findings
 
 
@@ -3164,6 +4275,7 @@ def _parse_chunk_heading_inventory(text: str) -> list[dict[str, object]]:
             "root_cause": "",
             "description": "",
             "impact": "",
+            **_optional_finding_metadata_defaults(),
         }
         m = re.match(r"^#{2,4}\s+Finding\s+\[([^\]]+)\]:?", heading)
         if m:
@@ -3176,7 +4288,9 @@ def _parse_chunk_heading_inventory(text: str) -> list[dict[str, object]]:
             # Format-tolerant field extraction: handles bullets (- / *),
             # bold wrapping (**Label**: / **Label:**), and absence of bold.
             fm = re.match(
-                r"^\s*[-*]?\s*\*{0,2}([^:*]+?)\*{0,2}\s*:\s*(.*)", row
+                r"^\s*[-*]?\s*(?:\*\*)?([^:*]+?)(?:\*\*)?"
+                r"\s*(?:\([^)]*\))?\s*:\s*(.*)",
+                row,
             )
             if not fm:
                 continue
@@ -3211,6 +4325,10 @@ def _parse_chunk_heading_inventory(text: str) -> list[dict[str, object]]:
                 entry["description"] = _strip_md(val_raw)
             elif label_lc in ("source ids", "source id"):
                 entry["source_ids"] = _extract_ids_from_text(val_raw)
+            else:
+                opt_field = _optional_finding_metadata_field_for_label(label_lc)
+                if opt_field:
+                    entry[opt_field] = _strip_md(val_raw)
         if _non_reportable_marker(str(entry.get("severity", ""))) or _non_reportable_marker(str(entry.get("verdict", ""))):
             entry["severity"] = "Informational"
             if not entry.get("verdict"):
@@ -3238,6 +4356,7 @@ def _parse_chunk_table_inventory(text: str) -> list[dict[str, object]]:
                 "root_cause": "",
                 "description": "",
                 "impact": "",
+                **_optional_finding_metadata_defaults(),
             }
             for idx, cell in enumerate(row):
                 key = key_map.get(idx, "")
@@ -3273,6 +4392,10 @@ def _parse_chunk_table_inventory(text: str) -> list[dict[str, object]]:
                     entry["impact"] = val
                 elif "vulnerability class" in key and not entry["root_cause"]:
                     entry["root_cause"] = val
+                else:
+                    opt_field = _optional_finding_metadata_field_for_label(key)
+                    if opt_field:
+                        entry[opt_field] = val
             if _non_reportable_marker(str(entry.get("severity", ""))) or _non_reportable_marker(str(entry.get("verdict", ""))):
                 entry["severity"] = "Informational"
                 if not entry.get("verdict"):
@@ -3310,10 +4433,14 @@ def _parse_inventory_chunk(path: Path) -> list[dict[str, object]]:
             order.append(key)
             continue
         cur = merged[key]
-        for field in ("title", "severity", "location", "preferred_tag", "verdict", "root_cause", "description", "impact", "local_id"):
+        for field in (
+            "title", "severity", "location", "preferred_tag", "verdict",
+            "root_cause", "description", "impact", "local_id",
+            *_OPTIONAL_FINDING_METADATA_FIELDS,
+        ):
             if not cur.get(field) and entry.get(field):
                 cur[field] = entry.get(field)
-            elif len(str(entry.get(field, ""))) > len(str(cur.get(field, ""))) and field in {"root_cause", "description", "impact"}:
+            elif len(str(entry.get(field, ""))) > len(str(cur.get(field, ""))) and field in {"root_cause", "description", "impact", *_OPTIONAL_FINDING_METADATA_FIELDS}:
                 cur[field] = entry.get(field)
         cur_ids = list(cur.get("source_ids", []) or [])
         for sid in list(entry.get("source_ids", []) or []):
@@ -3357,6 +4484,10 @@ def _merge_inventory_entries(entries: list[dict[str, object]]) -> list[dict[str,
                 "root_cause": entry.get("root_cause", ""),
                 "description": entry.get("description", ""),
                 "impact": entry.get("impact", ""),
+                **{
+                    field: entry.get(field, "")
+                    for field in _OPTIONAL_FINDING_METADATA_FIELDS
+                },
             }
             order.append(key)
             continue
@@ -3367,7 +4498,10 @@ def _merge_inventory_entries(entries: list[dict[str, object]]) -> list[dict[str,
             cur["preferred_tag"] = entry.get("preferred_tag", "")
         if not cur.get("verdict") and entry.get("verdict"):
             cur["verdict"] = entry.get("verdict", "")
-        for field in ("root_cause", "description", "impact", "title"):
+        for field in (
+            "root_cause", "description", "impact", "title",
+            *_OPTIONAL_FINDING_METADATA_FIELDS,
+        ):
             if len(str(entry.get(field, ""))) > len(str(cur.get(field, ""))):
                 cur[field] = entry.get(field, "")
         local_id = entry.get("local_id")
@@ -3381,6 +4515,76 @@ def _merge_inventory_entries(entries: list[dict[str, object]]) -> list[dict[str,
     return items
 
 
+def _dedup_live_pair_cap() -> int:
+    """Resolve the live-pair cap.
+
+    The cap bounds how many candidate pairs are written into the live packet(s)
+    handed to the per-pair LLM dedup judge. It is NOT a blind-merge cap — every
+    admitted pair is still individually MERGE/KEEP judged by the dedup prompt
+    (and gated by the mechanical survivor-superset rule). Raising it only widens
+    how many genuine candidates reach the LLM; it never auto-merges.
+
+    Default 250 covers the observed 205-pair Irys L1 case in one pass. Env
+    override ``PLAMEN_DEDUP_LIVE_PAIR_CAP`` lets ops dial it down without code
+    change if a future inventory is pathologically large.
+    """
+    raw = os.environ.get("PLAMEN_DEDUP_LIVE_PAIR_CAP", "")
+    if raw.strip():
+        try:
+            val = int(raw.strip())
+            if val > 0:
+                return val
+        except (TypeError, ValueError):
+            pass
+    return _DEDUP_LIVE_PAIR_CAP_DEFAULT
+
+
+# Default cap on the number of candidate pairs admitted into the live LLM
+# work packet(s). Per-pair LLM judgment is retained for every admitted pair;
+# this is a context-budget bound, NOT a blind-merge cap. Overridable via
+# PLAMEN_DEDUP_LIVE_PAIR_CAP.
+# TURN-SAFE bound. semantic_dedup runs as ONE subprocess in ONE turn, so the
+# live cap is the per-turn pair budget. The previous 250 (split into 80-pair
+# "rounds") was a regression: the multi-round prompt still asks the SINGLE
+# subprocess to evaluate every round, so ~240 pairs of focus-inventory input +
+# per-pair decision output blew the 32K output-token cap AND saturated context
+# (100% context used) -> 0 decisions, hung. 50 keeps both input (focus
+# inventory) and output (decisions) well inside one turn (the long-proven safe
+# value was 24; 50 is ~2x that and ~1/5 of the overflow point). Per-round
+# SEPARATE subprocesses would let this go higher without overflow (future).
+# Overridable via PLAMEN_DEDUP_LIVE_PAIR_CAP for operators on bigger budgets.
+_DEDUP_LIVE_PAIR_CAP_DEFAULT = 50
+
+# Keep chunk == cap so len(live_pairs) <= _DEDUP_ROUND_CHUNK is ALWAYS true ->
+# exactly ONE round of <= cap pairs reaches the single subprocess, and EVERY
+# live pair is per-pair LLM-judged in that one round (no orphaned rounds that
+# only the mechanical supplemental fallback would touch). The dedup phase does
+# NOT (yet) re-invoke one subprocess PER round, so multi-round-in-one-turn must
+# never happen — chunk < cap would strand rounds 2..N unjudged by the LLM.
+#
+# The real per-turn context pressure was NOT the ~50 focus-inventory bodies; it
+# was the SC override forcing the agent to READ the full findings_inventory.md
+# AND REWRITE it verbatim into findings_inventory_deduped.md in the same turn.
+# That read+rewrite of the whole inventory is now removed: the agent emits
+# decisions-only (dedup_decisions.md) and the driver mechanically builds the
+# deduped inventory via plamen_mechanical.apply_llm_dedup_decisions. With the
+# inventory rewrite gone and only the BOUNDED per-round focus packet read, 50
+# per-pair judgements fit comfortably in one turn. Per-round SEPARATE
+# subprocesses would let this go higher without overflow (future work).
+_DEDUP_ROUND_CHUNK = 50
+
+# Findings whose depth source-ID set exceeds this threshold are treated as
+# depth-aggregate / perturbation findings. For such findings the source-ID
+# subset and PERT-lineage signals MISFIRE (a single shared source ID makes the
+# subset signal fire even though the defects differ), so those two signals are
+# SUPPRESSED as candidate-generation hints. The pair may still surface on
+# location / title / function-name signals. Heuristic from the Irys L1
+# post-mortem (INV-125/127 carried 15-element source sets).
+_DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD = 4
+
+# Back-compat alias. Historically a hard live limit of 24; retained as a name
+# so any external reference resolves, but the live cap is now resolved via
+# _dedup_live_pair_cap() (env-overridable, default 250).
 _DEDUP_LIVE_PAIR_LIMIT = 24
 
 
@@ -3399,8 +4603,25 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
     catches findings targeting the same function but at different line offsets
     (e.g., entry check vs exit path of the same function).
 
-    NEVER merges findings — only identifies candidates for LLM review.
-    Returns the number of candidate pairs written.
+    Aggregate-suppression: for any cross-file candidate where EITHER finding
+    carries more than ``_DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD`` depth source IDs
+    (depth-aggregate / perturbation findings), the source-ID-subset and
+    PERT-lineage signals are SUPPRESSED — they misfire on these large sets and
+    are the worst false-merge class. Such pairs may still surface via
+    location / title / function-name signals.
+
+    Multi-round: when the live candidate count exceeds ``_DEDUP_ROUND_CHUNK``,
+    per-round sub-packets (``dedup_candidate_pairs_round{N}.md`` +
+    ``dedup_focus_inventory_round{N}.md``) are written in addition to the
+    unified round-1 ``dedup_candidate_pairs.md`` so single-round consumers keep
+    working. The driver decides single vs multi-round. Each pair appears in
+    exactly one round.
+
+    NEVER merges findings — only identifies candidates for LLM review. The five
+    signals are candidate-generation HINTS only; this function performs no
+    auto-merge.
+
+    Returns the total number of candidate pairs written (live + deferred).
     """
     inv = scratchpad / "findings_inventory.md"
     if not inv.exists():
@@ -3424,10 +4645,21 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
         inv_id = m.group(1)
         title = m.group(2).strip()
         body = m.group(3)
-        loc_m = re.search(r"\*\*Location\*\*:\s*(.+)", body, re.IGNORECASE)
-        sev_m = re.search(r"\*\*Severity\*\*:\s*(\w+)", body, re.IGNORECASE)
-        loc = loc_m.group(1).strip() if loc_m else ""
-        sev = sev_m.group(1).strip() if sev_m else ""
+        # Location / Severity via the shared tolerant extractor: accepts
+        # bold (`**Location**:`), plain (`Location:`), bullet, `**Location:**`,
+        # backtick, `=`-separated, and TABLE-CELL (`| Location | ... |`)
+        # renderings. The old `**Location**:` / `**Severity**:`-exact regexes
+        # missed every non-bold form, silently dropping dedup-pair candidates
+        # (recall hole). Strict superset — every bold form still matches.
+        loc, _ = _field_anywhere(body, ("Location", "Locations"), table_ok=True)
+        sev_val, _ = _field_anywhere(body, ("Severity", "Final Severity"), table_ok=True)
+        loc = loc.strip()
+        # Legacy `**Severity**:\s*(\w+)` captured only the first word token;
+        # preserve that value-identity.
+        sev = ""
+        if sev_val:
+            sm = re.match(r"\s*\**\s*(\w+)", sev_val)
+            sev = sm.group(1) if sm else sev_val.strip()
         norm = _norm_loc(loc)
         file_part = re.sub(r":L?\d+.*$", "", norm)
         line_range = _parse_line_range(norm)
@@ -3515,6 +4747,9 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
     # ── Cross-file signals: source-ID subset, PERT-* lineage ──
     # These fire across ANY pair (same or different file).
     _PERT_RE = re.compile(r"^PERT-\d+$", re.IGNORECASE)
+    # Count of pairs for which the subset/PERT signals were suppressed because
+    # a side is a large-aggregate finding. Used only for the header note.
+    aggregate_suppressed_count = 0
     for i in range(len(findings)):
         for j in range(i + 1, len(findings)):
             fa, fb = findings[i], findings[j]
@@ -3524,12 +4759,32 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
 
             cross_reasons: list[str] = []
 
+            sa, sb = fa["_source_ids"], fb["_source_ids"]
+
+            # Aggregate-suppression: depth-aggregate / perturbation findings
+            # carry large source-ID sets, so the subset and PERT-lineage
+            # signals MISFIRE (a single shared source ID makes the subset
+            # signal fire even though the defects differ). When EITHER side
+            # exceeds the threshold, suppress those two false-merge-prone
+            # signals for this pair. The pair can still surface on
+            # location/title/function-name. This is the worst false-merge
+            # class per the Irys L1 post-mortem (e.g. INV-125/127 carrying
+            # 15-element source sets).
+            aggregate_suppressed = (
+                len(sa) > _DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD
+                or len(sb) > _DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD
+            )
+            # Track suppression only when the signals WOULD have fired (some
+            # shared source ID exists) so the header count reflects real
+            # suppressions, not every large-aggregate pair.
+            if aggregate_suppressed and sa and sb and (sa & sb):
+                aggregate_suppressed_count += 1
+
             # Signal 3: source-ID subset — if A's source IDs are a
             # non-empty proper subset of B's (or vice versa), A is
             # likely a partial view of the same bug that B covers
-            # more completely.
-            sa, sb = fa["_source_ids"], fb["_source_ids"]
-            if sa and sb:
+            # more completely. (Suppressed for large-aggregate findings.)
+            if sa and sb and not aggregate_suppressed:
                 if sa < sb:
                     cross_reasons.append(
                         f"source-ID subset ({', '.join(sorted(sa))} ⊂ {', '.join(sorted(sb))})"
@@ -3549,10 +4804,11 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
             # contain a PERT-* token and B's source IDs contain the
             # parent of that PERT (or vice versa), they are lineage-linked.
             # Also pair if both source sets reference overlapping depth IDs
-            # AND one contains PERT-*.
+            # AND one contains PERT-*. (Suppressed for large-aggregate
+            # findings — PERT findings are themselves the aggregate offenders.)
             pert_a = any(_PERT_RE.match(s) for s in sa) if sa else False
             pert_b = any(_PERT_RE.match(s) for s in sb) if sb else False
-            if (pert_a or pert_b) and sa & sb:
+            if (pert_a or pert_b) and sa & sb and not aggregate_suppressed:
                 cross_reasons.append("PERT lineage (shared depth source IDs)")
 
             if cross_reasons:
@@ -3567,93 +4823,253 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
         )
         return 0
 
-    # Sort: source-ID/PERT first, then location-overlap, then title score
+    # Sort: genuine same-code signals first, bare CC co-occurrence last.
+    #
+    # The limited live-pair budget must be spent on pairs that are likely to
+    # be the SAME code/bug seen twice, not on pairs that merely co-occur in a
+    # cross-cutting (CC) breadth sweep. The signals split into two strengths:
+    #
+    #   STRONG (genuine same-code): location overlap, source-ID subset
+    #     (mechanical proof of containment), and PERT lineage (documented
+    #     derivative sharing depth source IDs).
+    #   WEAK (bare CC co-occurrence): "source-ID overlap" — partial shared
+    #     source IDs with NEITHER set a subset of the other. This fires for
+    #     unrelated findings that a breadth agent happened to cite together;
+    #     it is provenance noise, not a same-code signal.
+    #
+    # Bare-CC-only pairs are demoted below every genuine same-code pair so the
+    # budget is not exhausted by provenance noise (the failure that let the
+    # clock-underflow x4 / pull_data x3 clusters escape dedup).
+    #
+    # NOTE: this only re-RANKS the candidate pairs handed to the dedup LLM. It
+    # does NOT decide any merge and CANNOT drop a finding — pairs beyond the
+    # live budget are preserved as deferred in dedup_candidate_pairs_full.md.
     def _sort_key(p: tuple) -> tuple:
-        has_src = "source-ID" in p[3] or "PERT" in p[3]
-        has_loc = "location overlap" in p[3]
-        return (-int(has_src), -int(has_loc), -p[2])
+        reason = p[3]
+        has_loc = "location overlap" in reason
+        has_subset = "source-ID subset" in reason
+        has_pert = "PERT lineage" in reason
+        # A pair whose ONLY source-ID signal is the bare partial overlap
+        # (and which has no location/subset/PERT genuine signal) is weak CC.
+        has_bare_cc = "source-ID overlap" in reason
+        is_genuine = has_loc or has_subset or has_pert
+        bare_cc_only = has_bare_cc and not is_genuine
+        return (
+            -int(is_genuine),     # genuine same-code pairs first
+            int(bare_cc_only),    # bare-CC-only pairs sink to the bottom
+            -int(has_loc),        # within genuine, prefer location overlap
+            -int(has_subset),     # then source-ID subset
+            -p[2],                # then title score
+        )
 
     sorted_pairs = sorted(pairs, key=_sort_key)
-    live_pairs = sorted_pairs[:_DEDUP_LIVE_PAIR_LIMIT]
 
-    # Write candidate pairs file
-    lines = [
-        "# Dedup Candidate Pairs",
-        "",
-        f"{len(live_pairs)} candidate pair(s) identified for LLM review.",
-        "Pairs are identified by five independent signals:",
-        "- **Source-ID subset**: one finding's depth source IDs are a proper subset of the other's (strongest — mechanical proof of containment)",
-        "- **PERT lineage**: perturbation finding shares depth source IDs with parent (strongest — documented derivative)",
-        "- **Location overlap**: same file + line ranges within 15 lines (primary for same-file)",
-        "- **Title overlap / shared identifiers**: same file + ≥0.50 token overlap (secondary)",
-        "- **Function-name match**: same file + same function name from Location field (tertiary)",
-        "",
-        "| Finding A | Finding B | Title Score | Signal(s) | Same Sev? |",
-        "|-----------|-----------|-------------|-----------|-----------|",
-    ]
-    if len(live_pairs) < len(pairs):
-        lines[3:3] = [
-            "",
-            f"Bounded work packet: showing top {len(live_pairs)} of {len(pairs)} candidate pair(s).",
-            "The full candidate set is preserved in `dedup_candidate_pairs_full.md`.",
-            "Treat omitted pairs as deferred, not silently discarded.",
-        ]
+    live_cap = _dedup_live_pair_cap()
+    live_pairs = sorted_pairs[:live_cap]
+    deferred_pairs = sorted_pairs[live_cap:]
 
-    for fa, fb, score, reason in live_pairs:
-        same_sev = "Yes" if fa["severity"].lower() == fb["severity"].lower() else "No"
-        lines.append(
+    findings_by_id = {f["id"]: f for f in findings}
+
+    def _pair_row(fa: dict, fb: dict, score: float, reason: str) -> str:
+        same_sev = (
+            "Yes" if fa["severity"].lower() == fb["severity"].lower() else "No"
+        )
+        return (
             f"| {fa['id']}: {fa['title'][:50]} | "
             f"{fb['id']}: {fb['title'][:50]} | "
             f"{score:.2f} | {reason} | {same_sev} |"
         )
-    lines.append("")
 
-    (scratchpad / "dedup_candidate_pairs.md").write_text(
-        "\n".join(lines), encoding="utf-8",
-    )
-    if len(live_pairs) < len(pairs):
-        full_lines = [
-            line
-            for idx, line in enumerate(lines)
-            if idx not in {3, 4, 5, 6}
+    def _signal_legend() -> list[str]:
+        legend = [
+            "Pairs are identified by five independent signals:",
+            "- **Source-ID subset**: one finding's depth source IDs are a proper subset of the other's (strongest — mechanical proof of containment)",
+            "- **PERT lineage**: perturbation finding shares depth source IDs with parent (strongest — documented derivative)",
+            "- **Location overlap**: same file + line ranges within 15 lines (primary for same-file)",
+            "- **Title overlap / shared identifiers**: same file + ≥0.50 token overlap (secondary)",
+            "- **Function-name match**: same file + same function name from Location field (tertiary)",
         ]
-        full_lines[2] = f"{len(pairs)} candidate pair(s) identified for LLM review."
-        if full_lines and full_lines[-1] == "":
-            full_lines.pop()
-        for fa, fb, score, reason in sorted_pairs[_DEDUP_LIVE_PAIR_LIMIT:]:
-            same_sev = "Yes" if fa["severity"].lower() == fb["severity"].lower() else "No"
-            full_lines.append(
-                f"| {fa['id']}: {fa['title'][:50]} | "
-                f"{fb['id']}: {fb['title'][:50]} | "
-                f"{score:.2f} | {reason} | {same_sev} |"
-            )
-        full_lines.append("")
-        (scratchpad / "dedup_candidate_pairs_full.md").write_text(
-            "\n".join(full_lines), encoding="utf-8",
+        # Aggregate-suppression note: the subset/PERT hints are unreliable for
+        # depth-aggregate / perturbation findings and were suppressed for those
+        # pairs (>4 source IDs). The LLM must NOT treat the absence of a
+        # subset/PERT signal on such pairs as evidence of distinctness, and
+        # must NEVER merge on subset/PERT hints alone.
+        legend.append(
+            "- **(aggregate-suppressed: >4 source IDs)**: for findings carrying "
+            f"more than {_DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD} depth source IDs "
+            "(depth-aggregate / perturbation findings), the source-ID-subset and "
+            "PERT-lineage hints are SUPPRESSED — they misfire on large source "
+            "sets. Such pairs surface (if at all) only via location/title/"
+            "function signals; judge them on a confirmed same-root-cause + "
+            "same-fix reading of BOTH bodies, never on a subset/PERT hint."
         )
+        if aggregate_suppressed_count:
+            legend.append(
+                f"- NOTE: {aggregate_suppressed_count} pair(s) had subset/PERT "
+                "signals suppressed under the aggregate rule."
+            )
+        return legend
 
-    focus_ids = {
-        item["id"]
-        for fa, fb, _score, _reason in live_pairs
-        for item in (fa, fb)
-    }
-    if focus_ids:
+    def _render_pairs_table(
+        title_line: str,
+        header_count: int,
+        note_lines: list[str],
+        rows: list[tuple],
+    ) -> str:
+        out = ["# Dedup Candidate Pairs", "", title_line]
+        out.extend(note_lines)
+        out.append("")
+        out.extend(_signal_legend())
+        out.append("")
+        out.append("| Finding A | Finding B | Title Score | Signal(s) | Same Sev? |")
+        out.append("|-----------|-----------|-------------|-----------|-----------|")
+        for fa, fb, score, reason in rows:
+            out.append(_pair_row(fa, fb, score, reason))
+        out.append("")
+        return "\n".join(out)
+
+    def _write_focus_inventory(path: Path, rows: list[tuple], packet_name: str) -> None:
+        focus_ids = {item["id"] for fa, fb, _s, _r in rows for item in (fa, fb)}
+        if not focus_ids:
+            return
         focus_lines = [
             "# Dedup Focus Inventory",
             "",
             "This bounded file contains the full finding bodies for the IDs "
-            "referenced by `dedup_candidate_pairs.md`. Use it for semantic "
-            "review before falling back to the full inventory.",
+            f"referenced by `{packet_name}`. Use it for semantic review before "
+            "falling back to the full inventory. The full bodies carry each "
+            "finding's distinct Location(s), Source IDs, attack path, and "
+            "impact so both sides of a candidate pair can be coupled on MERGE.",
             "",
         ]
         for f in findings:
             if f["id"] in focus_ids:
                 focus_lines.append(str(f.get("_block", "")).rstrip())
                 focus_lines.append("")
-        (scratchpad / "dedup_focus_inventory.md").write_text(
-            "\n".join(focus_lines).rstrip() + "\n",
-            encoding="utf-8",
+        path.write_text(
+            "\n".join(focus_lines).rstrip() + "\n", encoding="utf-8"
         )
+
+    # ── Determine single vs multi-round layout ──
+    # Chunk only the LIVE pairs (the per-pair judged set). Deferred pairs
+    # (beyond the cap) are written to dedup_candidate_pairs_full.md for
+    # traceability and are never silently discarded.
+    if len(live_pairs) <= _DEDUP_ROUND_CHUNK:
+        rounds: list[list[tuple]] = [live_pairs] if live_pairs else []
+    else:
+        rounds = [
+            live_pairs[i:i + _DEDUP_ROUND_CHUNK]
+            for i in range(0, len(live_pairs), _DEDUP_ROUND_CHUNK)
+        ]
+
+    n_rounds = len(rounds)
+
+    # Round 1's packet is ALSO the unified dedup_candidate_pairs.md so that
+    # existing single-round consumers (driver, validators) keep working.
+    if rounds:
+        round1 = rounds[0]
+        if n_rounds == 1:
+            title_line = (
+                f"{len(round1)} candidate pair(s) identified for LLM review."
+            )
+            note_lines: list[str] = []
+            if deferred_pairs:
+                note_lines = [
+                    "",
+                    f"Bounded work packet: showing top {len(live_pairs)} of "
+                    f"{len(pairs)} candidate pair(s) (cap={live_cap}).",
+                    "The full candidate set is preserved in "
+                    "`dedup_candidate_pairs_full.md`.",
+                    "Treat omitted pairs as deferred, not silently discarded.",
+                ]
+        else:
+            title_line = (
+                f"Round 1 of {n_rounds}: {len(round1)} candidate pair(s) for "
+                "LLM review."
+            )
+            note_lines = [
+                "",
+                f"Multi-round work packet: {len(live_pairs)} live candidate "
+                f"pair(s) (cap={live_cap}) split into {n_rounds} round(s) of "
+                f"<= {_DEDUP_ROUND_CHUNK} pairs each.",
+                "Evaluate ONLY this round's rows; later rounds are in "
+                "`dedup_candidate_pairs_round{N}.md`. Decisions are appended "
+                "across rounds and excluded pairs are not re-decided.",
+            ]
+            if deferred_pairs:
+                note_lines.append(
+                    "Pairs beyond the cap are preserved in "
+                    "`dedup_candidate_pairs_full.md` (deferred, not discarded)."
+                )
+
+        unified = _render_pairs_table(
+            title_line, len(round1), note_lines, round1
+        )
+        (scratchpad / "dedup_candidate_pairs.md").write_text(
+            unified, encoding="utf-8"
+        )
+        _write_focus_inventory(
+            scratchpad / "dedup_focus_inventory.md",
+            round1,
+            "dedup_candidate_pairs.md",
+        )
+
+        # Per-round sub-packets (only when multi-round).
+        if n_rounds > 1:
+            for ridx, round_rows in enumerate(rounds, start=1):
+                rt_line = (
+                    f"Round {ridx} of {n_rounds}: {len(round_rows)} candidate "
+                    "pair(s) for LLM review."
+                )
+                rt_notes = [
+                    "",
+                    "Evaluate ONLY this round's rows. If the driver supplies an "
+                    "`## Already-decided exclusion list`, do NOT re-decide those "
+                    "pairs. Append decisions to dedup_decisions.md.",
+                ]
+                rt_packet = f"dedup_candidate_pairs_round{ridx}.md"
+                (scratchpad / rt_packet).write_text(
+                    _render_pairs_table(
+                        rt_line, len(round_rows), rt_notes, round_rows
+                    ),
+                    encoding="utf-8",
+                )
+                _write_focus_inventory(
+                    scratchpad / f"dedup_focus_inventory_round{ridx}.md",
+                    round_rows,
+                    rt_packet,
+                )
+
+    # ── Deferred (beyond-cap) traceability file ──
+    if deferred_pairs:
+        full_lines = [
+            "# Dedup Candidate Pairs (Full Set)",
+            "",
+            f"{len(pairs)} candidate pair(s) identified for LLM review "
+            f"({len(live_pairs)} live, {len(deferred_pairs)} deferred beyond "
+            f"cap={live_cap}).",
+            "Deferred pairs are preserved for traceability and are NOT silently "
+            "discarded. Raise PLAMEN_DEDUP_LIVE_PAIR_CAP to admit more into the "
+            "live LLM-judged set.",
+            "",
+            "| Finding A | Finding B | Title Score | Signal(s) | Same Sev? |",
+            "|-----------|-----------|-------------|-----------|-----------|",
+        ]
+        for fa, fb, score, reason in sorted_pairs:
+            full_lines.append(_pair_row(fa, fb, score, reason))
+        full_lines.append("")
+        (scratchpad / "dedup_candidate_pairs_full.md").write_text(
+            "\n".join(full_lines), encoding="utf-8"
+        )
+
+    # ── Round-count marker (deterministic signal for the driver) ──
+    try:
+        (scratchpad / "dedup_round_count.txt").write_text(
+            f"{n_rounds}\n", encoding="utf-8"
+        )
+    except Exception:
+        pass
+
     return len(pairs)
 
 
@@ -3662,6 +5078,11 @@ _DEPTH_PROMOTION_FILES = (
     "depth_state_trace_findings.md",
     "depth_edge_case_findings.md",
     "depth_external_findings.md",
+    # v2.8.9: depth_token_flow is a CORE SC depth channel (DT-* ids) but was
+    # absent from this list (the list was authored L1-first, where token-flow
+    # does not load), so DT-* depth-only findings were never read by the
+    # promotion bridge and silently dropped. Added for SC parity.
+    "depth_token_flow_findings.md",
     "depth_network_surface_findings.md",
     "depth_iter2_*_findings.md",
     "depth_iter3_*_findings.md",
@@ -3692,6 +5113,13 @@ _PROMOTABLE_FEEDER_ID_PATTERN = (
     r"DCI-\d+|DEC-\d+|DST-\d+|DX-\d+|DN-\d+|"
     r"DNS-\d+|DA-[A-Z0-9_-]+-\d+|DA\d+-[A-Z0-9_-]+-\d+|"
     r"PERT-\d+|ATT-\d+|"
+    # SC depth/scanner channels that actually emit DS-/DE-/DT-/BLIND- ids
+    # (v2.8.9: these prefixes were ABSENT, so the depth-promotion bridge and its
+    # receipt gate parsed 0 findings from depth_state_trace / depth_edge_case /
+    # depth_token_flow / blind_spot_* and silently dropped depth-only findings —
+    # incl. a CONFIRMED High on the DODO run. DST-=design_stress and DEC-/DX- are
+    # distinct; DS-/DE-/DT- require a digit so they cannot match inside DST-/DEC-/DX-N.)
+    r"DS-\d+|DE-\d+|DT-\d+|BLIND-[A-Z]?-?\d+|"
     # SC scanner/fuzz/tool outputs
     r"SLITHER-\d+|FUZZ-\d+|MEDUSA-\d+|RSW-\d+|SP-\d+|"
     # SC niche/injectable skill prefixes. Deliberately excludes public report
@@ -3843,6 +5271,7 @@ def _parse_depth_finding_blocks(path: Path) -> list[dict[str, str]]:
             "description": _strip_md(desc),
             "source_file": path.name,
             "_referenced_ids": sorted(_ref_ids),
+            **_extract_optional_finding_metadata(block),
         })
     return out
 
@@ -4073,12 +5502,8 @@ def _expected_depth_agent_roles(scratchpad: Path) -> list[str]:
     return roles
 
 
-_DEPTH_EVIDENCE_TAG_RE = re.compile(
-    r"\[(BOUNDARY|VARIATION|TRACE|REGRESS|PERTURBATION|"
-    r"NON-DET|PRE-AUTH-PANIC|ASYMMETRIC|SCORE-DRAIN|REORG-DIVERGE|"
-    r"DECODE-UNBOUNDED|CROSS-DOMAIN-DEP|MEDUSA-PASS)[: ]",
-    re.IGNORECASE,
-)
+# Ship A: single source of truth in plamen_types (was a divergent local copy).
+_DEPTH_EVIDENCE_TAG_RE = DEPTH_EVIDENCE_TAG_RE
 
 
 # --- v2.2.0 A.4: NOTREAD priority coverage gate ----------------------------
@@ -4671,23 +6096,59 @@ _MATRIX_ONCHAIN_RE = re.compile(
 )
 
 
+# Severity enum for the matrix axes. Impact may also be "Informational"/"Info"
+# (the `_MATRIX_IMPACT_RE` accept set); Likelihood is High/Medium/Low only. The
+# leading-word extractor below mirrors the legacy regexes' group(1) — it returns
+# the FIRST enum word of a value like `High (direct fund loss)` so the table and
+# kv forms yield a value-identical result to the old leading-key regex.
+_MATRIX_IMPACT_ENUM = r"\b(?:High|Medium|Low|Informational|Info)\b"
+_MATRIX_LIKELIHOOD_ENUM = r"\b(?:High|Medium|Low)\b"
+_MATRIX_IMPACT_ENUM_RE = re.compile(_MATRIX_IMPACT_ENUM, re.IGNORECASE)
+_MATRIX_LIKELIHOOD_ENUM_RE = re.compile(_MATRIX_LIKELIHOOD_ENUM, re.IGNORECASE)
+
+
+def _matrix_axis(text: str, labels, enum_re: re.Pattern, enum_pat: str):
+    """Extract a severity-matrix axis (Impact / Likelihood) from *text*.
+
+    Routes through the shared `_field_anywhere` tolerant extractor
+    (regex-fragility plan Site 3) so the axis is found in EVERY shape:
+    leading-key (`Impact: High`), bold/backtick/bullet, AND — the live miss —
+    the matrix TABLE forms (`| Impact | Likelihood |` header/row and
+    `| Impact | High |` vertical kv). `value_pattern=enum_pat` constrains the
+    accepted value to the severity enum (so a `Impact: TBD` line is skipped and
+    the search continues, just like the legacy regex would not match it).
+
+    Returns the leading enum WORD (group(1)-equivalent: `High` from
+    `High (direct fund loss)`), preserving value-identity with the legacy
+    `_MATRIX_*_RE.group(1)`. Returns None when no axis value is present.
+    """
+    value, _shape = _field_anywhere(
+        text, labels, value_pattern=enum_pat, table_ok=True
+    )
+    if not value:
+        return None
+    m = enum_re.search(value)
+    return m.group(0) if m else None
+
+
 def _extract_severity_inputs(verify_text: str) -> dict:
     """Parse Impact, Likelihood, and modifier flags from a verify_*.md body.
 
-    Only literal Impact/Likelihood lines on a leading-key form (`Impact: High`)
-    are recognized. Modifier flags are detected by phrase scan in the body --
-    these are advisory tags emitted by the verifier methodology, not formal
-    fields. Missing data returns empty / None values for graceful fallback.
+    Impact/Likelihood are extracted via the shared `_field_anywhere` tolerant
+    extractor (Site 3): the legacy leading-key form (`Impact: High`) PLUS the
+    previously table-blind matrix renderings (`| Impact | Likelihood |` header
+    row + aligned data row, and `| Impact | High |` vertical kv). Modifier flags
+    are detected by phrase scan in the body -- these are advisory tags emitted
+    by the verifier methodology, not formal fields. Missing data returns
+    empty / None values for graceful fallback.
     """
     text = verify_text or ""
-    impact = None
-    likelihood = None
-    m = _MATRIX_IMPACT_RE.search(text)
-    if m:
-        impact = m.group(1)
-    m = _MATRIX_LIKELIHOOD_RE.search(text)
-    if m:
-        likelihood = m.group(1)
+    impact = _matrix_axis(
+        text, ("Impact",), _MATRIX_IMPACT_ENUM_RE, _MATRIX_IMPACT_ENUM
+    )
+    likelihood = _matrix_axis(
+        text, ("Likelihood",), _MATRIX_LIKELIHOOD_ENUM_RE, _MATRIX_LIKELIHOOD_ENUM
+    )
     modifiers = {
         "onchain_only": bool(_MATRIX_ONCHAIN_RE.search(text)),
         "view_function": bool(_MATRIX_VIEW_FN_RE.search(text)),
@@ -4796,7 +6257,19 @@ def _enforce_severity_matrix(verify_text: str, queue_row: dict[str, str]) -> str
         normalize_severity(verifier_sev_resolved) if verifier_sev_resolved else ""
     )
     if base is not None:
-        matrix_final = _apply_severity_modifiers(base, inputs.get("modifiers", {}))
+        mods = dict(inputs.get("modifiers", {}))
+        # CALIBRATION (recover the good-coverage-class Critical): the on-chain-only
+        # -1 modifier applies ONLY when impact is CONFINED to on-chain state
+        # (report-template.md). Impact:High is defined as "direct fund loss /
+        # permanent lock" -- that is NOT confined, so the modifier must not pull a
+        # High-impact finding down (later DODO runs lost their Critical to exactly
+        # this spurious on-chain demotion of a verified High x High theft). This
+        # only PREVENTS a demotion of an already-High-impact finding; it never
+        # promotes, so it cannot re-inflate the verifier-over-rating class the
+        # asymmetric matrix is designed to correct.
+        if _normalize_matrix_label(inputs.get("impact"), _MATRIX_IMPACT_LABELS) == "High":
+            mods.pop("onchain_only", None)
+        matrix_final = _apply_severity_modifiers(base, mods)
         if verifier_sev and verifier_sev != matrix_final:
             v_rank = severity_rank(verifier_sev)
             m_rank = severity_rank(matrix_final)
@@ -5189,10 +6662,18 @@ def _section_for_report_id(body: str, report_id: str) -> str:
         row = row_pat.search(qo_text)
         return row.group(0) if row else ""
     start = m.start()
-    # Stop at the next report finding header as well as tier/report headings.
-    # Otherwise X-01 can pass location-integrity checks using X-02's section.
+    # RPT-3: Stop at the next report finding header OR a known STRUCTURAL tier/
+    # report heading -- never at an arbitrary `##`. In-finding subheadings like
+    # `## Impact` / `## PoC Result` are legitimate (the field extractor supports
+    # section-style fields), so terminating on any H2 truncated the finding and
+    # produced false "missing substantive Impact/PoC" errors. Cross-finding
+    # isolation (X-01 must not borrow X-02's section) is preserved by the
+    # next-finding-header branch and the closed structural-heading set.
     end_m = re.search(
-        r"(?im)^#{1,2}\s+|^#{3}\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[\s*[CHMLI]-\d{1,3}\s*\]",
+        r"(?im)^#{1,2}\s+(?:Critical|High|Medium|Low|Informational|"
+        r"Quality\s+Observations|Appendix|Priority\s+Remediation|"
+        r"Excluded|Summary)\b"
+        r"|^#{3}\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[\s*[CHMLI]-\d{1,3}\s*\]",
         (body or "")[m.end():],
     )
     end = m.end() + end_m.start() if end_m else len(body or "")
@@ -5217,14 +6698,65 @@ _TABLE_SOURCE_ID_RE = re.compile(r"(?im)\b([A-Z][A-Z0-9]{0,6}-\d+)\b")
 _TABLE_LOCATION_RE = re.compile(r"([A-Za-z0-9_./\\-]+\.(?:sol|rs|go|move):L?\d+)")
 
 
+# Site 5 (regex-fragility plan, RECALL-CRITICAL): the non-reportable markers.
+# A match forces severity -> Informational and verdict -> REFUTED, so a
+# FALSE-fire here silently DEMOTES a real finding. The negation-blind substring
+# form wrongly fired on `NOT a duplicate`, `not refuted`, `this is not a false
+# positive` — demoting genuine findings. The fix scopes a clause-level negation
+# guard to each matched marker: when a negation token (`not`/`no`/`never`/…)
+# shares the SAME clause as the marker word, that match is suppressed (it is the
+# verifier asserting the finding is NOT non-reportable). Word boundaries already
+# prevented `id`!=`invalid`-style false hits; the markers below keep them.
+#
+# Recall-safety: the guard only ever SUPPRESSES a non-reportable match, i.e. it
+# can only KEEP a finding reportable that the old rule would have demoted. It can
+# never newly demote a finding the old rule kept. Same direction as the
+# `_valid_poc_skip` narrowing — strictly recall-positive.
+#
+# Each individual marker alternative that itself encodes a negation
+# (`not applicable`, `not reportable`, `no finding`) is a TRUE non-reportable
+# signal, so its own leading `not`/`no` must NOT trip the guard. We therefore
+# strip the marker span before scanning its clause for an OUTSIDE negation.
+_NON_REPORTABLE_MARKER_RE = re.compile(
+    r"\b(?:refuted|false[_\s-]*positive|infeasible|not\s+applicable|"
+    r"absorbed(?:\s+into)?|deduplicated|not\s+reportable|no\s+finding|"
+    # Disposition-SENSE only for the two adjective-prone terms. Bare 'duplicate'
+    # / 'merged' word-sense (e.g. 'merged-pool', 'duplicate entry') must NOT
+    # demote a real finding (recall-safe). Accept: 'duplicate of', 'is/as/marked
+    # (a) duplicate', standalone duplicate at field-end/before-ID; 'merged
+    # into/with/to/under', 'is/was merged', standalone merged at field-end/before-ID.
+    r"duplicate[ds]?\s+of\b|(?:is|as|marked)(?:\s+a)?(?:\s+as)?\s+duplicate\b|"
+    r"\bduplicates?\b(?=\s*[.;,)\]]|\s*$|\s+[A-Z]{1,4}-\d)|"
+    r"merged\s+(?:in|into|with|to|under)\b|(?:is|was)\s+merged\b|"
+    r"\bmerged\b(?=\s*[.;,)\]]|\s*$|\s+[A-Z]{1,4}-\d))",
+    re.IGNORECASE,
+)
+
+
 def _non_reportable_marker(text: str) -> bool:
-    return bool(re.search(
-        r"\b(?:refuted|false[_\s-]*positive|infeasible|not\s+applicable|"
-        r"absorbed(?:\s+into)?|duplicate|deduplicated|merged(?:\s+into)?|"
-        r"not\s+reportable|no\s+finding)\b",
-        text or "",
-        re.IGNORECASE,
-    ))
+    s = text or ""
+    for m in _NON_REPORTABLE_MARKER_RE.finditer(s):
+        # Scope the negation check to the marker's own clause, with the marker
+        # span itself blanked out so a marker that legitimately contains its own
+        # negation (`not applicable`/`not reportable`/`no finding`) is not
+        # self-suppressed. Only an EXTERNAL negation governing the marker
+        # (e.g. "this is NOT a duplicate") suppresses it.
+        clause = _clause_around(s, m.start(), m.end())
+        # Blank the marker span inside the clause so a marker that legitimately
+        # contains its own negation is not self-suppressed.
+        marker_text = m.group(0)
+        idx = clause.find(marker_text)
+        if idx >= 0:
+            masked = clause[:idx] + (" " * len(marker_text)) + clause[idx + len(marker_text):]
+        else:
+            masked = clause
+        if _NEGATION_GUARD_RE.search(masked):
+            # An external negation governs this marker -> it is asserting the
+            # finding is NOT non-reportable. Suppress this match and keep
+            # scanning (another, ungoverned marker may still be present).
+            continue
+        return True
+    return False
 
 
 def _ambiguous_na_marker(text: str) -> bool:
@@ -5790,3 +7322,315 @@ def _path_in_scope_file(rel_path: str, scope_names: set[str]) -> bool:
         if "/" in n and (rel.endswith("/" + n) or n.endswith("/" + rel)):
             return True
     return False
+
+
+# ===========================================================================
+# Artifact marker helpers (Ship 1 of artifact-complete PTY supervision)
+# ===========================================================================
+#
+# Spawned-worker artifacts (analysis_*.md, depth_*_findings.md, niche_*_findings.md,
+# verify_*.md, tier writer outputs) carry HTML-comment markers that record the
+# write-lifecycle of the file:
+#
+#   <!-- PLAMEN_ARTIFACT: analysis_access_control.md -->
+#   <!-- PLAMEN_OWNER: B3 -->
+#   <!-- PLAMEN_STATUS: IN_PROGRESS -->
+#   <!-- PLAMEN_PHASE: breadth -->
+#   <!-- PLAMEN_VERSION: 1 -->
+#   ... body ...
+#   <!-- PLAMEN_STATUS: COMPLETE -->
+#   <!-- PLAMEN_FINDINGS_COUNT: 7 -->
+#
+# Helpers in this section are pure (no driver state, no I/O beyond reading the
+# given path). Wiring into Phase / gate_passes happens in Ship 3.
+
+# T2-6 (SW15-1): no re.DOTALL. PLAMEN markers are single-line HTML comments;
+# with DOTALL a malformed/missing `-->` let the value `(.*?)` swallow the body
+# AND the next marker, misclassifying a COMPLETE file as IN_PROGRESS. Bounding
+# the value to one line confines the damage of a malformed marker to its line.
+_PLAMEN_MARKER_RE = re.compile(
+    r"<!--\s*PLAMEN_([A-Z][A-Z0-9_]*)\s*:\s*(.*?)\s*-->",
+)
+
+
+def _strip_fenced_code_blocks(text: str) -> str:
+    """Ship 8.18: remove fenced code blocks (``` or ~~~) before PLAMEN-marker
+    parsing.
+
+    Prompt/documentation EXAMPLES place marker comments like
+    ``<!-- PLAMEN_STATUS: COMPLETE -->`` inside code fences. If an agent echoes
+    such an example into its artifact, the marker parser (and legacy-unmarked
+    detection) would treat the EXAMPLE as a real status marker -- poisoning the
+    last-wins resolution (a fenced COMPLETE could mask a real IN_PROGRESS, or a
+    fenced marker could make a genuinely legacy file look fresh-format). Real
+    markers an agent writes live in the body, not inside fences, so dropping
+    fenced content before parsing is safe and matches intent.
+    """
+    out: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue  # drop the fence delimiter line itself
+        if not in_fence:
+            out.append(line)
+    return "\n".join(out)
+
+# Site 4 (regex-fragility plan): heading-LEVEL tolerant. The completion gate
+# `_structural_completeness_ok` calls `_NO_FINDINGS_HEADING_RE.search` to decide
+# whether a complete-marked artifact carries an explicit negative-result
+# rationale. The old `^##` H2-exact form false-FAILED a complete artifact that
+# rendered the rationale as H1/H3 drift (`# No Findings` / `### No Findings`).
+# `#{1,6}` is a strict superset of `##` — every H2 match still matches, and H1
+# /H3..H6 drift is newly accepted. Recall-safe: this gate can only now PASS more
+# complete artifacts, never fail one it previously passed.
+_NO_FINDINGS_HEADING_RE = re.compile(
+    r"^#{1,6}\s+.*\b(No\s+Findings|Negative\s+Result)\b",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+_OBLIGATION_RECEIPTS_HEADING_RE = re.compile(
+    r"^##\s+.*\bObligation\s+Receipts\b",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+# Ship 8.2: an artifact "has findings" if it shows a `## Findings` section
+# OR at least one finding block. Finding blocks are `## Finding [ID]`
+# (breadth) or `### Finding [ID]` (depth) -- 2 or 3 hashes, then "Finding",
+# whitespace, "[". Case-insensitive (review note). The block regex does NOT
+# match the `## Findings` section heading ("Findings" has no whitespace+"["
+# after "Finding"), so the two regexes are disjoint.
+# Ship D: single source of truth in plamen_types (H2/H3, captures the ID).
+_FINDING_BLOCK_HEADING_RE = FINDING_BLOCK_HEADING_RE
+# Site 4 (regex-fragility plan): heading-LEVEL tolerant `#{1,6}` (strict
+# superset of `##`). An agent that renders the findings section as `# Findings`
+# or `### Findings` must not false-FAIL the completion gate. `_FINDING_BLOCK_*`
+# disjointness is preserved: "Findings\b" still requires the word boundary after
+# "Findings", so a `## Finding [ID]` block heading (no trailing 's') never
+# collides with this section heading.
+_FINDINGS_SECTION_RE = re.compile(
+    r"^#{1,6}\s+Findings\b",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+_FINDINGS_BODY_MIN_CHARS = 15
+
+# Ship D (SW03-1): crash-safety / "to be filled" placeholder bodies that an LLM
+# leaves under a `## Findings` heading. Matched substrings are stripped before
+# the substance re-check, so they cannot masquerade as completed analysis.
+_FINDINGS_PLACEHOLDER_BODY_RE = re.compile(
+    r"\(?\s*(?:findings?\s+(?:will\s+be\s+)?appended\b[^)\n]*"
+    r"|(?:findings?\s+)?appended\s+below\b[^)\n]*"
+    r"|to\s+be\s+(?:filled|added|appended|determined|populated)\b[^)\n]*"
+    r"|no\s+findings?\s+(?:yet|recorded\s+yet)\b[^)\n]*"
+    r"|placeholder\b[^)\n]*"
+    r"|as\s+they\s+are\s+discovered\b[^)\n]*"
+    r"|TBD\b|TODO\b)\s*\)?",
+    re.IGNORECASE,
+)
+
+
+def _findings_section_has_body(text: str) -> bool:
+    """Ship 8.18: True iff a `## Findings` section exists AND has substantive
+    body content (>= _FINDINGS_BODY_MIN_CHARS non-whitespace chars between the
+    heading and the next `## ` heading / EOF). A BARE `## Findings` shell --
+    the heading with nothing under it -- returns False. This closes the hole
+    where an empty `## Findings` heading counted as completed work while
+    preserving the Ship 8.2 widening (a real `## Findings` section with prose
+    still counts, without requiring a `## Finding [` block)."""
+    m = _FINDINGS_SECTION_RE.search(text)
+    if not m:
+        return False
+    nl = text.find("\n", m.end())
+    if nl == -1:
+        return False  # heading is the last line -> no body
+    rest = text[nl + 1:]
+    nxt = re.search(r"^##\s+\S", rest, re.MULTILINE)
+    body = rest[: nxt.start()] if nxt else rest
+    if len("".join(body.split())) < _FINDINGS_BODY_MIN_CHARS:
+        return False
+    # Ship D (SW03-1): reject KNOWN placeholder bodies. The breadth crash-safety
+    # stub writes `## Findings\n\n(findings appended below as they are
+    # discovered)` (>15 chars), which Ship 8.18's length-only check accepted as
+    # real work -> an empty COMPLETE-marked breadth artifact silently passed.
+    # Strip placeholder phrases, then re-test substance: a REAL section that
+    # merely mentions such a phrase alongside real findings still passes.
+    substantive = _FINDINGS_PLACEHOLDER_BODY_RE.sub("", body)
+    return len("".join(substantive.split())) >= _FINDINGS_BODY_MIN_CHARS
+
+
+def _artifact_has_findings(text: str) -> bool:
+    """True iff the artifact body shows at least one `## Finding [` /
+    `### Finding [` block OR a `## Findings` section WITH substantive body.
+
+    Ship 8.2 findings-present signal (block OR section), tightened by Ship 8.18
+    to reject a BARE `## Findings` shell (heading, no body) -- which previously
+    counted as completed work."""
+    return bool(
+        _FINDING_BLOCK_HEADING_RE.search(text)
+        or _findings_section_has_body(text)
+    )
+
+
+def _extract_artifact_status(path: Path) -> dict[str, str]:
+    """Parse <!-- PLAMEN_* --> comments from `path`.
+
+    Multiple occurrences of the same key collapse to the LAST value
+    (final-write-wins semantics: e.g. an IN_PROGRESS line followed by a
+    COMPLETE line yields STATUS=COMPLETE).
+
+    Returns an empty dict when the file is missing, unreadable, or contains
+    no PLAMEN_* markers. Keys are uppercase without the PLAMEN_ prefix
+    (e.g. STATUS, OWNER, FINDINGS_COUNT).
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+    # Ship 8.18: ignore markers inside fenced code blocks (examples) so a
+    # fenced exemplar cannot poison last-wins status resolution.
+    text = _strip_fenced_code_blocks(text)
+    result: dict[str, str] = {}
+    for m in _PLAMEN_MARKER_RE.finditer(text):
+        key = m.group(1).strip()
+        val = m.group(2).strip()
+        # Last occurrence wins because dict overwrite preserves order.
+        result[key] = val
+    return result
+
+
+def is_artifact_complete(path: Path, min_bytes: int) -> bool:
+    """Return True iff PLAMEN_STATUS == "COMPLETE" AND the file is at
+    least `min_bytes` long.
+
+    False when the file is missing, unreadable, below `min_bytes`, lacks a
+    PLAMEN_STATUS marker, or has STATUS != COMPLETE. The size guard makes
+    COMPLETE necessary but not sufficient — Ship 3 layers structural
+    completeness checks on top for the breadth gate.
+    """
+    try:
+        if not path.exists():
+            return False
+        if path.stat().st_size < min_bytes:
+            return False
+    except Exception:
+        return False
+    markers = _extract_artifact_status(path)
+    return markers.get("STATUS") == "COMPLETE"
+
+
+def is_artifact_legacy_unmarked(path: Path) -> bool:
+    """Return True iff the file exists with substantive content but
+    contains NO ``PLAMEN_*`` comment marker of ANY kind.
+
+    Ship 8.2 (RC2 fix): the prior implementation keyed legacy detection
+    off the single ``PLAMEN_ARTIFACT`` marker. That misclassified
+    fresh-format files that carry OTHER markers (``PLAMEN_STATUS``,
+    ``PLAMEN_FINDINGS_COUNT``, agent-improvised ``PLAMEN_AGENT`` /
+    ``PLAMEN_FOCUS``) but happen to omit ``PLAMEN_ARTIFACT`` -- on a
+    fresh audit those were wrongly routed to IN_PROGRESS and halted the
+    breadth phase (DODO 2026-05-22). A file with any PLAMEN marker is a
+    fresh-format file; its completion is judged by status + structure,
+    not by legacy detection.
+
+    Uses the canonical ``_PLAMEN_MARKER_RE`` (the same comment-form regex
+    ``_extract_artifact_status`` uses) so "has a PLAMEN marker" means the
+    same thing across the codebase: a marker the parser cannot see is a
+    marker that does not exist. A prose mention of a marker name does NOT
+    match -- the regex requires the full ``<!-- PLAMEN_X: ... -->`` comment.
+
+    Legacy/pre-marker artifacts (genuinely no markers) are still detected
+    and tolerated on resumed scratchpads with a warning log.
+    """
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return False
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    # Ship 8.18: a marker that only appears inside a fenced example does not
+    # make a file "fresh-format" -- strip fences before deciding legacy status.
+    text = _strip_fenced_code_blocks(text)
+    return not bool(_PLAMEN_MARKER_RE.search(text))
+
+
+def _structural_completeness_ok(
+    path: Path,
+    *,
+    required_headings: tuple[str, ...] | list[str] = (),
+    require_findings_count_marker: bool = False,
+    placeholder_strings: tuple[str, ...] | list[str] = (),
+    require_obligation_receipts_if_shard_exists: Optional[Path] = None,
+) -> tuple[bool, list[str]]:
+    """Run structural completeness checks against `path` and return
+    `(ok, reasons)` where `ok` is True only when every applicable check
+    passes. ANY entry in `reasons` hard-fails the artifact -- there is no
+    such thing as a "soft warning reason" here.
+
+    Ship 8.2 reduces the contract to its semantic minimum so the gate
+    accepts genuinely-complete work without demanding ceremonial marker
+    schemas that real agents reproduce inconsistently:
+
+    - required_headings: each entry must appear as a `## ` heading.
+      Retained for callers that genuinely need a specific heading;
+      breadth/depth now pass `()` and rely on the findings rule below.
+    - FINDINGS RULE (replaces the old literal-`## Findings` requirement
+      AND the FINDINGS_COUNT==0 branch): the artifact must EITHER show
+      findings (`## Findings` section OR >=1 `## Finding [` / `### Finding [`
+      block) OR carry an explicit `## No Findings` / `## Negative Result`
+      rationale. An artifact with neither is empty/incomplete.
+    - placeholder_strings: none of these substrings may remain at COMPLETE
+      time (still rejects TODO:/FILL_ME/<placeholder>).
+
+    COMPATIBILITY NO-OPS (Ship 8.2): the following parameters are retained
+    ONLY for signature/test stability and have NO effect on the verdict.
+    They MUST NOT append any reason (reasons hard-fail):
+    - require_findings_count_marker: PLAMEN_FINDINGS_COUNT is now
+      informational metadata; the findings decision uses block detection,
+      not the count. Passing True changes nothing. (Removing the hard
+      requirement eliminates the attempt-1 wasted retry the canonical
+      DODO files hit when they omitted the count.)
+    - require_obligation_receipts_if_shard_exists: receipt coverage is
+      owned solely by `_check_opengrep_obligation_coverage` (warning-only,
+      non-blocking). A missing `## Obligation Receipts` section MUST NOT
+      hard-fail the artifact gate. Passing a shard path changes nothing.
+
+    The return shape `(ok, reasons)` lets the caller surface every failure
+    reason in the gate's detail string at once.
+    """
+    # require_findings_count_marker and require_obligation_receipts_if_shard_exists
+    # are intentionally unused (compatibility no-ops -- see docstring).
+    _ = (require_findings_count_marker, require_obligation_receipts_if_shard_exists)
+
+    reasons: list[str] = []
+
+    try:
+        if not path.exists():
+            return False, ["file missing"]
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:  # pragma: no cover - I/O failure path
+        return False, [f"file unreadable: {exc}"]
+
+    for heading in required_headings:
+        pattern = re.compile(
+            r"^##\s+" + re.escape(heading) + r"\b",
+            re.MULTILINE | re.IGNORECASE,
+        )
+        if not pattern.search(text):
+            reasons.append(f"missing required heading: ## {heading}")
+
+    for placeholder in placeholder_strings:
+        if placeholder and placeholder in text:
+            reasons.append(f"unresolved placeholder string present: {placeholder!r}")
+
+    # Findings rule: has findings OR an explicit no-findings rationale.
+    if not _artifact_has_findings(text) and not _NO_FINDINGS_HEADING_RE.search(text):
+        reasons.append(
+            "no '## Finding [' / '### Finding [' blocks (and no "
+            "'## Findings' section) and no '## No Findings' / "
+            "'## Negative Result' rationale -- artifact is empty/incomplete"
+        )
+
+    return (len(reasons) == 0, reasons)

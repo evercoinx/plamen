@@ -5,6 +5,34 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-06-15
+
+### Added
+- **PTY-supervised execution + disk-derived completion**: the driver drives each worker through a pseudo-terminal and infers turn completion from on-disk artifact markers (`<!-- PLAMEN_STATUS: COMPLETE -->`) instead of a stdout/JSON envelope, eliminating the 0-byte-stdio silent-hang class. Adds a PTY transport preflight (`preflight_pty_transports.py`).
+- **Codex backend (cost-saving BETA)**: OpenAI Codex CLI (`codex exec`) as an alternative worker backend — model/tier/compact configuration, per-job depth fan-out (one `codex exec` per depth job), and natural-language usage-cap detection that auto-waits instead of halting.
+- **Deterministic Go SCIP bake** (`_bake_go_scip`) for L1 Go audits, alongside the existing Rust SCIP path.
+- **Thorough-only Exploration-Completeness skeptic** (Phase 4b.6) — an independent, recall-positive pass.
+- **New mechanical helper modules** (`plamen_contracts.py`, `plamen_markdown.py`) factoring the shared deterministic substrate; `pty_exec.py` + `preflight_pty_transports.py` back PTY execution.
+- **Ecosystem auto-detection on the startup banner**: the audited language is detected, auto-corrected, and shown at startup (manifest-priority; suffix never clobbers config; Pinocchio / native-SDK Solana at high confidence).
+
+### Changed
+- **Opus tier defaults to `claude-opus-4-8`** across the entire pipeline and all modes; L1 Thorough reasoning roles and verify are pinned to Opus 4.8 (overridable via `PLAMEN_OPUS_MODEL` / `PLAMEN_THOROUGH_OPUS_MODEL`).
+- **Haltless by design**: report_index, verify, inventory, and resume paths repair-then-degrade and surface unfinished obligations as flagged Appendix-B items in `AUDIT_REPORT.md` instead of stopping the run. Retry/recovery is unified across backend x mode x pipeline.
+- **More deterministic, fewer LLM-prose phases**: mechanical SC `report_index` recovery, mechanical verify backfill / queue manifests, the data-loss-free `report_dedup` builder, and the recon prepass.
+- **Zero-data-loss dedup**: dedup runs over the full candidate set rather than a pruned subset.
+- **Cross-platform / POSIX execution**: POSIX PTY via `Popen` ownership + SIGCHLD reset on macOS/Linux, nested-session env isolation (strips `CLAUDE_CODE_*` from child workers), and shell-rc PATH persistence.
+- **HARD de-overfit rule enforced**: protocol-specific knowledge (DODO, ZetaChain) purged from methodology — the pipeline encodes HOW to analyze, never WHAT to find.
+
+### Fixed
+- **Silent-hang / 0-byte-stdio class**: disk-derived completion replaces the stdout/JSON envelope; the context-thrash fast-fail that killed slow-but-completing workers was removed.
+- **Audits halting at the finish line**: report_index / verify / inventory obligations degrade-with-flag instead of halting.
+- **report_index inflation + coverage-parser bug**: the SC report_index keeps the LLM's consolidated index, accounts coverage-seed-only residuals without halting, and parses the coverage ledger correctly (a "candidate" in reason prose no longer corrupts ID parsing).
+- **Resume-rewind loop**: verify queue-completeness backfill stops resume from rewinding a near-complete run; stale/corrupt checkpoints recover instead of stranding the audit.
+- **Codex never-cut-stub halt**: per-job depth fan-out; usage-cap exhaustion auto-waits; context-exceeded no longer perma-fails.
+- **Ecosystem mis-detection requiring a rerun**: startup auto-correction replaces halt-to-rerun.
+- **Regex-fragility silent-drop class**: a tolerant-extraction substrate closes over-strict ID/field parsing drops.
+- **Transient API errors**: 5xx server errors (500/502/503/504) now get 529-style backoff-retry instead of stalling a worker.
+
 ## [2.0.0] - 2026-05-13
 
 ### Impact vs v1.1.8 — quality, cost, time

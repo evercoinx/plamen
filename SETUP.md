@@ -4,7 +4,8 @@
 > Copy everything below the `---` line into a Claude Code or Codex CLI session.
 > The assistant will follow the steps, check for errors, and stop with a clear
 > message if anything goes wrong. RAG database build is **off** by default
-> (it requires ~6GB RAM and 3–5 min of CPU). Run `plamen rag` from a terminal
+> (it requires ~6GB RAM and ~10-20 min, including network download of indexers).
+Run `plamen rag` from a terminal
 > yourself if you want it.
 
 > **Do not paste `docs/setup.md` or `docs/getting-started.md` instead** — those

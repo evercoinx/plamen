@@ -26,6 +26,17 @@ The setup wizard detects your OS and installed tools, then offers to install mis
 | Node.js | 18+ | npm-based MCP servers | [nodejs.org](https://nodejs.org) |
 | Git | any | Submodules, version control | [git-scm.com](https://git-scm.com) |
 | Rust | stable | Solana (Trident fuzzer), Soroban contracts, L1 Rust clients | [rustup.rs](https://rustup.rs) — Solana, Soroban, and L1 Rust |
+| `pywinpty>=2.0.14` (Windows only) | latest | PTY supervision transport for Claude workers | auto-installed by `plamen install` (gated `platform_system=="Windows"` in `requirements.txt`); macOS/Linux use stdlib `pty.openpty()` with `Popen` ownership + SIGCHLD reset |
+
+> **PTY-supervised execution (v2.1.0)**: the driver now drives each Claude/Codex
+> worker through a pseudo-terminal and infers turn completion from artifacts
+> written to disk (the `<!-- PLAMEN_STATUS: COMPLETE -->` marker), not from a
+> stdout/JSON envelope. This removes the 0-byte-stdio ambiguity and silent-hang
+> class from v2.0.x. A one-time PTY transport preflight
+> (`scripts/preflight_pty_transports.py`) probes which continuation mechanisms
+> the installed Claude Code binary supports; results are cached per
+> `claude --version` and the driver always falls back to a slower respawn path
+> if a probe is inconclusive — no extra setup is required.
 
 ### Windows: Developer Mode (required)
 
@@ -67,6 +78,7 @@ Medusa requires Go. The setup wizard installs Go automatically if missing (`go i
 | Solana CLI | Toolchain, account data | [docs.anza.xyz](https://docs.anza.xyz/cli/install) | Yes |
 | Anchor (via AVM) | Build Anchor programs | `avm install latest && avm use latest` | Yes (for Anchor projects) |
 | Trident | Stateful fuzzing (v0.11+) | `cargo install trident-cli` | Recommended |
+| Scout (cargo-scout-audit) | Static analysis (Anchor + native Solana) | `cargo install cargo-scout-audit` | Recommended |
 
 ### Solana Platform Notes
 
@@ -165,6 +177,8 @@ Works on all platforms. The setup wizard installs via `suiup` (the official Sui 
 |------|---------|---------|-----------|
 | Stellar CLI | Build, deploy, test Soroban contracts | [stellar.org/docs](https://stellar.org/docs/build/smart-contracts/getting-started) | Yes |
 | Rust (stable) | Soroban contract compilation | [rustup.rs](https://rustup.rs) | Yes |
+| Scout (cargo-scout-audit) | Soroban static analysis | `cargo install cargo-scout-audit` | Recommended |
+| cargo-fuzz | Thorough-mode libFuzzer fuzzing | `rustup toolchain install nightly && cargo install cargo-fuzz` | Recommended |
 
 Soroban contracts are Rust-based. The Stellar CLI (`stellar`) handles contract building and testing. Install Rust stable toolchain first, then install the Stellar CLI.
 
@@ -180,10 +194,11 @@ Works on all platforms. No special setup needed beyond Rust and the Stellar CLI.
 
 | Tool | Purpose | Install | Required? |
 |------|---------|---------|-----------|
-| Go | 1.22+ | Build Go-based node clients | [go.dev/dl](https://go.dev/dl/) | Yes (Go clients) |
-| Rust | stable | Build Rust-based node clients | [rustup.rs](https://rustup.rs) (preferred) | Yes (Rust clients) |
+| Go 1.25+ | Build Go-based node clients | [go.dev/dl](https://go.dev/dl/) | Yes (Go clients) |
+| Rust (stable) | Build Rust-based node clients | [rustup.rs](https://rustup.rs) (preferred) | Yes (Rust clients) |
 | scip-go | SCIP indexer for Go | `go install github.com/scip-code/scip-go/cmd/scip-go@latest` | Recommended |
-| rust-analyzer | SCIP indexer for Rust | `rustup component add rust-analyzer` (or `brew install rust-analyzer` on Homebrew Rust) | Recommended |
+| rust-analyzer | SCIP indexer for Rust | `rustup component add rust-analyzer` (or `brew install rust-analyzer` on Homebrew Rust; or `cargo install rust-analyzer` when neither rustup nor brew is available) | Recommended |
+| cargo-fuzz | libFuzzer harness runner for Rust (Thorough-mode fuzzing) | `rustup toolchain install nightly && cargo install cargo-fuzz` | Recommended (L1 Rust) |
 | Opengrep | Cross-ecosystem static analysis | [github.com/opengrep/opengrep](https://github.com/opengrep/opengrep) | Recommended |
 | ast-grep | Structural code search | `cargo install ast-grep --locked` (or `brew install ast-grep` on macOS); auto-installed by `plamen setup` | Recommended |
 | CodeQL CLI | Advanced static analysis | [github.com/github/codeql-cli-binaries](https://github.com/github/codeql-cli-binaries) | Optional |
@@ -198,15 +213,18 @@ Works on all platforms. No special setup needed beyond Rust and the Stellar CLI.
 > `plamen setup` detects Homebrew Rust and routes to `brew install` for
 > `rust-analyzer` and `ast-grep` automatically. Same applies to `ast-grep`
 > when installed via `cargo install` (needs rustup-managed cargo) vs
-> `brew install ast-grep` (standalone).
+> `brew install ast-grep` (standalone). On a box with **neither rustup nor
+> Homebrew** (e.g. a bare Linux/CI environment with only a system `cargo`),
+> `plamen setup` falls back to `cargo install rust-analyzer` — slower (builds
+> from source) but works everywhere.
 
 These tools power the Phase 0.5 "Bake" step that batch-indexes repositories before depth analysis. The pipeline works without them (falls back to grep-based analysis), but SCIP indexing significantly improves cross-reference accuracy.
 
 ---
 
-## MCP Servers & RAG (Claude Code Only)
+## MCP Servers & RAG
 
-MCP servers are used by the Claude Code backend only. The Codex backend uses tool translation and does not load MCP servers. The RAG database itself is shared between backends.
+MCP servers are shared between backends. Claude Code loads them from `mcp.json`; Codex loads them from `[mcp_servers.*]` TOML blocks in `~/.codex/config.toml` that `scripts/codex_adapter.py:generate_config_toml` generates from `mcp.json.example` at install time. The RAG database, Python packages, and Node MCP package versions in `mcp-packages/package.json` apply to both backends. A small subset is disabled or wrapped on Codex (`evm-chain-data` disabled due to MCP protocol version mismatch; four Python servers — `slither-analyzer`, `unified-vuln-db`, `farofino`, `solana-fender` — launched through `mcp-packages/schema-sanitizer.js`). See [mcp-servers.md](mcp-servers.md) for specifics.
 
 | Component | Purpose | Install | Required? |
 |-----------|---------|---------|-----------|
@@ -227,7 +245,7 @@ MCP servers are used by the Claude Code backend only. The Codex backend uses too
 | `HELIUS_API_KEY` | [helius.dev](https://helius.dev) | Solana on-chain data | Optional (free tier) |
 | RPC URL | Alchemy/Infura/public | Ethereum fork testing | Optional (free tier) |
 
-Set keys in `~/.claude/mcp.json` (Claude Code) after copying from `mcp.json.example`. Codex backend does not use MCP — API keys for Codex are set in `~/.codex/config.toml`. See [MCP Servers](mcp-servers.md) for details.
+Set keys in `~/.claude/mcp.json` (Claude Code) after copying from `mcp.json.example`. On Codex set the same keys in `~/.codex/config.toml` under each `[mcp_servers.<name>.env]` block (generated by the adapter from the same `mcp.json.example`). See [MCP Servers](mcp-servers.md) for details.
 
 ---
 
@@ -246,7 +264,7 @@ You don't need honggfuzz. Trident v0.11+ uses TridentSVM. Just `cargo install tr
 This occurs when Anchor CLI encounters Agave v3 (Solana CLI 3.x). Use Solana CLI 2.x for Anchor projects that specify `solana_version = "2.x"` in Anchor.toml.
 
 ### MCP server won't start (`spawn python ENOENT` or server shows as failed)
-Claude Code only (Codex does not use MCP servers). The Python-based MCP servers use `"command": "python"` in mcp.json. On macOS/Linux, change to `"command": "python3"`:
+(Claude Code: edit mcp.json; Codex: the equivalent command lives in ~/.codex/config.toml [mcp_servers.*] blocks). **If you used `plamen install`, skip the sed below** — the installer already resolves the Python path (`_merge_mcp_json()` rewrites `"command": "python"`/`"python3"` to your interpreter's absolute path via `_resolve_command()`), so it is unnecessary and could clobber the resolved path. The sed is **only** for the manual `cp mcp.json.example` path. In that copied file the Python-based MCP servers use `"command": "python"` in mcp.json. On macOS/Linux, change to `"command": "python3"`:
 ```bash
 sed -i '' 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json  # macOS
 sed -i 's/"command": "python"/"command": "python3"/g' ~/.claude/mcp.json    # Linux
@@ -306,3 +324,21 @@ macOS (Homebrew Python) and Ubuntu 23.04+ block bare `pip install`. Plamen handl
 
 ### `error: failed to load manifest for workspace member programs/*`
 Anchor CLI < 0.32 glob issue on Windows. See [Solana > Windows](#solana-platform-notes) above.
+
+### Worker appears to "hang" with no output (PTY supervision)
+As of v2.1.0 the driver supervises each worker over a pseudo-terminal and treats
+the on-disk `<!-- PLAMEN_STATUS: COMPLETE -->` marker as the only completion
+signal. A worker that is doing slow-but-real work no longer trips the old
+context-thrash fast-fail; quiet stdio is expected. The driver detects completion
+from disk, repairs-then-degrades rather than halting at the finish line, and
+surfaces any unfinished obligations as flagged Appendix-B items in
+`AUDIT_REPORT.md`. On Windows, ensure `pywinpty>=2.0.14` is installed (see
+[Required](#required-all-platforms)); macOS/Linux use the stdlib `pty` module.
+
+### Wrong toolchain selected / ecosystem mismatch
+v2.1.0 auto-detects the target ecosystem (EVM, Solana, Aptos, Sui, Soroban, or
+L1) at startup, auto-corrects it without a halt-to-rerun, and shows the resolved
+ecosystem on the startup banner. Detection uses manifest-priority rules
+(file-suffix-only signals never clobber an explicit config; Pinocchio/native-SDK
+Solana is detected at high confidence). If the banner shows the wrong ecosystem,
+set it explicitly in your project config and re-run — the explicit value wins.

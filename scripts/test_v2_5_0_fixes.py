@@ -23,10 +23,18 @@ def test_rate_limit_wait_poll_interval():
     )
     tree = ast.parse(src)
     found_wait_calls = []
+    # This guard is about the rate-limit COUNTDOWN event poll responsiveness
+    # (early_resume.wait / a threading.Event). Subprocess reaps such as
+    # `proc.wait(timeout=2)` are unrelated and legitimately longer; exempt
+    # receivers that are obviously a subprocess handle.
+    _subprocess_receivers = {"proc", "process", "p", "child", "popen"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            # Look for early_resume.wait(timeout=...)
+            # Look for <event>.wait(timeout=...), not <subprocess>.wait(...)
             if isinstance(node.func, ast.Attribute) and node.func.attr == "wait":
+                recv = node.func.value
+                if isinstance(recv, ast.Name) and recv.id.lower() in _subprocess_receivers:
+                    continue
                 for kw in node.keywords:
                     if kw.arg == "timeout":
                         if isinstance(kw.value, ast.Constant):
@@ -349,6 +357,8 @@ def test_location_integrity_exact_match():
     **Severity**: High
     **Location**: `src/Vault.sol:L45-L60`
     **Description**: Something bad happens here.
+    **Impact**: An attacker can drain depositor funds from the vault.
+    **PoC Result**: Test confirms the drain; assertion passed.
     """)
     result = _validate_report_body(body, manifest)
     assert result["ok"], f"Expected ok, got {result}"
@@ -370,6 +380,8 @@ def test_location_integrity_multi_range_relaxed():
     **Severity**: High
     **Location**: `src/AwesomeXBuyAndBurn.sol:L361-366` and `src/AwesomeXBuyAndBurn.sol:L381-386`
     **Description**: The burn function has issues at two sites.
+    **Impact**: Tokens intended for burning are stranded, breaking the burn accounting.
+    **PoC Result**: Test reproduces the stranded balance; assertion passed.
     """)
     result = _validate_report_body(body, manifest)
     assert result["ok"], f"Multi-range should pass via file-path fallback: {result}"
@@ -411,6 +423,8 @@ def test_location_integrity_no_colon_location():
     **Severity**: Medium
     **Location**: `src/Vault.sol`
     **Description**: File-level concern.
+    **Impact**: Incorrect accounting can mislead integrators reading vault state.
+    **PoC Result**: Verification skipped — no build environment.
     """)
     result = _validate_report_body(body, manifest)
     assert result["ok"], f"File-only location should pass: {result}"
@@ -1696,7 +1710,11 @@ def test_quality_gate_rejects_report_blocked_flood():
             encoding="utf-8",
         )
         issues = _run_report_quality_gate(tmp, str(proj))
-        assert any("REPORT-BLOCKED" in issue for issue in issues), issues
+        # GATE-3: the blocked-section COUNT is now a soft WARN (the mechanical
+        # assembler cannot manufacture upstream evidence). What stays HARD is
+        # the marker LEAK: bracketed [REPORT-BLOCKED] markers must never appear
+        # in the client report, so a report carrying them is still rejected.
+        assert any("leaked into client report" in issue for issue in issues), issues
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
@@ -1717,7 +1735,9 @@ def test_quality_gate_rejects_critical_high_report_blocked():
             encoding="utf-8",
         )
         issues = _run_report_quality_gate(tmp, str(proj))
-        assert any("Critical/High REPORT-BLOCKED" in issue for issue in issues), issues
+        # GATE-3: C/H REPORT-BLOCKED count is now a soft WARN; the bracketed
+        # marker leak into the client report remains a HARD rejection.
+        assert any("leaked into client report" in issue for issue in issues), issues
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
@@ -1757,7 +1777,9 @@ def test_quality_gate_rejects_after_id_report_blocked_marker(tmp_path):
         encoding="utf-8",
     )
     issues = _run_report_quality_gate(tmp, str(proj))
-    assert any("REPORT-BLOCKED" in issue for issue in issues), issues
+    # Marker leaked into the client report (bracketed [REPORT-BLOCKED] after the
+    # ID) stays a HARD rejection; the message is the canonical leak message.
+    assert any("leaked into client report" in issue for issue in issues), issues
 
 
 def test_quality_gate_rejects_generated_placeholder_title():

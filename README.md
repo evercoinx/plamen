@@ -1,4 +1,4 @@
-# Plamen (v2.0.0)
+# Plamen (v2.1.0)
 
 Autonomous Web3 security auditor for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [OpenAI Codex CLI](https://github.com/openai/codex).
 
@@ -117,12 +117,17 @@ echo 'export PATH="$HOME/.plamen:$PATH"' >> ~/.zshrc && source ~/.zshrc
 Then use `plamen` from anywhere:
 ```bash
 plamen                              # interactive audit wizard
+plamen resume                       # resume an interrupted audit from last checkpoint
 plamen doctor                       # verify install (no audit run, no API calls)
 plamen setup                        # toolchain wizard + optional RAG build
 plamen migrate                      # upgrade a v1.x install layout
 plamen rag                          # rebuild RAG database only
+plamen compare                      # diff two audit reports
 plamen uninstall                    # remove Plamen symlinks
+plamen help                         # full command + option reference
 ```
+
+> Audit runs accept additional options (`--tier`, `--modules`, `--network`, `--notes`, `--claude`, ...). Run `plamen help` or see [docs/usage.md](docs/usage.md) for the complete list.
 
 > **Important**: Always use `plamen` (not `python3 plamen.py`) after PATH is set. The `python3 plamen.py` form only works from inside `~/.plamen/`.
 
@@ -164,9 +169,18 @@ When the AI runtime reads `~/.claude/agents/depth-edge-case.md` (or `~/.codex/pl
 
 > **Migrating from v1.0.x** (installed directly in `~/.claude`): Close Claude Code (and Codex CLI if running) first, then run:
 >
+> Linux/macOS:
+>
 > ```bash
 > cd ~/.plamen 2>/dev/null || cd ~/.claude    # cd into whichever exists
-> python3 plamen.py migrate                    # or `python plamen.py migrate` on Windows
+> python3 plamen.py migrate
+> ```
+>
+> Windows (PowerShell):
+>
+> ```powershell
+> cd $HOME\.plamen 2>$null; if (-not $?) { cd $HOME\.claude }  # cd into whichever exists
+> python plamen.py migrate
 > ```
 >
 > `plamen migrate` strips any dangling Plamen hook references from
@@ -198,7 +212,7 @@ pip install -e custom-mcp/solana-fender
 pip install -r custom-mcp/farofino-mcp/requirements.txt
 pip install -e custom-mcp/slither-mcp              # EVM only (needs Python 3.11+)
 
-# 2. Build RAG database (~5 min)
+# 2. Build RAG database (~10-20 min, includes network download of indexers)
 # IMPORTANT: a `export SOLODIT_API_KEY=...` here works for this terminal only.
 # For `plamen rag` and audit agents to see it later, put the key in
 # ~/.claude/settings.json -> "env" (Claude Code) or ~/.codex/config.toml -> [env]
@@ -233,7 +247,14 @@ See [docs/setup.md](docs/setup.md) for the full guide with all per-language prer
 ### Updating
 
 ```bash
+# macOS / Linux
 cd ~/.plamen && git pull && plamen install
+plamen install --codex    # if using Codex backend
+```
+
+```powershell
+# Windows (PowerShell)
+cd $HOME\.plamen; git pull; plamen install
 plamen install --codex    # if using Codex backend
 ```
 
@@ -249,7 +270,7 @@ See [docs/updating.md](docs/updating.md) for details on what updates automatical
 plamen                    # terminal wrapper with interactive wizard
 ```
 
-Or inside Claude Code: `/plamen` · Inside Codex CLI: `$plamen core /path/to/project`
+Or inside Claude Code: `/plamen` · Inside Codex CLI: `/plamen core /path/to/project`
 
 ---
 
@@ -259,13 +280,18 @@ Or inside Claude Code: `/plamen` · Inside Codex CLI: `$plamen core /path/to/pro
 |------|------|--------|-----------------|-------------|
 | **Light** | Pro | ~18-22 | **~$1–5** / ~10-25 min | Fast scan, all Sonnet, no fuzzing |
 | **Core** | Max | ~30-50 | **~$10–30** / ~30-90 min | Full depth, PoC verification for Medium+ |
-| **Thorough** | Max | ~40-100 | **~$30–100+** / ~1-4 hr | Iterative depth, invariant fuzzing, Medusa, skeptic-judge |
+| **Thorough** | Max | ~40-100 | **~$30–100+** / ~1-4 hr | Iterative depth, invariant fuzzing, Medusa, skeptic-judge, Exploration-Completeness skeptic |
+
+> On the Claude backend, Opus phases default to `claude-opus-4-8` (override
+> with `PLAMEN_OPUS_MODEL` / `PLAMEN_THOROUGH_OPUS_MODEL`).
 
 > Cost / runtime are rough indicators for a ~5k-line codebase on a Claude
 > subscription. Larger codebases scale roughly linearly. The wizard runs
-> `plamen --estimate` before each audit to show a per-project number based
-> on lines, scope, and target plan — use that for budgeting. API-key users
-> (pay-as-you-go) see costs ~2–3× higher than subscription users.
+> `plamen --estimate` (an internal flag invoked by the wizard / `/plamen`
+> slash command — not a direct-CLI option, see [docs/usage.md](docs/usage.md))
+> before each audit to show a per-project number based on lines, scope, and
+> target plan — use the interactive `plamen` wizard for a standalone estimate.
+> API-key users (pay-as-you-go) see costs ~2–3× higher than subscription users.
 
 See [docs/audit-modes.md](docs/audit-modes.md) for the full comparison.
 
@@ -279,7 +305,7 @@ Plamen also audits **L1 node clients and blockchain infrastructure** — consens
 plamen l1 core /path/to/node-client
 ```
 
-Or inside Claude Code: `/plamen l1 core` · Inside Codex CLI: `$plamen l1 core /path/to/node-client`
+Or inside Claude Code: `/plamen l1 core` · Inside Codex CLI: `/plamen l1 core /path/to/node-client`
 
 L1 mode adds:
 - **22+ injectable skills** covering consensus safety, fork choice, p2p DoS/eclipse, mempool asymmetric DoS, BLS aggregation, light client proofs, state sync/pruning, execution client hardening, validator lifecycle, and more
@@ -313,8 +339,8 @@ plamen setup                                        # install tools only
 **Inside Codex CLI**:
 
 ```
-> $plamen core
-> $plamen l1 thorough /path/to/node-client
+> /plamen core
+> /plamen l1 thorough /path/to/node-client
 ```
 
 See [docs/usage.md](docs/usage.md) for PATH setup and all CLI options.
@@ -323,32 +349,36 @@ See [docs/usage.md](docs/usage.md) for PATH setup and all CLI options.
 
 ## Resumable Pipeline (V2)
 
-The V2 pipeline (`plamen-wizard`) runs a Python driver that executes one `claude -p` (or `codex exec`) subprocess per phase. If usage runs out or the process crashes, re-run the same command — it auto-resumes from the last successful checkpoint.
+Plamen is a Python orchestrator that drives Claude (or Codex) workers. Phases run in one of three shapes: **LLM phase session** (single `claude -p` / `codex exec` subprocess), **Python mechanical** (no LLM), or **Direct PTY worker pool** (driver supervises one Claude PTY per worker artifact — used for breadth, depth, and rescan). PTY-supervised execution drives each worker through a pseudo-terminal and infers turn completion from artifacts written to disk rather than a fragile stdout/JSON envelope — eliminating the 0-byte-stdio ambiguity and silent-hang class. A dedicated PTY transport preflight runs at startup to pick a working terminal transport. For worker-pool phases the driver treats disk artifacts with `<!-- PLAMEN_STATUS: COMPLETE -->` markers as the only source of truth — Claude saying "done" is no longer trusted. If usage runs out or the process crashes, re-run the same command — it auto-resumes from the last successful checkpoint and, for worker-pool phases, only retries missing or `IN_PROGRESS` rows (completed worker rows are preserved). Stale or corrupt checkpoints recover rather than stranding the run.
+
+**Haltless resilience.** A finished audit is never thrown away at the finish line. The report_index, verify, inventory, and resume paths **repair-then-degrade** — surfacing unfinished obligations as flagged items in `AUDIT_REPORT.md` (Appendix B) instead of halting the pipeline. Several formerly fragile LLM phases are now **deterministic Python** (LLM out of the loop): mechanical smart-contract report_index recovery, verify backfill / queue manifests, the data-loss-free `report_dedup` builder, and the recon prepass.
 
 ```bash
 # Launch via wizard (interactive)
 plamen                              # terminal wrapper starts wizard
 /plamen-wizard                      # inside Claude Code
-$plamen-wizard                      # inside Codex CLI
+/plamen-wizard                      # inside Codex CLI
 
 # Resume a crashed/interrupted audit
 python3 ~/.plamen/scripts/plamen_driver.py /path/to/project/.scratchpad/config.json
 ```
 
-The driver handles: phase scheduling, artifact gating, rate-limit pauses, retry-with-degradation, and subprocess isolation via the `plamen_home()` abstraction (resolves to `~/.claude/` or `~/.codex/plamen/` based on the configured backend). The LLM handles: agent orchestration, finding analysis, PoC execution, and report generation.
+The driver handles: phase scheduling, worker-pool orchestration, artifact gating, rate-limit pauses, retry-with-degradation, and subprocess isolation via the `plamen_home()` abstraction (resolves to `~/.claude/` or `~/.codex/plamen/` based on the configured backend). The LLM handles: in-phase agent reasoning for phase-LLM phases, finding analysis, PoC execution, and report content. For worker-pool phases the LLM is a bounded executor — one role, one output file, one artifact.
+
+After install, `~/.plamen/` is canonical (the Git checkout). `~/.claude/` (and `~/.codex/plamen/` if Codex is installed) are install-created runtime integration symlinks — edits go in `~/.plamen/`. `/plamen` and `/plamen-wizard` can be launched from inside an active Claude Code session: the driver strips parent Claude identity env vars from child subprocesses so nested invocations don't collide with the parent session.
 
 ---
 
-## Codex CLI Backend
+## Codex CLI Backend (BETA — cost-saving)
 
-Plamen supports [OpenAI Codex CLI](https://github.com/openai/codex) as an alternative backend. The V2 driver translates tool calls (Write to `apply_patch`, Bash to `shell`), rewrites paths (`~/.claude/` to `~/.codex/plamen/`), and adapts sandbox constraints.
+Plamen supports [OpenAI Codex CLI](https://github.com/openai/codex) as an alternative, cost-saving backend (**beta**). The V2 driver translates **prompt text** (Write→`apply_patch`, Bash→`shell`, `Task()`→`spawn_agent`, `~/.claude/`→`~/.codex/plamen/`) and adapts sandbox constraints. Note: this is prompt-text rewriting, not an MCP transport shim — MCP servers run natively on both backends. The Claude PTY transport is Claude-only; Codex invokes `codex exec` directly — one `codex exec` per depth job, so depth fans out cleanly across jobs. Codex usage-cap errors (which Codex emits as natural-language text, not structured codes) are detected and the driver auto-waits instead of halting, and context-exceeded no longer perma-fails. Codex depth runs real Devil's-Advocate iteration 2 and seeds the full mandatory first-pass artifact set so recon/depth stop degrading lossily.
 
 ```bash
 # Install Codex backend (after standard install)
 plamen install --codex
 
 # Run via Codex
-$plamen core /path/to/project       # inside Codex CLI
+/plamen core /path/to/project       # inside Codex CLI
 ```
 
 Codex shares methodology via `~/.codex/plamen/` (symlinked to `~/.plamen/`). Config files are copied to `~/.codex/`:
@@ -357,8 +387,8 @@ Codex shares methodology via `~/.codex/plamen/` (symlinked to `~/.plamen/`). Con
 |-------------|-----------|---------|
 | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | Orchestrator rules |
 | `~/.claude/settings.json` | `~/.codex/config.toml` | Permissions, env vars |
-| `~/.claude/mcp.json` | N/A (Codex uses tool translation) | MCP server definitions |
-| `~/.claude/commands/` | `~/.codex/plamen/commands/` | Slash commands |
+| `~/.claude/mcp.json` | `~/.codex/config.toml` (`[mcp_servers.*]` blocks, generated by `scripts/codex_adapter.py`) | MCP server definitions |
+| `~/.claude/commands/` | `~/.codex/commands/` (from `codex-adapter/commands/`) | Slash commands |
 
 ---
 
@@ -373,7 +403,7 @@ Codex shares methodology via `~/.codex/plamen/` (symlinked to `~/.plamen/`). Con
 | **Soroban/Stellar** | Stellar CLI | -- | proptest, cargo-fuzz |
 | **L1 Go/Rust** | go build, cargo | scip-go, rust-analyzer, Opengrep | proptest, go test -fuzz |
 
-Language detection is automatic based on config files.
+Ecosystem (language) is auto-detected and **auto-corrected at startup** with no halt-to-rerun — the resolved ecosystem is shown on the startup banner. Detection uses manifest-priority rules (a suffix-only match never clobbers an explicit config; Pinocchio / native-SDK Solana is detected at high confidence).
 
 ---
 

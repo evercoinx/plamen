@@ -399,6 +399,13 @@ go test ./... -count=0 2>&1 | tail -5  # dry-run compile check
 
 Record which command succeeds and which crates/packages have compilable tests.
 
+**Rust fuzzer availability probe** (Rust lanes only): run `cargo +nightly fuzz --version`.
+If it succeeds, record `cargo_fuzz_available: true`; if it fails (cargo-fuzz not
+installed, or no nightly toolchain), record `cargo_fuzz_available: false`. This gates
+Thorough-mode libFuzzer fuzz campaigns; the verifier falls back to proptest, then
+boundary-value parameterized tests, when false. Mirrors the EVM/Solana medusa/trident
+availability probe pattern.
+
 ### Step 4: Extract representative test patterns (3 examples)
 
 From the discovered test files, extract 3 representative test functions that demonstrate:
@@ -418,6 +425,7 @@ Write `{SCRATCHPAD}/test_infrastructure.md`:
 ## Build Commands
 - Workspace test: `{command that works}`
 - Per-crate test: `cargo test -p {crate} -- --nocapture`
+- **cargo_fuzz_available**: true/false (`cargo +nightly fuzz --version` probe, Rust lanes; gates Thorough-mode libFuzzer fuzzing — proptest fallback if false)
 
 ## Test Constructors (public mock builders)
 | Constructor | Crate/Package | Signature | What It Builds |
@@ -454,6 +462,27 @@ Write `{SCRATCHPAD}/test_infrastructure.md`:
 
 
 ## Return protocol
+
+### Pre-DONE coverage gate (MANDATORY — run before returning DONE)
+
+Before returning DONE, enumerate EVERY top-level module/crate that contains
+≥10 source files (by the language's primary extensions — `.go`, `.rs`, `.sol`,
+`.move`). For EACH such module, confirm exactly ONE of:
+
+1. **CITED** — at least one file from that module is cited in some recon
+   artifact (`recon_summary.md`, `subsystem_map.md`, `attack_surface.md`,
+   `integration_points.md`, `opengrep_hits_ranked.md`, `function_list.md`,
+   `state_variables.md`, `threat_model.md`, `trust_boundaries.md`,
+   `detected_patterns.md`, `contract_inventory.md`), OR
+2. **ACKNOWLEDGED** — the whole module is recorded in `scope_leftover.md` as
+   `ACKNOWLEDGED: <reason>`.
+
+A module with ≥10 files that is neither cited nor acknowledged (e.g.
+"crates/database 17 files not cited") will FAIL the driver's
+`_validate_recon_coverage` gate and force a recon retry. Resolve every such
+module — add a citation or an `ACKNOWLEDGED:` row to `scope_leftover.md` — and
+confirm the `### Module Coverage Summary` table in `file_coverage_ledger.md`
+shows `Uncovered = 0` for every module with ≥10 files BEFORE returning DONE.
 
 Return ONLY: `DONE: L1 Recon Agent {N}` (max 1 line).
 ")

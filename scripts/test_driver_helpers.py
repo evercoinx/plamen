@@ -135,6 +135,75 @@ def test_H1_missing_inventory_fails():
           repr(issues))
 
 
+# --------------------------------------------------------------------------
+# AP-HF-1: inventory degrade-and-continue helper
+# --------------------------------------------------------------------------
+
+def _inventory_block(idx: int, *, fields: bool = True) -> str:
+    lines = [f"### Finding [INV-{idx:03d}]: usable issue {idx}"]
+    if fields:
+        lines += [
+            "**Severity**: Medium",
+            f"**Location**: src/F{idx}.sol:L{idx}",
+            f"**Source IDs**: AC-{idx}",
+            "**Preferred Tag**: CODE-TRACE",
+        ]
+    lines.append(f"Description of issue {idx} with enough body to be substantive.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def test_AP_HF_1_usable_findings_true_for_3plus_blocks():
+    sp = _mkscratch({
+        "findings_inventory.md": "# Finding Inventory\n\n## Findings\n\n"
+        + "\n".join(_inventory_block(i) for i in range(1, 4)),
+    })
+    assert D._inventory_has_usable_findings(sp) is True
+
+
+def test_AP_HF_1_usable_findings_false_for_zero_blocks():
+    sp = _mkscratch({
+        "findings_inventory.md": "# Finding Inventory\n\nNo parseable findings here.\n",
+    })
+    assert D._inventory_has_usable_findings(sp) is False
+
+
+def test_AP_HF_1_usable_findings_false_for_near_empty():
+    sp = _mkscratch({"findings_inventory.md": "# Finding Inventory\n"})
+    assert D._inventory_has_usable_findings(sp) is False
+
+
+def test_AP_HF_1_usable_findings_false_for_missing_file():
+    sp = _mkscratch({})
+    assert D._inventory_has_usable_findings(sp) is False
+
+
+def test_AP_HF_1_structure_failure_with_usable_blocks_would_degrade():
+    """Integration precondition: a genuine STRUCTURE field-completeness HARD
+    failure on an inventory that STILL has >= 3 usable blocks. The new driver
+    branch degrades-and-continues (does NOT funnel to wait_critical_halt_choice)
+    precisely because both conditions hold."""
+    # 5 titled blocks, 4 of which (>40%) are missing required fields.
+    blocks = [_inventory_block(1)]  # complete
+    blocks += [_inventory_block(i, fields=False) for i in range(2, 6)]  # 4 incomplete
+    inv = "# Finding Inventory\n\n## Findings\n\n" + "\n".join(blocks)
+    sp = _mkscratch({"findings_inventory.md": inv})
+    structure_issues = D._validate_inventory_structure(sp)
+    # The STRUCTURE gate (the one FC4 enforces for inventory) genuinely fails...
+    assert any("missing one or more required fields" in s for s in structure_issues), structure_issues
+    # ...yet usable blocks are present, so the degrade branch fires.
+    assert D._inventory_has_usable_findings(sp) is True
+
+
+def test_AP_HF_1_zero_blocks_still_halts():
+    """Regression: an inventory with 0 usable blocks (missing-file class) does
+    NOT satisfy the degrade precondition, so the critical-halt path is preserved."""
+    sp = _mkscratch({})
+    # FC4's content gate (structure) fails AND no usable blocks → halt preserved.
+    assert D._validate_inventory_structure(sp), "structure gate must fail for missing inventory"
+    assert D._inventory_has_usable_findings(sp) is False
+
+
 def test_H1_block_count_retention_gate():
     """IDs align but heading-block count drops >60%. Flag retention."""
     upstream = "\n".join(
@@ -810,7 +879,7 @@ def test_R10_depth_findings_promote_into_inventory_before_verify_queue():
     issues = D._validate_depth_promotion_receipt(sp)
     check("R10 high-confidence depth finding is appended to inventory",
           promoted == ["DCI-3"]
-          and "### Finding [INV-02]: VDF seed is deterministic" in text
+          and "### Finding [INV-002]: VDF seed is deterministic" in text
           and "**Source IDs**: [DCI-3]" in text
           and issues == [],
           f"promoted={promoted!r}; issues={issues!r}; text={text!r}")
@@ -1671,6 +1740,31 @@ def test_A3_attention_repair_validation_requires_verdicts_and_paths():
           repr((hard, soft)))
 
 
+def test_A3_attention_repair_accepts_covered_verdict_for_receipts():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "# Attention Repair Queue\n\n"
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | security-obligation | `SO-001` | gap | `security_obligations.md` | `SO-001` |\n"
+            "| 2 | security-obligation | `SO-002` | gap | `security_obligations.md` | `SO-002` |\n"
+            "| 3 | security-obligation | `SO-003` | gap | `security_obligations.md` | `SO-003` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| Row 1 | security-obligation | `SO-001` | COVERED | Existing depth/scanner artifacts cover SO-001 | no new finding |\n"
+            "| #2 | security-obligation | `SO-002` | REVIEWED | Existing depth/scanner artifacts cover SO-002 | no new finding |\n"
+            "- Queue 3: CLOSED after reviewing SO-003; no new finding.\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    check("A3 attention repair accepts common verdict and row-number variants",
+          hard == [],
+          repr((hard, soft)))
+
+
 def test_A3_attention_repair_requires_full_queued_path_receipt():
     sp = _mkscratch({
         "attention_repair_queue.md": (
@@ -1711,6 +1805,150 @@ def test_A3_attention_repair_validation_accepts_row_shard_suffix_paths():
     })
     hard, soft = D._validate_attention_repair(sp, "thorough")
     check("A3 attention repair accepts row-shard basename/suffix citations",
+          hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_rejects_vague_asset_binding_closure():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-001: declaredAsset <-> executedAsset` | exact pair unresolved | `asset_binding_matrix.md` | `AB-001` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-001: declaredAsset <-> executedAsset` | NO_FINDING | Existing H-1 says executedAsset is not validated | adjacent asset issue |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    # FC2: asset-binding closure wording is a prose-quality judgment on an
+    # enrichment phase -> it WARNs (soft) and must NOT hard-fail/halt.
+    check("A3 attention repair warns (not halts) on adjacent-only asset binding closure",
+          any("asset-binding closure" in issue for issue in soft) and hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_accepts_exact_asset_binding_closure():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-001: declaredAsset <-> executedAsset` | exact pair unresolved | `asset_binding_matrix.md` | `AB-001` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-001: declaredAsset <-> executedAsset` | SAFE | Router.sol:L10 proves declaredAsset is validated against executedAsset before transfer | SAFE_REASON:EXPLICIT_BINDING_CHECK; exact pair closed |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    check("A3 attention repair accepts exact asset binding closure",
+          hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_accepts_impossible_pair_safe_reason():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-003: context.asset <-> decoded.targetZRC20` | exact pair unresolved | `asset_binding_matrix.md` | `AB-003` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-003: context.asset <-> decoded.targetZRC20` | SAFE | Gateway.sol:L10-L40 proves context.asset is read only in onRevert while decoded.targetZRC20 is decoded only in onCall. | SAFE_REASON:IMPOSSIBLE_PAIR - context.asset and decoded.targetZRC20 are on disjoint code paths; no reachable execution path touches both fields simultaneously. |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    check("A3 attention repair accepts impossible-pair asset binding closure",
+          hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_accepts_impossible_pair_revert_path_wording():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-003: context.asset <-> decoded.targetZRC20` | exact pair unresolved | `asset_binding_matrix.md` | `AB-003` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-003: context.asset <-> decoded.targetZRC20` | SAFE | Gateway.sol:L10-L40 proves context.asset is present only on the onRevert callback path while decoded.targetZRC20 is decoded only for onCall withdrawals. | SAFE_REASON:IMPOSSIBLE_PAIR - on every revert path context.asset and decoded.targetZRC20 are disjoint fields, so no reachable execution path can bind both fields in one local action. |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    check("A3 attention repair accepts impossible-pair closure with revert wording",
+          hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_accepts_binding_check_revert_wording():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-008: params.minReturnAmount <-> outputAmount` | exact pair unresolved | `asset_binding_matrix.md` | `AB-008` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-008: params.minReturnAmount <-> outputAmount` | SAFE | Swap.sol:L337-L361 passes params.minReturnAmount directly into mixSwap and assigns outputAmount from the same mixSwap return value. | SAFE_REASON:EXPLICIT_BINDING_CHECK - mixSwap enforces outputAmount >= params.minReturnAmount before returning; if the bound is not met, mixSwap reverts and outputAmount is never assigned. |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    check("A3 attention repair accepts explicit binding closure with revert wording",
+          hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_rejects_residual_balance_safe_reason():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-009: sourceToken <-> paidToken` | exact pair unresolved | `asset_binding_matrix.md` | `AB-009` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-009: sourceToken <-> paidToken` | SAFE | Router.sol:L10 mentions sourceToken and paidToken. | SAFE_REASON:EXPLICIT_BINDING_CHECK - any mismatch only consumes residual balance, so sourceToken and paidToken are economically self-punishing. |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    # FC2: residual-balance SAFE reasoning is still flagged, but as a soft
+    # warning -- it must not hard-fail/halt the enrichment phase.
+    check("A3 attention repair warns (not halts) on residual-balance SAFE reasoning",
+          any("asset-binding closure" in issue for issue in soft) and hard == [],
+          repr((hard, soft)))
+
+
+def test_A3_attention_repair_accepts_existing_finding_asset_binding_closure():
+    sp = _mkscratch({
+        "attention_repair_queue.md": (
+            "| # | Kind | Target | Reason | Source | Evidence hint |\n"
+            "|---|------|--------|--------|--------|---------------|\n"
+            "| 1 | asset-binding-gap | `AB-001: outputAmount <-> targetAmount` | exact pair unresolved | `asset_binding_matrix.md` | `AB-001` |\n"
+        ),
+        "attention_repair_summary.md": (
+            "# Attention Repair\n\n"
+            "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
+            "|---------|------|--------|---------|----------|-------|\n"
+            "| 1 | asset-binding-gap | `AB-001: outputAmount <-> targetAmount` | COVERED | INV-014 covers outputAmount not validated against targetAmount: this is the exact binding failure described. | no new finding |\n"
+        ),
+    })
+    hard, soft = D._validate_attention_repair(sp, "thorough")
+    check("A3 attention repair accepts existing-finding asset binding closure",
           hard == [],
           repr((hard, soft)))
 
@@ -1856,12 +2094,20 @@ def test_A3_semantic_dedup_candidate_packet_is_bounded(tmp_path):
     check("A3 semantic dedup has many total pairs",
           total > 24,
           f"total={total}")
-    check("A3 semantic dedup live pair packet capped at 24",
-          len(live_rows) == 24 and "showing top 24" in live,
-          f"rows={len(live_rows)}\n{live[:500]}")
+    # v2.8.17 dedup-throughput upgrade: the old hard 24-cap is gone. The live
+    # packet (round 1 when multi-round) is bounded by the per-round chunk size,
+    # NOT 24 — every admitted pair is still per-pair LLM-judged and the full set
+    # is preserved (deferred pairs in dedup_candidate_pairs_full.md). Recall is
+    # never reduced: more genuine candidates now reach the LLM, never fewer.
+    import plamen_parsers as _pp
+    chunk = _pp._DEDUP_ROUND_CHUNK
+    cap = D._dedup_live_pair_cap()
+    check("A3 semantic dedup live packet bounded by chunk size (not 24)",
+          0 < len(live_rows) <= max(chunk, 1) and len(live_rows) <= cap,
+          f"rows={len(live_rows)} chunk={chunk} cap={cap}\n{live[:500]}")
     check("A3 semantic dedup focus inventory only contains live IDs",
-          len(focus_ids) <= 48,
-          f"focus_ids={len(focus_ids)}")
+          len(focus_ids) <= 2 * max(chunk, 1),
+          f"focus_ids={len(focus_ids)} chunk={chunk}")
 
 
 def test_A3_semantic_dedup_prompt_is_fail_open_and_bounded():
@@ -1869,11 +2115,18 @@ def test_A3_semantic_dedup_prompt_is_fail_open_and_bounded():
         plamen_home() / "prompts" / "shared" / "v2" /
         "phase4e-semantic-dedup.md"
     ).read_text(encoding="utf-8")
-    check("A3 semantic dedup prompt writes passthrough first",
+    # D1: the SC agent emits decisions-only and the driver builds the deduped
+    # inventory. The crash-safety stub the agent writes FIRST is now the
+    # decisions stub (IN_PROGRESS_PASSTHROUGH_WRITTEN); the L1 queue copy
+    # remains. The SC `findings_inventory.md` -> deduped copy moved to the
+    # driver (pre-run passthrough safety net), so the agent no longer performs
+    # it (avoiding the full-inventory read/rewrite context bomb).
+    check("A3 semantic dedup prompt writes decisions stub first",
           "Mandatory First Action" in prompt
-          and "copy `{SCRATCHPAD}/findings_inventory.md`" in prompt
-          and "IN_PROGRESS_PASSTHROUGH_WRITTEN" in prompt,
-          prompt[:1000])
+          and "IN_PROGRESS_PASSTHROUGH_WRITTEN" in prompt
+          and "copy `{SCRATCHPAD}/verification_queue.md`" in prompt
+          and "do NOT read `{SCRATCHPAD}/findings_inventory.md`" in prompt,
+          prompt[:1200])
     check("A3 semantic dedup prompt forbids global expansion",
           "Do NOT read or expand" in prompt
           and "Evaluate ONLY the candidate rows" in prompt
@@ -1894,10 +2147,10 @@ def test_A3_sc_phase_order_has_attention_repair_before_rag_and_chain():
           repr(names))
 
 
-def test_M1_opus_alias_pins_to_46():
+def test_M1_opus_alias_pins_to_48():
     phase = D.Phase("depth", [], [], base_timeout_s=1, model="opus")
-    check("M1 bare opus resolves to claude-opus-4-6",
-          D.phase_model(phase, "thorough") == "claude-opus-4-6",
+    check("M1 bare opus resolves to claude-opus-4-8",
+          D.phase_model(phase, "thorough") == "claude-opus-4-8",
           D.phase_model(phase, "thorough"))
 
 
@@ -1958,17 +2211,24 @@ def test_M4_l1_verify_shards_are_severity_weighted():
         )
         if shards.get(name)
     ]
+    # Uniform per-shard target (VERIFY_TARGET_PER_SHARD=4): C/H spreads across
+    # the full 10-slot pool (84 findings -> ~9/shard, slot-pool capped).
     check("M4 L1 C/H verify shards are <=9 on Irys-sized queue",
           max(ch_sizes) <= 9,
           repr(non_empty))
-    check("M4 L1 Medium verify shards are <=11 on Irys-sized queue",
-          max(med_sizes) <= 11,
+    # Medium now uses ALL 6 slots (43 findings / 4 ~= 11 desired, capped at 6
+    # slots -> ~8/shard) instead of the old ~11/shard heavy lane.
+    check("M4 L1 Medium verify shards stay in the fast lane (<=8)",
+          max(med_sizes) <= 8,
           repr(non_empty))
-    check("M4 L1 Low verify shards are <=17 on Irys-sized queue",
-          max(low_sizes) <= 17,
+    # Low spreads to ~5/shard (17 findings / 4 = 5 shards over 4 slots)
+    # instead of the old ~17/shard near-timeout lane.
+    check("M4 L1 Low verify shards stay in the fast lane (<=5)",
+          max(low_sizes) <= 5,
           repr(non_empty))
+    # Heavy tiers produce MORE shards (negative control: spread, not cram).
     check("M4 L1 verify shard count is bounded and balanced",
-          len(non_empty) == 15 and min(non_empty.values()) >= 8,
+          len(non_empty) == 20 and min(non_empty.values()) >= 4,
           repr(non_empty))
     check("M4 L1 verify shard total preserves queue",
           sum(non_empty.values()) == 145,
@@ -1992,12 +2252,97 @@ def test_M4b_sc_high_verify_shards_are_small_enough_for_thorough():
         len(shards[name]) for name in D.SC_VERIFY_CRITHIGH_PHASE_NAMES
         if shards.get(name)
     ]
-    check("M4b SC C/H verify shards cap live 13-item queue at <=3",
-          max(ch_sizes) <= 3,
+    # Uniform per-shard target (VERIFY_TARGET_PER_SHARD=4): 13 C/H findings
+    # spread across 4 shards (4,3,3,3) -> max 4, still the fast lane.
+    check("M4b SC C/H verify shards cap live 13-item queue at <= target",
+          max(ch_sizes) <= D.VERIFY_TARGET_PER_SHARD,
           repr(non_empty))
     check("M4b SC C/H verify shards preserve all rows",
           sum(ch_sizes) == 13,
           repr(non_empty))
+
+
+def _build_skewed_queue(counts: dict[str, int]) -> str:
+    """Build a verification_queue.md with the given per-severity finding counts."""
+    header = [
+        "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact |",
+        "|---------|------------|----------|-------|-----------|---------------|----------|------------------|",
+    ]
+    rows = []
+    q = 1
+    prefix = {"Critical": "C", "High": "H", "Medium": "M", "Low": "L", "Informational": "I"}
+    for sev, n in counts.items():
+        for i in range(1, n + 1):
+            fid = f"{prefix[sev]}-{i:03d}"
+            rows.append(
+                f"| {q} | {fid} | {sev} | T{q} | logic | [CODE-TRACE] | src/A.sol:L{q} | depth.md |"
+            )
+            q += 1
+    return "\n".join(header + rows)
+
+
+def test_M4h_sc_verify_shard_partition_complete_and_disjoint():
+    """ROOT FIX: every finding lands in EXACTLY ONE shard (complete + disjoint)
+    on a live-like skewed distribution (1C / 18H / 30M / 37L / 13I)."""
+    counts = {"Critical": 1, "High": 18, "Medium": 30, "Low": 37, "Informational": 13}
+    sp = _mkscratch({"verification_queue.md": _build_skewed_queue(counts)})
+    queue_rows = D.parse_verification_queue_rows(sp)
+    queue_ids = [r.get("finding id") for r in queue_rows]
+    shards = D.compute_sc_verify_shards(sp)
+
+    sharded_ids = [
+        r.get("finding id")
+        for rows_in in shards.values()
+        for r in rows_in
+    ]
+    # Completeness: every queued finding is assigned to some shard.
+    check("M4h every finding is assigned (complete)",
+          set(sharded_ids) == set(queue_ids),
+          f"queue={len(set(queue_ids))} sharded={len(set(sharded_ids))}")
+    # Disjoint: no finding appears in two shards, and the total count matches.
+    check("M4h no finding is duplicated (disjoint)",
+          len(sharded_ids) == len(set(sharded_ids)) == len(queue_ids),
+          f"sharded={len(sharded_ids)} unique={len(set(sharded_ids))} queue={len(queue_ids)}")
+    # Every returned shard name exists in all four registries (slot contract).
+    for name in shards:
+        check(f"M4h {name} is a registered shard name",
+              name in D.SC_VERIFY_SHARD_MANIFESTS,
+              name)
+    # Fast-lane assertion: no non-empty shard exceeds TARGET_PER_SHARD+1.
+    target = D.VERIFY_TARGET_PER_SHARD
+    for name, rows_in in shards.items():
+        if rows_in:
+            check(f"M4h {name} stays in the fast lane (<= target+1)",
+                  len(rows_in) <= target + 1,
+                  f"{name}={len(rows_in)} target={target}")
+
+
+def test_M4i_sc_verify_shards_spread_heavy_tiers_not_overshard_light():
+    """Negative control: a heavy tier produces MORE shards (spread, not cram);
+    a light tier does NOT over-shard."""
+    # Heavy: 36 Low findings -> ceil(36/4)=9 Low shards (spread).
+    heavy = _mkscratch({"verification_queue.md": _build_skewed_queue({"Low": 36})})
+    heavy_shards = D.compute_sc_verify_shards(heavy)
+    low_used = [n for n, v in heavy_shards.items()
+                if n.startswith("sc_verify_low") and v]
+    check("M4i heavy Low tier spreads across many shards (>=8)",
+          len(low_used) >= 8,
+          f"low_used={len(low_used)}")
+    check("M4i heavy Low shards stay small (<=5 each)",
+          max(len(heavy_shards[n]) for n in low_used) <= 5,
+          {n: len(heavy_shards[n]) for n in low_used})
+
+    # Light: 2 Medium findings -> only 1 Medium shard used (no over-shard).
+    light = _mkscratch({"verification_queue.md": _build_skewed_queue({"Medium": 2})})
+    light_shards = D.compute_sc_verify_shards(light)
+    med_used = [n for n, v in light_shards.items()
+                if n.startswith("sc_verify_medium") and v]
+    check("M4i light Medium tier does NOT over-shard (1 shard)",
+          len(med_used) == 1,
+          f"med_used={med_used}")
+    check("M4i light Medium shard holds all findings",
+          len(light_shards[med_used[0]]) == 2,
+          light_shards[med_used[0]])
 
 
 def test_M4c_stale_verify_retry_hint_cleared_after_reshard():
@@ -2768,6 +3113,12 @@ def main():
         test_H1_zero_upstream_signal_fails_loudly,
         test_H1_no_upstream_no_inventory_body_passes,
         test_H1_missing_inventory_fails,
+        test_AP_HF_1_usable_findings_true_for_3plus_blocks,
+        test_AP_HF_1_usable_findings_false_for_zero_blocks,
+        test_AP_HF_1_usable_findings_false_for_near_empty,
+        test_AP_HF_1_usable_findings_false_for_missing_file,
+        test_AP_HF_1_structure_failure_with_usable_blocks_would_degrade,
+        test_AP_HF_1_zero_blocks_still_halts,
         test_H1_block_count_retention_gate,
         test_H1_inventory_shard_merge_allows_dedup_against_chunks,
         test_A1_module_key_grouping,
@@ -2821,8 +3172,16 @@ def main():
         test_Q4_hibernation_can_be_opted_in,
         test_A3_attention_repair_queue_from_notread_and_uncited_security_files,
         test_A3_attention_repair_validation_requires_verdicts_and_paths,
+        test_A3_attention_repair_accepts_covered_verdict_for_receipts,
         test_A3_attention_repair_requires_full_queued_path_receipt,
         test_A3_attention_repair_validation_accepts_row_shard_suffix_paths,
+        test_A3_attention_repair_rejects_vague_asset_binding_closure,
+        test_A3_attention_repair_accepts_exact_asset_binding_closure,
+        test_A3_attention_repair_accepts_impossible_pair_safe_reason,
+        test_A3_attention_repair_accepts_impossible_pair_revert_path_wording,
+        test_A3_attention_repair_accepts_binding_check_revert_wording,
+        test_A3_attention_repair_rejects_residual_balance_safe_reason,
+        test_A3_attention_repair_accepts_existing_finding_asset_binding_closure,
         test_A3_attention_repair_graph_rows_do_not_require_exact_source_path,
         test_A3_attention_repair_findings_promote_into_inventory,
         test_A3_graph_schema_catches_weak_network_rows,
@@ -2831,11 +3190,13 @@ def main():
         test_A3_semantic_dedup_candidate_packet_is_bounded,
         test_A3_semantic_dedup_prompt_is_fail_open_and_bounded,
         test_A3_sc_phase_order_has_attention_repair_before_rag_and_chain,
-        test_M1_opus_alias_pins_to_46,
+        test_M1_opus_alias_pins_to_48,
         test_M2_light_mode_still_forces_sonnet,
         test_M3_l1_verify_shards_are_cost_capped,
         test_M4_l1_verify_shards_are_severity_weighted,
         test_M4b_sc_high_verify_shards_are_small_enough_for_thorough,
+        test_M4h_sc_verify_shard_partition_complete_and_disjoint,
+        test_M4i_sc_verify_shards_spread_heavy_tiers_not_overshard_light,
         test_M4c_stale_verify_retry_hint_cleared_after_reshard,
         test_M4d_semantic_dedup_passthrough_with_pairs_is_not_complete,
         test_M4e_semantic_dedup_prompt_overrides_passthrough_resumption,

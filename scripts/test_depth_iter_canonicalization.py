@@ -160,6 +160,44 @@ def test_canonicalizer_handles_iter3_too(tmp_path: Path):
     assert (sp / "depth_iter3_targeted_findings.md").exists()
 
 
+def test_canonicalizer_handles_da_iter_namespace(tmp_path: Path):
+    """Actual old-run failure: DA outputs lacked the depth_ prefix, so the
+    depth gate missed them and retried the phase."""
+    sp = tmp_path / ".scratchpad"
+    sp.mkdir()
+    _write(
+        sp / "da_iter2_edge_case_findings.md",
+        "<!-- PLAMEN_ARTIFACT: da_iter2_edge_case_findings.md -->\n"
+        "<!-- EXPECTED_OUTPUT: da_iter2_edge_case_findings.md -->\n"
+        "complete DA content",
+    )
+    _write(sp / "da_iter3_findings.md", "iter3-content")
+
+    renamed = D._canonicalize_depth_iter_filenames(sp)
+
+    assert "da_iter2_edge_case_findings.md -> depth_da_iter2_edge_case_findings.md" in renamed
+    assert "da_iter3_findings.md -> depth_da_iter3_findings.md" in renamed
+    target = sp / "depth_da_iter2_edge_case_findings.md"
+    assert target.exists()
+    text = target.read_text(encoding="utf-8")
+    assert "PLAMEN_ARTIFACT: depth_da_iter2_edge_case_findings.md" in text
+    assert "EXPECTED_OUTPUT: depth_da_iter2_edge_case_findings.md" in text
+    assert not (sp / "da_iter2_edge_case_findings.md").exists()
+
+
+def test_iter2_gate_tolerates_da_iter_namespace(tmp_path: Path):
+    """Defense in depth: even if canonicalization cannot rename, the iter2
+    gate recognizes DA work and does not force a full depth retry."""
+    sp = tmp_path / ".scratchpad"
+    sp.mkdir()
+    _seed_uncertain_finding_inputs(sp)
+    _write(sp / "da_iter2_state_trace_findings.md", "DA work")
+
+    issues = V._validate_confidence_iter2_mandatory(sp)
+
+    assert issues == []
+
+
 # --- Widened canonicalizer: token-decomposition variant matrix ------------
 # The DODO audit (May 2026) burned a $4 opus depth retry because the
 # orchestrator wrote `depth_state_trace_iteration2_findings.md` — the

@@ -1,93 +1,56 @@
 {
-  "version": 2,
+  "version": 1,
   "languages": {
     "evm": {
       "build_command": "forge build",
-      "test_command": "forge test --match-test test_{ID} -vvv",
-      "test_filter_mode": "match_test_regex",
+      "test_command": "forge test --match-test test_{id} -vvv",
+      "test_filter_mode": "foundry_match_test",
       "fuzz_engines": [
         {
-          "name": "foundry_fuzz",
-          "command": "forge test --match-test testFuzz_{ID} -vvv",
-          "template": "function testFuzz_{ID}(uint256 x) public { x = bound(x, MIN, MAX); ... }",
-          "notes": "use bound() to constrain inputs; randomized; runs default 256 iterations"
-        },
-        {
-          "name": "medusa_stateful",
-          "command": "medusa fuzz",
-          "template_path": "prompts/evm/phase4b-medusa-fuzz.md",
-          "output_file": "medusa_findings.md",
-          "notes": "stateful fuzzer; runs invariant properties from properties.sol"
+          "name": "forge_fuzz",
+          "command": "forge test --match-test testFuzz_{id} -vvv",
+          "template": "Foundry fuzz test using bound() inputs"
         }
       ],
-      "static_analyzers": [
-        {"name": "slither", "command": "slither .", "primary": true},
-        {"name": "aderyn", "command": "aderyn .", "primary": false, "role": "slither_fallback"}
-      ],
-      "alt_build": {
-        "hardhat": {
-          "build_command": "npx hardhat compile",
-          "test_command": "npx hardhat test --grep \"{ID}\"",
-          "fuzz_engines": [],
-          "notes": "hardhat-only projects skip the fuzz variant"
-        }
-      },
-      "fork_testing": "forge test --match-test test_{ID} --fork-url {RPC_URL} -vvv",
-      "evidence_tags": ["POC-PASS", "POC-FAIL", "MEDUSA-PASS", "CODE-TRACE"],
+      "fallback_strategy": "parameterized Foundry unit tests or Hardhat grep tests when Foundry is unavailable",
+      "evidence_tags": ["POC-PASS", "POC-FAIL", "FUZZ-PASS", "CODE-TRACE"],
       "docs_sources": [
-        "https://book.getfoundry.sh/",
-        "https://secure-contracts.com/program-analysis/medusa/"
+        "https://book.getfoundry.sh/forge/tests",
+        "https://book.getfoundry.sh/forge/fuzz-testing"
       ]
     },
     "solana": {
       "build_command": "cargo build-sbf",
-      "alt_build": {
-        "anchor": {
-          "build_command": "anchor build",
-          "notes": "preferred when Anchor.toml is present"
-        }
-      },
       "test_command": "cargo test test_{id} -- --nocapture",
       "test_filter_mode": "cargo_name_filter",
       "fuzz_engines": [
         {
           "name": "trident",
           "command": "cd trident-tests && trident fuzz run fuzz_0",
-          "template": "Trident's IDL-driven handler in trident-tests/fuzz_instructions.rs",
-          "detection_flag": "trident_available",
-          "notes": "v0.11+ uses built-in TridentSVM (no honggfuzz). Anchor-only; needs `trident init`",
-          "docs": "https://ackee.xyz/trident/docs/"
+          "template": "Trident fuzz target when available"
         },
         {
           "name": "proptest",
-          "command": "cargo test test_fuzz_{id}",
-          "template": "proptest! { #[test] fn test_fuzz_{id}(x in 1u64..MAX) { ... } }",
-          "notes": "fallback when Trident unavailable or for native (non-Anchor) programs"
+          "command": "cargo test proptest_{id} -- --nocapture",
+          "template": "bounded Rust proptest fallback"
         }
       ],
-      "static_analyzers": [
-        {"name": "scout-audit", "command": "cargo scout-audit", "primary": true, "notes": "post-2025 successor; superset of soroban-scout for Anchor"}
-      ],
-      "fallback_strategy": "proptest with bounded inputs, then boundary-value parameterized tests",
+      "fallback_strategy": "native cargo tests with bounded account/message fixtures when Anchor or Trident is unavailable",
       "evidence_tags": ["POC-PASS", "POC-FAIL", "FUZZ-PASS", "CODE-TRACE"],
       "docs_sources": [
-        "https://solana.com/docs/programs/testing",
+        "https://solana.com/docs/programs",
         "https://www.anchor-lang.com/docs/testing"
       ]
     },
     "aptos": {
       "build_command": "aptos move compile",
       "test_command": "aptos move test --filter test_{id}",
-      "test_filter_mode": "filter_substring",
+      "test_filter_mode": "aptos_filter",
       "fuzz_engines": [],
-      "fallback_strategy": "boundary-value parameterized tests — write multiple #[test] functions covering min, mid, MAX_U64 for each input (no built-in fuzzer)",
-      "static_analyzers": [
-        {"name": "move-prover", "command": "aptos move prove", "primary": false, "notes": "requires #[spec] annotations; opt-in"}
-      ],
+      "fallback_strategy": "boundary-value Move unit tests with multiple concrete input sets",
       "evidence_tags": ["POC-PASS", "POC-FAIL", "CODE-TRACE"],
       "docs_sources": [
-        "https://aptos.dev/build/smart-contracts/book/unit-testing",
-        "https://aptos.dev/build/smart-contracts/prover"
+        "https://aptos.dev/en/build/smart-contracts/book/unit-testing"
       ]
     },
     "sui": {
