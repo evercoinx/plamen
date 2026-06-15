@@ -12,7 +12,7 @@
 
 | Tool | Purpose | Install |
 |------|---------|---------|
-| **Claude Code CLI** (or Codex CLI) | AI runtime | [docs.anthropic.com](https://docs.anthropic.com/en/docs/claude-code) or [github.com/openai/codex](https://github.com/openai/codex) |
+| **Claude Code CLI** (or Codex CLI — BETA) | AI runtime | [docs.anthropic.com](https://docs.anthropic.com/en/docs/claude-code) or [github.com/openai/codex](https://github.com/openai/codex) |
 | **Python 3.11-3.12** | MCP servers, wrapper | [python.org](https://python.org) |
 | **Node.js 18+** / **npx** | npm MCP servers | [nodejs.org](https://nodejs.org) |
 | **Git** | Submodules, deps | [git-scm.com](https://git-scm.com) |
@@ -133,6 +133,10 @@ pip install -e custom-mcp/slither-mcp
 
 Plamen supports two AI backends. Install one or both:
 
+> **Backend status**: Claude Code is the default, fully-supported backend. Codex CLI (`codex exec`) is a **cost-saving BETA** added in v2.1.0 — it runs one `codex exec` per depth job, auto-waits on natural-language usage-cap detection instead of halting, and runs real Devil's-Advocate iteration-2 depth. Some features remain Claude-only (see [docs/mcp-servers.md](mcp-servers.md)).
+
+> **Default model**: On Claude Code, Thorough-mode depth/orchestration defaults to **Opus 4.8** (`claude-opus-4-8`). Override with the `PLAMEN_OPUS_MODEL` environment variable.
+
 **Claude Code** (default):
 
 ```bash
@@ -228,7 +232,7 @@ python3 plamen.py         # macOS / Linux
 python plamen.py          # Windows
 ```
 
-The startup screen runs a dependency check showing which tools are available.
+The startup screen runs a dependency check showing which tools are available. As of v2.1.0 it also shows the auto-detected **ecosystem** (language) for your target — detection runs and auto-corrects at startup (no halt-to-rerun), resolved via manifest-priority rules. The detected ecosystem is printed on the startup banner so you can confirm it before launching an audit.
 
 ---
 
@@ -265,6 +269,16 @@ MCP server access is granted per-server in the `[mcp_servers.*]` sections of `co
 ## Cold Start
 
 The first MCP tool call per session loads ChromaDB and the all-MiniLM-L6-v2 embedding model (~5s). Subsequent calls are instant. Both Claude Code and Codex CLI experience this cold start. The pipeline handles it automatically with probe-first patterns and WebSearch fallback. On Codex CLI, MCP server startup timeouts are configured per-server in `config.toml` (`startup_timeout_sec = 30` by default).
+
+---
+
+## Execution Model (v2.1.0)
+
+You do not need to configure any of this — it runs automatically — but it helps to know how the driver supervises workers:
+
+- **PTY-supervised execution**: As of v2.1.0 the driver drives each `claude`/Codex worker through a pseudo-terminal and infers turn completion from artifacts written to disk (disk-derived completion) rather than from a fragile stdout/JSON envelope. This eliminates the 0-byte-stdio ambiguity and silent-hang class from earlier releases. A dedicated PTY transport preflight runs before the pipeline; on macOS/Linux, POSIX PTY execution uses `Popen` ownership with SIGCHLD reset and strips `CLAUDE_CODE_*` env vars from nested child workers.
+- **Haltless resilience**: A finished audit is never discarded at the finish line. The report-index, verify, inventory, and resume paths repair-then-degrade and surface any unfinished obligations as flagged Appendix-B items in `AUDIT_REPORT.md` instead of halting. Stale or corrupt checkpoints recover instead of stranding the run, so re-running the same `plamen` command resumes from the last good state.
+- **Deterministic/mechanical plumbing**: Several formerly-LLM steps (report-index recovery, verify backfill/queue manifests, candidate dedup) now run as deterministic Python so a single bad LLM turn cannot lose findings or stall the run.
 
 ---
 

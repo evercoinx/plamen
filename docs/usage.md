@@ -2,7 +2,7 @@
 
 > **Just installed?** See [getting-started.md](getting-started.md) first — what's required, what's optional, and how to run your first audit.
 
-All invocations -- terminal CLI, Claude Code slash commands, and Codex CLI -- launch the same V2 deterministic driver (`plamen_driver.py`). Most phases run as a single isolated `claude -p` (or `codex exec`) subprocess; **breadth, depth, and rescan** run as driver-supervised PTY worker pools with one Claude PTY per worker artifact and disk-derived completion (`<!-- PLAMEN_STATUS: COMPLETE -->`). See [pipeline-phases-presentation.md](pipeline-phases-presentation.md) for the per-phase execution shape. The driver provides automatic checkpointing, manifest-exact retry (only missing/bad worker rows re-spawn, not whole phases), gating, and rate-limit pause/resume.
+All invocations -- terminal CLI, Claude Code slash commands, and Codex CLI -- launch the same V2 deterministic driver (`plamen_driver.py`). Most phases run as a single isolated `claude -p` (or `codex exec`) subprocess; **breadth, depth, and rescan** run as driver-supervised PTY worker pools with one Claude PTY per worker artifact and disk-derived completion (`<!-- PLAMEN_STATUS: COMPLETE -->`). See [pipeline-phases-presentation.md](pipeline-phases-presentation.md) for the per-phase execution shape. The driver provides automatic checkpointing, manifest-exact retry (only missing/bad worker rows re-spawn, not whole phases), gating, rate-limit pause/resume, and haltless resilience — late phases repair-then-degrade and flag unfinished obligations in the report instead of throwing away a finished audit. Bookkeeping-heavy stages (report_index recovery, verify backfill, finding dedup) run as deterministic Python rather than fragile LLM prose-parsing.
 
 ---
 
@@ -23,7 +23,9 @@ plamen l1 thorough /path/to/node-client # L1 audit, Thorough mode
 /plamen-l1-wizard       # L1 infrastructure audit
 ```
 
-### Codex CLI
+### Codex CLI (beta)
+
+The OpenAI Codex CLI (`codex exec`) is supported as an alternative, cost-saving backend (beta). It runs one `codex exec` per depth job, detects usage caps from natural-language output and auto-waits instead of halting, and seeds the full mandatory first-pass artifact set so recon/depth degrade losslessly.
 
 ```
 $plamen core /path/to/project           # Codex has no slash commands
@@ -153,6 +155,8 @@ Each scratchpad has a `.plamen_run.lock` that prevents concurrent driver invocat
 - **Compaction heartbeat**: Claude auto-compacting its context during a worker turn prints a single informational line ("Claude compacted context; continuing normally (disk gate is source of truth)"). This is **not a warning** — the driver continues under disk-gate validation. If the artifact reaches `PLAMEN_STATUS: COMPLETE`, the worker is done regardless of compaction notice.
 - **Worker-pool progress**: operators see live per-worker progress directly in the UI (no longer hidden inside Claude's Task tool stdio). File creation, marker transitions (`IN_PROGRESS` → `COMPLETE`), and worker completion events are all visible.
 - **Multiple Claude PTY processes**: during breadth/rescan/depth you will see multiple `claude` processes in the process tree — one per worker artifact. This is expected (driver-owned worker pool), not duplication or runaway processes.
+- **Ecosystem auto-detect**: the driver mechanically detects the codebase ecosystem (EVM, Solana, Aptos, Sui, Soroban, or L1 Go/Rust) at startup, shows it on the banner, and auto-corrects a mismatched `config.language` in place — no halt-to-rerun. Detection is recall-safe: it only overrides on a genuine high/medium-confidence mismatch, and on ambiguity it keeps the configured value and warns rather than guessing. Corrections are surfaced on the TUI (`[startup] auto-detected ecosystem=...`).
+- **Haltless completion (degrade-with-flag)**: a finished audit is never discarded at the finish line. If a late phase (report_index, verify, inventory, or resume) cannot fully complete, the driver repairs what it can, then degrades and surfaces the unfinished obligation as a flagged human-review item in `AUDIT_REPORT.md` rather than halting the run. Stale or corrupt checkpoints recover instead of stranding the audit.
 
 ---
 

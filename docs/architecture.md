@@ -1,5 +1,9 @@
 # Architecture
 
+> Plamen v2.1.0. The default analysis model is Opus 4.8 (`claude-opus-4-8`),
+> resolved via `PLAMEN_OPUS_MODEL` / `PLAMEN_THOROUGH_OPUS_MODEL` in
+> `scripts/plamen_types.py`. Runs on Windows, macOS, and Linux.
+
 ## Pipeline Overview
 
 > Python driver → worker pool → one Claude PTY session per artifact → disk artifact gate → retry only missing/bad rows. Claude saying "done" is not trusted; disk markers are.
@@ -57,8 +61,9 @@ Pipeline phases (semantic order, regardless of execution shape):
 ```
 Phase 1 RECON -> Phase 2 INSTANTIATE -> Phase 3 BREADTH -> Phase 3b RESCAN
   -> Phase 3c PER-CONTRACT -> Phase 4a INVENTORY -> Phase 4a.5 SEMANTIC
-  -> Phase 4b DEPTH LOOP -> Phase 4c CHAIN -> Phase 5 VERIFY
-  -> Phase 5.1 SKEPTIC-JUDGE -> Phase 6 REPORT -> AUDIT_REPORT.md
+  -> Phase 4b DEPTH LOOP -> Phase 4b.6 EXPLORATION SKEPTIC (Thorough)
+  -> Phase 4c CHAIN -> Phase 5 VERIFY -> Phase 5.1 SKEPTIC-JUDGE
+  -> Phase 6 REPORT -> Phase 6b REPORT_DEDUP (Python) -> AUDIT_REPORT.md
 ```
 
 ---
@@ -131,6 +136,13 @@ Worker-pool phase (`_run_depth_worker_pool_pty`, `scripts/plamen_driver.py:6183`
 
 **Confidence scoring** (sonnet, batched): 4-axis model (Evidence x 0.25 + Consensus x 0.25 + Analysis Quality x 0.3 + RAG Match x 0.2).
 
+### Phase 4b.6: Exploration-Completeness Skeptic (Thorough only)
+
+Recall-positive additive soft phase that audits whether the depth loop left
+unexplored paths. Validator-soft: it never halts (writes a sentinel + warning
+on missing output) and only adds coverage, never removes findings. Wired at
+`scripts/plamen_driver.py:13178` (`_validate_exploration_skeptic`).
+
 ### Phase 4c: Chain Analysis (2 sequential agents)
 
 - **Agent 1**: Exhaustive enabler enumeration (5 actor categories per dangerous state), finding grouping
@@ -147,6 +159,16 @@ Skeptic (sonnet) with INVERSION MANDATE, then Judge (haiku) resolves disagreemen
 ### Phase 6: Report Generation
 
 Index Agent (haiku, LLM phase) -> 3 Tier Writers (opus/sonnet, LLM phase) -> Assembler (Python mechanical, no LLM) -> `AUDIT_REPORT.md`.
+
+The Index Agent's report_index is built deterministically where it used to rely on prose parsing — mechanical SC report_index recovery repairs missing/malformed rows in Python rather than re-running the LLM or halting (see *Haltless Resilience*).
+
+### Phase 6b: report_dedup (Python mechanical)
+
+A durable post-report deduplication phase (`report_dedup`, dispatched at
+`scripts/plamen_driver.py:16961`, `critical=False`/non-fatal). It runs a
+data-loss-free dedup over the full candidate set with a precision-guarded
+cross-tier same-fix catch — recall-positive, and a non-fatal failure never
+blocks delivery of `AUDIT_REPORT.md`.
 
 ---
 
@@ -189,10 +211,37 @@ Disk-gate completion contract. The driver only counts a worker complete when:
 Claude saying "done" in the PTY transcript is not trusted for worker phases. The reader thread captures the `DONE:` line for observability but the only completion authority is the disk gate. This closes the premature-DONE failure class observed when Claude Code auto-compacts a worker turn (see *Compaction-as-informational* below).
 
 Key properties:
-- **Resumable**: re-run `python ~/.claude/scripts/plamen_driver.py {project}/.scratchpad/config.json` to resume from the last checkpoint.
+- **Resumable**: re-run `python ~/.claude/scripts/plamen_driver.py {project}/.scratchpad/config.json` to resume from the last checkpoint. Stale or corrupt checkpoints recover rather than stranding the run.
 - **Phase-isolated**: each subprocess sees only its own prompt section; forward refs and foreign subsections are stripped before dispatch.
 - **Backend-agnostic**: Claude Code (`claude -p`) and Codex CLI (`codex exec`) share the same phase contracts.
 - **Deterministic gating**: artifact existence and marker hygiene are checked mechanically. The LLM never self-reports completion to the driver's state machine.
+- **Ecosystem auto-detect**: the language/ecosystem is detected and auto-corrected at startup (no halt-to-rerun), shown on the startup banner, and resolved via manifest-priority rules (`config.language` reconciliation around `scripts/plamen_driver.py:14838`). A suffix-only signal never clobbers an explicit config; high-confidence cases such as Pinocchio and native-SDK Solana are corrected automatically, while ambiguous cases stay conservative (recall-safe — a wrong auto-correct is worse than the status quo).
+- **Haltless at the finish line**: late-stage gates degrade-with-flag instead of halting (see *Haltless Resilience* below).
+
+---
+
+## Haltless Resilience
+
+A finished audit is never thrown away at the finish line. Late-stage phases
+(report_index, verify, inventory, and the resume paths) **repair-then-degrade**
+rather than halting: where v2.0.x would stop the run, v2.1.0 completes the run
+and surfaces any unfinished obligations as flagged items so a human can triage
+them.
+
+- **Degrade-with-flag → delivered Appendix B.** Gates that previously wrote
+  "for human review" notes into intermediate `report_semantic_*.md` files (where
+  the flag never actually reached the reader) now fold those items into a
+  delivered Appendix B of `AUDIT_REPORT.md` via
+  `_build_human_review_appendix` (`scripts/plamen_mechanical.py:1970`). The
+  human-review flag reaches the human.
+- **Mechanical report_index / verify recovery.** Missing or malformed
+  report_index rows and verify files are repaired deterministically in Python
+  (mechanical SC report_index recovery, verify backfill, and queue-completeness
+  manifests) instead of triggering an LLM re-run or a halt. The verify
+  queue-completeness backfill also stops the resume-rewind loop.
+- **Unified retry/recovery.** Retry and recovery are consistent across
+  backend × mode × pipeline: a hinted 3rd retry, rescan added to the set of
+  recovering phases, and stale/corrupt-checkpoint recovery.
 
 ---
 
@@ -272,7 +321,7 @@ When running in L1 mode (`/plamen-l1-wizard` in Claude Code, or `plamen l1` from
 |-------------|-------------|--------|
 | Phase 4c: Chain Analysis | **Removed** | L1 bugs are point vulnerabilities; enabler enumeration doesn't apply |
 | depth-token-flow | **Not loaded** | No in-scope DeFi token flow in node clients |
-| -- | **Phase 0.5: Bake** | Batch-indexes repo with scip-go / rust-analyzer SCIP before depth |
+| -- | **Phase 0.5: Bake** | Batch-indexes repo before depth with deterministic SCIP: `_bake_go_scip` (scip-go) for Go node clients, `_bake_rust_scip` (rust-analyzer scip) for Rust. Generates the graph artifacts depth agents expect. |
 | -- | **depth-consensus-invariant** | Consensus safety/liveness, non-determinism, Byzantine scenarios |
 | -- | **depth-network-surface** | p2p/RPC/mempool attack surfaces, DoS vectors, eclipse checks |
 | SC severity matrix | **L1 severity matrix** | Aligned with Immunefi v2.3, stricter for Critical impact |
@@ -282,12 +331,19 @@ See [l1-mode/design.md](l1-mode/design.md) for the complete L1 architecture.
 
 ---
 
-## Codex Backend
+## Codex Backend (cost-saving, BETA)
 
-The driver supports OpenAI Codex CLI as an alternative backend:
+The driver supports OpenAI Codex CLI (`codex exec`) as an alternative backend,
+added in v2.1.0 as a cost-saving option (still beta):
 
 - Prompts are rewritten by `scripts/codex_adapter.py`: `~/.claude/...` paths become `~/.codex/plamen/...` equivalents, `Task(subagent_type=...)` becomes `spawn_agent(...)`, bash snippets become PowerShell where required. This is prompt-text rewriting, not MCP transport translation.
 - MCP is supported natively by Codex via `[mcp_servers.*]` TOML stanzas in `~/.codex/config.toml`, which `codex_adapter.py` generates from the Claude Code MCP config so unified-vuln-db and Solodit RAG tools work in both backends.
 - Sandbox constraints are adapted for Codex's execution model.
 - `~/.codex/plamen/` is symlinked to `~/.plamen/` (the canonical Git checkout), exactly the same way `~/.claude/` is. The Codex tree carries `AGENTS.md` (orchestrator) and `config.toml` (settings), replacing Claude Code's `CLAUDE.md`, `settings.json`, and `mcp.json`.
 - Install: `plamen install --codex`. The driver auto-detects the active backend and resolves the correct symlink via `plamen_home()` (`scripts/plamen_types.py:87`).
+
+v2.1.0 Codex-specific hardening:
+- **Per-job depth fan-out**: the depth phase runs one `codex exec` per depth job rather than a single subprocess, fixing the never-cut-stub halt from single-subprocess under-fan-out.
+- **Natural-language usage-cap detection**: Codex/ChatGPT usage-cap errors arrive as prose, not structured codes; the driver detects them and auto-waits (preserving state) instead of treating them as a phase failure that retries into a halt (`scripts/plamen_driver.py:494`).
+- **Full first-pass artifact seeding**: Codex depth seeds the complete mandatory first-pass artifact set (`_codex_depth_artifact_checklist` / `_codex_widen_depth_output_contract`) so recon/depth stop degrading lossily, and runs a real Devil's-Advocate iteration 2.
+- **Context-exceeded no longer perma-fails**: a context-exceeded condition is recoverable rather than fatal.

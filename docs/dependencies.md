@@ -26,7 +26,17 @@ The setup wizard detects your OS and installed tools, then offers to install mis
 | Node.js | 18+ | npm-based MCP servers | [nodejs.org](https://nodejs.org) |
 | Git | any | Submodules, version control | [git-scm.com](https://git-scm.com) |
 | Rust | stable | Solana (Trident fuzzer), Soroban contracts, L1 Rust clients | [rustup.rs](https://rustup.rs) — Solana, Soroban, and L1 Rust |
-| `pywinpty>=2.0.14` (Windows only) | latest | PTY supervision transport for Claude workers | auto-installed by `plamen install` (gated `platform_system=="Windows"` in `requirements.txt`); macOS/Linux use stdlib `pty.openpty()` |
+| `pywinpty>=2.0.14` (Windows only) | latest | PTY supervision transport for Claude workers | auto-installed by `plamen install` (gated `platform_system=="Windows"` in `requirements.txt`); macOS/Linux use stdlib `pty.openpty()` with `Popen` ownership + SIGCHLD reset |
+
+> **PTY-supervised execution (v2.1.0)**: the driver now drives each Claude/Codex
+> worker through a pseudo-terminal and infers turn completion from artifacts
+> written to disk (the `<!-- PLAMEN_STATUS: COMPLETE -->` marker), not from a
+> stdout/JSON envelope. This removes the 0-byte-stdio ambiguity and silent-hang
+> class from v2.0.x. A one-time PTY transport preflight
+> (`scripts/preflight_pty_transports.py`) probes which continuation mechanisms
+> the installed Claude Code binary supports; results are cached per
+> `claude --version` and the driver always falls back to a slower respawn path
+> if a probe is inconclusive — no extra setup is required.
 
 ### Windows: Developer Mode (required)
 
@@ -307,3 +317,21 @@ macOS (Homebrew Python) and Ubuntu 23.04+ block bare `pip install`. Plamen handl
 
 ### `error: failed to load manifest for workspace member programs/*`
 Anchor CLI < 0.32 glob issue on Windows. See [Solana > Windows](#solana-platform-notes) above.
+
+### Worker appears to "hang" with no output (PTY supervision)
+As of v2.1.0 the driver supervises each worker over a pseudo-terminal and treats
+the on-disk `<!-- PLAMEN_STATUS: COMPLETE -->` marker as the only completion
+signal. A worker that is doing slow-but-real work no longer trips the old
+context-thrash fast-fail; quiet stdio is expected. The driver detects completion
+from disk, repairs-then-degrades rather than halting at the finish line, and
+surfaces any unfinished obligations as flagged Appendix-B items in
+`AUDIT_REPORT.md`. On Windows, ensure `pywinpty>=2.0.14` is installed (see
+[Required](#required-all-platforms)); macOS/Linux use the stdlib `pty` module.
+
+### Wrong toolchain selected / ecosystem mismatch
+v2.1.0 auto-detects the target ecosystem (EVM, Solana, Aptos, Sui, Soroban, or
+L1) at startup, auto-corrects it without a halt-to-rerun, and shows the resolved
+ecosystem on the startup banner. Detection uses manifest-priority rules
+(file-suffix-only signals never clobber an explicit config; Pinocchio/native-SDK
+Solana is detected at high confidence). If the banner shows the wrong ecosystem,
+set it explicitly in your project config and re-run — the explicit value wins.

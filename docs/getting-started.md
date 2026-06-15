@@ -26,7 +26,7 @@
 
 These are installed automatically. If any are missing, `plamen` will tell you.
 
-- **Claude Code** (`claude` in PATH) or **Codex CLI** (`codex` in PATH)
+- **Claude Code** (`claude` in PATH) or **Codex CLI** (`codex` in PATH — cost-saving BETA backend)
 - **Python 3.11-3.12** (`python` / `python3`)
 - **Node.js 18+** (`npx`, `npm`)
 - **Git**
@@ -82,7 +82,7 @@ Set in `~/.claude/mcp.json` (Claude Code). Codex CLI does not use MCP — API ke
 plamen
 ```
 
-The interactive wizard walks you through: mode selection → target project → docs → scope → cost estimate → launch. The V2 driver auto-detects your backend (Claude Code or Codex CLI) via `plamen_home()`.
+The interactive wizard walks you through: mode selection → target project → docs → scope → cost estimate → launch. The V2 driver auto-detects your backend (Claude Code or Codex CLI) via `plamen_home()`, and auto-detects (and auto-corrects) the target ecosystem/language at startup — no halt-to-rerun if the detected language is off; the resolved ecosystem is shown on the startup banner.
 
 ### Option B: One-liner
 
@@ -103,7 +103,13 @@ plamen core /path/to/your/project
 $plamen core /path/to/project
 ```
 
-All paths invoke the same V2 deterministic driver. The backend difference is transparent — agent prompts, depth templates, and verification logic are identical.
+All paths invoke the same V2 deterministic driver. The backend difference is transparent — agent prompts, depth templates, and verification logic are identical. The default high-capability model is **Opus 4.8** (`claude-opus-4-8`); override with `PLAMEN_OPUS_MODEL` / `PLAMEN_THOROUGH_OPUS_MODEL`.
+
+### How the driver runs workers (v2.1.0)
+
+- **PTY-supervised execution.** The driver drives each worker through a pseudo-terminal and infers turn completion from artifacts written to disk (the `<!-- PLAMEN_STATUS: COMPLETE -->` marker), not from a stdout/JSON envelope. This eliminates the 0-byte-stdio "silent hang" ambiguity from earlier versions. During breadth/rescan/depth you will see several `claude` (or `codex`) processes in your process tree — one per worker artifact. That's the driver-owned worker pool, not runaway processes.
+- **Haltless resilience.** A finished audit is never thrown away at the finish line. The report-index, verify, inventory, and resume paths repair-then-degrade: any unfinished obligation is surfaced as a flagged Appendix-B item in `AUDIT_REPORT.md` rather than halting the run. Stale or corrupt checkpoints recover instead of stranding the audit, and rate-limit / usage-cap conditions auto-wait then resume.
+- **Deterministic plumbing.** Report-index recovery, verify backfill, and finding dedup are mechanical Python steps (LLM out of the loop) for reliability.
 
 ## What mode should I pick?
 
@@ -163,4 +169,4 @@ See [updating.md](updating.md) for details on what auto-updates and what doesn't
 
 ## Troubleshooting
 
-See [dependencies.md](dependencies.md) for platform-specific fixes (Windows Developer Mode, macOS hnswlib, Python version issues, etc.).
+Plamen runs on Windows, macOS, and Linux. POSIX systems use native PTY execution (`Popen` ownership + SIGCHLD reset) with nested-session env isolation. See [dependencies.md](dependencies.md) for platform-specific fixes (Windows Developer Mode, macOS hnswlib, Python version issues, etc.).

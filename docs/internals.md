@@ -147,9 +147,9 @@ Downgrade modifiers: on-chain-only exploit (-1), view-function-only (cap Medium)
 
 ## Driver
 
-One-liner: **Python driver → worker pool → one Claude PTY session per artifact → disk artifact gate → retry only missing/bad rows. Claude saying "done" is not trusted; disk markers are.**
+One-liner: **Python driver → worker pool → one backend PTY session (Claude Code or Codex) per artifact → disk artifact gate → retry only missing/bad rows. The worker saying "done" is not trusted; disk markers are.**
 
-The pipeline driver (`plamen_driver.py`) executes phases as isolated subprocesses. This is the only execution model — all invocations (`/plamen-wizard`, `plamen` terminal, `plamen core`, etc.) launch this driver.
+The pipeline driver (`plamen_driver.py`) executes phases as isolated subprocesses. This is the only execution model — all invocations (`/plamen-wizard`, `plamen` terminal, `plamen core`, etc.) launch this driver. It runs on Windows, macOS, and Linux against either the Claude Code or Codex (BETA) backend.
 
 ### Driver layout
 
@@ -183,6 +183,29 @@ Three execution shapes coexist behind the same `plamen_home()` and disk-gate pri
 3. **Python mechanical** — used for `inventory_prepare`, `report_assemble`, `chain_prep`, `verify_aggregate`, semantic-dedup fallback, severity binding, and similar plumbing phases. No LLM is spawned; deterministic Python in `plamen_mechanical.py` / `mechanical_verify.py` / `chain_prep.py` / `report_index_machinery.py` reads and writes scratchpad artifacts in-process.
 
 All three shapes share the same checkpoint (`_v2_checkpoint.json`), the same `gate_passes` validator, the same `plamen_home()`-derived paths, and the same artifact ownership rules. Phase ordering and retry policy live in `plamen_driver.py`; shape-specific behavior is dispatched by phase name.
+
+### Model routing
+
+Opus phases run on **Opus 4.8** (`claude-opus-4-8`) by default across all modes — its stronger multi-step instruction-following reduces attempt-1 misses on recon coverage, breadth/rescan fan-out, and verification rigor (`PLAMEN_OPUS_MODEL`, `scripts/plamen_types.py:105-125`). In **Thorough** mode the reasoning-critical roles (discovery = breadth + depth, verification shards, skeptic-judge) are promoted to Opus 4.8 specifically, while **Core** keeps the 4.6 pin and **Light** stays on Sonnet to bound plan usage (`PLAMEN_THOROUGH_OPUS_MODEL`, `scripts/plamen_types.py:111-118`). Both defaults are env-overridable for benchmarking or cost-capping.
+
+### Backends (Claude Code + Codex BETA)
+
+The driver runs against two interchangeable CLI backends behind the same `plamen_home()` and disk-gate primitives:
+
+- **Claude Code** (default) — config files `CLAUDE.md` + `settings.json` + `mcp.json`.
+- **Codex CLI** (`codex exec`, **BETA / cost-saving**) — OpenAI's CLI as an alternative worker backend, with research-backed model/tier/compact configuration and per-job depth fan-out (one `codex exec` per depth job, which fixes the never-cut-stub halt). Codex model aliases map through `_CODEX_MODEL_MAP` (`scripts/plamen_types.py:128`), config files are `AGENTS.md` + `config.toml`, and `codex_adapter.py` regenerates them from the Claude-side manifests to prevent drift. Codex usage-cap messages are detected in natural language so the driver auto-waits instead of halting, Codex depth runs real Devil's-Advocate iter-2, and `context-exceeded` no longer perma-fails. The active backend is detected at startup (`backend == "codex"`, `scripts/plamen_driver.py:205`) and selected paths/tools are translated only when Codex is active.
+
+### Cross-platform (Windows + macOS + Linux)
+
+The PTY worker-pool model runs on all three platforms. POSIX hosts (macOS, Linux) use `pty.openpty()` + `Popen` ownership with a `SIGCHLD` reset on spawn; Windows uses `winpty` (see the PTY transport section below). Nested-session env isolation strips `CLAUDE_CODE_*` markers from child workers on every platform, and PATH is persisted into the child environment so backend binaries resolve.
+
+### Ecosystem auto-detection
+
+The configured language/ecosystem is mechanically auto-detected and auto-corrected at startup with no halt-to-rerun (`_detect_ecosystem`, `scripts/plamen_driver.py:14879`), shown on the startup banner, and resolved via manifest-priority rules (a suffix-only signal never clobbers an explicit config; native-SDK / Pinocchio Solana is detected at high confidence). The auto-corrector is recall-safe by design — a wrong auto-correct is treated as worse than the status quo (`_language_correction`, `scripts/plamen_driver.py:14837`), and L1 pipelines always keep their configured Rust/Go language.
+
+### Haltless resilience
+
+A finished audit is never discarded at the finish line. The `report_index`, `verify`, `inventory`, and resume paths **repair-then-degrade** instead of halting: unfinished obligations are surfaced as flagged Appendix-B items in `AUDIT_REPORT.md` rather than blocking the run. Retry/recovery is unified across backend × mode × pipeline (hinted 3rd retry for under-covering phases, rescan added to recovering phases, verify queue-completeness backfill that stops the resume-rewind loop), and stale/corrupt checkpoints recover rather than stranding the run. Degraded phases carry a sentinel that is cleared on a genuine resume (`checkpoint.degraded` / `clear_degraded_sentinel`, `scripts/plamen_driver.py:2187-2191`).
 
 ### Compaction as informational
 

@@ -1,12 +1,16 @@
 # Audit Modes
 
+> Plamen v2.1.0. All modes run through the PTY-supervised V2 driver
+> (`plamen_driver.py`) on Windows, macOS, and Linux, with either the Claude Code
+> or OpenAI Codex CLI backend.
+
 ## Comparison
 
 | Dimension | Light | Core | Thorough |
 |-----------|-------|------|----------|
 | **Target plan** | **Pro** | Max | Max |
 | Orchestrator model | Session model (Sonnet default) | Opus | Opus |
-| Agent models | All Sonnet/Haiku | Opus + Sonnet | Opus + Sonnet |
+| Agent models | All Sonnet/Haiku | Opus + Sonnet | Opus + Sonnet (Opus tier resolves to Opus-4.8) |
 | Recon | 2 sonnet (no RAG, no fork) | 4 agents (RAG fire-and-forget) | 4 agents (full RAG) |
 | Breadth | 3-4 sonnet | 5-9 opus | 5-9 opus |
 | Re-scan (3b/3c) | Skip | Skip | Full (sonnet, 2 iters + per-contract) |
@@ -24,13 +28,19 @@
 | Report | 2 agents (sonnet + haiku) | 5 agents (opus + sonnet + haiku) | 5 agents |
 | Agent count | **~18-22** | **~30-50** | **~40-100** |
 
-> The "agent" counts above are role counts. Agents in the **breadth**, **rescan**, and **depth** rows now execute as a driver-owned PTY worker pool (one Claude PTY per agent artifact) rather than as `Task()` subagents under a Claude coordinator — see [pipeline-phases-presentation.md](pipeline-phases-presentation.md) for execution-shape details.
+> The "agent" counts above are role counts. Agents in the **breadth**, **rescan**, and **depth** rows execute as a driver-owned PTY worker pool (one Claude PTY per agent artifact) rather than as `Task()` subagents under a Claude coordinator. The driver supervises each worker through a pseudo-terminal and infers turn completion from artifacts written to disk (`PLAMEN_STATUS` markers) rather than from a stdout/JSON envelope, eliminating the 0-byte-stdio / silent-hang class. See [pipeline-phases-presentation.md](pipeline-phases-presentation.md) for execution-shape details.
+
+> **Cross-platform & ecosystem auto-detect**: All modes run on Windows, macOS, and Linux. The driver auto-detects (and auto-corrects, without a halt-to-rerun) the language ecosystem at startup, shows it on the startup banner, and resolves it via manifest-priority rules. POSIX runs use `Popen`-owned PTY execution with nested-session env isolation.
+
+> **Haltless resilience**: A finished audit is never discarded at the finish line. The report_index, verify, inventory, and resume paths repair-then-degrade and surface any unfinished obligations as flagged Appendix-B items in `AUDIT_REPORT.md` instead of halting. Stale or corrupt checkpoints recover instead of stranding the run.
+
+> **Deterministic plumbing**: Fragile LLM-prose-parsing phases have been replaced with deterministic Python — mechanical SC `report_index` recovery, mechanical verify backfill / queue manifests, and the data-loss-free `report_dedup` builder — so structure-assembly steps no longer depend on LLM output shape.
 
 ## When to Use Each
 
 - **Light**: Pro plan, codebases under 3000 lines, quick first pass. Reports all severities but skips semantic invariants, fuzzing, and design stress testing.
 - **Core**: Standard audit. Reports all severities, PoC-verifies Medium+, flag-triggered niche agents. Best balance of coverage and cost.
-- **Thorough**: Maximum coverage. Iterative depth with Devil's Advocate, fuzz campaigns (invariant + Medusa), design stress testing, skeptic-judge for HIGH/CRIT, 4-axis confidence scoring. Use for high-value or pre-deployment audits.
+- **Thorough**: Maximum coverage. Iterative depth with Devil's Advocate, fuzz campaigns (invariant + Medusa), design stress testing, skeptic-judge for HIGH/CRIT, a Thorough-only Exploration-Completeness skeptic (Phase 4b.6), 4-axis confidence scoring, and a durable post-report `report_dedup` pass. Use for high-value or pre-deployment audits.
 
 ## Proven-Only Mode
 
@@ -46,7 +56,7 @@ L1 infrastructure audits use the same Light/Core/Thorough tiers with these diffe
 |-----------|---------------|
 | Languages | Go, Rust (instead of Solidity, Move, etc.) |
 | Depth agents | + depth-consensus-invariant, depth-network-surface; no depth-token-flow |
-| Phase 0.5 | Bake phase: scip-go / rust-analyzer SCIP batch indexing |
+| Phase 0.5 | Bake phase: deterministic SCIP batch indexing — `_bake_go_scip` (Go) and rust-analyzer SCIP (Rust) |
 | Phase 4c | Removed (no chain analysis for L1 point vulnerabilities) |
 | Severity matrix | L1-specific, aligned with Immunefi v2.3 |
 | Skills | 22+ L1 injectable skills (consensus, p2p, mempool, RPC, validator, etc.) |
@@ -62,6 +72,8 @@ See [l1-mode/design.md](l1-mode/design.md) for the full L1 architecture.
 
 ---
 
-## Codex Backend
+## Codex Backend (BETA)
 
-All audit modes work with both Claude Code and OpenAI Codex CLI backends. The V2 driver (`plamen_driver.py`) auto-detects the active backend via `plamen_home()` and handles tool translation and path rewriting (`~/.claude/` vs `~/.codex/plamen/`). Install the Codex backend with `plamen install --codex`. See the main [README](../README.md) for full Codex setup.
+All audit modes work with both Claude Code and OpenAI Codex CLI (`codex exec`) backends. The Codex backend is a cost-saving **beta**: it adds a research-backed model/tier/compact configuration, per-job depth fan-out (one `codex exec` per depth job, which fixes the never-cut-stub halt), and natural-language usage-cap detection that auto-waits instead of halting. Codex depth runs the full Devil's-Advocate iteration 2 and seeds the complete mandatory first-pass artifact set so recon/depth degrade losslessly, and a context-exceeded turn no longer perma-fails.
+
+The V2 driver (`plamen_driver.py`) auto-detects the active backend via `plamen_home()` and handles tool translation and path rewriting (`~/.claude/` vs `~/.codex/plamen/`). Install the Codex backend with `plamen install --codex`. See the main [README](../README.md) for full Codex setup.
