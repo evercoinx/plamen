@@ -1160,7 +1160,7 @@ def _stellar_cmds():
 
 
 def _scout_soroban_cmds():
-    return ['cargo install cargo-scout-audit']
+    return ['cargo install cargo-scout-audit --locked']
 
 
 # Same binary as Soroban's scout (cargo-scout-audit). Listed separately so
@@ -1168,7 +1168,7 @@ def _scout_soroban_cmds():
 # the Soroban group, and so the post-install report can attribute it to
 # the right chain.
 def _scout_solana_cmds():
-    return ['cargo install cargo-scout-audit']
+    return ['cargo install cargo-scout-audit --locked']
 
 
 def _scip_go_cmds():
@@ -1205,7 +1205,7 @@ def _cargo_fuzz_cmds():
     cmds = []
     if shutil.which("rustup"):
         cmds.append('rustup toolchain install nightly')
-    cmds.append('cargo install cargo-fuzz')
+    cmds.append('cargo install cargo-fuzz --locked')
     return cmds
 
 
@@ -1224,7 +1224,7 @@ def _rust_analyzer_cmds():
     if sys.platform == "darwin" and _has_brew():
         return ['brew install rust-analyzer']
     # No rustup, no brew — cargo install is the last resort (slow but works).
-    return ['cargo install rust-analyzer']
+    return ['cargo install rust-analyzer --locked']
 
 
 def _ast_grep_cmds():
@@ -1283,7 +1283,7 @@ _INSTALL_RECIPES = {
 
         ("Trident fuzzer",
          lambda: _find_bin("trident", _CARGO_PATHS),
-         lambda: ['cargo install trident-cli'],
+         lambda: ['cargo install trident-cli --locked'],
          ["trident"], "~2-3 min",
          _CARGO_PATHS, ["rust", "openssl"] if sys.platform == "win32" else "rust"),
 
@@ -1561,7 +1561,7 @@ def _report_toolchain_visibility(w):
         ("Stellar CLI",                "stellar","plamen setup → Soroban", "Soroban audits"),
         ("Go (scip-go, medusa)",       "go",     "plamen setup → installs Go, or system package manager", "L1 mode + Medusa"),
         ("Rust (cargo)",               "cargo",  "plamen setup → installs Rust, or (in a real terminal) `sh -c \"$(curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs)\"`", "L1 mode + Soroban + Solana"),
-        ("cargo-fuzz",                 "cargo-fuzz", "plamen setup → Soroban / L1, or `rustup toolchain install nightly && cargo install cargo-fuzz`", "Soroban + L1-Rust Thorough fuzz"),
+        ("cargo-fuzz",                 "cargo-fuzz", "plamen setup → Soroban / L1, or `rustup toolchain install nightly && cargo install cargo-fuzz --locked`", "Soroban + L1-Rust Thorough fuzz"),
     ]
     # Use the same search paths as check_dependencies() so we don't get
     # a different answer here than `plamen doctor` would give.
