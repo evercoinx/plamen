@@ -3496,6 +3496,30 @@ def run_doctor():
     if claude_bin or codex_bin:
         if claude_bin:
             ok(f"`claude` on PATH ({claude_bin})")
+            # v2.0.1: probe authentication. An unauthenticated `claude -p`
+            # invocation returns rc=0 with a "Not logged in" / "/login"
+            # message on stdout, which the V2 driver cannot distinguish
+            # from a real subprocess response and ends up burning the
+            # phase budget on empty output. Surface this in `doctor`.
+            try:
+                probe = subprocess.run(
+                    [claude_bin, "-p", "ping"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                blob = (probe.stdout or "") + (probe.stderr or "")
+                if re.search(r"not logged in|/login\b|please log in|run `claude`",
+                             blob, re.IGNORECASE):
+                    warn("`claude` is on PATH but NOT authenticated. "
+                         "Either run `claude` interactively and complete `/login` (OAuth), "
+                         "OR set the ANTHROPIC_API_KEY environment variable with a valid "
+                         "Anthropic Console API key. "
+                         "A key dropped into ~/.claude/settings.json is NOT picked up — "
+                         "that file is for hooks/MCP/plugin config, not credentials. "
+                         "(V2 driver will produce empty subprocess output otherwise.)")
+            except (subprocess.TimeoutExpired, OSError):
+                # 5s timeout means `claude` is alive and waiting on
+                # input — that is the authenticated path; no warning.
+                pass
         else:
             warn("`claude` not on PATH (Claude Code backend unavailable)")
         if codex_bin:
@@ -3819,7 +3843,12 @@ def run_install():
         console.print(Rule(title="Linking into Claude Code", style="color(238)"))
         _run_symlink_install(w)
     elif not has_claude:
-        w(f"  {_C_GRAY}Claude Code not detected -- skipping ~/.claude/ symlinks{_RST}\n")
+        # v2.0.1: loud, not silent. A user who installs Plamen without
+        # `claude` on PATH gets no symlinks AND no config merge, which
+        # leaves the V2 driver unable to spawn subprocesses on the
+        # Claude Code backend. Make it impossible to miss.
+        w(f"  {_C_RED}! Claude Code not detected -- skipping ~/.claude/ symlinks{_RST}\n")
+        w(f"    {_C_GRAY}Install via https://claude.com/code, then re-run `plamen install`.{_RST}\n")
 
     # ── Submodules ─────────────────────────────────────────────
     # Init must fire when ANY git submodule is empty, not just slither-mcp.
@@ -3883,14 +3912,10 @@ def run_install():
         w(f"  {_C_GRAY}Claude Code not detected -- skipping ~/.claude/ config merge{_RST}\n")
 
     # ── Codex adapter (auto) ──────────────────────────────────
-    # `plamen install` (no flag) must wire the Codex backend on Codex-only and
-    # dual machines without requiring the user to know the `--codex` flag.
-    # _install_codex_adapter warns-but-continues when the codex bin is absent,
-    # so it is safe to run when staging configs for a machine where Codex will
-    # be installed later. When neither backend is detected we STILL stage the
-    # adapter so a Codex-only new user is not left with a non-functional
-    # backend (no ~/.codex/plamen symlink, no AGENTS.md/config.toml, no agents
-    # /skills/commands) that hard-fails at the first audit phase.
+    # `plamen install` (no flag) wires the Codex backend on Codex-only and dual
+    # machines without requiring the `--codex` flag. _install_codex_adapter
+    # warns-but-continues when the codex bin is absent, so it is safe to stage
+    # for a machine where Codex will be installed later.
     has_codex = bool(_find_codex_bin()) or os.path.isdir(
         os.path.normpath(os.path.expanduser("~/.codex"))
     )
@@ -3898,15 +3923,20 @@ def run_install():
         console.print(Rule(title="Codex Adapter", style="color(238)"))
         _install_codex_adapter(w)
 
+    # v2.0.1: if NEITHER backend is usable, the install is incomplete — say so
+    # loudly (exit stays 0; Codex-only/planned-later setups are valid and skip
+    # this because has_codex is True there).
+    if not has_claude and not has_codex:
+        console.print(Rule(title="INSTALL INCOMPLETE", style="color(160)"))
+        w(f"  {_C_RED}No backend configured.{_RST}\n")
+        w(f"  {_C_GRAY}Install `claude` (https://claude.com/code) + authenticate, OR{_RST}\n")
+        w(f"  {_C_GRAY}install the Codex CLI, then re-run `plamen install`.{_RST}\n")
+        w(f"  {_C_GRAY}Run `plamen doctor` to verify.{_RST}\n")
+
     # ── Install manifest (backend-agnostic, unconditional) ─────
-    # The claude-gated _run_symlink_install above is the only place that wrote
-    # the version manifest historically, so a Codex-only machine (has_claude
-    # False) never recorded a version. That left _installed_version() == None
-    # and _setup_python_deps' upgrade detection inert, silently skipping the
-    # editable `pip install -e` re-install loop on a v(N)->v(N+1) upgrade.
-    # Stamp the version now into every backend home that exists (and always
-    # PLAMEN_HOME) so upgrade detection fires on all backends. Runs after the
-    # Codex adapter so ~/.codex exists when present.
+    # Stamp the version into every backend home that exists (and PLAMEN_HOME)
+    # so _setup_python_deps upgrade detection fires on all backends. Runs after
+    # the Codex adapter so ~/.codex exists when present.
     _write_install_manifest()
 
     return 0

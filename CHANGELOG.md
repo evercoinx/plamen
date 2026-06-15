@@ -32,6 +32,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Ecosystem mis-detection requiring a rerun**: startup auto-correction replaces halt-to-rerun.
 - **Regex-fragility silent-drop class**: a tolerant-extraction substrate closes over-strict ID/field parsing drops.
 - **Transient API errors**: 5xx server errors (500/502/503/504) now get 529-style backoff-retry instead of stalling a worker.
+## [2.0.2] - 2026-05-20
+
+Follow-up to v2.0.1 — same surface, error-message copy edit only.
+
+### Fixed
+- **Auth error messages** in both `plamen doctor` and the V2 driver's
+  `detect_not_logged_in` exit now point at BOTH supported auth paths
+  (OAuth `/login` AND `ANTHROPIC_API_KEY` env var) and explicitly state
+  that `~/.claude/settings.json` is NOT read as credentials. Previously
+  the messages mentioned only OAuth, which misled users who had dropped
+  an API key into settings.json expecting it to be picked up.
+  (`plamen.py` `run_doctor`, `scripts/plamen_driver.py` `run_phase`)
+
+## [2.0.1] - 2026-05-20
+
+Isolated post-install gap fixes from a live-version user halt diagnosis. No
+methodology, agent set, or scratchpad-schema changes — only the install /
+doctor / driver edges that produced the failure.
+
+### Fixed
+- **`plamen doctor`** now probes `claude` authentication state. An
+  unauthenticated `claude -p` returns rc=0 with a "Not logged in" /
+  `/login` message that the V2 driver cannot distinguish from a real
+  empty response; previously `doctor` only checked that `claude` was on
+  PATH. (`plamen.py` `run_doctor`)
+- **V2 driver** detects "Not logged in" / `/login` in subprocess stdio
+  via the new `detect_not_logged_in` helper (sibling of
+  `detect_rate_limit`) and exits `EXIT_DEGRADED` with an actionable
+  error message instead of silently re-spawning the same
+  unauthenticated CLI until the attempt budget is exhausted.
+  (`scripts/plamen_driver.py`)
+- **`plamen install`** now emits a loud red `!` and an explicit
+  `INSTALL INCOMPLETE` banner when `claude` is not on PATH at install
+  time. Previously the install silently skipped both the `~/.claude/`
+  symlink and config-merge steps with a gray "skipping" line that was
+  easy to miss, leaving the user with an unrunnable setup.
+  (`plamen.py` `run_install`)
+- **Resume command** in `plamen_display` now quotes `{config_path}`
+  in all three emission sites so paths with spaces survive copy/paste.
+  (`scripts/plamen_display.py`)
 
 ## [2.0.0] - 2026-05-13
 

@@ -2744,6 +2744,33 @@ def detect_rate_limit(stdio_log: Path, tail_bytes: int = 65536) -> bool:
     return bool(_STRUCTURED_RATE_LIMIT_RE.search(tail))
 
 
+_NOT_LOGGED_IN_RE = re.compile(
+    r"not\s+logged\s+in|/login|please\s+log\s+in|"
+    r"run\s+`?claude`?\s+(?:interactively\s+)?to\s+(?:log\s*in|authenticate)",
+    re.IGNORECASE,
+)
+
+
+def detect_not_logged_in(stdio_log: Path, tail_bytes: int = 65536) -> bool:
+    """Return True iff the `claude` CLI emitted an authentication error (v2.0.1).
+
+    An unauthenticated `claude -p` returns rc=0 (or rc!=0 on newer builds) with a
+    "Not logged in" / "/login" message; without this the driver retries the same
+    unauthenticated CLI and degrades the phase, masking the real cause.
+    """
+    if not stdio_log.exists():
+        return False
+    try:
+        with stdio_log.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - tail_bytes))
+            tail = f.read().decode("utf-8", errors="replace")
+    except Exception:
+        return False
+    return bool(_NOT_LOGGED_IN_RE.search(tail))
+
+
 # ── 529 overload (transient provider overload) ──────────────────────────────
 #
 # A 529 / `overloaded_error` is Anthropic being temporarily overloaded
@@ -12170,6 +12197,17 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
             _archive_orphan_stubs(scratchpad, phase.name, diag)
     except Exception as e:
         log.debug(f"[{phase.name}] orphan diagnostic skipped: {e}")
+    # v2.0.1: surface "Not logged in" before silently retrying the same
+    # unauthenticated CLI (which would exhaust the budget + degrade opaquely).
+    if detect_not_logged_in(log_path):
+        log.error(
+            f"[{phase.name}] `claude` CLI not authenticated -- subprocess emitted "
+            f"/login or 'Not logged in'. Fix with EITHER (1) run `claude` "
+            f"interactively and complete `/login` (OAuth), OR (2) set "
+            f"ANTHROPIC_API_KEY with a valid Anthropic Console API key. A key in "
+            f"~/.claude/settings.json is NOT read as credentials. Then resume."
+        )
+        sys.exit(EXIT_DEGRADED)
     return rc
 
 
