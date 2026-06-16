@@ -2278,7 +2278,7 @@ def _assemble_report_python(
     low_section = _finalize_report_tier_section(low_section, id_to_title)
     info_section = _finalize_report_tier_section(info_section, id_to_title)
 
-    # --- Assemble per ~/.claude/rules/report-template.md ---------------------
+    # --- Assemble per ~/.plamen/rules/report-template.md ---------------------
     auditor = header_info.get("auditor", "Automated Security Analysis (Plamen V2)")
     scope = header_info.get("scope", project_root)
     header_fields = [

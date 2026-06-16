@@ -9,7 +9,7 @@ Execute the instructions below directly and stop. Do not spawn subagents.
 > STAGE, not an optional agent tool call.
 > **Budget**: 1 agent (not counted against depth budget).
 > **Reference (not load-bearing)**: Full scoring context is in
-> `~/.claude/rules/phase4-confidence-scoring.md`. Scoring formulas and
+> `~/.plamen/rules/phase4-confidence-scoring.md`. Scoring formulas and
 > axis weightings are applied in a separate phase (`final_scoring`) —
 > your job is only to produce per-finding RAG scores.
 

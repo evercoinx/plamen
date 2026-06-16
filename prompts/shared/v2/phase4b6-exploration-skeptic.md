@@ -3,7 +3,7 @@
 > **Mode gate**: Thorough mode ONLY.
 > **Purpose**: Independent exploration-completeness audit of prior analysis — verify whether each finding was investigated to completion, then fill any gaps.
 > **Output artifact**: `exploration_skeptic_findings.md`
-> **Finding format**: follow `~/.claude/rules/finding-output-format.md`
+> **Finding format**: follow `~/.plamen/rules/finding-output-format.md`
 
 ---
 
@@ -198,7 +198,7 @@ vulnerability.
 Write everything to `exploration_skeptic_findings.md`.
 
 1. **Findings**: Every new finding, upgrade, or re-open MUST use the standard
-   finding format defined in `~/.claude/rules/finding-output-format.md`. State
+   finding format defined in `~/.plamen/rules/finding-output-format.md`. State
    clearly for each whether it is a NEW finding, an UPGRADE (and of which prior
    finding), or a RE-OPEN (and of which prior finding).
 

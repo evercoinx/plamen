@@ -2632,15 +2632,25 @@ def _run_symlink_install(w):
     #    Claude Code context. Agents access rules directly from PLAMEN_HOME via
     #    absolute paths. Remove ALL Plamen-pointing symlinks from prior installs.
     rules_dir = os.path.join(CLAUDE_HOME, "rules")
-    os.makedirs(rules_dir, exist_ok=True)
-    rule_files = sorted(glob.glob(os.path.join(PLAMEN_HOME, "rules", "*.md")) +
-                        glob.glob(os.path.join(PLAMEN_HOME, "rules", "*.json")))
-    if rule_files:
-        w(f"  {_C_ORANGE}>{_RST} Linking rules ({len(rule_files)} files)\n")
-        for f in rule_files:
-            dst = os.path.join(rules_dir, os.path.basename(f))
-            _install(f, dst)
-    _clean_dangling_plamen_links(rules_dir, w)
+    if os.path.isdir(rules_dir):
+        plamen_norm = os.path.normpath(PLAMEN_HOME)
+        removed_rules = 0
+        for entry in sorted(os.listdir(rules_dir)):
+            path = os.path.join(rules_dir, entry)
+            if not os.path.islink(path):
+                continue
+            target_path = os.readlink(path)
+            if not os.path.isabs(target_path):
+                target_path = os.path.normpath(os.path.join(rules_dir, target_path))
+            if plamen_norm in os.path.normpath(target_path):
+                os.remove(path)
+                removed_rules += 1
+        if removed_rules:
+            w(f"  {_C_GREEN}rules/: removed {removed_rules} legacy Plamen symlink(s){_RST}\n")
+        try:
+            os.rmdir(rules_dir)  # remove if now empty
+        except OSError:
+            pass  # non-empty (user has own rules) — leave it
 
     # 5. Prompts directory (Plamen-only — per-language prompt trees)
     prompts_src = os.path.join(PLAMEN_HOME, "prompts")
