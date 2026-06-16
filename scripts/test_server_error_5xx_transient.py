@@ -36,6 +36,35 @@ def test_rate_limit_429_unaffected():
     assert not P.text_shows_overloaded('429 too many requests')  # 429 != server-error class
 
 
+def test_inspect_transcript_529_sets_overloaded_and_rate_limited(tmp_path):
+    """A 529 in a worker transcript sets BOTH flags (overloaded is a subset of
+    the broad rate-limit set), so the worker-pool runner routes it to the
+    retriable 'overloaded' status instead of the phase-level usage-cap pause."""
+    t = tmp_path / "transcript.jsonl"
+    t.write_text(
+        '{"type":"assistant","subtype":"api_error","status":529,'
+        '"error":{"type":"overloaded_error","message":"Overloaded"}}\n',
+        encoding="utf-8",
+    )
+    state = P.inspect_transcript(t)
+    assert state.overloaded is True
+    assert state.rate_limited is True
+
+
+def test_inspect_transcript_429_is_rate_limit_not_overloaded(tmp_path):
+    """A real 429 account/usage cap sets rate_limited but NOT overloaded, so it
+    still routes to the usage-cap pause (behavior unchanged)."""
+    t = tmp_path / "transcript.jsonl"
+    t.write_text(
+        '{"type":"assistant","subtype":"api_error","status":429,'
+        '"error":{"type":"rate_limit_error","message":"Too Many Requests"}}\n',
+        encoding="utf-8",
+    )
+    state = P.inspect_transcript(t)
+    assert state.rate_limited is True
+    assert state.overloaded is False
+
+
 if __name__ == '__main__':
     import pytest, sys
     sys.exit(pytest.main([__file__, '-q']))

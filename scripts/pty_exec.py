@@ -586,6 +586,11 @@ class TurnCompleteState:
     complete: bool
     done_seen: bool = False
     rate_limited: bool = False
+    # 529 / overloaded_error: a transient, provider-wide overload — NOT a 429
+    # account/usage cap. Tracked separately (it's a subset of rate_limited,
+    # which matches both) so worker-pool phases can give a 529 retriable
+    # short-backoff handling instead of escalating to the usage-cap pause.
+    overloaded: bool = False
     output_truncated: bool = False
     context_thrash: bool = False
     line_count: int = 0
@@ -616,6 +621,8 @@ def inspect_transcript(path: Path) -> TurnCompleteState:
                 state.line_count += 1
                 if event_is_rate_limited(event):
                     state.rate_limited = True
+                if event_is_overloaded(event):
+                    state.overloaded = True
                 if event.get("type") == "assistant":
                     state.last_assistant = event
                     if event_is_productive(event):

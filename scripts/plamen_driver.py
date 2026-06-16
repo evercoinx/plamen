@@ -6195,6 +6195,16 @@ def _run_single_recon_worker_pty(
                 on_poll=_worker_poll,
             )
             if state.rate_limited:
+                # A transient 529/overloaded is provider-wide, NOT a 429
+                # account/usage cap. It must NOT escalate to the phase-level
+                # usage-cap pause that stops the whole worker pool — Claude
+                # Code's own retry loop (exp backoff, up to 10x) usually
+                # self-recovers it. Classify it as a retriable worker failure
+                # so the gate re-spawns just this one worker. Mirrors the
+                # single-subprocess overload path (detect_overloaded backoff).
+                if getattr(state, "overloaded", False):
+                    return {"output": output, "rc": 1, "status": "overloaded",
+                            "reasons": ["transient 529 overloaded -- retriable"]}
                 return {"output": output, "rc": 1, "status": "rate_limited"}
             ok, reasons = _recon_worker_complete(scratchpad, output, job)
             return {
@@ -7006,6 +7016,16 @@ def _run_single_breadth_worker_pty(
                 on_poll=_worker_poll,
             )
             if state.rate_limited:
+                # A transient 529/overloaded is provider-wide, NOT a 429
+                # account/usage cap. It must NOT escalate to the phase-level
+                # usage-cap pause that stops the whole worker pool — Claude
+                # Code's own retry loop (exp backoff, up to 10x) usually
+                # self-recovers it. Classify it as a retriable worker failure
+                # so the gate re-spawns just this one worker. Mirrors the
+                # single-subprocess overload path (detect_overloaded backoff).
+                if getattr(state, "overloaded", False):
+                    return {"output": output, "rc": 1, "status": "overloaded",
+                            "reasons": ["transient 529 overloaded -- retriable"]}
                 return {"output": output, "rc": 1, "status": "rate_limited"}
             status_rows = compute_breadth_row_statuses(scratchpad, phase)
             status = next(
@@ -7715,6 +7735,16 @@ def _run_single_rescan_worker_pty(
                 on_poll=_worker_poll,
             )
             if state.rate_limited:
+                # A transient 529/overloaded is provider-wide, NOT a 429
+                # account/usage cap. It must NOT escalate to the phase-level
+                # usage-cap pause that stops the whole worker pool — Claude
+                # Code's own retry loop (exp backoff, up to 10x) usually
+                # self-recovers it. Classify it as a retriable worker failure
+                # so the gate re-spawns just this one worker. Mirrors the
+                # single-subprocess overload path (detect_overloaded backoff).
+                if getattr(state, "overloaded", False):
+                    return {"output": output, "rc": 1, "status": "overloaded",
+                            "reasons": ["transient 529 overloaded -- retriable"]}
                 return {"output": output, "rc": 1, "status": "rate_limited"}
             ok = _rescan_output_complete(scratchpad, phase, output)
             return {
@@ -9144,6 +9174,16 @@ def _run_single_depth_worker_pty(
                 on_poll=_worker_poll,
             )
             if state.rate_limited:
+                # A transient 529/overloaded is provider-wide, NOT a 429
+                # account/usage cap. It must NOT escalate to the phase-level
+                # usage-cap pause that stops the whole worker pool — Claude
+                # Code's own retry loop (exp backoff, up to 10x) usually
+                # self-recovers it. Classify it as a retriable worker failure
+                # so the gate re-spawns just this one worker. Mirrors the
+                # single-subprocess overload path (detect_overloaded backoff).
+                if getattr(state, "overloaded", False):
+                    return {"output": output, "rc": 1, "status": "overloaded",
+                            "reasons": ["transient 529 overloaded -- retriable"]}
                 return {"output": output, "rc": 1, "status": "rate_limited"}
             ok = _depth_worker_output_complete(
                 scratchpad,
