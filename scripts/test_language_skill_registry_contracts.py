@@ -28,7 +28,7 @@ def test_language_toolchain_registry_covers_all_supported_chains():
     Now the registry is the source of truth.
     """
     registry = json.loads(_read(ROOT / "rules" / "language-toolchain-registry.json"))
-    expected = {"evm", "solana", "aptos", "sui", "soroban"}
+    expected = {"evm", "solana", "aptos", "sui", "soroban", "daml"}
     assert set(registry["languages"]) == expected, (
         f"registry coverage drift: {set(registry['languages']) ^ expected}"
     )

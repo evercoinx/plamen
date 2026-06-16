@@ -55,6 +55,7 @@ __all__ = [
     "_FINDING_ID_EXTRACT_RE",
     "_ID_ALL_INTERNAL",
     "_ID_ALL_NONHYPO",
+    "_ID_DAML_ALTS",
     "_ID_DEPTH_ALTS",
     "_ID_HYPO_ALTS",
     "_ID_NICHE_ALTS",
@@ -287,16 +288,22 @@ _ID_HYPO_ALTS = (
     r"|GRP-\d+|H[CHMLI]-\d+"
 )
 
-# Convenience: all internal IDs (depth + tool + niche + hypothesis)
+# DAML/Canton internal finding-ID prefixes (DML- namespace; collision-free vs
+# the report-strip list, the DT/DS/DE/DX depth IDs, and DA=Devil's-Advocate).
+# Listed FIRST in the joins so a leftmost finditer match consumes the full
+# DML-CC-/DML-CID- token before the bare CC-/niche alts can grab a substring.
+_ID_DAML_ALTS = r"DML-(?:AUTH|ASM|CID|SK|BI|PR|IF|AM|CHS|CK|CC|PD|LK|EI)-\d+"
+
+# Convenience: all internal IDs (daml + depth + tool + niche + hypothesis)
 _ID_ALL_INTERNAL = "|".join([
-    _ID_DEPTH_ALTS, _ID_TOOL_ALTS, _ID_NICHE_ALTS, _ID_HYPO_ALTS,
+    _ID_DAML_ALTS, _ID_DEPTH_ALTS, _ID_TOOL_ALTS, _ID_NICHE_ALTS, _ID_HYPO_ALTS,
 ])
 
 # All unambiguously-internal IDs for client-body sanitization. Excludes
 # bare [CHMLI]-\d{1,3} (report IDs) and H-\d+ / CH-\d+ (overlap with
 # report IDs in SC). Only strips IDs that a report reader should never see.
 _ID_ALL_NONHYPO = "|".join([
-    _ID_DEPTH_ALTS, _ID_TOOL_ALTS, _ID_NICHE_ALTS,
+    _ID_DAML_ALTS, _ID_DEPTH_ALTS, _ID_TOOL_ALTS, _ID_NICHE_ALTS,
     # L1-prefixed hypothesis IDs are never client-facing
     r"L1-[CHMLI]-\d+|CC-\d+|F-\d+",
 ])

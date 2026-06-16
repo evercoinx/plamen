@@ -14619,6 +14619,7 @@ _LANG_EXPECTED_SUFFIX: dict[str, tuple[str, ...]] = {
     "soroban": (".rs",),
     "aptos": (".move",),
     "sui": (".move",),
+    "daml": (".daml",),
 }
 
 # Reverse map: a source suffix -> the languages it can indicate. Used to phrase
@@ -14627,6 +14628,7 @@ _SUFFIX_TO_LANGS: dict[str, tuple[str, ...]] = {
     ".sol": ("evm",),
     ".rs": ("solana", "soroban"),
     ".move": ("aptos", "sui"),
+    ".daml": ("daml",),
 }
 
 _LANG_GATE_IGNORE_DIRS = {
@@ -14776,7 +14778,7 @@ def _dominant_source_suffix(
     even then a contradiction can only arise from a genuine source tree above.
     ``dominant_suffix`` is None when no recognized source file is found
     anywhere consulted (an indeterminate signal). Bounded; never raises."""
-    base_counts: dict[str, int] = {".sol": 0, ".rs": 0, ".move": 0}
+    base_counts: dict[str, int] = {".sol": 0, ".rs": 0, ".move": 0, ".daml": 0}
     recognized = set(base_counts)
     try:
         base = Path(project_root).resolve()
@@ -14995,6 +14997,23 @@ def _detect_ecosystem(
             "high",
             {"counts": counts, "manifest_hits": {},
              "reason": ".sol dominant -> evm (unambiguous suffix)"},
+        )
+
+    # .daml is unambiguous: daml is the only language that maps to it.
+    # daml.yaml / Daml.toml are scanned only as a CONFIRMING signal (they add
+    # manifest_hits to the diagnostics dict); the suffix alone is decisive, so
+    # the verdict is 'high' regardless of whether a manifest is present.
+    if dominant == ".daml":
+        manifest_hits = _scan_manifests_for_markers(
+            Path(project_root),
+            {"daml.yaml", "Daml.toml"},
+            {"daml": ("sdk-version", "daml", "name:")},
+        )
+        return (
+            "daml",
+            "high",
+            {"counts": counts, "manifest_hits": manifest_hits,
+             "reason": ".daml dominant -> daml (unambiguous suffix)"},
         )
 
     # .rs => disambiguate solana vs soroban via Cargo.toml / Anchor.toml.

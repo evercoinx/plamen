@@ -91,6 +91,19 @@
       "fallback_strategy": "proptest with bounded inputs or boundary-value parameterized tests",
       "evidence_tags": ["POC-PASS", "POC-FAIL", "FUZZ-PASS", "CODE-TRACE"],
       "docs_sources": ["https://developers.stellar.org/docs/build/smart-contracts"]
+    },
+    "daml": {
+      "build_command": "daml build",
+      "test_command": "daml test --files {file}",
+      "test_filter_mode": "daml_no_filter",
+      "fuzz_engines": [],
+      "fallback_strategy": "boundary-value parameterized DAML Script () functions (min/mid/max/empty-list) when no fuzzer is available; DLint is style-only, no security SAST",
+      "evidence_tags": ["POC-PASS", "POC-FAIL", "CODE-TRACE"],
+      "docs_sources": [
+        "https://docs.daml.com/daml/intro/0_Intro.html",
+        "https://docs.daml.com/daml-script/index.html",
+        "https://docs.daml.com/daml/intro/9_Dependencies.html"
+      ]
     }
   }
 }

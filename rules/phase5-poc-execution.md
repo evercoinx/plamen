@@ -120,6 +120,7 @@ If execution was not attempted, explain why (no build environment, no test frame
 | **Solana (native)** | `cargo build-sbf` | `cargo test test_{id} -- --nocapture` | proptest with bounded inputs, or boundary-value parameterized tests |
 | **Aptos** | `aptos move compile` | `aptos move test --filter test_{id}` | No built-in fuzzer - write boundary-value parameterized tests (`#[test]` with multiple concrete value sets covering min/mid/max) |
 | **Sui** | `sui move build` | `sui move test test_{id}` (positional filter; module/function path accepted) | `#[random_test]` with `sui move test --rand-num-iters {N} test_{id}`; fallback to boundary-value parameterized tests |
+| **DAML (Canton)** | `daml build` | `daml test --files daml-test/PoC_{id}.daml` (or `daml script --dar .daml/dist/*.dar --script-name {Module}:{id} --ledger-host localhost --ledger-port 6865`) | No native fuzzer or SAST (DLint = style only) — boundary-value parameterized `Script ()` (min/mid/max), Aptos-style |
 
 **Fork testing** (EVM only): `forge test --match-test test_{ID} --fork-url {RPC_URL} -vvv`
 
@@ -272,3 +273,29 @@ fun test_hypothesis_random(input: u64) {
 Run with `sui move test --rand-num-iters 100 test_hypothesis_random`. If the
 random-input test cannot compile for the target harness, fall back to the
 boundary-value parameterized test pattern above and document the limitation.
+
+### DAML (Canton) - boundary-value Scripts
+DAML has NO native fuzzer and NO security SAST (DLint is style-only). Write a
+shared helper and call it from min/mid/max top-level `Script ()` functions;
+`daml test --files <file>` runs every Script in the file (no per-test name
+filter). Assert the boundary invariant inside the helper (e.g. an `ensure`-gap
+becoming creatable, or an arithmetic `Int`/`Decimal` operation aborting →
+liveness brick, never a silent wrap):
+```daml
+runBoundary : Int -> Script ()
+runBoundary amount = do
+    p <- allocateParty "P"
+    -- exercise the target choice with `amount`, assert the boundary invariant
+    pure ()
+
+boundaryMin : Script ()
+boundaryMin = runBoundary 0
+
+boundaryMid : Script ()
+boundaryMid = runBoundary 500000
+
+boundaryMax : Script ()
+boundaryMax = runBoundary maxIntValue
+```
+This provides 3+ data points instead of 1, catching boundary-dependent bugs
+without a full fuzzer.

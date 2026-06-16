@@ -140,6 +140,28 @@
 | CENTRALIZATION_RISK | 3+ privileged roles (optional) | breadth agents |
 | SHARE_ALLOCATION_FAIRNESS | SHARE_ALLOCATION flag | breadth agents, depth-edge-case |
 
+## DAML Skills (`~/.claude/agents/skills/daml/`)
+
+> Load these when `LANGUAGE=daml`. 12 skills total (7 DAML-specific always-on + 5 cross-language carry-overs). All use DAML/Canton template-choice concepts.
+
+| Skill | Trigger Pattern | Used By |
+|-------|-----------------|---------|
+| AUTHORIZATION_MODEL | Always (DAML) | breadth agents, depth-state-trace, depth-external |
+| CHOICE_SEMANTICS | Always (DAML) | breadth agents, depth-state-trace, depth-edge-case |
+| CONTRACT_KEY_SAFETY | Always (DAML) — self-skips if no `key`; `CONTRACT_KEY` flag | breadth agents, depth-state-trace |
+| CID_CAPABILITY_SAFETY | Always (DAML) | breadth agents, depth-external, depth-edge-case |
+| PRIVACY_DISCLOSURE | Always (DAML) | breadth agents, depth-edge-case |
+| LOCKING_SEMANTICS | Always (DAML) — self-skips if no lock; `LOCKING` flag | breadth agents, depth-state-trace, depth-edge-case |
+| ENSURE_INVARIANTS | Always (DAML) | breadth agents, depth-edge-case |
+| VERIFICATION_PROTOCOL | Always (verifiers) | security-verifier |
+| SEMI_TRUSTED_ROLES | SEMI_TRUSTED_ROLE flag | breadth agents, depth-state-trace |
+| ECONOMIC_DESIGN_AUDIT | MONETARY_PARAMETER flag | breadth agents |
+| SHARE_ALLOCATION_FAIRNESS | SHARE_ALLOCATION flag | breadth agents, depth-edge-case |
+| TEMPORAL_PARAMETER_STALENESS | TEMPORAL flag | breadth agents, depth-state-trace |
+
+> Carried niche agents for DAML appear in the `## Niche Agents` table below: `MULTI_STEP_OPERATION_SAFETY` (re-scoped to `PROPOSE_ACCEPT`) and `SPEC_COMPLIANCE_AUDIT` (`HAS_DOCS`, conformance-with-exploit only).
+> Dropped by construction for DAML (no analog): FLASH_LOAN_INTERACTION, ORACLE_ANALYSIS / EXTERNAL_PRECONDITION_AUDIT (cross-template fetch-precondition lens absorbed into CID_CAPABILITY_SAFETY + CONTRACT_KEY_SAFETY), reentrancy, STORAGE_LAYOUT/proxy, TOKEN_2022/CPI/PDA/BIT_SHIFT/ABILITY/OBJECT_OWNERSHIP, MIGRATION_ANALYSIS/CROSS_CHAIN_*, CENTRALIZATION_RISK (single-controller-where-joint owned by AUTHORIZATION_MODEL). FORK_ANCESTRY reduced to a one-line recon note.
+
 ## Injectable Skills (`~/.claude/agents/skills/injectable/`)
 
 > Injectable skills are protocol-type-specific. They load ONLY when recon classifies the protocol as the matching type.
@@ -175,10 +197,10 @@
 |-------------|-------------|--------|-------------|
 | EVENT_COMPLETENESS | `MISSING_EVENT` | 1 slot | Event emission coverage, parameter accuracy, cross-component event gaps |
 | SEMANTIC_GAP_INVESTIGATOR | `sync_gaps >= 1` OR `accumulation_exposures >= 1` OR `conditional_writes >= 1` OR `cluster_gaps >= 1` (from Phase 4a.5) | 1 slot | Investigates SYNC_GAP, ACCUMULATION_EXPOSURE, CONDITIONAL, and CLUSTER_GAP flags from semantic invariants to conclusion |
-| SPEC_COMPLIANCE_AUDIT | `HAS_DOCS` flag (non-empty DOCS_PATH with testable claims) | 1 slot | Spec-to-code compliance: extracts doc claims, verifies against code, reports mismatches |
+| SPEC_COMPLIANCE_AUDIT | `HAS_DOCS` flag (non-empty DOCS_PATH with testable claims). **DAML**: `HAS_DOCS` — emit a finding ONLY when a doc mismatch is exploitable; demote pure doc mismatch to Informational. | 1 slot | Spec-to-code compliance: extracts doc claims, verifies against code, reports mismatches |
 | SIGNATURE_VERIFICATION_AUDIT | `HAS_SIGNATURES` flag (ecrecover/ECDSA.recover/permit/EIP712/domainSeparator/nonces/isValidSignature) | 1 slot | Signature replay, malleability, EIP-712 domain, permit front-run, nonce management, cross-chain replay |
 | SEMANTIC_CONSISTENCY_AUDIT | `HAS_MULTI_CONTRACT` flag (2+ in-scope contracts sharing parameters or formulas) | 1 slot | Config variable unit mismatches, formula semantic drift, magic number consistency across contracts |
-| MULTI_STEP_OPERATION_SAFETY | `MULTI_STEP_OPS` flag (approve/delegate/authorize patterns + on-behalf-of functions: depositFor/stakeFor/delegateTo/mintFor/withdrawFor) | 1 slot | Authorization sequence conflicts in batch/multi-step operations, infrastructure address targeting via public on-behalf-of functions |
+| MULTI_STEP_OPERATION_SAFETY | `MULTI_STEP_OPS` flag (approve/delegate/authorize patterns + on-behalf-of functions: depositFor/stakeFor/delegateTo/mintFor/withdrawFor). **DAML**: re-scoped to `PROPOSE_ACCEPT` — propose template + accept choice; flag accept re-reading mutable state the proposer signed against, propose acceptable under different terms, non-revocable propose. | 1 slot | Authorization sequence conflicts in batch/multi-step operations, infrastructure address targeting via public on-behalf-of functions |
 | CALLBACK_RECEIVER_SAFETY | `OUTCOME_CALLBACK` flag (onERC721Received/onERC1155Received/tokensReceived/onTransferReceived/onFlashLoan/executeOperation/receive()/fallback()) | 1 slot | (EVM only) Callback handler access control, permissionless state inflation via callbacks, selective revert exploitation |
 | DIMENSIONAL_ANALYSIS | `MIXED_DECIMALS` flag (mulDiv/mulWad/rayMul + 1e6/1e8/decimals()/10** in scope) | 1 slot | (EVM only) Unit/scale mismatch detection: vocabulary discovery, expression annotation, cross-function propagation, boundary substitution. Sequential 4-phase methodology requires single agent context. |
 | STABLESWAP_COMPLIANCE | `STABLESWAP_FORK` flag (fork-ancestry detects Curve/StableSwap parent via get_d/get_y/ramp_a patterns) | 1 slot | Curve spec compliance: Newton-Raphson convergence, A parameter encoding (A vs A*N^(N-1)), reserve decimal normalization, fee consistency, known Curve vulnerability patterns. All languages. |

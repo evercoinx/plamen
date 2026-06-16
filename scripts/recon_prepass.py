@@ -656,6 +656,29 @@ def _write_meta_buffer_stub(scratch: Path) -> str:
     return "STUB" if _write_text(scratch / "meta_buffer.md",
                                    "# RAG Meta Buffer\n(optional)\n") else "FAILED"
 
+
+# DAML is the first SAST-less ecosystem: there is no static-analysis prepass
+# (no SCIP indexer, no Scout/Slither, DLint is style-only). Recon is fully
+# read-driven — the recon LLM is the sole producer of every artifact via
+# `damlc inspect-dar --json` (structural oracle) + disciplined grep over .daml.
+# This no-op writes the SC recon artifacts as [LLM TO ENRICH] stubs so the
+# driver's prepass-read gates never fail on a missing/zero-byte file, plus a
+# marker recording WHY no mechanical extraction ran. The mechanical SC
+# extractors (LANG_DISPATCH) are deliberately skipped — they have no .daml
+# adapter and would emit empty tables.
+def _write_daml_prepass_noop(scratch: Path, proj: Path) -> str:
+    marker = (
+        "# DAML Recon Pre-Pass: NO-OP (read-driven)\n\n"
+        "No mechanical prepass for DAML. DAML has no static-analysis prepass "
+        "(no SCIP indexer, no Scout/Slither; DLint is style-only). Recon is "
+        "fully read-driven: the recon LLM produces every artifact from "
+        "`damlc inspect-dar --json` (structural oracle) and grep over `.daml` "
+        "sources. These prepass files are non-empty [LLM TO ENRICH] stubs only "
+        "so prepass-read gates do not fail; the recon phase replaces them.\n"
+    )
+    _write_text(scratch / "daml_prepass_noop.md", marker)
+    return "STUB"
+
 # template_recommendations.md — extract from skill-index.md
 _LANG_HEADING = {
     "evm":     "## EVM Skills",
@@ -663,6 +686,7 @@ _LANG_HEADING = {
     "aptos":   "## Aptos Skills",
     "sui":     "## Sui Skills",
     "soroban": "## Soroban Skills",
+    "daml":    "## DAML Skills",
     "l1":      "## L1 Skills",
 }
 
@@ -1499,6 +1523,44 @@ def run_recon_prepass(config: dict) -> Dict[str, str]:
         _safe("trust_boundaries.md", lambda: _write_trust_boundaries_l1(scratch, proj))
         _safe("attack_surface.md",   lambda: _write_attack_surface_l1(scratch, proj))
         _safe("threat_model.md",     lambda: _write_design_or_threat_stub(scratch, pipeline))
+    elif lang == "daml":
+        # DAML: no mechanical prepass (read-driven). Write a marker plus
+        # [LLM TO ENRICH] stubs for every SC recon artifact so prepass-read
+        # gates never fail; the recon LLM replaces them via damlc + grep.
+        _safe("daml_prepass_noop.md",  lambda: _write_daml_prepass_noop(scratch, proj))
+        _safe("contract_inventory.md", lambda: _write_sc_recon_stub(scratch, "contract_inventory.md",
+              "# Contract Inventory\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "| Template | Path | Choices | Signatories | Observers | Has Key | Implements |\n"
+              "|----------|------|---------|-------------|-----------|---------|------------|\n"))
+        _safe("state_variables.md",    lambda: _write_sc_recon_stub(scratch, "state_variables.md",
+              "# State Variables\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "| Template.field | Type | Role | Read/Written By |\n"
+              "|----------------|------|------|-----------------|\n"))
+        _safe("function_list.md",      lambda: _write_sc_recon_stub(scratch, "function_list.md",
+              "# Function List\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "| Template.Choice | Consume-Mode | Controller | Return | Arg-Derived Controller? |\n"
+              "|-----------------|--------------|------------|--------|-------------------------|\n"))
+        _safe("build_status.md",       lambda: _write_sc_recon_stub(scratch, "build_status.md",
+              "# Build Status\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "**Tool**: daml build\n\n**Status**: SKIPPED (recon LLM runs `daml build`)\n\n"
+              "**Chosen build root**: [LLM TO ENRICH — dir owning daml.yaml]\n"))
+        _safe("design_context.md",     lambda: _write_design_or_threat_stub(scratch, pipeline))
+        _safe("attack_surface.md",     lambda: _write_sc_recon_stub(scratch, "attack_surface.md",
+              "# Attack Surface\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "## Authorization Matrix\n[LLM TO ENRICH]\n\n"
+              "## External Dependencies\n[LLM TO ENRICH]\n"))
+        _safe("detected_patterns.md",  lambda: _write_sc_recon_stub(scratch, "detected_patterns.md",
+              "# Detected Patterns\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "## Flags\n[LLM TO ENRICH]\n"))
+        _safe("setter_list.md",        lambda: _write_sc_recon_stub(scratch, "setter_list.md",
+              "# Setter List\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "| Template | Choice | Field | Controller |\n"
+              "|----------|--------|-------|------------|\n"))
+        _safe("emit_list.md",          lambda: _write_sc_recon_stub(scratch, "emit_list.md",
+              "# Disclosure List\n\n[LLM TO ENRICH] No prepass for DAML (read-driven). "
+              "Repurposed as observable-disclosure list (DAML has no events).\n\n"
+              "| Template | Exposed To (observer) | Interface view |\n"
+              "|----------|-----------------------|----------------|\n"))
     else:
         _safe("contract_inventory.md", lambda: _write_contract_inventory_sc(scratch, proj, lang))
         _safe("state_variables.md",    lambda: _write_table_artifact(scratch, proj, lang, "state"))
