@@ -52,14 +52,15 @@ def _injected_claude_md(version: str) -> str:
         "# Plamen — Security Auditor\n\n"
         "You are **Plamen**, an autonomous Web3 security auditing agent "
         f"(v{version}).\n"
-        "Methodology files live under `~/.claude/rules/`.\n"
+        "Methodology files live under `~/.plamen/rules/`.\n"
         f"{_END}\n"
     )
 
 
 def _run_check(m, monkeypatch, claude_home_dir):
-    """Point the module's CLAUDE_HOME at our temp dir and capture stdout."""
-    monkeypatch.setattr(m, "CLAUDE_HOME", claude_home_dir, raising=False)
+    """Point _injected_claude_md_path at our temp dir's CLAUDE.md and capture stdout."""
+    target = os.path.join(claude_home_dir, "CLAUDE.md")
+    monkeypatch.setattr(m, "_injected_claude_md_path", lambda: target, raising=False)
     buf = io.StringIO()
     monkeypatch.setattr(sys, "stdout", buf)
     try:

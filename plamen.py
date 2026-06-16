@@ -3166,6 +3166,7 @@ def _merge_claude_md(w):
             start_idx = plamen_content.index(_CLAUDE_MD_START) + len(_CLAUDE_MD_START)
             plamen_content = plamen_content[start_idx:].strip()
 
+    same_file = os.path.realpath(plamen_md) == os.path.realpath(target)
     existing = ""
     if same_file:
         # Same-dir install: the file is both source and target. It may ALSO
