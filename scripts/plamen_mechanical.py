@@ -21,8 +21,10 @@ from plamen_parsers import *  # noqa: F403,F401
 from plamen_parsers import (
     _OPTIONAL_FINDING_METADATA_FIELDS,
     _OPTIONAL_FINDING_METADATA_LABELS,
+    _QUALITY_CLASS_TITLES,
     _queue_rows_from_inventory_with_exclusions,
     _write_queue_subset_manifest,
+    classify_quality_observation,
 )
 from plamen_validators import *  # noqa: F403,F401
 from plamen_validators import (  # explicit private helpers used by SC index repair
@@ -47,6 +49,10 @@ __all__ = [
     "_dedup_report_sections",
     "_dedup_report_candidate_pairs",
     "_dedup_data_loss_gate",
+    "_reclassify_cosmetic_low_info_to_qo",
+    "_finding_own_block",
+    "_qo_one_line_desc",
+    "_append_quality_observation_rows",
     "_dedup_title_jaccard",
     "_defined_report_section_ids",
     "_build_human_review_appendix",
@@ -2690,21 +2696,26 @@ def _dedup_same_fix_ok(a: dict, b: dict) -> tuple[bool, str]:
 def _dedup_report_candidate_pairs(
     records: list[dict], src_by_id: dict[str, set[str]]
 ) -> list[dict]:
-    """Detect cross-tier candidate pairs (NEVER auto-merge — candidates only).
+    """Detect same-root-cause candidate pairs (NEVER auto-merge — candidates only).
 
-    Signals, ranked: (1) cross-tier source-ID subset [primary], (2) shared
-    location token, (3) shared PoC test-fn, (4) title Jaccard >= 0.5,
-    (5) same-fix-cross-tier (shared location/anchor + same Recommendation).
-    Aggregate-source-ID suppression: a finding with a large source-ID set is
-    excluded from the subset signal (avoids class-D false merges).
+    Signals, ranked: (1) source-ID subset [primary], (2) shared location token,
+    (3) shared PoC test-fn, (4) title Jaccard >= 0.5, (5) same-fix (shared
+    location/anchor + same Recommendation). Aggregate-source-ID suppression: a
+    finding with a large source-ID set is excluded from the subset signal
+    (avoids class-D false merges).
+
+    Candidate GENERATION spans BOTH same-tier and cross-tier pairs (F2): the LLM
+    report_index STEP-1.5 only catches a subset of same-tier root-cause dupes,
+    so report_dedup is the deterministic backstop within AND across tiers. Only
+    candidate generation widens here — the merge DECISION downstream is gated by
+    the unchanged `_dedup_same_fix_ok` and superset (`_resolve_dedup_survivor`)
+    guards, so a false merge that HIDES a finding remains precluded.
     """
     pairs: list[dict] = []
     n = len(records)
     for i in range(n):
         for j in range(i + 1, n):
             a, b = records[i], records[j]
-            if a["prefix"] == b["prefix"]:
-                continue  # same tier handled by report_index STEP-1.5
             a_src = src_by_id.get(a["id"], set())
             b_src = src_by_id.get(b["id"], set())
             signals: list[str] = []
@@ -2735,10 +2746,23 @@ def _dedup_report_candidate_pairs(
             # the antonym/thin-fix vetoes keep precision intact.
             shared_anchor = bool(a.get("anchors") and b.get("anchors")
                                  and (a["anchors"] & b["anchors"]))
-            if (shared_loc or shared_anchor) and "source-id-subset" not in signals:
+            # Candidate broadening (recall-safe): also adjudicate pairs in the
+            # SAME SOURCE FILE even when the exact location token / anchor
+            # differs. Different agents express the same site at different
+            # granularity (e.g. "Foo.sol:L120" vs "Foo.onCall()"), so
+            # exact-token matching misses true same-root-cause dupes. ONLY the
+            # candidate set widens here — the merge DECISION stays gated by the
+            # UNCHANGED strict `_dedup_same_fix_ok` (Recommendation Jaccard +
+            # antonym/thin-fix vetoes) and the superset survivor guard, so a
+            # false merge that HIDES a finding remains precluded.
+            a_files = {f for f in (_dedup_file_part(l) for l in a["locations"]) if f}
+            b_files = {f for f in (_dedup_file_part(l) for l in b["locations"]) if f}
+            same_file = bool(a_files & b_files)
+            if (shared_loc or shared_anchor or same_file) and "source-id-subset" not in signals:
                 ok, reason = _dedup_same_fix_ok(a, b)
                 if ok:
-                    site = "loc" if shared_loc else "anchor"
+                    site = ("loc" if shared_loc
+                            else "anchor" if shared_anchor else "file")
                     signals.append(f"same-fix-cross-tier[{site}]:{reason}")
                     rank = min(rank, 1)
             if not signals:
@@ -2791,6 +2815,219 @@ def _dedup_data_loss_gate(original: str, deduped: str) -> list[str]:
     return lost
 
 
+# Security-impact signal vocabulary. A Low/Info finding whose body mentions any
+# of these is NOT cosmetic — it keeps its full `### [X-NN]` section even if its
+# title matches a quality-observation class. Generic vulnerability vocabulary
+# only (no protocol-specific tokens): the retabulation must never demote a real
+# (even low-severity) security observation to a single QO table row.
+_QO_SECURITY_IMPACT_SIGNAL_RE = re.compile(
+    r"(?i)\b("
+    r"missing\s+validation|input\s+validation|sanitiz|"
+    r"missing\s+event|event\s+emission|emit\b|"
+    r"access\s+control|authoriz|unauthoriz|permission|privileg|"
+    r"\bauth\b|authenticat|onlyowner|onlyadmin|role[-\s]?based|"
+    r"fund(?:s)?\s+loss|loss\s+of\s+funds|drain|steal|theft|"
+    r"reentran|re-entran|"
+    r"overflow|underflow|"
+    r"front[-\s]?run|"
+    r"oracle|price\s+manipulat|"
+    r"centraliz"
+    r")\b"
+)
+
+
+def _finding_own_block(section: str) -> str:
+    """Trim a parsed finding `section` to the finding's OWN content.
+
+    `_dedup_report_sections` extends a finding section to the NEXT finding
+    heading (or EOF), which can swallow a trailing non-finding section such as
+    a pre-existing `## Quality Observations` table, `## Priority Remediation
+    Order`, or an appendix when the finding is the last one before that
+    section. For QO retabulation we must operate on (and remove) ONLY the
+    finding's own block — bounded by the first subsequent `##`/`###` heading
+    after the finding's own heading line. Returns the trimmed block (always a
+    leading substring of `section`).
+    """
+    if not section:
+        return section
+    # Skip the finding's own heading line, then find the next H2/H3 heading.
+    nl = section.find("\n")
+    if nl < 0:
+        return section
+    rest = section[nl + 1:]
+    m = re.search(r"(?m)^#{2,3}\s", rest)
+    if not m:
+        return section
+    return section[: nl + 1 + m.start()]
+
+
+def _reclassify_cosmetic_low_info_to_qo(
+    audit_text: str,
+) -> tuple[str, list[tuple[str, str, str, str, str, str]]]:
+    """F1 — Quality-Observations retabulation (RETABULATION, never a drop).
+
+    For each `### [L-NN]` / `### [I-NN]` finding section: if
+    ``classify_quality_observation(title, severity)`` returns a non-empty
+    cosmetic class AND the section body carries NO security-impact signal, move
+    the finding into a single row under a `## Quality Observations` megasection
+    table and remove the standalone `###` section. Otherwise the section is
+    kept verbatim.
+
+    This is pure retabulation: every report ID that leaves a `###` section
+    re-appears as exactly one QO table row, so NO finding ID is ever dropped
+    (the downstream `_dedup_data_loss_gate` re-confirms zero location/impact/PoC
+    loss).
+
+    Returns ``(new_text, log_rows)`` where each log row is
+    ``(report_id, title, severity, location, class, one_line_desc)``. When no
+    section qualifies, returns the input unchanged with an empty log.
+    """
+    if not audit_text:
+        return audit_text, []
+
+    records = _dedup_report_sections(audit_text)
+    pri_to_sev = {"L": "Low", "I": "Informational"}
+
+    qo_rows: list[tuple[str, str, str, str, str, str]] = []
+    blocks_to_remove: list[str] = []
+    for rec in records:
+        prefix = rec["prefix"]
+        if prefix not in pri_to_sev:
+            continue  # only Low / Info are QO-eligible
+        sev_word = pri_to_sev[prefix]
+        cls = classify_quality_observation(rec["title"], sev_word)
+        if not cls:
+            continue  # not a cosmetic class → keep the full section
+        # Operate on the finding's OWN block only — never the trailing
+        # non-finding section a parsed record may have swallowed.
+        own = _finding_own_block(rec["section"])
+        if _QO_SECURITY_IMPACT_SIGNAL_RE.search(own):
+            continue  # carries a security-impact signal → keep the full section
+        # Build the QO row. The Location cell lists ALL location tokens and the
+        # Description cell carries any impact bullets / PoC test-fns inline, so
+        # the downstream mechanical data-loss gate (which checks every original
+        # location / impact bullet / PoC fn still appears SOMEWHERE) passes —
+        # retabulation is provably zero-loss, not merely "usually" cosmetic.
+        own_locs = {
+            m.group(0).strip("`") for m in _DEDUP_LOCATION_TOKEN_RE.finditer(own)
+        }
+        own_pocs = set(_DEDUP_POC_FN_RE.findall(own))
+        own_impacts: set[str] = set()
+        imp_block = re.search(
+            r"(?is)\*\*Impact\*\*\s*:?(.*?)(?:\n\*\*[A-Z]|\Z)", own
+        )
+        if imp_block:
+            for bm in _DEDUP_IMPACT_BULLET_RE.finditer(imp_block.group(1)):
+                own_impacts.add(bm.group(1).strip())
+        locs_sorted = sorted(own_locs)
+        loc_cell = ", ".join(f"`{l}`" for l in locs_sorted) if locs_sorted else ""
+        desc = _qo_one_line_desc(own)
+        extra_bits: list[str] = []
+        for imp in sorted(own_impacts):
+            imp_clean = re.sub(r"\s+", " ", imp).replace("|", "/").strip()
+            if imp_clean and imp_clean.lower() not in desc.lower():
+                extra_bits.append(imp_clean)
+        for poc in sorted(own_pocs):
+            extra_bits.append(poc)
+        if extra_bits:
+            desc = (desc + " " if desc else "") + "(" + "; ".join(extra_bits) + ")"
+        class_title = _QUALITY_CLASS_TITLES.get(cls, cls)
+        qo_rows.append(
+            (rec["id"], rec["title"], sev_word, loc_cell, class_title, desc)
+        )
+        blocks_to_remove.append(own)
+
+    if not qo_rows:
+        return audit_text, []
+
+    # --- remove the absorbed `###` blocks (longest-first to keep indices
+    #     stable; every block text is unique because IDs are unique) ----------
+    new_text = audit_text
+    for own in sorted(blocks_to_remove, key=lambda s: -len(s)):
+        idx = new_text.find(own)
+        if idx < 0:
+            continue
+        new_text = new_text[:idx] + new_text[idx + len(own):]
+
+    # --- append (or extend) the `## Quality Observations` table --------------
+    new_text = _append_quality_observation_rows(new_text, qo_rows)
+    new_text = re.sub(r"\n{4,}", "\n\n\n", new_text)
+    return new_text, qo_rows
+
+
+def _qo_one_line_desc(section: str) -> str:
+    """Extract a one-sentence description for a QO row from a finding section.
+
+    Prefers the first non-empty line of the `**Description**` field; falls back
+    to the first non-heading, non-metadata prose line. Always single-line.
+    """
+    desc_block = re.search(
+        r"(?is)\*\*Description\*\*\s*:?(.*?)(?:\n\*\*[A-Z]|\Z)", section
+    )
+    raw = desc_block.group(1) if desc_block else ""
+    if not raw.strip():
+        # Fall back to the first prose line that is not a heading / metadata.
+        for ln in section.splitlines():
+            s = ln.strip()
+            if not s or s.startswith("#") or s.startswith("**") or s.startswith("|"):
+                continue
+            raw = s
+            break
+    text = re.sub(r"\s+", " ", raw).strip()
+    text = text.replace("|", "/")  # never break the markdown table
+    # First sentence, capped.
+    m = re.match(r"(.{0,200}?[.!?])\s", text + " ")
+    one = m.group(1).strip() if m else text[:200].strip()
+    return one
+
+
+def _append_quality_observation_rows(
+    text: str, rows: list[tuple[str, str, str, str, str, str]]
+) -> str:
+    """Append QO rows into a `## Quality Observations` table.
+
+    If the section already exists, append rows to its table; otherwise create
+    the section (with header row) at the end of the document. Idempotent header.
+    """
+    header = (
+        "| ID | Title | Severity | Location | Class | Description |\n"
+        "|----|-------|----------|----------|-------|-------------|\n"
+    )
+
+    def _fmt(r: tuple[str, str, str, str, str, str]) -> str:
+        rid, title, sev, loc, cls, desc = r
+        title = re.sub(r"\s+", " ", title).replace("|", "/").strip()
+        loc = (loc or "").replace("|", "/").strip()
+        return f"| {rid} | {title} | {sev} | {loc} | {cls} | {desc} |"
+
+    body_rows = "\n".join(_fmt(r) for r in rows) + "\n"
+
+    existing = _extract_h2_section(text, "Quality Observations")
+    if existing:
+        # Append rows to the end of the existing section's table.
+        pattern = re.compile(
+            r"(^#{2,3}\s+Quality Observations[^\n]*\n(?:.|\n)*?)(?=\n##(?!#)|\Z)",
+            re.MULTILINE | re.IGNORECASE,
+        )
+        m = pattern.search(text)
+        if m:
+            sect = m.group(1).rstrip("\n")
+            # Ensure a header exists in the section; if not, inject one.
+            if "| ID | Title |" not in sect and "|----" not in sect:
+                sect = sect + "\n\n" + header.rstrip("\n")
+            new_sect = sect + "\n" + body_rows.rstrip("\n") + "\n"
+            return text[: m.start()] + new_sect + text[m.end():]
+
+    # No existing section — create it at the end of the document.
+    section = (
+        "\n\n## Quality Observations\n\n"
+        + header
+        + body_rows.rstrip("\n")
+        + "\n"
+    )
+    return text.rstrip("\n") + section + "\n"
+
+
 def _dedup_report_python(scratchpad: Path, project_root: str) -> bool:
     """Cross-tier report dedup. Python-native, NEVER loses content.
 
@@ -2823,16 +3060,31 @@ def _dedup_report_python(scratchpad: Path, project_root: str) -> bool:
         log.warning(f"[report_dedup] read failed: {exc!r}")
         return True
 
-    records = _dedup_report_sections(original)
-    src_by_id = _dedup_source_ids_by_report_id(scratchpad)
-    pairs = _dedup_report_candidate_pairs(records, src_by_id)
-
     # ALWAYS snapshot the untouched original first (data-loss safety).
     pre_path = scratchpad / "AUDIT_REPORT.pre-dedup.md"
     try:
         pre_path.write_text(original, encoding="utf-8")
     except Exception as exc:
         log.warning(f"[report_dedup] pre-dedup snapshot failed: {exc!r}")
+
+    # --- F1: Quality-Observations retabulation (RETABULATION, never a drop) ---
+    # Move unambiguously cosmetic Low/Info `###` sections into a single
+    # `## Quality Observations` table BEFORE the cross-tier pair pass. Wrapped so
+    # any internal error degrades gracefully (report_dedup is critical=False).
+    qo_rows: list[tuple[str, str, str, str, str, str]] = []
+    working = original
+    try:
+        retab, qo_rows = _reclassify_cosmetic_low_info_to_qo(original)
+        if qo_rows:
+            working = retab
+    except Exception as exc:
+        log.warning(f"[report_dedup] QO retabulation failed: {exc!r} — skipped")
+        working = original
+        qo_rows = []
+
+    records = _dedup_report_sections(working)
+    src_by_id = _dedup_source_ids_by_report_id(scratchpad)
+    pairs = _dedup_report_candidate_pairs(records, src_by_id)
 
     rec_by_id = {r["id"]: r for r in records}
     decisions: list[dict] = []
@@ -2920,9 +3172,19 @@ def _dedup_report_python(scratchpad: Path, project_root: str) -> bool:
 
     # --- write decisions-only mapping ---------------------------------------
     map_lines = ["# Report Dedup Mapping", ""]
+    map_lines.append(f"- Quality-Observation retabulations: {len(qo_rows)}")
     map_lines.append(f"- Candidate pairs evaluated: {len(pairs)}")
     map_lines.append(f"- Merges proposed: {len(merges)}")
     map_lines.append("")
+    if qo_rows:
+        map_lines.append("## Quality-Observation Retabulations (section -> QO table row)")
+        map_lines.append("")
+        map_lines.append("| Report ID | Severity | Class | Title |")
+        map_lines.append("|-----------|----------|-------|-------|")
+        for rid, title, sev_word, _loc, class_title, _desc in qo_rows:
+            t = re.sub(r"\s+", " ", title).replace("|", "/").strip()
+            map_lines.append(f"| {rid} | {sev_word} | {class_title} | {t} |")
+        map_lines.append("")
     map_lines.append("| Survivor | Absorbed | Decision | Signals | Reason |")
     map_lines.append("|----------|----------|----------|---------|--------|")
     for d in decisions:
@@ -2932,11 +3194,47 @@ def _dedup_report_python(scratchpad: Path, project_root: str) -> bool:
         )
 
     if not merges:
-        # Idempotent no-op: leave AUDIT_REPORT.md untouched.
-        _write_mapping(map_lines + ["", "_No cross-tier merges — report unchanged (identity)._"])
+        if not qo_rows:
+            # Idempotent no-op: leave AUDIT_REPORT.md untouched.
+            _write_mapping(map_lines + ["", "_No cross-tier merges, no QO retabulation — report unchanged (identity)._"])
+            log.info(
+                f"[report_dedup] no cross-tier merges "
+                f"({len(pairs)} candidates) — report unchanged"
+            )
+            return True
+        # QO-only change: promote `working` after the data-loss gate confirms
+        # the retabulation lost nothing relative to the true original.
+        lost_qo = _dedup_data_loss_gate(original, working)
+        if lost_qo:
+            _write_mapping(map_lines + [
+                "", f"## DATA-LOSS GATE: VETO ({len(lost_qo)} item(s) lost)",
+                "_QO retabulation dropped content — original report retained as delivered._",
+                "",
+                *[f"- LOST {item}" for item in lost_qo[:50]],
+            ])
+            log.warning(
+                f"[report_dedup] QO-only data-loss gate VETO "
+                f"({len(lost_qo)} lost item(s)) — original retained"
+            )
+            return True
+        try:
+            audit_path.write_text(working, encoding="utf-8")
+        except Exception as exc:
+            log.warning(f"[report_dedup] QO-only promote failed ({exc!r}) — original retained")
+            return True
+        try:
+            (scratchpad / "AUDIT_REPORT.deduped.md").write_text(working, encoding="utf-8")
+        except Exception as exc:
+            log.warning(f"[report_dedup] QO-only deduped write failed: {exc!r}")
+        _write_mapping(map_lines + [
+            "", "## DATA-LOSS GATE: PASS",
+            f"_Promoted QO-retabulated report ({len(qo_rows)} cosmetic Low/Info "
+            f"finding(s) moved to Quality Observations; no cross-tier merges). "
+            f"Original snapshot at AUDIT_REPORT.pre-dedup.md._",
+        ])
         log.info(
-            f"[report_dedup] no cross-tier merges "
-            f"({len(pairs)} candidates) — report unchanged"
+            f"[report_dedup] promoted QO-retabulated report: "
+            f"{len(qo_rows)} retabulation(s), data-loss gate passed"
         )
         return True
 
@@ -2944,7 +3242,7 @@ def _dedup_report_python(scratchpad: Path, project_root: str) -> bool:
     #     absorbed section. Survivor keeps highest severity (it already is the
     #     keep). Renumbering is intentionally NOT done here to keep the merge
     #     strictly additive and the data-loss gate exact on locations/impacts. --
-    deduped = original
+    deduped = working  # base includes the F1 QO retabulation, if any
     for d in merges:
         keep_rec = rec_by_id.get(d["keep"])
         absorb_rec = rec_by_id.get(d["absorb"])
@@ -3034,12 +3332,13 @@ def _dedup_report_python(scratchpad: Path, project_root: str) -> bool:
         return True
     _write_mapping(map_lines + [
         "", "## DATA-LOSS GATE: PASS",
-        f"_Promoted deduped report ({len(merges)} cross-tier merge(s)). "
+        f"_Promoted deduped report ({len(merges)} cross-tier merge(s), "
+        f"{len(qo_rows)} QO retabulation(s)). "
         f"Original snapshot at AUDIT_REPORT.pre-dedup.md._",
     ])
     log.info(
         f"[report_dedup] promoted deduped report: {len(merges)} cross-tier "
-        f"merge(s), data-loss gate passed"
+        f"merge(s), {len(qo_rows)} QO retabulation(s), data-loss gate passed"
     )
     return True
 

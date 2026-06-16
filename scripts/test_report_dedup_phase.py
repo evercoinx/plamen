@@ -259,14 +259,18 @@ def test_e2e_idempotent_noop_when_no_pairs():
 
 ## Low Findings
 
-### [L-01] Typo in comment
+### [L-01] Missing event on pause
 
 **Severity**: Low
 **Location**: `src/B.sol:L99`
 **Impact**:
 - None.
-**Recommendation**: fix typo.
+**Recommendation**: emit a Paused event.
 """
+    # NOTE: the Low finding is deliberately a *security-relevant* observation
+    # (missing event), NOT a cosmetic class, so the F1 Quality-Observations
+    # retabulation does not fire — this test verifies the no-candidate-pair
+    # idempotent no-op path specifically.
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         scratch, proj = _setup(tmp, report)

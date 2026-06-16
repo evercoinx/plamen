@@ -31,6 +31,7 @@ from plamen_types import (
 
 __all__ = [
     "DedupSignature",
+    "classify_quality_observation",
     "_manifest_row_from_cells",
     "_manifest_row_is_spawned_breadth_agent",
     "_normalize_manifest_header",
