@@ -5,7 +5,7 @@ description: "Protocol Type Trigger NAMED_EXTERNAL_PROTOCOL (detected when recon
 
 # Injectable Skill: Integration Hazard Research
 
-> **Protocol Type Trigger**: `NAMED_EXTERNAL_PROTOCOL` — detected when recon identifies imports or interface calls to a named external protocol (Uniswap, Aave, Balancer, Compound, Curve, Chainlink, Lido, MakerDAO, CCA, etc.) that is NOT a standard library (OpenZeppelin, solmate, solady) and NOT the protocol under audit itself.
+> **Protocol Type Trigger**: `NAMED_EXTERNAL_PROTOCOL` — detected when recon identifies imports or interface calls to a named external protocol (Uniswap, Aave, Balancer, Compound, Curve, Chainlink, Lido, MakerDAO, etc.) that is NOT a standard library (OpenZeppelin, solmate, solady) and NOT the protocol under audit itself.
 > **Inject Into**: depth-external agent
 > **Language**: All chains (EVM primary; Solana/Aptos/Sui when integrating with named on-chain protocols)
 > **Finding prefix**: `[IHR-N]`
@@ -23,7 +23,7 @@ When decomposing into investigation questions:
 ## When This Skill Activates
 
 Recon Agent 3 detects named external protocol imports during TASK 6 pattern scanning. Indicators:
-- Named protocol interfaces: `IUniswapV2Router`, `IUniswapV3Pool`, `IBalancerVault`, `IPool`, `IAToken`, `ICToken`, `ILendingPool`, `ICurvePool`, `IChainlinkAggregator`, `IStETH`, `IContinuousClearingAuction`
+- Named protocol interfaces: `IUniswapV2Router`, `IUniswapV3Pool`, `IBalancerVault`, `IPool`, `IAToken`, `ICToken`, `ILendingPool`, `ICurvePool`, `IChainlinkAggregator`, `IStETH`
 - Named protocol library imports: `@uniswap/`, `@aave/`, `@balancer-labs/`, `@chainlink/`, `@openzeppelin/` (only when calling protocol-specific functions, not generic utilities)
 - Solana: CPI targets to known program IDs (Jupiter, Marinade, Raydium, Orca, Drift)
 - Sui: external package calls to known protocols (Cetus, DeepBook, Suilend, NAVI)
@@ -110,7 +110,6 @@ If Solodit AND Tavily BOTH fail, check EACH applicable protocol against this min
 | Lido | stETH rebasing balance changes | balanceOf changes between blocks without transfers | stETH balance used as accounting input |
 | Lido | wstETH/stETH exchange rate assumption | Rate changes with each rebase | Hardcoded or cached conversion rate |
 | MakerDAO | DAI Savings Rate (DSR) flash manipulation | `pot.drip()` is permissionless and changes chi | State reads dependent on DSR rate |
-| CCA (Uniswap) | Permissionless `claimTokens()` zeroes `tokensFilled` | Anyone can claim for any bidId | Reading `tokensFilled` after `claimBlock` |
 | **Solana** | | | |
 | Jupiter | Slippage bypass via `0` slippage on `route()` / `shared_accounts_route()` | Caller passes zero min-out | Zero slippage tolerance in CPI args |
 | Jupiter | Stale quote across slots | Quote computed in slot N, executed in slot N+K with changed pool state | Cross-slot quote freshness |

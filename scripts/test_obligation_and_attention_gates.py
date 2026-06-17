@@ -70,61 +70,26 @@ def test_oblig_receipt_re_unicode_arrow():
     assert m.group("status").upper() == "DISMISSED"
 
 
-def test_asset_binding_matrix_ignores_stale_report_coverage(tmp_path):
-    m = _m()
-    (tmp_path / "design_context.md").write_text(
-        "Gateway swap path mentions params.fromToken, zrc20, params.toToken, targetZRC20, amount, and value moves.\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "report_index.md").write_text(
-        "Stale prior report says params.fromToken is checked against zrc20.\n",
-        encoding="utf-8",
-    )
-    rows, gaps = m._write_asset_binding_matrix(tmp_path, "thorough")
-    assert rows > 0
-    assert gaps > 0
-    ledger = (tmp_path / "obligation_ledger.json").read_text(encoding="utf-8")
-    assert "exact_value_binding" in ledger
-    assert '"status": "active"' in ledger
-
-
-def test_asset_binding_matrix_accepts_attention_repair_exact_closure(tmp_path):
-    m = _m()
-    (tmp_path / "design_context.md").write_text(
-        "Swap gateway value path mentions params.fromToken and zrc20 before value moves.\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "attention_repair_summary.md").write_text(
-        "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
-        "|---|---|---|---|---|---|\n"
-        "| 1 | asset-binding-gap | `AB-001: params.fromToken <-> zrc20` | SAFE | Router.sol:L10 proves params.fromToken is validated against zrc20 before transfer | SAFE_REASON:EXPLICIT_BINDING_CHECK |\n",
-        encoding="utf-8",
-    )
-    rows, gaps = m._write_asset_binding_matrix(tmp_path, "thorough")
-    assert rows >= 1
-    assert gaps == 0
-
-
-def test_obligation_retention_requires_exact_value_pair_or_absorber(tmp_path):
+def test_obligation_retention_requires_chain_upgrade_coverage_or_absorber(tmp_path):
     v = _v()
     (tmp_path / "obligation_ledger.json").write_text(
         '{\n'
         '  "schema_version": "plamen.obligation_ledger.v1",\n'
         '  "obligations": [\n'
-        '    {"id":"OBL-AB-001","class":"exact_value_binding","status":"active",'
-        '"severity_signal":"High","field_a":"params.fromToken","field_b":"zrc20"}\n'
+        '    {"id":"OBL-CHAIN-CH-1","class":"chain_upgrade_retention","status":"active",'
+        '"severity_signal":"High","source_id":"CH-1"}\n'
         '  ]\n'
         '}\n',
         encoding="utf-8",
     )
     bad = v._validate_obligation_ledger_retention(
         tmp_path,
-        "A nearby token-flow issue is covered, but the exact pair is never named.",
+        "A nearby composition is discussed, but the chain itself is never named.",
     )
     assert bad
     good = v._validate_obligation_ledger_retention(
         tmp_path,
-        "H-01 preserves params.fromToken not validated against zrc20 before transfer.",
+        "CH-1 is preserved and merged into H-01 in the report.",
     )
     assert good == []
 
@@ -136,11 +101,11 @@ def test_report_coverage_parser_does_not_read_obligation_status_as_severity():
         "| Source File | Candidate ID / Label | Severity Signal | Status | Report ID / Refutation / Reason |\n"
         "|---|---|---|---|---|\n"
         "| depth_token_flow_findings.md | H-01 (INV-001) | High | PROMOTED | H-01 |\n\n"
-        "## Asset Binding Obligations\n\n"
+        "## Chain Retention Obligations\n\n"
         "| Obligation ID | Field Binding | Status | Covered By |\n"
         "|---|---|---|---|\n"
-        "| OBL-AB-001 | params.toToken <-> decoded.targetZRC20 | covered | H-01 |\n"
-        "| OBL-AB-002 | params.fromToken <-> zrc20 | covered | M-01 |\n"
+        "| OBL-CHAIN-CH-1 | inputToken <-> outputToken | covered | H-01 |\n"
+        "| OBL-CHAIN-CH-2 | fromToken <-> toToken | covered | M-01 |\n"
     )
     rows = v._parse_report_coverage_rows_for_contract(text)
     assert len(rows) == 1

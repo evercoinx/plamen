@@ -100,13 +100,13 @@ def test_fc4_content_gate_clean_for_valid_attention_repair():
         "attention_repair_queue.md": (
             "| # | Kind | Target | Reason | Source | Evidence hint |\n"
             "|---|------|--------|--------|--------|---------------|\n"
-            "| 1 | asset-binding-gap | `AB-001: a <-> b` | exact pair unresolved | `m.md` | `AB-001` |\n"
+            "| 1 | security-obligation | `SO-1` | generic obligation | `m.md` | `SO-1` |\n"
         ),
         "attention_repair_summary.md": (
             "# Attention Repair\n\n"
             "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
             "|---------|------|--------|---------|----------|-------|\n"
-            "| 1 | asset-binding-gap | `AB-001: a <-> b` | SAFE | Router.sol:L10 proves a is validated against b before transfer | SAFE_REASON:EXPLICIT_BINDING_CHECK; exact pair closed |\n"
+            "| 1 | security-obligation | `SO-1` | SAFE | Router.sol:L10 addresses the obligation | bound |\n"
         ),
     })
     phase = Phase("attention_repair", ["Attention Repair"], ["attention_repair_summary.md"], 3000)
@@ -119,7 +119,7 @@ def test_fc4_content_gate_flags_missing_attention_repair_summary():
         "attention_repair_queue.md": (
             "| # | Kind | Target | Reason | Source | Evidence hint |\n"
             "|---|------|--------|--------|--------|---------------|\n"
-            "| 1 | asset-binding-gap | `AB-001: a <-> b` | exact pair unresolved | `m.md` | `AB-001` |\n"
+            "| 1 | security-obligation | `SO-1` | generic obligation | `m.md` | `SO-1` |\n"
         ),
     })
     phase = Phase("attention_repair", ["Attention Repair"], ["attention_repair_summary.md"], 3000)

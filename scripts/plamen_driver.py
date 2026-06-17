@@ -3421,6 +3421,38 @@ def _is_semantic_dedup_passthrough_failure(missing: list[Any]) -> bool:
     )
 
 
+def _dedup_passthrough_should_continue(
+    phase_name: str, attempt: int, budget: int, scratchpad: Path
+) -> bool:
+    """True when the in-session continuation loop should spend a turn driving
+    a fresh missing-only continuation for a semantic-dedup phase instead of
+    accepting the gate's pass.
+
+    The gate "passes" the moment the driver's crash-safety PASSTHROUGH
+    scaffold exists on disk — so a subprocess that compacted mid-write and
+    never overwrote the scaffold looks complete and the continuation budget
+    is never used. This predicate fires ONLY when ALL hold:
+
+      - the phase is the semantic-dedup phase (SC or L1),
+      - continuation budget remains (attempt <= budget), and
+      - dedup_decisions.md still carries Status: PASSTHROUGH while
+        dedup_candidate_pairs.md has live candidate rows
+        (``_semantic_dedup_passthrough_issue`` is the single source of truth).
+
+    When it returns False on a dedup phase because the budget is spent, the
+    caller accepts the passthrough floor (returns 0) — it MUST NOT escalate to
+    a whole-phase-retry sentinel, because this phase is critical=True and that
+    would cascade to a critical halt. Recall is preserved downstream by the
+    mechanical passthrough disposition, supplemental dedup, and the
+    Python-native report_dedup pass.
+    """
+    if phase_name not in ("semantic_dedup", "sc_semantic_dedup"):
+        return False
+    if attempt > budget:
+        return False
+    return bool(_semantic_dedup_passthrough_issue(scratchpad))
+
+
 # Regex for the LLM/mechanical absorbed->survivor relationship rows in
 # dedup_decisions.md. Two formats are recognized (mirrors
 # _extract_dedup_absorbed_ids, but captures BOTH endpoints so the survivor can
@@ -5498,7 +5530,44 @@ def _run_supervised_pty_loop(
             return -2, session
 
         if gate_passed:
-            return 0, session
+            # Semantic-dedup compaction-continue. The driver pre-writes a
+            # crash-safety PASSTHROUGH scaffold (dedup_decisions.md +
+            # findings_inventory_deduped.md) BEFORE this subprocess so a
+            # timeout never loses findings. That scaffold satisfies the
+            # generic artifact gate from turn 1 — so without this guard the
+            # loop returns 0 immediately and NEVER spends its continuation
+            # budget, even when the subprocess compacted mid-write and left
+            # the scaffold unchanged while live candidate pairs remain. That
+            # is the exact "passes on the safety net, never actually dedups"
+            # no-op. Treat an unchanged PASSTHROUGH + live pairs the same as
+            # any other incomplete artifact: drive a FRESH missing-only
+            # continuation (clean context, immune to the prior compaction)
+            # up to the same budget breadth/depth use. When the budget is
+            # spent, ACCEPT the passthrough floor (return 0) — never -2 —
+            # because this phase is critical=True and a -2 would cascade to
+            # whole-phase retries and ultimately a critical halt. The
+            # mechanical passthrough disposition + supplemental dedup +
+            # the Python-native report_dedup remain the recall-safe net.
+            if _dedup_passthrough_should_continue(
+                phase.name, attempt, budget, scratchpad
+            ):
+                log.info(
+                    f"[{phase.name}] gate passes on the pre-written "
+                    f"PASSTHROUGH scaffold but live candidate pairs remain "
+                    f"(attempt {attempt}/{budget}); driving a fresh "
+                    f"missing-only continuation instead of accepting the "
+                    f"no-op (compaction-continue, same as breadth/depth)."
+                )
+                gate_passed = False
+                if not gate_missing:
+                    gate_missing = [
+                        "dedup_decisions.md still carries Status: PASSTHROUGH "
+                        "while dedup_candidate_pairs.md has live rows — "
+                        "evaluate every candidate pair and OVERWRITE the "
+                        "passthrough with real MERGE / KEEP SEPARATE decisions"
+                    ]
+            else:
+                return 0, session
 
         # Ship 8.13: DONE-then-gate-miss telemetry. When the turn reached
         # end_turn (state.complete -> the coordinator emitted DONE) yet the
@@ -9020,12 +9089,6 @@ your assigned role without treating them as expected findings. When directly
 disposing an obligation, emit a receipt:
 `[OBLIG:security_obligations.md:<SO-ID>] STATUS:R|D|C KEY:<summary> -> <finding_id|reason|phase>`.
 
-If `{scratchpad.as_posix()}/asset_binding_matrix.md` exists, read it as a
-compact value-binding checklist. For rows relevant to your role, either report
-the unbound value-flow pair as a candidate finding with evidence, or explain
-why the pair is bound/irrelevant in your assigned artifact. Treat it as a
-generic audit obligation, not as expected protocol-specific answers.
-
 {standard_block}
 
 ## Required File Contract
@@ -10997,16 +11060,14 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
         except Exception as exc:
             log.warning(f"[{phase.name}] security obligation sidecar skipped: {exc!r}")
         try:
-            binding_rows, binding_gaps = _write_asset_binding_matrix(
-                scratchpad, config.get("mode", "core")
-            )
-            if binding_rows and phase.name == "depth":
+            obl_count = _write_obligation_ledger(scratchpad, config.get("mode", "core"))
+            if obl_count and phase.name == "depth":
                 log.info(
-                    f"[depth] asset_binding_matrix.md refreshed "
-                    f"({binding_rows} row(s), {binding_gaps} gap(s))"
+                    f"[depth] obligation_ledger.md refreshed "
+                    f"({obl_count} chain-retention obligation(s))"
                 )
         except Exception as exc:
-            log.warning(f"[{phase.name}] asset-binding sidecar skipped: {exc!r}")
+            log.warning(f"[{phase.name}] obligation ledger sidecar skipped: {exc!r}")
     if phase.name == "report_index":
         try:
             facet_count = _write_candidate_semantic_facets(scratchpad)

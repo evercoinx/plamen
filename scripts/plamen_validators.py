@@ -3030,6 +3030,10 @@ def _owned_artifact_patterns(pipeline: str, scratchpad: Optional[Path] = None) -
         "report_low_info": ["report_low_info.md"],
         "report_low_info_merge": ["report_low_info.md"],
         "report_assemble": common_report,
+        # Phase 6d LLM consolidation proposer. Writes ONLY its decisions file —
+        # it never edits AUDIT_REPORT.md (the Python report_dedup phase below is
+        # the sole executor), so ownership is exclusive to this one artifact.
+        "report_dedup_agent": ["report_dedup_agent_decisions.md"],
         # Cross-tier dedup (Python-native). Owns its decisions mapping and the
         # snapshot side artifacts; MAY rewrite the delivered report when the
         # data-loss gate passes (hence common_report ownership too).
@@ -8339,7 +8343,6 @@ def _validate_attention_repair(
                 receipt_context[row_no] = bm.group(2)
     queue_numbers: list[int] = []
     queued_paths: list[str] = []
-    asset_binding_rows: dict[int, tuple[str, str, str]] = {}
     for line in qtext.splitlines():
         s = line.strip()
         if not re.match(r"^\|\s*\d+\s*\|", s):
@@ -8354,18 +8357,6 @@ def _validate_attention_repair(
         except ValueError:
             pass
         kind = cells[1].lower()
-        if row_no is not None and "asset-binding-gap" in kind:
-            target = cells[2].strip()
-            m = re.search(
-                r"\b(AB-\d+)\s*:\s*`?([^`<>|]+?)`?\s*<->\s*`?([^`|]+?)`?\s*$",
-                target,
-            )
-            if m:
-                asset_binding_rows[row_no] = (
-                    m.group(1).strip(),
-                    m.group(2).strip(),
-                    m.group(3).strip(),
-                )
         if any(token in kind for token in ("uncited", "notread", "file", "path")):
             for cell in (cells[2], cells[-1]):
                 for p in _extract_gap_paths_from_markdown(cell):
@@ -8415,283 +8406,6 @@ def _validate_attention_repair(
             + ", ".join(missing_paths[:8])
         ], soft
 
-    def _binding_terms(raw: str) -> set[str]:
-        value = str(raw or "").strip().strip("`")
-        terms = {value}
-        if "." in value:
-            terms.add(value.rsplit(".", 1)[-1])
-        return {t.lower() for t in terms if t}
-
-    relation_re = re.compile(
-        r"(?:"
-        r"==|!=|=|<->|->|"
-        r"\b(?:mismatch(?:es|ed)?|diverg(?:e|es|ed|ence)|"
-        r"not\s+match(?:es|ed)?|does\s+not\s+match|"
-        r"not\s+(?:validated|bound|checked|compared)|"
-        r"missing\s+(?:validation|binding|check)|"
-        r"validated\s+against|checked\s+against|compared\s+against|"
-        r"bound\s+to|binds?\s+to|matches?|equals?|same\s+as|"
-        r"consistent\s+with|consistency|must\s+equal|should\s+equal|"
-        r"source\s+of\s+truth|derived\s+from|unreachable|not\s+applicable|"
-        r"mutually\s+exclusive|different\s+purposes|disjoint\s+code\s+paths?|"
-        r"no\s+reachable\s+execution\s+path|never\s+touch(?:es|ed)?\s+both|"
-        r"not\s+used\s+(?:together|simultaneously)|same\s+variable|"
-        r"by\s+identity|by\s+construction|direct\s+and\s+by\s+construction)\b"
-        r")",
-        re.IGNORECASE,
-    )
-    existing_finding_ref_re = re.compile(
-        r"\b(?:INV|H|M|L|I|CH|DS|DT|DE|BS|NS|ATT)-\d{1,4}\b",
-        re.IGNORECASE,
-    )
-    coverage_claim_re = re.compile(
-        r"\b(?:covered\s+by|directly\s+covers?|fully\s+covered|"
-        r"merged\s+into|exact\s+binding\s+failure|binding\s+failure\s+described)\b",
-        re.IGNORECASE,
-    )
-
-    def _local_claim_units(text: str) -> list[str]:
-        units: list[str] = []
-        for line in str(text or "").splitlines():
-            s = line.strip()
-            if not s:
-                continue
-            if "|" in s:
-                units.append(s[:1400])
-                continue
-            for part in re.split(r"(?<=[.;:!?])\s+", s):
-                part = part.strip()
-                if part:
-                    units.append(part[:1400])
-        return units
-
-    def _referenced_record_text(fid: str) -> str:
-        fid = (fid or "").strip()
-        if not fid:
-            return ""
-        chunks: list[str] = []
-        for name in (
-            "attention_repair_findings.md",
-            "findings_inventory.md",
-            "findings_inventory_pre_dedup.md",
-            "hypotheses.md",
-            "chain_hypotheses.md",
-            "verification_queue.md",
-            "verify_core.md",
-        ):
-            p = scratchpad / name
-            if not p.exists():
-                continue
-            try:
-                text = p.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            m = re.search(rf"\b{re.escape(fid)}\b", text, re.IGNORECASE)
-            if not m:
-                continue
-            start = max(0, m.start() - 1800)
-            end = min(len(text), m.end() + 2600)
-            chunks.append(text[start:end])
-        vf = _find_verify_file(scratchpad, fid)
-        if vf and vf.exists():
-            try:
-                chunks.append(vf.read_text(encoding="utf-8", errors="replace")[:6000])
-            except Exception:
-                pass
-        return "\n".join(chunks)
-
-    def _unit_closes_pair(unit: str, a: str, b: str) -> bool:
-        low = unit.lower()
-        if not relation_re.search(unit):
-            return False
-        terms_a = _binding_terms(a)
-        terms_b = _binding_terms(b)
-        return any(t in low for t in terms_a) and any(t in low for t in terms_b)
-
-    def _safe_reason_closes_pair(unit: str, a: str, b: str) -> bool:
-        """Accept explicit SAFE_REASON closure when the row names both fields.
-
-        SAFE asset-binding rows are allowed only for driver-known closure
-        classes. Some valid closures are not equality claims: e.g. an
-        IMPOSSIBLE_PAIR where two queued fields are proven to live on disjoint
-        callbacks. The strict relation parser still protects non-SAFE and
-        finding/report rows; this helper prevents valid SAFE_REASON rows from
-        becoming brittle wording traps.
-
-        Tier C noise fix: a rich depth-evidence-tag closure
-        (`[TRACE: ...]` / `[VARIATION: ...]` / `[BOUNDARY: ...]`) that names BOTH
-        queued fields is an equally valid closure form — the prompt does not
-        force the rigid `SAFE_REASON:<ENUM>` token. Accepting it removes a
-        false soft-WARN without weakening the field-pair requirement (the
-        closure must STILL mention both fields). Soft-class only.
-        """
-        if not (safe_reason_re.search(unit) or _DEPTH_EVIDENCE_TAG_RE.search(unit)):
-            return False
-        low = unit.lower()
-        terms_a = _binding_terms(a)
-        terms_b = _binding_terms(b)
-        return any(t in low for t in terms_a) and any(t in low for t in terms_b)
-
-    def _exact_pair_closed(text: str, a: str, b: str) -> bool:
-        for unit in _local_claim_units(text):
-            # A repair row may close an exact pair by explicitly routing it
-            # to an existing finding. The referenced record must still prove
-            # the same A <-> B relationship; merely saying "covered by INV-N"
-            # is ID accounting, not semantic closure.
-            if existing_finding_ref_re.search(unit) and coverage_claim_re.search(unit):
-                refs = sorted(set(m.group(0).upper() for m in existing_finding_ref_re.finditer(unit)))
-                if any(
-                    _unit_closes_pair(claim, a, b)
-                    for fid in refs
-                    for claim in _local_claim_units(unit + "\n" + _referenced_record_text(fid))
-                ):
-                    return True
-                continue
-            if _unit_closes_pair(unit, a, b):
-                return True
-            if _safe_reason_closes_pair(unit, a, b):
-                return True
-        return False
-
-    safe_reason_re = re.compile(
-        r"\bSAFE_REASON\s*:\s*"
-        r"(?:EXPLICIT_EQUALITY|EXPLICIT_BINDING_CHECK|UNREACHABLE_PATH|IMPOSSIBLE_PAIR)\b",
-        re.IGNORECASE,
-    )
-    # A rich depth-evidence-tag closure is an accepted alternative to the rigid
-    # SAFE_REASON:<ENUM> token (Tier C noise fix). These tags are the same
-    # closure vocabulary depth agents already emit, so a SAFE row that proves
-    # its pair via `[TRACE: ... → revert at L120]` / `[VARIATION: ...]` /
-    # `[BOUNDARY: ...]` is a valid, non-vague closure — not a wording trap.
-    unsafe_asset_safe_re = re.compile(
-        r"\b(?:atomic(?:ally)?|self[-\s]*punishing|"
-        r"no\s+(?:normal\s+)?(?:balance|accumulation|residual|leftover)|"
-        r"requires\s+(?:an?\s+)?(?:existing|prior)\s+(?:balance|residual)|"
-        r"leftover\s+balance|residual\s+balance)\b",
-        re.IGNORECASE,
-    )
-    revert_only_safe_re = re.compile(r"\b(?:revert(?:s|ed|ing)?|reverted)\b", re.IGNORECASE)
-    asset_pair_issues: list[str] = []
-    findings_blob = "\n".join(summary_outputs[1:])
-    def _row_substantive_closure_text(row_context: str, base_blob: str) -> str:
-        """Full closure text for a row: receipt context + findings blob + any
-        escalated finding records the row references (ATT-N / INV-N / ...)."""
-        text = row_context + "\n" + base_blob
-        for ref in sorted(set(
-            m.group(0).upper()
-            for m in existing_finding_ref_re.finditer(row_context)
-        )):
-            text += "\n" + _referenced_record_text(ref)
-        return text
-
-    closure_class_kw_re = re.compile(
-        r"\b(?:EXPLICIT_EQUALITY|EXPLICIT_BINDING_CHECK|"
-        r"UNREACHABLE_PATH|IMPOSSIBLE_PAIR)\b",
-        re.IGNORECASE,
-    )
-
-    def _has_substantive_closure(closure_text: str, a: str, b: str) -> bool:
-        """A row is substantively closed when its closure text carries ANY of:
-        (1) a depth-evidence tag ([TRACE]/[VARIATION]/[BOUNDARY]),
-        (2) a SAFE_REASON:<ENUM> token,
-        (3) a bare closure-class enum keyword
-            (EXPLICIT_EQUALITY/EXPLICIT_BINDING_CHECK/UNREACHABLE_PATH/
-            IMPOSSIBLE_PAIR), or
-        (4) an explicit field-PAIR relation claim — a relation phrase that names
-            BOTH queued fields in one local claim.
-        Branches 1-3 are inherently substantive closure forms (per
-        phase5/attention-repair contract), so they do not require naming both
-        fields. Branch 4 requires the pair so that an ADJACENT single-field
-        claim (e.g. "executedAsset is not validated", which names only one side)
-        is NOT mistaken for closure. Recall-safe: a row with NONE of these is
-        treated as unclosed and still warns."""
-        if _DEPTH_EVIDENCE_TAG_RE.search(closure_text):
-            return True
-        if safe_reason_re.search(closure_text):
-            return True
-        if closure_class_kw_re.search(closure_text):
-            return True
-        return any(
-            _unit_closes_pair(unit, a, b)
-            for unit in _local_claim_units(closure_text)
-        )
-
-    for row_no, (rid, field_a, field_b) in asset_binding_rows.items():
-        context = receipt_context.get(row_no, "")
-        combined = context + "\n" + findings_blob
-        safe_reason_pair = _safe_reason_closes_pair(context, field_a, field_b)
-        if re.search(r"\bSAFE\b", context, re.IGNORECASE):
-            # Accept the rigid SAFE_REASON:<ENUM> token, a field-pair-naming
-            # depth-evidence closure (`safe_reason_pair`), OR — root noise fix —
-            # ANY substantive closure on the row (a depth-evidence tag, a
-            # SAFE_REASON token, or an explicit relation claim such as
-            # `EXPLICIT_EQUALITY confirmed` / `identical expression`). The
-            # custody/value guards below (revert/no-balance, revert-only) still
-            # apply, so this only relaxes the bare "no SAFE_REASON token" wording
-            # trap. RECALL-SAFE: a SAFE row with no closure of any kind still
-            # warns.
-            if (
-                not safe_reason_re.search(context)
-                and not safe_reason_pair
-                and not _has_substantive_closure(
-                    _row_substantive_closure_text(context, findings_blob),
-                    field_a, field_b,
-                )
-            ):
-                asset_pair_issues.append(
-                    f"row {row_no} {rid} ({field_a} <-> {field_b}) marks SAFE "
-                    "without SAFE_REASON:<EXPLICIT_EQUALITY|EXPLICIT_BINDING_CHECK|UNREACHABLE_PATH|IMPOSSIBLE_PAIR> "
-                    "or a field-pair-naming [TRACE]/[VARIATION]/[BOUNDARY] closure"
-                )
-                continue
-            if unsafe_asset_safe_re.search(context):
-                asset_pair_issues.append(
-                    f"row {row_no} {rid} ({field_a} <-> {field_b}) marks SAFE "
-                    "using revert/no-balance/residual reasoning; custody/value rows require explicit binding, unreachable-path, or impossible-pair proof"
-                )
-                continue
-            if revert_only_safe_re.search(context) and not safe_reason_pair and not _unit_closes_pair(context, field_a, field_b):
-                asset_pair_issues.append(
-                    f"row {row_no} {rid} ({field_a} <-> {field_b}) marks SAFE "
-                    "using revert-only reasoning; custody/value rows require explicit binding, unreachable-path, or impossible-pair proof"
-                )
-                continue
-        if not _exact_pair_closed(combined, field_a, field_b):
-            # Root noise fix: the exact-pair matcher demands the closure
-            # literally NAME both queued field tokens in one local claim. A
-            # CONFIRMED row whose escalated finding proves the gap with a rich
-            # depth-evidence trace (e.g. `[TRACE: onCall(zrc20=USDC, ...) ->
-            # _handleEvmOrSolanaWithdraw(targetZRC20=WZETA) -> ...]`) names the
-            # CONCRETE values/symbols, not the abstract queued field labels
-            # (`context.asset`), so the literal-pair match misses even though
-            # the row is substantively closed. Accept ANY substantive closure
-            # on the row — a depth-evidence tag ([TRACE]/[VARIATION]/[BOUNDARY]),
-            # a SAFE_REASON token, OR an explicit field-pair relation claim — as
-            # sufficient to suppress this soft WARN. This is prose-quality
-            # judgment on an enrichment phase, so over-strict wording must not
-            # warn. RECALL-SAFE: a row with NONE of these (no tag, no
-            # SAFE_REASON, no relation claim anywhere in its closure context)
-            # STILL warns — the check is not made vacuous.
-            closure_text = _row_substantive_closure_text(context, findings_blob)
-            if not _has_substantive_closure(closure_text, field_a, field_b):
-                asset_pair_issues.append(
-                    f"row {row_no} {rid} ({field_a} <-> {field_b}) lacks any substantive closure "
-                    "(no field-pair claim, SAFE_REASON, or depth-evidence tag)"
-                )
-    if asset_pair_issues:
-        # Prose-quality judgment of how the agent worded a SAFE justification
-        # ("vague or adjacent", revert/no-balance wording, field-pair closure
-        # phrasing). Per the WARN-not-halt policy for LLM-quality gates on
-        # enrichment phases, this is a soft warning -- it must not flip the
-        # phase to failed and trigger a CRITICAL halt. Mechanical gates in
-        # this function (missing receipts, uncited queued paths, missing/stub
-        # summary) remain hard above.
-        soft.append(
-            "attention repair asset-binding closure is vague or adjacent; "
-            "each asset-binding-gap row should explicitly prove/report both "
-            "queued fields in one local claim: "
-            + "; ".join(asset_pair_issues[:6])
-        )
     return [], soft
 
 
@@ -14961,13 +14675,8 @@ def _generate_attention_repair_retry_hint(issues: list[str]) -> str:
         "the full relative path in Target and cite the same path again in "
         "Evidence with file:line support. Use a clear Verdict such as SAFE, "
         "COVERED, CONFIRMED, FINDING, FALSE_POSITIVE, NO_FINDING, or "
-        "NEEDS_HUMAN if the source is unavailable. For asset-binding-gap "
-        "targets, explicitly discuss "
-        "both queued fields in the same Evidence/Notes claim and state whether "
-        "they mismatch, are not validated, are bound/equal, are unreachable, "
-        "or need human review. A nearby issue involving only one field does "
-        "not close the row. Do NOT assume prior output files are correct; "
-        "they have been quarantined.",
+        "NEEDS_HUMAN if the source is unavailable. Do NOT assume prior output "
+        "files are correct; they have been quarantined.",
     ])
     return "\n".join(lines) + "\n"
 
@@ -17152,41 +16861,6 @@ def _retention_claim_units(text: str) -> list[str]:
     return units
 
 
-def _retention_pair_closed(text: str, a: str, b: str) -> bool:
-    if not a or not b:
-        return False
-    def _base(raw: str) -> str:
-        s = str(raw or "").strip().strip("`")
-        if s == "msg.value":
-            return s
-        if "." in s:
-            return s.rsplit(".", 1)[-1]
-        return s
-    terms_a = {a.lower(), _base(a).lower()}
-    terms_b = {b.lower(), _base(b).lower()}
-    terms_a.discard("")
-    terms_b.discard("")
-    relation = re.compile(
-        r"(?:"
-        r"==|!=|<->|->|"
-        r"\b(?:mismatch(?:es|ed)?|not\s+match(?:es|ed)?|"
-        r"not\s+(?:validated|bound|checked|compared)|"
-        r"missing\s+(?:validation|binding|check)|"
-        r"validated\s+against|checked\s+against|compared\s+against|"
-        r"bound\s+to|binds?\s+to|matches?|equals?|same\s+as|"
-        r"source\s+of\s+truth|derived\s+from|merge(?:d)?\s+into|covered\s+by)\b"
-        r")",
-        re.IGNORECASE,
-    )
-    for unit in _retention_claim_units(text):
-        low = unit.lower()
-        if not relation.search(unit):
-            continue
-        if any(t in low for t in terms_a) and any(t in low for t in terms_b):
-            return True
-    return False
-
-
 def _validate_obligation_ledger_retention(scratchpad: Path, coverage_text: str) -> list[str]:
     """Hard-gate only stable Medium+ typed obligations.
 
@@ -17206,7 +16880,7 @@ def _validate_obligation_ledger_retention(scratchpad: Path, coverage_text: str) 
         if sev not in {"Critical", "High", "Medium"}:
             continue
         cls = str(row.get("class") or "")
-        if cls not in {"exact_value_binding", "chain_upgrade_retention"}:
+        if cls not in {"chain_upgrade_retention"}:
             continue
         oid = str(row.get("id") or row.get("source_id") or "unknown")
         source_id = str(row.get("source_id") or "")
@@ -17217,11 +16891,6 @@ def _validate_obligation_ledger_retention(scratchpad: Path, coverage_text: str) 
                 or (source_id and source_id.lower() in unit.lower())
             )
         )
-        if cls == "exact_value_binding":
-            a = str(row.get("field_a") or "")
-            b = str(row.get("field_b") or "")
-            if _retention_pair_closed(coverage_text, a, b):
-                continue
         if relevant and (
             re.search(r"\b[CHMLI]-\d{1,4}\b", relevant, re.IGNORECASE)
             or re.search(

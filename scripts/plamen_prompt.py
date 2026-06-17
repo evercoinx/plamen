@@ -927,6 +927,10 @@ _STANDALONE_PROMPT_MAP: dict[str, str] = {
     "crossbatch": "phase5-crossbatch.md",
     "report_index": "phase6a-report-index.md",
     "report_assemble": "phase6c-assembler.md",
+    # Phase 6d LLM consolidation proposer — reads the assembled report and
+    # proposes cross-tier/no-location MERGES + QO reclassifications. Real LLM
+    # phase (NOT short-circuited); writes report_dedup_agent_decisions.md only.
+    "report_dedup_agent": "phase6d-report-dedup-agent.md",
     # Phase 6d cross-tier report dedup — Python-native; stub prompt exists so
     # build_phase_prompt doesn't crash. Driver short-circuits this phase to
     # plamen_mechanical._dedup_report_python(). critical=False; never halts.
@@ -3264,20 +3268,7 @@ Mandatory rules:
    file:line evidence, or cite the exact path and mark `NEEDS_HUMAN` if the
    source is unavailable.
 6. SAFE rows are valid and expected. Do not invent findings to satisfy a quota.
-   For `asset-binding-gap` rows, SAFE is valid ONLY with one of:
-   `SAFE_REASON:EXPLICIT_EQUALITY`, `SAFE_REASON:EXPLICIT_BINDING_CHECK`,
-   `SAFE_REASON:UNREACHABLE_PATH`, or `SAFE_REASON:IMPOSSIBLE_PAIR`.
-   A revert, no-balance assumption, no-normal-accumulation assumption, or
-   "self-punishing" path is not a SAFE proof for custody/value rows unless the
-   row also proves explicit binding, unreachable path, or impossible pair.
-7. Asset-binding rows are exact field-pair obligations. If the target is
-   `A <-> B`, the Evidence/Notes claim must discuss A against B directly.
-   Include one local `PAIR_CLAIM:` that names both queued fields exactly and
-   states equality, explicit binding check, mismatch, unreachable path, or
-   impossible pair.
-   Similar topic coverage or an existing finding ID only closes the row when
-   the cited finding names both fields and their relationship.
-8. Stop after writing the two attention-repair files; do not proceed outside
+7. Stop after writing the two attention-repair files; do not proceed outside
    this phase.
 """
     elif config.get("pipeline") != "l1" and phase.name in SC_VERIFY_PHASE_NAMES:

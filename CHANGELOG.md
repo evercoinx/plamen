@@ -5,6 +5,20 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-06-17
+
+### Added
+- **DAML / Canton as a first-class smart-contract ecosystem (bug-hunting scope).** Plamen now audits DAML codebases end-to-end: ecosystem auto-detection on `.daml` sources; DAML-specific recon, inventory, depth (templates + driver + scanner templates), and verification prompts (`prompts/daml/...`); 12 DAML skills under `agents/skills/daml/` (authorization-model, choice-semantics, contract-key-safety, cid-capability-safety, locking-semantics, privacy-disclosure, ensure-invariants, temporal-parameter-staleness, semi-trusted-roles, share-allocation-fairness, economic-design-audit, verification-protocol); registry entries in `rules/skill-registry.json` and a `daml` toolchain block in `rules/language-toolchain-registry.json` (`daml build` / `daml test`, DAML Script boundary-value fallback, no security SAST); and `DML-` internal finding IDs recognized by the mechanical pipeline.
+- **Report-dedup AGENT (Phase 6d, `report_dedup_agent`).** A new, non-halting LLM phase reads the fully assembled `AUDIT_REPORT.md` and PROPOSES consolidations the mechanical signals miss: cross-tier and no-/mismatched-location duplicate MERGES, plus Quality-Observation reclassifications of unambiguously cosmetic Low/Info findings. The agent proposes only — it never edits, renumbers, or deletes; the existing deterministic Python `report_dedup` executes the proposals through the unchanged zero-loss embed + data-loss gate (agent proposes, Python disposes). The phase is `critical=False` (never halts the run), and both `AUDIT_REPORT.pre-dedup.md` and the deduped `AUDIT_REPORT.md` are retained.
+
+### Changed
+- **Opus promotion for SC Thorough semantic dedup.** The smart-contract semantic-dedup phase (`sc_semantic_dedup`) now runs on Opus in Thorough mode, where precision-critical per-pair adjudication benefits most from the stronger model.
+
+### Fixed
+- **Report-dedup agent decisions were silently dropped (column-mismatch) and one lossy QO retab vetoed every merge.** The `report_dedup_agent` decision parser is now column-agnostic: it reads report IDs by position-in-row (first = survivor, the rest = absorbed) instead of assuming a fixed `Survivor | Absorbed` two-column layout, so it correctly ingests the agent's richer table (`Survivor ID | Title | Absorbed IDs | …`), supports multi-absorb, and loose-matches the QO header. Separately, the Quality-Observation retabulation is now gated **independently** from the merges: previously the single end-of-pass all-or-nothing data-loss gate would revert *every* good consolidation when the QO retab happened to be lossy (e.g. a fee-rounding finding whose impact sub-bullets don't fit the compact QO row). A lossy QO retab is now dropped on its own while the merges still apply. Net effect on a representative report: dedup that had been a silent no-op (proposed merges parsed as zero) now consolidates correctly (81 → 70).
+- **Semantic-dedup compaction no-op on large inventories.** The semantic-dedup phase now spends its in-session continuation budget to keep working when live candidate pairs remain, instead of accepting a pre-written `PASSTHROUGH` result unchanged after a context compaction. This closes the large-inventory case where dedup silently did nothing.
+- **De-overfit: removed protocol-specific answer-priming from the methodology.** A ZetaChain-specific binding-template primer (and any other protocol-specific answer-priming found in the same sweep) was removed, restoring the HARD no-overfit invariant: the methodology encodes HOW to analyze, never WHAT to find in a specific protocol. (Generic, illustrative-only mentions of named protocols — e.g. ZetaChain/LayerZero/Wormhole as one example among several, or the documented "never again" case study in the post-audit-improvement protocol — are retained, as permitted by the rule.)
+
 ## [2.1.0] - 2026-06-15
 
 ### Added

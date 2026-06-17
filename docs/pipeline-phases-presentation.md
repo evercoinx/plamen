@@ -142,10 +142,10 @@ Validates every finding against historical vulnerability databases via MCP (Mode
 ## Phase 4e: Semantic Dedup
 
 ### `sc_semantic_dedup` — Semantic Deduplication
-**Model**: sonnet | **Timeout**: 15min | **Critical**: no
+**Model**: sonnet (Opus in SC Thorough since v2.1.1) | **Timeout**: 15min | **Critical**: no
 **Execution**: LLM phase session
 
-The pipeline produces findings from 10-20+ agents across breadth, rescan, per-contract, and depth. Despite within-chunk dedup in inventory, semantic duplicates survive — the same root cause described with different words by a breadth agent and a depth agent, or the same bug caught by both a scanner and a niche agent. This phase detects and merges those duplicates using title overlap scoring (cosine-like), location overlap detection (same file+line range), function-name extraction (same function targeted), and source-ID subset signals (one finding's evidence is a subset of another's). An LLM pass makes the final semantic decision on each candidate pair — mechanical signals nominate, the LLM confirms. Without this phase, the report would contain inflated finding counts that waste the reader's time on what is effectively the same bug reported twice.
+The pipeline produces findings from 10-20+ agents across breadth, rescan, per-contract, and depth. Despite within-chunk dedup in inventory, semantic duplicates survive — the same root cause described with different words by a breadth agent and a depth agent, or the same bug caught by both a scanner and a niche agent. This phase detects and merges those duplicates using title overlap scoring (cosine-like), location overlap detection (same file+line range), function-name extraction (same function targeted), and source-ID subset signals (one finding's evidence is a subset of another's). An LLM pass makes the final semantic decision on each candidate pair — mechanical signals nominate, the LLM confirms. In SC Thorough mode this per-pair adjudication runs on Opus (since v2.1.1), where the precision of the merge/keep decision matters most. On a large inventory, if a context compaction interrupts the turn while live candidate pairs remain, the phase now spends its in-session continuation budget to keep working rather than accepting a pre-written `PASSTHROUGH` result unchanged (the prior large-inventory no-op). Without this phase, the report would contain inflated finding counts that waste the reader's time on what is effectively the same bug reported twice.
 
 **Produces**: `dedup_decisions.md`, `findings_inventory_deduped.md`
 
@@ -295,6 +295,13 @@ The final phase. Fully deterministic Python assembler since v2.3.11 (no LLM call
 **Produces**: `AUDIT_REPORT.md` (in project root)
 
 **Why it's last**: The report is the deliverable. Everything before this phase exists to produce the inputs the report needs — verified findings, clean IDs, correct severities, written sections. The assembler touches every prior phase's output and is the final quality gate before the client sees results.
+
+### `report_dedup_agent` — Final Report Consolidation Proposer *(Phase 6d, since v2.1.1)*
+**Execution**: LLM phase session | **Critical**: no (never halts)
+
+A post-assembly pass that reads the fully assembled `AUDIT_REPORT.md` and PROPOSES consolidations the mechanical signals cannot make on their own: cross-tier and no-/mismatched-location duplicate MERGES (the same underlying bug surfaced at two severity tiers, or whose `Location` is missing or written at different granularity), plus Quality-Observation reclassifications of unambiguously cosmetic Low/Info findings. The agent **proposes only** — it never edits, renumbers, or deletes report content. The existing deterministic Python `report_dedup` then executes those proposals through its unchanged zero-data-loss embed + data-loss gate (agent proposes, Python disposes), so a proposal that would lose information is rejected mechanically. Both the pre-dedup snapshot (`AUDIT_REPORT.pre-dedup.md`) and the deduped `AUDIT_REPORT.md` are kept. Because the phase is non-critical, a failed or empty proposal degrades to the assembled report unchanged rather than halting the run.
+
+**Produces**: `report_dedup_agent_decisions.md` (proposals), `AUDIT_REPORT.pre-dedup.md` (snapshot), updated `AUDIT_REPORT.md`
 
 ---
 

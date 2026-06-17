@@ -57,7 +57,6 @@ __all__ = [
     "_defined_report_section_ids",
     "_build_human_review_appendix",
     "_build_attention_repair_items",
-    "_build_asset_binding_repair_items",
     "_build_body_writer_manifests",
     "_build_sc_body_writer_manifests",
     "_collect_raw_candidate_ledger_rows",
@@ -82,7 +81,7 @@ __all__ = [
     "_synth_report_section_from_verify",
     "_synthesize_components_audited",
     "_write_attention_repair_queue",
-    "_write_asset_binding_matrix",
+    "_write_obligation_ledger",
     "_allocate_inventory_ledger_id",
     "_write_canonical_finding_identity_map",
     "_write_candidate_semantic_facets",
@@ -2863,15 +2862,24 @@ def _finding_own_block(section: str) -> str:
 
 def _reclassify_cosmetic_low_info_to_qo(
     audit_text: str,
+    extra_qo_ids: set[str] | None = None,
 ) -> tuple[str, list[tuple[str, str, str, str, str, str]]]:
     """F1 — Quality-Observations retabulation (RETABULATION, never a drop).
 
     For each `### [L-NN]` / `### [I-NN]` finding section: if
     ``classify_quality_observation(title, severity)`` returns a non-empty
-    cosmetic class AND the section body carries NO security-impact signal, move
+    cosmetic class OR the report ID is in ``extra_qo_ids`` (Phase 6d agent
+    proposals) — AND the section body carries NO security-impact signal — move
     the finding into a single row under a `## Quality Observations` megasection
     table and remove the standalone `###` section. Otherwise the section is
     kept verbatim.
+
+    ``extra_qo_ids`` lets the LLM proposer flag cosmetic Low/Info findings the
+    vocab classifier misses. The security-impact-signal guard still applies to
+    agent-flagged IDs (an agent CANNOT bury a finding whose body shows a
+    security signal), and retabulation remains provably zero-loss (every removed
+    section re-appears as exactly one QO row preserving its locations / impacts /
+    PoC fns), so the downstream data-loss gate re-confirms no loss.
 
     This is pure retabulation: every report ID that leaves a `###` section
     re-appears as exactly one QO table row, so NO finding ID is ever dropped
@@ -2887,6 +2895,7 @@ def _reclassify_cosmetic_low_info_to_qo(
 
     records = _dedup_report_sections(audit_text)
     pri_to_sev = {"L": "Low", "I": "Informational"}
+    extra = {x.upper() for x in (extra_qo_ids or set())}
 
     qo_rows: list[tuple[str, str, str, str, str, str]] = []
     blocks_to_remove: list[str] = []
@@ -2896,6 +2905,12 @@ def _reclassify_cosmetic_low_info_to_qo(
             continue  # only Low / Info are QO-eligible
         sev_word = pri_to_sev[prefix]
         cls = classify_quality_observation(rec["title"], sev_word)
+        if not cls and rec["id"].upper() in extra:
+            # Agent flagged this Low/Info as cosmetic but the vocab classifier
+            # did not name a class — record it under a generic class so the
+            # retabulation still fires (the security-impact guard below still
+            # protects against burying a real finding).
+            cls = "observation"
         if not cls:
             continue  # not a cosmetic class → keep the full section
         # Operate on the finding's OWN block only — never the trailing
@@ -3028,6 +3043,106 @@ def _append_quality_observation_rows(
     return text.rstrip("\n") + section + "\n"
 
 
+_REPORT_DEDUP_AGENT_ID_RE = re.compile(r"\b([CHMLI]-\d{1,3})\b")
+
+
+def _parse_report_dedup_agent_decisions(
+    scratchpad: Path,
+) -> tuple[list[tuple[str, str]], set[str]]:
+    """Parse the report_dedup_agent proposal file into machine inputs.
+
+    Returns ``(merge_pairs, qo_ids)``:
+      - ``merge_pairs``: list of (survivor_report_id, absorbed_report_id) from
+        the `## MERGE Decisions` table (rows whose `Same Root Cause` cell is YES;
+        defaults to accepting a row when that column is absent).
+      - ``qo_ids``: set of report IDs from the `## Quality Observation
+        Reclassifications` table.
+
+    Defensive by construction: any read/parse failure returns empties so the
+    caller falls back to a mechanical-only pass (report_dedup is critical=False;
+    the agent proposal is advisory, never load-bearing). Self-merges and
+    duplicate absorbed IDs are dropped here so the downstream merge loop never
+    sees a contradictory proposal.
+    """
+    path = scratchpad / "report_dedup_agent_decisions.md"
+    if not path.exists():
+        return [], set()
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        log.warning(f"[report_dedup] agent decisions read failed: {exc!r}")
+        return [], set()
+
+    def _section(key: str) -> str:
+        # Body of the FIRST H2 whose title CONTAINS `key` (case-insensitive,
+        # format-tolerant), up to the next H2. The LLM phrases headers loosely
+        # ("Quality Observation Reclassification Decisions" vs ".Reclassifications")
+        # and adds sub-tables; matching on a substring of the H2 title — not an
+        # exact name — stops the whole agent proposal from being silently dropped.
+        m = re.search(
+            r"(?ims)^##\s+[^\n]*" + re.escape(key) + r"[^\n]*\n(.*?)(?=^##\s+|\Z)", text
+        )
+        return m.group(1) if m else ""
+
+    def _row_ids(line: str) -> list[str]:
+        # Report IDs in the row, in order, de-duplicated. COLUMN-AGNOSTIC: the
+        # agent's table layout varies ("Survivor ID | Survivor Title | Absorbed
+        # IDs | ..." vs "Survivor | Absorbed | ..."), so we never assume a
+        # column index — first ID = survivor, every later ID = an absorbed.
+        out: list[str] = []
+        seen: set[str] = set()
+        for mm in _REPORT_DEDUP_AGENT_ID_RE.finditer(line):
+            v = mm.group(1).upper()
+            if v not in seen:
+                seen.add(v)
+                out.append(v)
+        return out
+
+    merge_pairs: list[tuple[str, str]] = []
+    seen_absorbed: set[str] = set()
+    seen_survivor: set[str] = set()
+    for line in _section("MERGE").splitlines():
+        s = line.strip()
+        if not s.startswith("|") or _is_separator_row(s):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        # A standalone "NO" cell (Same Root Cause = NO) vetoes the row.
+        if any(re.fullmatch(r"(?i)no", c or "") for c in cells):
+            continue
+        ids = _row_ids(s)
+        if len(ids) < 2:   # header rows / prose carry < 2 report IDs
+            continue
+        survivor = ids[0]
+        for absorbed in ids[1:]:
+            if absorbed == survivor:
+                continue
+            # one absorbed -> one survivor; an absorbed can't also be a survivor
+            if absorbed in seen_absorbed or absorbed in seen_survivor:
+                continue
+            if survivor in seen_absorbed:
+                continue
+            seen_absorbed.add(absorbed)
+            seen_survivor.add(survivor)
+            merge_pairs.append((survivor, absorbed))
+
+    qo_ids: set[str] = set()
+    merged = seen_absorbed | seen_survivor
+    for line in _section("Quality Observation").splitlines():
+        s = line.strip()
+        if not s.startswith("|") or _is_separator_row(s):
+            continue
+        # QO id is the FIRST cell of a table row (not any ID mentioned in prose/
+        # justification) — first-cell-only avoids pulling cross-referenced IDs.
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if not cells:
+            continue
+        m = _REPORT_DEDUP_AGENT_ID_RE.search(cells[0])
+        if m and m.group(1).upper() not in merged:  # never QO an already-merged id
+            qo_ids.add(m.group(1).upper())
+
+    return merge_pairs, qo_ids
+
+
 def _dedup_report_python(scratchpad: Path, project_root: str) -> bool:
     """Cross-tier report dedup. Python-native, NEVER loses content.
 
@@ -3071,12 +3186,48 @@ def _dedup_report_python(scratchpad: Path, project_root: str) -> bool:
     # Move unambiguously cosmetic Low/Info `###` sections into a single
     # `## Quality Observations` table BEFORE the cross-tier pair pass. Wrapped so
     # any internal error degrades gracefully (report_dedup is critical=False).
+    # --- agent proposals (Phase 6d LLM proposer) ----------------------------
+    # The report_dedup_agent reads the assembled report and proposes the
+    # cross-tier / no-location MERGES and QO reclassifications that the
+    # mechanical signals below cannot pair (missing/coarse locations, different
+    # provenance). Advisory only: a missing/garbage file degrades to mechanical-
+    # only. Agent MERGE pairs are executed through the SAME zero-loss embed +
+    # whole-report data-loss gate as mechanical merges, so a wrong agent merge
+    # can never drop a finding (worst case: a cosmetic regrouping the pre-dedup
+    # snapshot lets a human compare).
+    agent_merge_pairs: list[tuple[str, str]] = []
+    agent_qo_ids: set[str] = set()
+    try:
+        agent_merge_pairs, agent_qo_ids = _parse_report_dedup_agent_decisions(
+            scratchpad
+        )
+    except Exception as exc:
+        log.warning(f"[report_dedup] agent decisions parse failed: {exc!r} — ignored")
+        agent_merge_pairs, agent_qo_ids = [], set()
+
     qo_rows: list[tuple[str, str, str, str, str, str]] = []
     working = original
     try:
-        retab, qo_rows = _reclassify_cosmetic_low_info_to_qo(original)
+        retab, qo_rows = _reclassify_cosmetic_low_info_to_qo(
+            original, extra_qo_ids=agent_qo_ids
+        )
         if qo_rows:
-            working = retab
+            # Gate QO retabulation INDEPENDENTLY from the merges. The whole-report
+            # gate at the end is all-or-nothing, so a single lossy QO retab (e.g. a
+            # finding whose impact sub-bullets don't fit the compact QO row) would
+            # otherwise VETO every good merge too. Decouple: if the QO retab loses
+            # data, drop QO and keep the original as the merge base — merges still land.
+            lost_qo = _dedup_data_loss_gate(original, retab)
+            if lost_qo:
+                log.warning(
+                    f"[report_dedup] QO retabulation is lossy ({len(lost_qo)} item(s)) — "
+                    f"dropping QO retab, proceeding with merges on the original "
+                    f"(prevents one lossy QO from vetoing all merges)"
+                )
+                working = original
+                qo_rows = []
+            else:
+                working = retab
     except Exception as exc:
         log.warning(f"[report_dedup] QO retabulation failed: {exc!r} — skipped")
         working = original
@@ -3085,6 +3236,38 @@ def _dedup_report_python(scratchpad: Path, project_root: str) -> bool:
     records = _dedup_report_sections(working)
     src_by_id = _dedup_source_ids_by_report_id(scratchpad)
     pairs = _dedup_report_candidate_pairs(records, src_by_id)
+
+    # Append agent-proposed MERGE pairs as candidates. Only pairs whose BOTH
+    # endpoints survive as parseable report sections (a QO-retabulated finding
+    # is no longer a `###` section and cannot be merged) are admitted. The
+    # "agent-semantic" signal authorizes a MERGE in the decision tree below,
+    # gated end-to-end by the zero-loss embed + data-loss gate.
+    _present_ids = {r["id"] for r in records}
+    _existing_pair_keys = {
+        frozenset((p["keep"], p["absorb"])) for p in pairs
+    }
+    for survivor, absorbed in agent_merge_pairs:
+        if survivor not in _present_ids or absorbed not in _present_ids:
+            continue
+        key = frozenset((survivor, absorbed))
+        if key in _existing_pair_keys:
+            # Already a mechanical candidate — add the agent signal so the
+            # decision tree treats it as MERGE-eligible even if the mechanical
+            # gate would have left it KEEP_SEPARATE.
+            for p in pairs:
+                if frozenset((p["keep"], p["absorb"])) == key:
+                    if "agent-semantic" not in p["signals"]:
+                        p["signals"].append("agent-semantic")
+                    p["keep"], p["absorb"] = survivor, absorbed
+                    p["rank"] = min(p.get("rank", 99), 0)
+                    break
+            continue
+        _existing_pair_keys.add(key)
+        pairs.append({
+            "keep": survivor, "absorb": absorbed,
+            "signals": ["agent-semantic"], "rank": 0,
+        })
+    pairs.sort(key=lambda p: p.get("rank", 99))
 
     rec_by_id = {r["id"]: r for r in records}
     decisions: list[dict] = []
@@ -3104,6 +3287,23 @@ def _dedup_report_python(scratchpad: Path, project_root: str) -> bool:
             absorb_id: {"source_ids": src_by_id.get(absorb_id, set()),
                         "line_range": None, "file": ""},
         }
+        # Agent-proposed semantic merge (Phase 6d proposer). The LLM read both
+        # full sections and judged them the same root cause / same fix — the
+        # cross-tier / no-location relationship the mechanical signals cannot
+        # pair. Authorize the MERGE here; safety is NOT taken on faith: the
+        # merge builder embeds the absorbed section verbatim under the survivor
+        # (zero-loss) and the whole-report `_dedup_data_loss_gate` VETOes the
+        # entire promotion (retaining the original report) if ANY location /
+        # impact / PoC token is lost. So the worst case of a wrong agent merge
+        # is a cosmetic regrouping, never a dropped finding.
+        if "agent-semantic" in p["signals"]:
+            decisions.append({
+                "keep": keep_id, "absorb": absorb_id,
+                "signals": p["signals"], "decision": "MERGE",
+                "reason": "agent-proposed semantic cross-tier merge",
+            })
+            absorbed_into[absorb_id] = keep_id
+            continue
         # Two signals authorize a mechanical cross-tier merge:
         #   (1) source-id-subset — same internal provenance (primary), and
         #   (2) same-fix-cross-tier — same code site + same Recommendation,
@@ -4267,366 +4467,6 @@ def _parse_security_obligation_items(scratchpad: Path) -> list[dict[str, str]]:
     return items
 
 
-_ASSET_BINDING_SIGNAL_FILES: tuple[str, ...] = (
-    "design_context.md", "attack_surface.md", "detected_patterns.md",
-    "function_list.md", "contract_inventory.md", "template_recommendations.md",
-    "analysis_token_flow.md", "analysis_external_dependencies.md",
-    "analysis_core_state.md", "analysis_access_control.md",
-    "depth_token_flow_findings.md", "depth_external_findings.md",
-    "depth_state_trace_findings.md", "depth_edge_case_findings.md",
-    "findings_inventory.md", "hypotheses.md", "chain_hypotheses.md",
-    "verification_queue.md",
-)
-
-_ASSET_BINDING_COVERAGE_FILES: tuple[str, ...] = (
-    "findings_inventory.md", "hypotheses.md", "chain_hypotheses.md",
-    "verification_queue.md", "attention_repair_summary.md",
-    "attention_repair_findings.md",
-)
-
-_BINDING_FIELD_CLASS: dict[str, str] = {
-    "asset": "token",
-    "inputasset": "token",
-    "outputasset": "token",
-    "token": "token",
-    "inputtoken": "token",
-    "outputtoken": "token",
-    "fromtoken": "token",
-    "totoken": "token",
-    "targetzrc20": "token",
-    "zrc20": "token",
-    "gaszrc20": "token",
-    "collateral": "token",
-    "debttoken": "token",
-    "amount": "amount",
-    "fromtokenamount": "amount",
-    "outputamount": "amount",
-    "targetamount": "amount",
-    "minamountout": "amount",
-    "minreturnamount": "amount",
-    "expretrunamount": "amount",
-    "expreturnamount": "amount",
-    "msg.value": "amount",
-    "fee": "amount",
-    "receiver": "recipient",
-    "recipient": "recipient",
-    "sender": "recipient",
-    "walletaddress": "recipient",
-    "assetto": "recipient",
-    "to": "recipient",
-    "refundrecipient": "recipient",
-    "sourcesender": "provenance",
-    "sourcechain": "provenance",
-    "chainid": "provenance",
-    "context.sender": "provenance",
-}
-
-_BINDING_PAIR_TEMPLATES: tuple[tuple[str, str, str, str], ...] = (
-    ("toToken", "targetZRC20", "token", "swap output token must match withdrawal/refund asset"),
-    ("fromToken", "zrc20", "token", "swap input token must match bridged or deposited asset"),
-    ("asset", "targetZRC20", "token", "gateway asset must match decoded withdrawal target"),
-    ("outputToken", "targetZRC20", "token", "output token must match withdrawal target"),
-    ("fromTokenAmount", "amount", "amount", "swap input amount must match actual held amount"),
-    ("msg.value", "amount", "amount", "native value must match declared bridge/swap amount"),
-    ("outputAmount", "targetAmount", "amount", "post-swap amount must match amount approved/withdrawn"),
-    ("minReturnAmount", "outputAmount", "amount", "minimum output/slippage check must bind to actual output"),
-    ("assetTo", "receiver", "recipient", "router output recipient must match intended receiver"),
-    ("walletAddress", "receiver", "recipient", "refund wallet must map to intended receiver"),
-    ("sender", "receiver", "recipient", "source sender must not be confused with refund receiver"),
-    ("sourceSender", "context.sender", "provenance", "message sender must be authenticated to gateway context"),
-)
-
-
-def _canonical_binding_base(raw: str) -> str:
-    s = str(raw or "").strip().strip("`")
-    if not s:
-        return ""
-    if s == "msg.value":
-        return s
-    if "." in s:
-        s = s.rsplit(".", 1)[-1]
-    return s
-
-
-def _binding_class(raw: str) -> str:
-    base = _canonical_binding_base(raw)
-    key = base.lower()
-    if raw == "context.sender":
-        key = "context.sender"
-    return _BINDING_FIELD_CLASS.get(key, "")
-
-
-def _read_asset_binding_signal_text(scratchpad: Path) -> str:
-    chunks: list[str] = []
-    for name in _ASSET_BINDING_SIGNAL_FILES:
-        p = scratchpad / name
-        if not p.exists() or not p.is_file():
-            continue
-        try:
-            chunks.append(f"\n\n# {name}\n")
-            chunks.append(p.read_text(encoding="utf-8", errors="replace")[:160_000])
-        except Exception:
-            continue
-    return _llm_norm("\n".join(chunks))
-
-
-def _read_asset_binding_coverage_text(scratchpad: Path) -> str:
-    chunks: list[str] = []
-    for name in _ASSET_BINDING_COVERAGE_FILES:
-        p = scratchpad / name
-        if not p.exists() or not p.is_file():
-            continue
-        try:
-            chunks.append(f"\n\n# {name}\n")
-            chunks.append(p.read_text(encoding="utf-8", errors="replace")[:180_000])
-        except Exception:
-            continue
-    return _llm_norm("\n".join(chunks))
-
-
-def _extract_binding_fields(text: str) -> dict[str, dict[str, object]]:
-    """Extract value-flow fields without assuming a protocol-specific schema."""
-    fields: dict[str, dict[str, object]] = {}
-
-    def add(name: str, source: str) -> None:
-        display = name.strip()
-        base = _canonical_binding_base(display)
-        cls = _binding_class(display)
-        if not base or not cls:
-            return
-        key = base.lower()
-        rec = fields.setdefault(key, {
-            "base": base,
-            "class": cls,
-            "forms": set(),
-            "sources": set(),
-        })
-        rec["forms"].add(display)  # type: ignore[index,union-attr]
-        rec["sources"].add(source)  # type: ignore[index,union-attr]
-
-    for m in re.finditer(
-        r"\b(params|decoded|context|message|payload|data|refundInfo|revertInfo)"
-        r"\.([A-Za-z_][A-Za-z0-9_]*)\b",
-        text,
-    ):
-        add(f"{m.group(1)}.{m.group(2)}", "dotted")
-    if re.search(r"\bmsg\.value\b", text):
-        add("msg.value", "native")
-    bare_names = (
-        "asset", "token", "fromToken", "toToken", "targetZRC20", "zrc20",
-        "gasZRC20", "outputToken", "inputToken", "amount", "fromTokenAmount",
-        "outputAmount", "targetAmount", "minAmountOut", "minReturnAmount",
-        "fee", "receiver", "recipient", "sender", "walletAddress", "assetTo",
-        "sourceSender", "sourceChain", "chainId",
-    )
-    for name in bare_names:
-        if re.search(rf"\b{re.escape(name)}\b", text):
-            add(name, "bare")
-
-    normalized: dict[str, dict[str, object]] = {}
-    for key, rec in fields.items():
-        normalized[key] = {
-            "base": rec["base"],
-            "class": rec["class"],
-            "forms": sorted(rec["forms"]),  # type: ignore[arg-type]
-            "sources": sorted(rec["sources"]),  # type: ignore[arg-type]
-        }
-    return normalized
-
-
-def _binding_domain_flags(text: str) -> list[str]:
-    flags: list[str] = []
-    if re.search(r"\b(?:bridge|cross[-_\s]?chain|gateway|onCall|onRevert|onAbort)\b", text, re.I):
-        flags.append("cross-chain")
-    if re.search(r"\b(?:swap|router|mixSwap|amountOut|minReturn|slippage|pool|pair)\b", text, re.I):
-        flags.append("swap-router")
-    if re.search(r"\b(?:refund|revertMessage|claimRefund|refundInfo)\b", text, re.I):
-        flags.append("refund")
-    if re.search(r"\b(?:native|wrapped|msg\.value|WETH|WZETA|sentinel)\b", text, re.I):
-        flags.append("native-wrapped")
-    if re.search(r"\b(?:vault|share|deposit|withdraw|redeem|asset)\b", text, re.I):
-        flags.append("asset-accounting")
-    if re.search(r"\b(?:borrow|repay|liquidat|collateral|debt)\b", text, re.I):
-        flags.append("lending")
-    return sorted(set(flags))
-
-
-_BINDING_PAIR_RELATION_RE = re.compile(
-    r"(?:"
-    r"==|!=|=|<->|->|"
-    r"\b(?:mismatch(?:es|ed)?|diverg(?:e|es|ed|ence)|"
-    r"not\s+match(?:es|ed)?|does\s+not\s+match|"
-    r"not\s+(?:validated|bound|checked|compared)|"
-    r"missing\s+(?:validation|binding|check)|"
-    r"validated\s+against|checked\s+against|compared\s+against|"
-    r"bound\s+to|binds?\s+to|matches?|equals?|same\s+as|"
-    r"consistent\s+with|consistency|must\s+equal|should\s+equal|"
-    r"source\s+of\s+truth|derived\s+from|unreachable|impossible|"
-    r"mutually\s+exclusive)\b"
-    r")",
-    re.IGNORECASE,
-)
-
-
-def _binding_term_forms(raw: str) -> set[str]:
-    value = str(raw or "").strip().strip("`")
-    base = _canonical_binding_base(value)
-    return {term for term in (value, base) if term}
-
-
-def _binding_claim_units(blob: str) -> list[str]:
-    """Split text into local claim units so distant mentions do not bind."""
-    units: list[str] = []
-    for line in str(blob or "").splitlines():
-        s = line.strip()
-        if not s:
-            continue
-        if "|" in s:
-            units.append(s[:1200])
-            continue
-        parts = re.split(r"(?<=[.;:!?])\s+", s)
-        for part in parts:
-            part = part.strip()
-            if part:
-                units.append(part[:1200])
-    return units
-
-
-def _binding_pair_claims_relationship(blob: str, a: str, b: str) -> bool:
-    """Require both exact fields/bases and a relation in the same local claim."""
-    terms_a = {t.lower() for t in _binding_term_forms(a)}
-    terms_b = {t.lower() for t in _binding_term_forms(b)}
-    if not terms_a or not terms_b:
-        return False
-    for unit in _binding_claim_units(blob):
-        low = unit.lower()
-        if not _BINDING_PAIR_RELATION_RE.search(unit):
-            continue
-        if any(t in low for t in terms_a) and any(t in low for t in terms_b):
-            return True
-    return False
-
-
-def _active_binding_pair_covered(coverage_text: str, a: str, b: str) -> bool:
-    """Return true when an active candidate/report explicitly binds both fields."""
-    if not coverage_text:
-        return False
-
-    # Split into finding-like chunks first so unrelated global mentions do not
-    # count as coverage. Fall back to a short-window search for JSON/queue rows.
-    chunks = re.split(r"(?im)^#{2,3}\s+Finding\s+\[[^\]\n]+\]", coverage_text)
-    for chunk in chunks:
-        if _binding_pair_claims_relationship(chunk[:6000], a, b):
-            return True
-    for line in coverage_text.splitlines():
-        if "|" in line or line.lstrip().startswith(("-", "*")):
-            if _binding_pair_claims_relationship(line, a, b):
-                return True
-    return False
-
-
-def _representative_binding_form(fields: dict[str, dict[str, object]], base: str) -> str:
-    rec = fields.get(base.lower()) or {}
-    forms = [str(x) for x in rec.get("forms", [])]
-    dotted = [f for f in forms if "." in f]
-    return (dotted or forms or [base])[0]
-
-
-def _build_asset_binding_rows(scratchpad: Path) -> tuple[list[dict[str, object]], list[str]]:
-    signal_text = _read_asset_binding_signal_text(scratchpad)
-    if not signal_text.strip():
-        return [], []
-    fields = _extract_binding_fields(signal_text)
-    domains = _binding_domain_flags(signal_text)
-    coverage_text = _read_asset_binding_coverage_text(scratchpad)
-    rows: list[dict[str, object]] = []
-    seen: set[tuple[str, str]] = set()
-
-    for a_base, b_base, cls, rationale in _BINDING_PAIR_TEMPLATES:
-        if a_base.lower() not in fields or b_base.lower() not in fields:
-            continue
-        # Keep domain packs audit-shape aware. Amount/token/recipient pairs are
-        # only useful when the protocol has a value-moving surface.
-        if cls in {"token", "amount", "recipient"} and not (
-            {"cross-chain", "swap-router", "refund", "asset-accounting", "lending"} & set(domains)
-        ):
-            continue
-        a_form = _representative_binding_form(fields, a_base)
-        b_form = _representative_binding_form(fields, b_base)
-        key = tuple(sorted((a_form.lower(), b_form.lower())))
-        if key in seen:
-            continue
-        seen.add(key)
-        covered = _active_binding_pair_covered(coverage_text, a_form, b_form)
-        gap_id = f"AB-{len(rows) + 1:03d}"
-        rows.append({
-            "id": gap_id,
-            "class": cls,
-            "field_a": a_form,
-            "field_b": b_form,
-            "status": "covered" if covered else "gap",
-            "rationale": rationale,
-            "domains": domains,
-            "question": (
-                f"Is `{a_form}` explicitly bound to `{b_form}` before value "
-                "moves, or is a mismatch reported as a candidate finding?"
-            ),
-        })
-    return rows, domains
-
-
-def _write_asset_binding_matrix(scratchpad: Path, mode: str = "core") -> tuple[int, int]:
-    """Write a deterministic value-field binding matrix.
-
-    This is a generic discovery backstop. It does not assert findings and does
-    not block a phase. In Thorough mode, gap rows can be consumed by attention
-    repair as bounded questions.
-    """
-    rows, domains = _build_asset_binding_rows(scratchpad)
-    payload = {
-        "schema_version": "plamen.asset_binding_matrix.v1",
-        "mode": mode,
-        "domains": domains,
-        "row_count": len(rows),
-        "gap_count": sum(1 for r in rows if r.get("status") == "gap"),
-        "rows": rows,
-    }
-    (scratchpad / "asset_binding_matrix.json").write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    lines = [
-        "# Asset Binding Matrix",
-        "",
-        "Driver-generated semantic binding obligations for value-moving fields. "
-        "Rows are generic field-pair questions, not expected findings. A `gap` "
-        "means no active inventory/hypothesis/report row was found that mentions "
-        "both fields together.",
-        "",
-        f"**Mode**: {mode}",
-        f"**Detected Domains**: {', '.join(domains) or 'none'}",
-        f"**Rows**: {len(rows)}",
-        f"**Gaps**: {sum(1 for r in rows if r.get('status') == 'gap')}",
-        "",
-        "| ID | Class | Field A | Field B | Status | Obligation |",
-        "|----|-------|---------|---------|--------|------------|",
-    ]
-    if rows:
-        for row in rows:
-            lines.append(
-                f"| {row['id']} | {row['class']} | `{row['field_a']}` | "
-                f"`{row['field_b']}` | {row['status']} | {row['rationale']} |"
-            )
-    else:
-        lines.append("| n/a | n/a | - | - | none | No value-binding pairs triggered. |")
-    (scratchpad / "asset_binding_matrix.md").write_text(
-        "\n".join(lines) + "\n",
-        encoding="utf-8",
-    )
-    _write_obligation_ledger(scratchpad, mode, rows, domains)
-    return len(rows), int(payload["gap_count"])
-
-
 def _composition_obligation_rows(scratchpad: Path) -> list[dict[str, object]]:
     path = scratchpad / "composition_coverage.md"
     if not path.exists():
@@ -4687,49 +4527,21 @@ def _composition_obligation_rows(scratchpad: Path) -> list[dict[str, object]]:
     return rows
 
 
-def _write_obligation_ledger(
-    scratchpad: Path,
-    mode: str,
-    asset_rows: list[dict[str, object]] | None = None,
-    domains: list[str] | None = None,
-) -> int:
+def _write_obligation_ledger(scratchpad: Path, mode: str) -> int:
     """Write a typed, protocol-neutral obligation ledger.
 
     The ledger is a deterministic retention contract, not a detector. Classes
     appear only when the audit artifacts trigger them, so protocols without
-    routers, native assets, bridges, or chain compositions can legitimately
-    have zero rows for those classes.
+    chain compositions can legitimately have zero rows. The sole feeder is
+    `_composition_obligation_rows` (CH-* chain-upgrade retention from
+    composition_coverage.md), which carries no protocol-specific vocabulary.
     """
     obligations: list[dict[str, object]] = []
-    for row in asset_rows or []:
-        rid = str(row.get("id") or "")
-        if not rid:
-            continue
-        status = str(row.get("status") or "").lower()
-        cls = "exact_value_binding"
-        field_a = str(row.get("field_a") or "")
-        field_b = str(row.get("field_b") or "")
-        obligations.append({
-            "id": f"OBL-{rid}",
-            "class": cls,
-            "source_id": rid,
-            "status": "active" if status == "gap" else "covered",
-            "severity_signal": "Medium" if status == "gap" else "Informational",
-            "field_a": field_a,
-            "field_b": field_b,
-            "source": "asset_binding_matrix.md",
-            "evidence": f"{rid} in asset_binding_matrix.md",
-            "target": f"{field_a} <-> {field_b}",
-            "closure_reason": "",
-            "absorbing_id": "",
-            "domains": row.get("domains") or domains or [],
-        })
     obligations.extend(_composition_obligation_rows(scratchpad))
 
     payload = {
         "schema_version": "plamen.obligation_ledger.v1",
         "mode": mode,
-        "domains": sorted(set(domains or [])),
         "row_count": len(obligations),
         "active_count": sum(1 for r in obligations if r.get("status") == "active"),
         "obligations": obligations,
@@ -4762,38 +4574,6 @@ def _write_obligation_ledger(
         encoding="utf-8",
     )
     return len(obligations)
-
-
-def _build_asset_binding_repair_items(scratchpad: Path, limit: int = 8) -> list[dict[str, str]]:
-    path = scratchpad / "asset_binding_matrix.json"
-    if not path.exists():
-        try:
-            _write_asset_binding_matrix(scratchpad)
-        except Exception:
-            return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
-        return []
-    items: list[dict[str, str]] = []
-    for row in payload.get("rows", []) or []:
-        if str(row.get("status", "")).lower() != "gap":
-            continue
-        rid = str(row.get("id", "AB-???"))
-        a = str(row.get("field_a", "field_a"))
-        b = str(row.get("field_b", "field_b"))
-        target = f"{rid}: {a} <-> {b}"
-        reason = str(row.get("question") or row.get("rationale") or "unresolved asset binding")
-        items.append({
-            "kind": "asset-binding-gap",
-            "target": target,
-            "reason": reason,
-            "source": "asset_binding_matrix.md",
-            "evidence": f"{rid} in asset_binding_matrix.md",
-        })
-        if len(items) >= limit:
-            break
-    return items
 
 
 def _extract_skill_execution_repair_items(scratchpad: Path, limit: int = 8) -> list[dict[str, str]]:
@@ -5093,18 +4873,6 @@ def _build_attention_repair_items(scratchpad: Path, mode: str) -> list[dict[str,
                 obligation.get("signals", ""),
             )
         try:
-            _write_asset_binding_matrix(scratchpad, mode)
-            for item in _build_asset_binding_repair_items(scratchpad)[:8]:
-                add(
-                    item["kind"],
-                    item["target"],
-                    item["reason"],
-                    item["source"],
-                    item.get("evidence", ""),
-                )
-        except Exception:
-            pass
-        try:
             for item in _extract_skill_execution_repair_items(scratchpad)[:8]:
                 add(
                     item["kind"],
@@ -5181,15 +4949,6 @@ def _write_attention_repair_queue(scratchpad: Path, items: list[dict[str, str]])
         "instead of a basename or folder summary. The Evidence cell must cite",
         "the same target path again with file:line evidence, or mark the row",
         "NEEDS_HUMAN if the source file is unavailable.",
-        "",
-        "ASSET-BINDING CONTRACT: for `asset-binding-gap` rows, Evidence/Notes",
-        "must include one local `PAIR_CLAIM:` that names both queued fields",
-        "exactly and states equality, explicit binding check, mismatch,",
-        "unreachable path, or impossible pair. SAFE asset-binding rows also",
-        "need `SAFE_REASON:EXPLICIT_EQUALITY`,",
-        "`SAFE_REASON:EXPLICIT_BINDING_CHECK`, `SAFE_REASON:UNREACHABLE_PATH`,",
-        "or `SAFE_REASON:IMPOSSIBLE_PAIR`. Do not use standalone revert,",
-        "no-balance, residual-balance, or self-punishing reasoning as SAFE.",
         "",
         "| # | Kind | Target | Reason | Source | Evidence hint |",
         "|---|------|--------|--------|--------|---------------|",

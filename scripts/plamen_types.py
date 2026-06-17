@@ -675,11 +675,21 @@ def phase_model(phase: Phase, mode: str, config: Optional[dict] = None) -> str:
             (config.get("pipeline") if config else None) == "sc"
             and name == "report_index"
         )
+        # SC Thorough semantic dedup (Phase 4e) → Opus. Per-pair MERGE/KEEP
+        # adjudication is precision-critical (a false merge HIDES a finding), so
+        # the stronger model improves decision quality; Opus's larger budget also
+        # comfortably absorbs the 100-pair live cap. SC-only (L1 has its own
+        # dedup path); Core/Light stay on sonnet at the same cap.
+        is_sc_semantic_dedup = (
+            (config.get("pipeline") if config else None) == "sc"
+            and name == "sc_semantic_dedup"
+        )
         promote = (
             name in ("breadth", "skeptic")
             or is_sc_verify_shard
             or is_l1_verify_shard
             or is_sc_report_index
+            or is_sc_semantic_dedup
         )
         tier = "opus" if promote else (phase.model or "sonnet").strip()
         if tier == "opus":
@@ -1325,10 +1335,23 @@ SC_PHASES = [
     Phase("report_assemble", ["Step 6c: Assembler"],
           ["AUDIT_REPORT.md"],
           base_timeout_s=3600, model="sonnet", critical=True),
+    # LLM consolidation PROPOSER. Reads the assembled AUDIT_REPORT.md and
+    # proposes cross-tier / no-location MERGES and Quality-Observation
+    # reclassifications that the mechanical signals cannot pair. Writes a
+    # decisions file ONLY — it never edits the report; the Python report_dedup
+    # phase below executes its proposals through the zero-data-loss gate.
+    # critical=False is LOAD-BEARING: a crash/timeout/degrade here MUST NOT
+    # halt the run — report_dedup then runs its mechanical-only pass exactly as
+    # before this phase existed.
+    Phase("report_dedup_agent", ["Step 6d: Report Dedup"],
+          ["report_dedup_agent_decisions.md"],
+          base_timeout_s=900, model="sonnet", critical=False),
     # Python-native cross-tier dedup. critical=False is LOAD-BEARING: a
     # crash/timeout/data-loss-veto here MUST NOT halt the run or corrupt the
     # delivered AUDIT_REPORT.md. Gate artifact is the always-written mapping,
     # NOT AUDIT_REPORT.md (the phase must not change it on a no-op/veto).
+    # Consumes report_dedup_agent_decisions.md (when present) as additional
+    # MERGE candidate pairs + QO reclassification IDs.
     Phase("report_dedup", ["Step 6d: Report Dedup"],
           ["report_dedup_mapping.md"],
           base_timeout_s=900, model="sonnet", critical=False),
