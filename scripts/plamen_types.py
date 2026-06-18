@@ -675,11 +675,11 @@ def phase_model(phase: Phase, mode: str, config: Optional[dict] = None) -> str:
             (config.get("pipeline") if config else None) == "sc"
             and name == "report_index"
         )
-        # SC Thorough semantic dedup (Phase 4e) → Opus. Per-pair MERGE/KEEP
-        # adjudication is precision-critical (a false merge HIDES a finding), so
-        # the stronger model improves decision quality; Opus's larger budget also
-        # comfortably absorbs the 100-pair live cap. SC-only (L1 has its own
-        # dedup path); Core/Light stay on sonnet at the same cap.
+        # SC Thorough semantic dedup (Phase 4e) → Opus. In-context-clustering
+        # MERGE/KEEP adjudication is precision-critical (a false merge HIDES a
+        # finding), so the stronger model improves decision quality; Opus's
+        # larger budget also comfortably absorbs the bounded clustering-block
+        # input. SC-only (L1 has its own dedup path); Core/Light stay on sonnet.
         is_sc_semantic_dedup = (
             (config.get("pipeline") if config else None) == "sc"
             and name == "sc_semantic_dedup"

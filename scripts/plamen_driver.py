@@ -36,6 +36,11 @@ from plamen_prompt import *  # noqa: F403,F401
 # these; importing them by name keeps the dependency robust regardless of the
 # producer modules' __all__ contents.
 from plamen_parsers import _dedup_live_pair_cap  # noqa: F401
+# Dedup redesign (in-context clustering blocks): the block builder is the new
+# live LLM-input producer. It is exported in plamen_parsers.__all__, but import
+# it by name too (mirrors the _dedup_live_pair_cap robustness pattern) so the
+# phase wiring below is insulated from __all__ drift.
+from plamen_parsers import _compute_dedup_candidate_blocks  # noqa: F401
 from plamen_mechanical import _extract_dedup_absorbed_ids  # noqa: F401
 import plamen_display as display
 from pty_exec import (
@@ -15908,21 +15913,32 @@ def main():
                 )
             _dedup_cap = _dedup_live_pair_cap()
             log.info(
-                f"[sc_semantic_dedup] dedup live-pair cap = {_dedup_cap} "
+                f"[sc_semantic_dedup] compat-shim pair cap = {_dedup_cap} "
                 f"(env PLAMEN_DEDUP_LIVE_PAIR_CAP="
                 f"{os.environ.get('PLAMEN_DEDUP_LIVE_PAIR_CAP', '<default>')}); "
-                "per-pair LLM judgment retained for every admitted pair"
+                "bounds the legacy fallback pair files only"
             )
-            n_pairs = _compute_dedup_candidate_pairs(scratchpad)
-            if n_pairs:
-                log.info(f"[sc_semantic_dedup] {n_pairs} dedup candidate pair(s) written")
+            # Dedup redesign: the live LLM input is now dedup_blocks.md (in-context
+            # clustering). _compute_dedup_candidate_blocks ALSO writes the legacy
+            # compat pair files (dedup_candidate_pairs[.md|_full.md]) for the
+            # mechanical fallback + supplemental path, so the degrade path is
+            # unchanged. Returns the count of findings placed into blocks.
+            n_blocked = _compute_dedup_candidate_blocks(scratchpad)
+            if n_blocked:
+                log.info(
+                    f"[sc_semantic_dedup] {n_blocked} finding(s) placed into "
+                    "dedup candidate blocks for in-context clustering"
+                )
+            else:
+                log.info(
+                    "[sc_semantic_dedup] no candidate duplicate blocks; "
+                    "dedup will pass through"
+                )
+            # Legacy multi-round staging is no longer the live path (output is
+            # bounded by construction). Keep the helpers wired against the compat
+            # pair files for the fallback only.
             _rounds = _dedup_round_files(scratchpad)
             if len(_rounds) > 1:
-                log.info(
-                    f"[sc_semantic_dedup] candidate set split into "
-                    f"{len(_rounds)} round(s); staging round 1 live packet "
-                    "with carry-forward exclusion list"
-                )
                 _stage_dedup_round_packet(scratchpad, _dedup_round_index(_rounds[0].name))
             dedup_issues = _validate_depth_promotion_dedup(scratchpad)
             for issue in dedup_issues:
@@ -16001,14 +16017,25 @@ def main():
                 )
             _dedup_cap = _dedup_live_pair_cap()
             log.info(
-                f"[verify_queue] dedup live-pair cap = {_dedup_cap} "
+                f"[verify_queue] compat-shim pair cap = {_dedup_cap} "
                 f"(env PLAMEN_DEDUP_LIVE_PAIR_CAP="
                 f"{os.environ.get('PLAMEN_DEDUP_LIVE_PAIR_CAP', '<default>')}); "
-                "per-pair LLM judgment retained for every admitted pair"
+                "bounds the legacy fallback pair files only"
             )
-            n_pairs = _compute_dedup_candidate_pairs(scratchpad)
-            if n_pairs:
-                log.info(f"[verify_queue] {n_pairs} dedup candidate pair(s) written")
+            # Dedup redesign: live LLM input is dedup_blocks.md (in-context
+            # clustering). _compute_dedup_candidate_blocks ALSO writes the legacy
+            # compat pair files for the mechanical fallback path.
+            n_blocked = _compute_dedup_candidate_blocks(scratchpad)
+            if n_blocked:
+                log.info(
+                    f"[verify_queue] {n_blocked} finding(s) placed into dedup "
+                    "candidate blocks for in-context clustering"
+                )
+            else:
+                log.info(
+                    "[verify_queue] no candidate duplicate blocks; "
+                    "dedup will pass through"
+                )
             dedup_issues = _validate_depth_promotion_dedup(scratchpad)
             for issue in dedup_issues:
                 log.warning(f"[verify_queue] {issue}")
@@ -16224,9 +16251,28 @@ def main():
                         f"{len(_stage_rounds)} into dedup_candidate_pairs.md "
                         "(carry-forward exclusion list prepended)"
                     )
+            blocks_file = scratchpad / "dedup_blocks.md"
             pairs_file = scratchpad / "dedup_candidate_pairs.md"
             focus_file = scratchpad / "dedup_focus_inventory.md"
             inv_file = scratchpad / "findings_inventory.md"
+            # Dedup redesign: the live LLM signal is now dedup_blocks.md. A block
+            # file with at least one "## Block " section means there are real
+            # candidate clusters to review. The legacy compat pair file is still
+            # present (written by the block builder) for the mechanical fallback,
+            # but it no longer drives the live signal/budget decision.
+            has_blocks = False
+            blocks_bytes = 0
+            if blocks_file.exists():
+                try:
+                    blocks_bytes = blocks_file.stat().st_size
+                    blocks_text = blocks_file.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                    has_blocks = bool(
+                        re.search(r"(?im)^\s*##\s+Block\s+", blocks_text)
+                    )
+                except Exception:
+                    has_blocks = False
             has_pairs = pairs_file.exists() and pairs_file.stat().st_size > 100
             pair_rows = 0
             if has_pairs:
@@ -16256,14 +16302,14 @@ def main():
                     )
                 except Exception:
                     pass
-            if not has_pairs and not has_likely_dup:
+            if not has_blocks and not has_likely_dup:
                 written = _write_semantic_dedup_skip_outputs(
                     scratchpad,
                     phase.name,
-                    "no candidate pairs and no LIKELY-DUP tags",
+                    "no candidate blocks and no LIKELY-DUP tags",
                 )
                 log.info(
-                    f"[{phase.name}] no dedup signals (no candidate pairs, "
+                    f"[{phase.name}] no dedup signals (no candidate blocks, "
                     "no LIKELY-DUP tags) -- wrote no-op outputs "
                     f"{written} and skipping"
                 )
@@ -16282,41 +16328,24 @@ def main():
                     "no dedup signals",
                 )
                 continue
-            # Semantic dedup is quality-improving, but the live work must stay
-            # bounded. `_compute_dedup_candidate_pairs` now emits the FULL
-            # candidate set up to `_dedup_live_pair_cap()` (default 250,
-            # env-overridable) and, when the live count exceeds the per-round
-            # chunk size, splits it into per-round sub-packets
-            # (dedup_candidate_pairs_round{N}.md) that the driver feeds to the
-            # subprocess one round at a time (see _run_dedup_rounds). The
-            # round-1 live file `dedup_candidate_pairs.md` is itself bounded by
-            # the chunk size, so each subprocess OUTPUT stays bounded while
-            # every pair remains per-pair LLM-judged. The old hard `> 24` guard
-            # would defeat the raised cap, so the budget guard now trips only
-            # when the LIVE round-1 packet itself exceeds the cap (a malformed
-            # run that wrote an oversized single packet) or a large inventory
-            # lacks the bounded focus packet entirely. Per-pair judgment is
-            # never short-circuited into a blind merge by this guard.
-            _dedup_cap = _dedup_live_pair_cap()
-            _round_files = sorted(
-                scratchpad.glob("dedup_candidate_pairs_round*.md")
-            )
-            _is_multiround = len(_round_files) > 0
-            # When multi-round packets exist the live file is round-1, already
-            # chunk-bounded by the parser. The guard must not fire on a normal
-            # bounded round-1 packet, but it still trips defensively if even the
-            # staged live packet exceeds the cap (a malformed/oversized run).
-            _live_over_budget = pair_rows > _dedup_cap
-            if _live_over_budget or (
-                inventory_count > 180 and not focus_file.exists()
-                and not _is_multiround
-            ):
+            # Dedup redesign: the live work is now bounded BY CONSTRUCTION.
+            # dedup_blocks.md lists size-bounded (4..18) in-context clustering
+            # blocks and the subprocess emits a few KB of MERGE/KEEP lines for
+            # any n -- the O(n^2) per-pair output-token explosion that motivated
+            # the old hard guard is structurally gone. The budget guard is kept
+            # only as defense-in-depth against a malformed/oversized block file
+            # (e.g. a runaway producer), gated on block-file SIZE rather than
+            # pair rows. Sentinel: ~200KB (a 300-finding inventory blocks file is
+            # comfortably under this per the halt test).
+            _DEDUP_BLOCKS_SIZE_SENTINEL = 200 * 1024
+            _blocks_over_budget = blocks_bytes > _DEDUP_BLOCKS_SIZE_SENTINEL
+            if _blocks_over_budget:
                 reason = (
-                    "semantic dedup budget guard: "
-                    f"{pair_rows} candidate pair row(s) (cap {_dedup_cap}), "
-                    f"{inventory_count} inventory finding(s), "
-                    f"multiround={_is_multiround}; preserving "
-                    "upstream artifact unchanged to avoid a timeout/retry loop"
+                    "semantic dedup budget guard: dedup_blocks.md is "
+                    f"{blocks_bytes} bytes (sentinel "
+                    f"{_DEDUP_BLOCKS_SIZE_SENTINEL}); a malformed/oversized "
+                    "block file; preserving upstream artifact unchanged to "
+                    "avoid a timeout/retry loop"
                 )
                 written = _write_semantic_dedup_skip_outputs(
                     scratchpad,
@@ -16336,7 +16365,7 @@ def main():
                 checkpoint.save(scratchpad)
                 display.print_phase_skipped(
                     phase_idx + 1, total_active, phase.name,
-                    "budget guard (too many pairs/findings)",
+                    "budget guard (oversized block file)",
                 )
                 continue
             prewritten = _write_semantic_dedup_skip_outputs(

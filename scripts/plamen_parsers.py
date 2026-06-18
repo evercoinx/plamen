@@ -156,7 +156,10 @@ __all__ = [
     "_match_canonical_header",
     "_merge_inventory_entries",
     "_compute_dedup_candidate_pairs",
+    "_compute_dedup_candidate_blocks",
+    "_dedup_extract_findings",
     "_dedup_live_pair_cap",
+    "_dedup_block_max",
     "_extract_chain_summaries_compact",
     "_chain_iter2_has_no_unexplored_pairs",
     "_line_ranges_overlap",
@@ -4595,54 +4598,52 @@ _DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD = 4
 # _dedup_live_pair_cap() (env-overridable, default 250).
 _DEDUP_LIVE_PAIR_LIMIT = 24
 
+# In-context CLUSTERING block-size range. A signal cluster is normalized into
+# blocks of this size before being handed to the dedup judge: clusters > MAX are
+# split into near-equal sub-blocks (sharing one [key:] so union-find still links
+# cross-sub-block duplicates); clusters < MIN are kept as-is (small blocks are
+# cheap; never padded with unrelated findings). The block path's OUTPUT scales
+# with n (line-oriented merge groups, a few KB for any n), unlike the legacy
+# O(n^2) pair path — so the per-turn block budget can be far larger than the
+# legacy 50-pair cap without blowing the output-token ceiling.
+_DEDUP_BLOCK_MIN = 4
+_DEDUP_BLOCK_MAX = 18
 
-def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
-    """Identify candidate duplicate pairs in findings_inventory.md.
 
-    Groups findings by file, then pairs by THREE independent signals:
-      1. **Location overlap** (primary): same file + line ranges within 15 lines
-      2. **Title overlap** (secondary): same file + ≥0.50 token overlap or anchor
-      3. **Function-name match** (tertiary): same file + same function name
-         extracted from Location field (e.g., ``Contract.sol:functionName:L42``)
+def _dedup_block_max() -> int:
+    """Resolve the maximum block size for in-context clustering.
 
-    Location overlap catches the hard case: agents describing the same code
-    from different angles with completely different vocabulary.  Title overlap
-    catches the easy case: near-identical rewordings.  Function-name match
-    catches findings targeting the same function but at different line offsets
-    (e.g., entry check vs exit path of the same function).
-
-    Aggregate-suppression: for any cross-file candidate where EITHER finding
-    carries more than ``_DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD`` depth source IDs
-    (depth-aggregate / perturbation findings), the source-ID-subset and
-    PERT-lineage signals are SUPPRESSED — they misfire on these large sets and
-    are the worst false-merge class. Such pairs may still surface via
-    location / title / function-name signals.
-
-    Multi-round: when the live candidate count exceeds ``_DEDUP_ROUND_CHUNK``,
-    per-round sub-packets (``dedup_candidate_pairs_round{N}.md`` +
-    ``dedup_focus_inventory_round{N}.md``) are written in addition to the
-    unified round-1 ``dedup_candidate_pairs.md`` so single-round consumers keep
-    working. The driver decides single vs multi-round. Each pair appears in
-    exactly one round.
-
-    NEVER merges findings — only identifies candidates for LLM review. The five
-    signals are candidate-generation HINTS only; this function performs no
-    auto-merge.
-
-    Returns the total number of candidate pairs written (live + deferred).
+    Mirrors ``_dedup_live_pair_cap``: env override ``PLAMEN_DEDUP_BLOCK_MAX``
+    lets ops dial the per-block size without code change; falls back to
+    ``_DEDUP_BLOCK_MAX`` (18). A value < ``_DEDUP_BLOCK_MIN`` is clamped up to
+    the min so a block is never sized below the floor.
     """
-    inv = scratchpad / "findings_inventory.md"
-    if not inv.exists():
-        return 0
-    try:
-        inv_text = _llm_norm(inv.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
-        return 0
+    raw = os.environ.get("PLAMEN_DEDUP_BLOCK_MAX", "")
+    if raw.strip():
+        try:
+            val = int(raw.strip())
+            if val > 0:
+                return max(val, _DEDUP_BLOCK_MIN)
+        except (TypeError, ValueError):
+            pass
+    return _DEDUP_BLOCK_MAX
 
-    if inv_text and not inv_text.endswith("\n"):
-        inv_text += "\n"
 
-    # Extract (inv_id, title, location, severity, source_ids) for each finding
+def _dedup_extract_findings(inv_text: str) -> list[dict]:
+    """Extract the per-finding dedup model from inventory/queue markdown text.
+
+    Single source of truth for BOTH ``_compute_dedup_candidate_pairs`` and
+    ``_compute_dedup_candidate_blocks``. Each returned dict carries the exact
+    fields the signal predicates and the block/pair writers consume:
+
+      ``id, title, location, severity, file, _lines, _source_ids, _func, _block``
+
+    The extraction logic is verbatim the loop that historically lived inline in
+    ``_compute_dedup_candidate_pairs`` (location/severity via the tolerant
+    ``_field_anywhere`` extractor, function-name parse, source-ID parse). Keeping
+    it in one helper guarantees the pair fallback and the block path see an
+    IDENTICAL finding set.
+    """
     findings: list[dict] = []
     for m in re.finditer(
         r"#{2,4}\s+(?:Finding\s+)?\[((?:INV|F)-\d+)\]:?\s*(.+?)(?:\n|$)"
@@ -4704,6 +4705,60 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
             "_func": func_name,
             "_block": f"### Finding [{inv_id}]: {title}\n{body}".rstrip(),
         })
+    return findings
+
+
+def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
+    """Identify candidate duplicate pairs in findings_inventory.md.
+
+    Groups findings by file, then pairs by THREE independent signals:
+      1. **Location overlap** (primary): same file + line ranges within 15 lines
+      2. **Title overlap** (secondary): same file + ≥0.50 token overlap or anchor
+      3. **Function-name match** (tertiary): same file + same function name
+         extracted from Location field (e.g., ``Contract.sol:functionName:L42``)
+
+    Location overlap catches the hard case: agents describing the same code
+    from different angles with completely different vocabulary.  Title overlap
+    catches the easy case: near-identical rewordings.  Function-name match
+    catches findings targeting the same function but at different line offsets
+    (e.g., entry check vs exit path of the same function).
+
+    Aggregate-suppression: for any cross-file candidate where EITHER finding
+    carries more than ``_DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD`` depth source IDs
+    (depth-aggregate / perturbation findings), the source-ID-subset and
+    PERT-lineage signals are SUPPRESSED — they misfire on these large sets and
+    are the worst false-merge class. Such pairs may still surface via
+    location / title / function-name signals.
+
+    Multi-round: when the live candidate count exceeds ``_DEDUP_ROUND_CHUNK``,
+    per-round sub-packets (``dedup_candidate_pairs_round{N}.md`` +
+    ``dedup_focus_inventory_round{N}.md``) are written in addition to the
+    unified round-1 ``dedup_candidate_pairs.md`` so single-round consumers keep
+    working. The driver decides single vs multi-round. Each pair appears in
+    exactly one round.
+
+    NEVER merges findings — only identifies candidates for LLM review. The five
+    signals are candidate-generation HINTS only; this function performs no
+    auto-merge.
+
+    Returns the total number of candidate pairs written (live + deferred).
+    """
+    inv = scratchpad / "findings_inventory.md"
+    if not inv.exists():
+        return 0
+    try:
+        inv_text = _llm_norm(inv.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return 0
+
+    if inv_text and not inv_text.endswith("\n"):
+        inv_text += "\n"
+
+    # Extract (inv_id, title, location, severity, source_ids) for each finding
+    # via the shared helper so the pair builder and the block builder operate on
+    # an IDENTICAL finding model (single source of truth — see
+    # _dedup_extract_findings).
+    findings: list[dict] = _dedup_extract_findings(inv_text)
 
     # Group by file (for location/title/anchor signals — same-file only)
     file_groups: dict[str, list[int]] = {}
@@ -5079,6 +5134,347 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
         pass
 
     return len(pairs)
+
+
+def _compute_dedup_candidate_blocks(scratchpad: Path) -> int:
+    """Compute size-bounded in-context CLUSTERING blocks for the dedup judge.
+
+    Replaces O(n^2) pair enumeration as the LIVE dedup LLM input. Builds an
+    undirected SIGNAL GRAPH over findings (the SAME five signals as the pair
+    builder, with the SAME aggregate-suppression), takes connected components as
+    raw clusters (singletons excluded), size-normalizes each cluster into the
+    [_DEDUP_BLOCK_MIN.._DEDUP_BLOCK_MAX] range, and writes ``dedup_blocks.md``.
+    Per block the model returns line-oriented merge GROUPS in ONE call, so output
+    scales with n (a few KB for any n); cross-block transitivity is recovered
+    deterministically by union-find in ``apply_llm_dedup_decisions``.
+
+    COMPAT SHIM (spec 2c): this also calls ``_compute_dedup_candidate_pairs`` so
+    the legacy ``dedup_candidate_pairs.md`` / ``_full.md`` files are still written
+    — the mechanical fallback (``_apply_mechanical_dedup_from_pairs``) and the
+    supplemental path keep working UNCHANGED on those files.
+
+    Halt-safety: the body is wrapped in try/except; on ANY exception the empty
+    ``dedup_blocks.md`` is written and 0 is returned (NEVER raises). The phase
+    degrades to passthrough / the mechanical fallback.
+
+    Returns the total finding count placed into blocks (int).
+    """
+    scratchpad = Path(scratchpad)
+    blocks_path = scratchpad / "dedup_blocks.md"
+
+    def _write_empty(reason: str = "") -> None:
+        try:
+            blocks_path.write_text(
+                "# Dedup Candidate Blocks\n\n"
+                "No candidate duplicate blocks found.\n",
+                encoding="utf-8",
+            )
+            (scratchpad / "dedup_block_count.txt").write_text(
+                "0\n", encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    # ── COMPAT SHIM: always (re)write the legacy pair files first so the
+    #    mechanical fallback + supplemental path keep working unchanged. This
+    #    is best-effort; a failure here must not block the block computation. ──
+    try:
+        _compute_dedup_candidate_pairs(scratchpad)
+    except Exception:
+        pass
+
+    inv = scratchpad / "findings_inventory.md"
+    if not inv.exists():
+        _write_empty("no inventory")
+        return 0
+
+    try:
+        inv_text = _llm_norm(inv.read_text(encoding="utf-8", errors="replace"))
+        if inv_text and not inv_text.endswith("\n"):
+            inv_text += "\n"
+
+        findings = _dedup_extract_findings(inv_text)
+        n_findings = len(findings)
+        if n_findings < 2:
+            _write_empty("fewer than 2 findings")
+            return 0
+
+        # ── Build the undirected signal graph (adjacency by finding index) ──
+        # Edges fire on the SAME predicate logic as the pair builder. Each edge
+        # carries a "signal token" used to pick the block key.
+        adj: dict[int, set[int]] = {i: set() for i in range(n_findings)}
+        # signal_tokens[(i,j)] -> list of human tokens, for [key:] selection.
+        edge_tokens: dict[tuple[int, int], list[str]] = {}
+
+        def _add_edge(i: int, j: int, token: str) -> None:
+            adj[i].add(j)
+            adj[j].add(i)
+            key = (i, j) if i < j else (j, i)
+            edge_tokens.setdefault(key, []).append(token)
+
+        # Group by file for the same-file signals.
+        file_groups: dict[str, list[int]] = {}
+        for idx, f in enumerate(findings):
+            if f["file"] and f["file"] != "unknown":
+                file_groups.setdefault(f["file"], []).append(idx)
+
+        # Same-file signals: location overlap, title overlap / anchor, func match.
+        for file_part, indices in file_groups.items():
+            for ii, idx_a in enumerate(indices):
+                for idx_b in indices[ii + 1:]:
+                    fa, fb = findings[idx_a], findings[idx_b]
+                    lr_a, lr_b = fa["_lines"], fb["_lines"]
+                    if lr_a and lr_b and _line_ranges_overlap(lr_a, lr_b):
+                        _add_edge(idx_a, idx_b, f"file:{file_part}")
+                    score = _titles_overlap_score(fa["title"], fb["title"])
+                    anchors = _shared_anchor_tokens(fa["title"], fb["title"])
+                    if score >= 0.50:
+                        _add_edge(
+                            idx_a, idx_b,
+                            f"title:{_norm_key(fa['title'])[:24]}",
+                        )
+                    elif anchors:
+                        _add_edge(
+                            idx_a, idx_b,
+                            f"title:{sorted(anchors)[0]}",
+                        )
+                    if fa["_func"] and fb["_func"] and fa["_func"] == fb["_func"]:
+                        _add_edge(idx_a, idx_b, f"func:{fa['_func']}")
+
+        # Cross-file signals: source-ID subset, PERT lineage — WITH the SAME
+        # aggregate-suppression as the pair builder.
+        _PERT_RE = re.compile(r"^PERT-\d+$", re.IGNORECASE)
+        for i in range(n_findings):
+            for j in range(i + 1, n_findings):
+                fa, fb = findings[i], findings[j]
+                sa, sb = fa["_source_ids"], fb["_source_ids"]
+                aggregate_suppressed = (
+                    len(sa) > _DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD
+                    or len(sb) > _DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD
+                )
+                if aggregate_suppressed:
+                    continue
+                # Source-ID strict subset (either direction).
+                if sa and sb and (sa < sb or sb < sa):
+                    sub, sup = (sa, sb) if sa < sb else (sb, sa)
+                    _add_edge(
+                        i, j,
+                        f"src:{sorted(sup)[0]}" if sup else "src",
+                    )
+                # PERT lineage: shared depth source IDs + a PERT-* token.
+                pert_a = any(_PERT_RE.match(s) for s in sa) if sa else False
+                pert_b = any(_PERT_RE.match(s) for s in sb) if sb else False
+                if (pert_a or pert_b) and (sa & sb):
+                    _add_edge(i, j, "src:PERT")
+
+        # ── Connected components (BFS) → raw clusters; singletons excluded. ──
+        visited: set[int] = set()
+        clusters: list[list[int]] = []
+        for start in range(n_findings):
+            if start in visited or not adj[start]:
+                continue
+            comp: list[int] = []
+            stack = [start]
+            visited.add(start)
+            while stack:
+                node = stack.pop()
+                comp.append(node)
+                for nb in adj[node]:
+                    if nb not in visited:
+                        visited.add(nb)
+                        stack.append(nb)
+            if len(comp) >= 2:
+                clusters.append(comp)
+
+        singletons = n_findings - sum(len(c) for c in clusters)
+
+        if not clusters:
+            # No finding shares a signal with another. Empty block file but
+            # record the singleton count for traceability.
+            try:
+                blocks_path.write_text(
+                    "# Dedup Candidate Blocks\n\n"
+                    "No candidate duplicate blocks found.\n\n"
+                    f"## Singletons\nSingletons: {singletons}\n",
+                    encoding="utf-8",
+                )
+                (scratchpad / "dedup_block_count.txt").write_text(
+                    "0\n", encoding="utf-8"
+                )
+            except Exception:
+                pass
+            return 0
+
+        block_max = _dedup_block_max()
+
+        def _cluster_key(member_idxs: list[int]) -> str:
+            """Most-common signal token across the cluster's internal edges."""
+            counts: dict[str, int] = {}
+            mset = set(member_idxs)
+            for (a, b), toks in edge_tokens.items():
+                if a in mset and b in mset:
+                    for t in toks:
+                        counts[t] = counts.get(t, 0) + 1
+            if counts:
+                # Deterministic: highest count, then lexicographic token.
+                return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+            # Fallback: file of the lowest-ID member.
+            lead = min(
+                member_idxs,
+                key=lambda x: _id_num(findings[x]["id"]),
+            )
+            return f"cluster:{findings[lead]['id']}"
+
+        # ── Size-normalize each cluster into [_DEDUP_BLOCK_MIN..block_max]. ──
+        # > block_max: split into ceil(size/block_max) near-equal sub-blocks,
+        #   each carrying the SAME [key:] so union-find links cross-sub-block
+        #   duplicates. Split is deterministic: sort members by numeric ID,
+        #   chunk in order. < MIN: keep as-is (do NOT pad).
+        emitted_blocks: list[tuple[str, list[int]]] = []
+        for comp in clusters:
+            key = _cluster_key(comp)
+            ordered = sorted(comp, key=lambda x: _id_num(findings[x]["id"]))
+            size = len(ordered)
+            if size <= block_max:
+                emitted_blocks.append((key, ordered))
+                continue
+            n_sub = (size + block_max - 1) // block_max  # ceil
+            # Near-equal chunk sizes.
+            base = size // n_sub
+            rem = size % n_sub
+            pos = 0
+            for s in range(n_sub):
+                take = base + (1 if s < rem else 0)
+                emitted_blocks.append((key, ordered[pos:pos + take]))
+                pos += take
+
+        # ── Write dedup_blocks.md ──
+        placed = sum(len(idxs) for _k, idxs in emitted_blocks)
+        out: list[str] = ["# Dedup Candidate Blocks", ""]
+        out.append(
+            f"{placed} finding(s) grouped into {len(emitted_blocks)} block(s) "
+            "for in-context clustering review."
+        )
+        out.append(
+            "Each block lists findings that MAY contain duplicates. Return merge "
+            "GROUPS per block. IDs only. See output contract."
+        )
+        out.append("")
+        for bn, (key, idxs) in enumerate(emitted_blocks, start=1):
+            out.append(f"## Block {bn}  [key: {key}]")
+            out.append("| ID | Title | Location | Root Cause | Severity |")
+            out.append("|----|-------|----------|------------|----------|")
+            for idx in idxs:
+                f = findings[idx]
+                out.append(
+                    "| "
+                    + _dedup_block_cell(f["id"], 0)
+                    + " | "
+                    + _dedup_block_cell(f["title"], 80)
+                    + " | "
+                    + _dedup_block_cell(f["location"], 0)
+                    + " | "
+                    + _dedup_block_cell(_dedup_root_cause_for(f), 100)
+                    + " | "
+                    + _dedup_block_cell(f["severity"], 0)
+                    + " |"
+                )
+            out.append("")
+        out.append("## Singletons")
+        out.append(f"Singletons: {singletons}")
+        out.append("")
+        blocks_path.write_text("\n".join(out), encoding="utf-8")
+
+        # Block-count marker (deterministic signal for the driver), analogous to
+        # dedup_round_count.txt.
+        try:
+            (scratchpad / "dedup_block_count.txt").write_text(
+                f"{len(emitted_blocks)}\n", encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+        # Focus inventory for the IDs placed in blocks (bounded bodies; reuses
+        # the same body model so both sides of any candidate can be coupled).
+        try:
+            _write_block_focus_inventory(
+                scratchpad / "dedup_focus_inventory.md",
+                findings,
+                {findings[i]["id"] for _k, idxs in emitted_blocks for i in idxs},
+            )
+        except Exception:
+            pass
+
+        return placed
+    except Exception:
+        _write_empty("exception")
+        return 0
+
+
+def _id_num(fid: str) -> int:
+    """Numeric component of a finding ID (e.g. 'INV-7' -> 7). 0 on parse fail."""
+    m = re.search(r"\d+", fid or "")
+    return int(m.group(0)) if m else 0
+
+
+def _dedup_block_cell(value: str, truncate: int) -> str:
+    """Render a single dedup_blocks.md table cell.
+
+    Pipes inside the value are replaced with ``/`` (so the cell never breaks the
+    markdown table), newlines collapsed to spaces, and the result truncated to
+    ``truncate`` chars when ``truncate > 0``.
+    """
+    s = re.sub(r"\s+", " ", str(value or "")).replace("|", "/").strip()
+    if truncate and len(s) > truncate:
+        s = s[:truncate]
+    return s
+
+
+def _dedup_root_cause_for(f: dict) -> str:
+    """Best-effort Root Cause text for a block cell.
+
+    Uses the finding's parsed Root Cause / Description first sentence from its
+    body block; empty allowed (the spec permits an empty Root Cause cell).
+    """
+    body = str(f.get("_block", ""))
+    rc, _ = _field_anywhere(body, ("Root Cause", "Description"), table_ok=True)
+    rc = rc.strip()
+    if not rc:
+        return ""
+    # First sentence (up to the first period followed by space/end), then the
+    # caller truncates to 100 chars.
+    m = re.match(r"(.+?\.)(?:\s|$)", rc)
+    if m:
+        rc = m.group(1)
+    return rc
+
+
+def _write_block_focus_inventory(
+    path: Path, findings: list[dict], focus_ids: set[str]
+) -> None:
+    """Write the bounded focus inventory for the IDs placed into blocks.
+
+    Mirrors the pair builder's ``_write_focus_inventory`` contract so the dedup
+    prompt can read full finding bodies (distinct Location / Source IDs / attack
+    path / impact) for every block member before deciding a merge.
+    """
+    if not focus_ids:
+        return
+    focus_lines = [
+        "# Dedup Focus Inventory",
+        "",
+        "This bounded file contains the full finding bodies for the IDs "
+        "referenced by `dedup_blocks.md`. Use it for semantic review before "
+        "falling back to the full inventory. The full bodies carry each "
+        "finding's distinct Location(s), Source IDs, attack path, and impact so "
+        "every member of a candidate block can be coupled on MERGE.",
+        "",
+    ]
+    for f in findings:
+        if f["id"] in focus_ids:
+            focus_lines.append(str(f.get("_block", "")).rstrip())
+            focus_lines.append("")
+    path.write_text("\n".join(focus_lines).rstrip() + "\n", encoding="utf-8")
 
 
 _DEPTH_PROMOTION_FILES = (

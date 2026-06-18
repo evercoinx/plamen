@@ -39,6 +39,10 @@ __all__ = [
     "_apply_mechanical_dedup_from_pairs",
     "_apply_merges_to_inventory",
     "apply_llm_dedup_decisions",
+    "_apply_llm_group_decisions",
+    "_parse_dedup_group_lines",
+    "_DEDUP_GROUP_LINE_RE",
+    "_DEDUP_ID_TOKEN_RE",
     "_stamp_dedup_group_note",
     "_dedup_parse_finding_info",
     "_dedup_survivor_superset_ok",
@@ -5230,6 +5234,26 @@ def _higher_severity(a: str, b: str) -> str:
     return na if ia <= ib else nb
 
 
+def _absorbed_severity_higher(absorbed_sev: str, survivor_sev: str) -> bool:
+    """True iff the absorbed finding's tier is STRICTLY more severe than the
+    survivor's.
+
+    Used by the dedup same-severity guard: removing a strictly-more-severe
+    absorbed finding would drop the higher severity (the zero-loss coupling
+    raises the survivor only up to the higher of the two, but the SURVIVING block
+    is the lower-severity one in that direction, so the merge is unsafe). Returns
+    False when severities are equal, the absorbed is less severe, or either tier
+    is unparseable (fail-open to merge, matching historical trust of the
+    LLM-chosen direction).
+    """
+    try:
+        ia = _SEVERITY_ORDER.index(normalize_severity(absorbed_sev))
+        ik = _SEVERITY_ORDER.index(normalize_severity(survivor_sev))
+    except ValueError:
+        return False
+    return ia < ik  # lower index == more severe
+
+
 def _strongest_evidence(a: str, b: str) -> str:
     """Return the strongest of two evidence tags (mechanical proof wins)."""
     a = (a or "").strip()
@@ -6091,6 +6115,238 @@ def _stamp_dedup_group_note(
     return stamped
 
 
+# ── Group-line decision parsing (NEW in-context clustering output form) ──
+# A MERGE line lists the survivor first, then >=1 absorbed IDs:
+#   MERGE: INV-3, INV-7, INV-12\tsame-root-cause reentrancy
+# requires >= 2 IDs (the (?:...)+ after the first). KEEP: lines are advisory
+# (coverage-gate only) and ignored for apply.
+_DEDUP_GROUP_LINE_RE = re.compile(
+    r"(?im)^\s*MERGE\s*:\s*(\[?(?:INV|F)-\d+\]?(?:\s*,\s*\[?(?:INV|F)-\d+\]?)+)"
+)
+_DEDUP_ID_TOKEN_RE = re.compile(r"(?:INV|F)-\d+", re.IGNORECASE)
+
+
+def _parse_dedup_group_lines(text: str) -> list[list[str]]:
+    """Parse ``MERGE: A, B, C`` group-lines into ID clusters (>=2 IDs each).
+
+    Tolerant: any line not matching ``_DEDUP_GROUP_LINE_RE`` is silently skipped
+    (no raise). A MERGE line with only one parseable ID is skipped. IDs are
+    upper-cased and stripped of brackets. Order is PRESERVED (first ID = the
+    survivor the agent intended; union-find re-derives the actual survivor via
+    the superset gate, but order is kept for determinism).
+    """
+    clusters: list[list[str]] = []
+    for m in _DEDUP_GROUP_LINE_RE.finditer(text):
+        ids: list[str] = []
+        for tok in _DEDUP_ID_TOKEN_RE.findall(m.group(1)):
+            cid = tok.upper().strip("[]")
+            if cid not in ids:
+                ids.append(cid)
+        if len(ids) >= 2:
+            clusters.append(ids)
+    return clusters
+
+
+def _apply_llm_group_decisions(scratchpad: Path, phase_name: str) -> int:
+    """Union-find transitive-closure reduce over ALL LLM MERGE decision forms.
+
+    The NEW group reducer (spec 2b). Parses every MERGE form recorded in
+    ``dedup_decisions.md`` — the in-context group-lines (``MERGE: A, B, C``), the
+    legacy ``### MERGE: {survivor} absorbs {absorbed}`` headings, and the
+    ``| {absorbed} | MERGED into {survivor} |`` status rows — into ID clusters,
+    UNIONs them so cross-block transitivity is recovered (Block1 ``MERGE A,B`` +
+    Block2 ``MERGE B,C`` -> one component {A,B,C}), then for each component picks
+    a provisional survivor by folding the EXISTING ``_resolve_dedup_survivor``
+    gate pairwise (a member the gate rejects is DROPPED and KEPT SEPARATE — never
+    a forced merge), applies the EXISTING same-severity guard, and hands the
+    resulting ``(absorbed, survivor, "llm-group")`` list to the EXISTING
+    ``_apply_merges_to_inventory`` (zero-loss coupling + removal).
+
+    Returns the number of merges applied. Returns 0 (no-op, leaves any prewritten
+    passthrough copy in place) when no real MERGE rows exist. NEVER raises out of
+    a dedup decision: a parse/apply failure degrades to 0.
+    """
+    scratchpad = Path(scratchpad)
+    dec_path = scratchpad / "dedup_decisions.md"
+    if not dec_path.is_file():
+        return 0
+    try:
+        text = dec_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return 0
+
+    if phase_name == "semantic_dedup":
+        source = scratchpad / "verification_queue.md"
+        target = scratchpad / "verification_queue_deduped.md"
+    elif phase_name == "sc_semantic_dedup":
+        source = scratchpad / "findings_inventory.md"
+        target = scratchpad / "findings_inventory_deduped.md"
+    else:
+        return 0
+    if not source.exists():
+        return 0
+
+    finfo: dict[str, dict] = {}
+    try:
+        finfo = _dedup_parse_finding_info(
+            source.read_text(encoding="utf-8", errors="replace")
+        )
+    except Exception:
+        finfo = {}
+    finfo = {k.upper(): v for k, v in finfo.items()}
+
+    # ── Step 1: collect ID-clusters from ALL three MERGE forms. ──
+    clusters: list[list[str]] = []
+    # 1a. New group-lines (whole comma list = one cluster).
+    clusters.extend(_parse_dedup_group_lines(text))
+    # 1b. Legacy status rows: `| {absorbed} | MERGED into {survivor} |`.
+    for m in re.finditer(
+        r"^\|\s*\[?([A-Za-z]+-\d+)\]?\s*\|\s*MERGED\s+into\s+\[?([A-Za-z]+-\d+)\]?",
+        text,
+        re.MULTILINE | re.IGNORECASE,
+    ):
+        absorbed = m.group(1).strip().upper()
+        survivor = m.group(2).strip().upper()
+        if absorbed and survivor and absorbed != survivor:
+            # Survivor first to match the group-line convention.
+            clusters.append([survivor, absorbed])
+    # 1c. Legacy headings: `### MERGE: {survivor} absorbs {absorbed}`.
+    for m in re.finditer(
+        r"(?im)^\s*#{2,6}\s+MERGE:\s+\[?([A-Za-z]+-\d+)\]?\s+absorbs\s+\[?([A-Za-z]+-\d+)\]?",
+        text,
+    ):
+        survivor = m.group(1).strip().upper()
+        absorbed = m.group(2).strip().upper()
+        if absorbed and survivor and absorbed != survivor:
+            clusters.append([survivor, absorbed])
+
+    if not clusters:
+        return 0
+
+    # ── Step 2: UNION-FIND over all clusters → connected components. ──
+    parent: dict[str, str] = {}
+
+    def _find(x: str) -> str:
+        parent.setdefault(x, x)
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        # Path compression.
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def _union(a: str, b: str) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    # Track first-seen order of IDs for deterministic component iteration.
+    order: list[str] = []
+    seen_order: set[str] = set()
+    for cl in clusters:
+        first = cl[0]
+        for cid in cl:
+            if cid not in seen_order:
+                seen_order.add(cid)
+                order.append(cid)
+            _union(first, cid)
+
+    components: dict[str, list[str]] = {}
+    for cid in order:
+        components.setdefault(_find(cid), []).append(cid)
+
+    # ── Step 3+4+5: per component, fold-left _resolve_dedup_survivor to choose
+    #    a survivor, drop gate-rejected members, apply same-severity guard. ──
+    final_merges: list[tuple[str, str, str]] = []
+    for root, members in components.items():
+        if len(members) < 2:
+            continue
+        # Deterministic processing order: ID-numeric ascending so the fold is
+        # reproducible regardless of decision-line ordering.
+        ordered = sorted(members, key=lambda x: (_dedup_id_num(x), x))
+        survivor = ordered[0]
+        component_absorbed: list[str] = []
+        for nxt in ordered[1:]:
+            resolved = _resolve_dedup_survivor(survivor, nxt, nxt, survivor, finfo)
+            if resolved is None:
+                # Gate rejects this pair → KEEP SEPARATE (drop from the merge).
+                continue
+            absorb, keep = resolved
+            # The running survivor is whichever side the gate kept.
+            survivor = keep
+            # The dropped side is the absorbed one (could be the prior survivor
+            # if the gate flipped direction).
+            component_absorbed.append(absorb)
+        # Re-point every absorbed at the FINAL survivor and apply the
+        # same-severity guard (spec 2b step 5). The existing zero-loss coupling
+        # ALWAYS raises the survivor to the higher of the two severities, so the
+        # ONLY case where a merge would lose a higher severity is when the
+        # ABSORBED tier is strictly higher than the survivor's. In that case the
+        # higher-severity finding would be the one removed — skip it (keep
+        # separate). When absorbed severity <= survivor severity, the survivor's
+        # tier is preserved (or coupled up), so the merge is safe — mirroring the
+        # historical behavior where the LLM-chosen survivor-superset direction is
+        # honored and the higher severity is retained by coupling.
+        for absorb in component_absorbed:
+            if absorb == survivor:
+                continue
+            a = finfo.get(absorb)
+            k = finfo.get(survivor)
+            if a is not None and k is not None:
+                sa = a.get("severity")
+                sk = k.get("severity")
+                if sa and sk and _absorbed_severity_higher(sa, sk):
+                    # Absorbed tier strictly higher than survivor → removing it
+                    # would drop a higher-severity finding. Keep separate.
+                    log.debug(
+                        "[dedup] same-severity guard skip %s->%s "
+                        "(absorbed %s > survivor %s)",
+                        absorb, survivor, sa, sk,
+                    )
+                    continue
+            final_merges.append((absorb, survivor, "llm-group"))
+
+    # De-dup absorbed (a finding absorbed into multiple components → first only)
+    # and drop any merge whose survivor is itself absorbed elsewhere.
+    all_survivors = {s for _a, s, _ in final_merges}
+    deduped_merges: list[tuple[str, str, str]] = []
+    seen_absorbed: set[str] = set()
+    for absorb, survivor, sig in final_merges:
+        if absorb in all_survivors:
+            continue
+        if absorb in seen_absorbed or absorb == survivor:
+            continue
+        seen_absorbed.add(absorb)
+        deduped_merges.append((absorb, survivor, sig))
+
+    if not deduped_merges:
+        return 0
+
+    # ── Step 6: build the deduped artifact via the EXISTING zero-loss engine. ──
+    try:
+        shutil.copy2(source, target)
+    except Exception:
+        try:
+            target.write_text(
+                source.read_text(encoding="utf-8", errors="replace"),
+                encoding="utf-8",
+            )
+        except Exception:
+            return 0
+    try:
+        _apply_merges_to_inventory(target, target, deduped_merges, finfo)
+    except Exception:
+        return 0
+    return len(deduped_merges)
+
+
+def _dedup_id_num(fid: str) -> int:
+    """Numeric component of a finding ID for deterministic ordering."""
+    m = re.search(r"\d+", fid or "")
+    return int(m.group(0)) if m else 0
+
+
 def apply_llm_dedup_decisions(scratchpad: Path, phase_name: str) -> int:
     """Build the deduped inventory/queue from LLM-authored dedup decisions.
 
@@ -6135,81 +6391,38 @@ def apply_llm_dedup_decisions(scratchpad: Path, phase_name: str) -> int:
     if not source.exists():
         return 0
 
-    # Parse per-finding info for coupling (severity / source IDs / location /
-    # kind). Same parser the mechanical path uses.
-    finfo: dict[str, dict] = {}
-    try:
-        finfo = _dedup_parse_finding_info(
-            source.read_text(encoding="utf-8", errors="replace")
-        )
-    except Exception:
-        finfo = {}
+    # --- MERGE decisions: route ALL three MERGE forms (new group-lines, legacy
+    #     `### MERGE: … absorbs …` headings, `| … | MERGED into … |` rows)
+    #     through the union-find transitive-closure reduce. The reducer parses
+    #     every form, unions cross-block transitivity, picks survivors via the
+    #     EXISTING superset gate (dropping gate-rejected members), applies the
+    #     same-severity guard, and writes the deduped artifact via the EXISTING
+    #     zero-loss `_apply_merges_to_inventory`. ---
+    merges_applied = _apply_llm_group_decisions(scratchpad, phase_name)
 
-    # --- Parse MERGE pairs (absorbed -> survivor) from BOTH the status rows
-    #     and the headings; union them so a decision recorded in either form is
-    #     honored. ---
-    merge_dir: dict[str, str] = {}  # absorbed -> survivor
-    for m in re.finditer(
-        r"^\|\s*\[?([A-Za-z]+-\d+)\]?\s*\|\s*MERGED\s+into\s+\[?([A-Za-z]+-\d+)\]?",
-        text,
-        re.MULTILINE | re.IGNORECASE,
-    ):
-        absorbed = m.group(1).strip().upper()
-        survivor = m.group(2).strip().upper()
-        if absorbed and survivor and absorbed != survivor:
-            merge_dir.setdefault(absorbed, survivor)
-    for m in re.finditer(
-        r"(?im)^\s*#{2,6}\s+MERGE:\s+\[?([A-Za-z]+-\d+)\]?\s+absorbs\s+\[?([A-Za-z]+-\d+)\]?",
-        text,
-    ):
-        survivor = m.group(1).strip().upper()
-        absorbed = m.group(2).strip().upper()
-        if absorbed and survivor and absorbed != survivor:
-            merge_dir.setdefault(absorbed, survivor)
-
-    # Normalize finfo keys to upper for lookup parity with parsed IDs.
-    finfo = {k.upper(): v for k, v in finfo.items()}
-
-    # De-conflict: if a finding is recorded as absorbed AND as a survivor,
-    # prefer keeping it absorbed only if it is not itself a survivor of another
-    # merge (avoid chains collapsing a needed survivor). Drop any merge whose
-    # survivor is itself absorbed elsewhere.
-    survivors = set(merge_dir.values())
-    final_merges: list[tuple[str, str, str]] = []
-    seen_absorbed: set[str] = set()
-    for absorbed, survivor in merge_dir.items():
-        if absorbed in survivors:
-            # absorbed is a survivor of another merge — skip to avoid losing it
-            continue
-        if absorbed in seen_absorbed:
-            continue
-        seen_absorbed.add(absorbed)
-        final_merges.append((absorbed, survivor, "llm-decision"))
-
-    # --- GROUP decisions: keep all member blocks, stamp the note (applied to
-    #     the deduped artifact below, after MERGEs, SC block-form only) ---
-    # If there are no real decisions, leave any prewritten passthrough in place.
-    has_group = bool(
-        re.search(r"(?im)^\s*#{2,6}\s+GROUP:\s+", text)
-    )
-    if not final_merges and not has_group:
+    # --- GROUP decisions: keep all member blocks, stamp the note (SC block-form
+    #     only). If there are no real MERGE/GROUP rows, leave any prewritten
+    #     passthrough in place (recall-safe floor). ---
+    has_group = bool(re.search(r"(?im)^\s*#{2,6}\s+GROUP:\s+", text))
+    if not merges_applied and not has_group:
         return 0
 
-    # Build the deduped artifact: start from a copy of source, then apply merges.
-    try:
-        shutil.copy2(source, target)
-    except Exception:
-        # Fall back to a manual copy.
-        target.write_text(
-            source.read_text(encoding="utf-8", errors="replace"),
-            encoding="utf-8",
-        )
-
-    if final_merges:
-        _apply_merges_to_inventory(target, target, final_merges, finfo)
+    # Ensure the deduped target exists before GROUP stamping. The reducer creates
+    # it only when it applies >=1 merge; for a GROUP-only decision we copy here.
+    if has_group and not target.exists():
+        try:
+            shutil.copy2(source, target)
+        except Exception:
+            try:
+                target.write_text(
+                    source.read_text(encoding="utf-8", errors="replace"),
+                    encoding="utf-8",
+                )
+            except Exception:
+                return merges_applied
 
     # Now stamp GROUP notes on the deduped artifact (SC block-form only).
-    if has_group and phase_name == "sc_semantic_dedup":
+    if has_group and phase_name == "sc_semantic_dedup" and target.exists():
         for m in re.finditer(
             r"(?im)^\s*#{2,6}\s+GROUP:\s+\[?([A-Za-z]+-\d+)\]?\s+represents\s+(.+?)\s*$",
             text,
@@ -6222,7 +6435,7 @@ def apply_llm_dedup_decisions(scratchpad: Path, phase_name: str) -> int:
             ]
             _stamp_dedup_group_note(target, rep, members)
 
-    return len(final_merges)
+    return merges_applied
 
 
 def _cap_severity_at(severity: str, capped_at: str) -> str:
