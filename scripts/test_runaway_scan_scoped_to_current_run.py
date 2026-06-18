@@ -32,9 +32,9 @@ def _drv():
 
 def test_encoder_matches_real_claude_dirs():
     d = _drv()
-    # Exact on-disk dirs observed in ~/.claude/projects.
-    assert _re_enc(r"D:\Programming\Certora\L1\Irys-Plamen tests\irys") == \
-        "D--Programming-Certora-L1-Irys-Plamen-tests-irys"
+    # Representative on-disk project dirs (drive letter, spaces, embedded dashes).
+    assert _re_enc(r"D:\Programming\Audits\L1\example-node tests\target") == \
+        "D--Programming-Audits-L1-example-node-tests-target"
     assert _re_enc(
         r"D:\Programming\Web3\Contests\DODO Crosschain Dex"
         r"\2025-05-dodo-cross-chain-dex\omni-chain-contracts\contracts"
