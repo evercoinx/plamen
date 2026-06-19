@@ -4140,8 +4140,10 @@ def _run_verify_recovery_shard(
         "--add-dir", plamen_home().as_posix(),
     ]
 
-    # Subprocess isolation (same as run_phase).
-    isolation_path = scratchpad / "_subprocess_isolation.json"
+    # Subprocess isolation (same as run_phase). Resolve to ABSOLUTE — the worker
+    # runs with cwd=project_root and a relative `--settings` arg would resolve
+    # against the worker cwd, "Settings file not found", every worker dies.
+    isolation_path = (scratchpad / "_subprocess_isolation.json").resolve()
     isolation_ok = False
     try:
         isolation_payload = '{"enabledPlugins":{},"hooks":{},"mcpServers":{}}'
@@ -11476,7 +11478,13 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
         # lock), the fall-through fail-open is "subprocess may still hang"
         # — but visibly logged, not silent.
         isolation_payload = SUBPROCESS_ISOLATION_PAYLOAD
-        isolation_path = scratchpad / "_subprocess_isolation.json"
+        # Resolve to ABSOLUTE: this file is handed to the worker as `--settings`
+        # and the worker runs with cwd=project_root. A relative path here would
+        # resolve against the worker's cwd (not the driver's) and "Settings file
+        # not found" kills every worker. main() normalizes config["scratchpad"]
+        # to absolute, but resolving again at the construction site is a cheap,
+        # general guarantee that the launch arg is never relative.
+        isolation_path = (scratchpad / "_subprocess_isolation.json").resolve()
         isolation_ok = False
         try:
             if (
@@ -15367,6 +15375,73 @@ def main():
         if key not in config:
             print(f"config missing required key: {key}", file=sys.stderr)
             sys.exit(EXIT_CONFIG_MISSING)
+
+    # PATH NORMALIZATION (cross-OS correctness): resolve the two filesystem
+    # roots to ABSOLUTE paths immediately after load. The driver launches every
+    # worker subprocess with `cwd=config["project_root"]`, and it passes paths
+    # derived from `scratchpad` (e.g. `--settings <scratchpad>/_subprocess_isolation.json`,
+    # `--add-dir`, `scope_file`) to that worker on the command line. A RELATIVE
+    # project_root/scratchpad in the config would be resolved by the worker
+    # against ITS cwd (= project_root), not against the driver's cwd — so a
+    # relative `--settings` path points at a nonexistent file and `claude`
+    # refuses to start (0-byte output, every worker dies in seconds). Resolving
+    # here once makes every downstream path cwd-independent for any caller that
+    # supplies a relative config (the in-tree wizard already supplies absolute
+    # paths; an external orchestrator may not). Resolve relative to the config
+    # file's directory when the path itself is relative, which is the least
+    # surprising anchor for a hand-written or generated config.
+    #
+    # ANCHOR CHOICE: a relative config value is anchored to the DRIVER'S CWD
+    # (`Path(val).resolve()`), because that is where the value was authored and
+    # where the driver process is launched (e.g. an orchestrator does
+    # `subprocess.run([python, driver, cfg_path])` from its own cwd with
+    # cwd-relative path values). The config-file directory is NOT a safe anchor:
+    # a common layout writes `config.json` INSIDE the scratchpad
+    # (`cfg_path = scratchpad / "config.json"`), so anchoring a relative
+    # `scratchpad`/`project_root` to the config dir DOUBLES the prefix and yields
+    # an absolute-but-nonexistent path — the exact failure that lets a relative
+    # config silently kill every worker. The config dir is used only as a
+    # best-effort FALLBACK when the cwd anchor does not exist on disk but the
+    # cfg-dir anchor does (covers a hand-written config kept beside its target).
+    _cfg_dir = config_path.resolve().parent
+
+    def _abs_under_cfg(val: str) -> str:
+        p = Path(val)
+        if p.is_absolute():
+            try:
+                return str(p.resolve())
+            except OSError:
+                return str(p)
+        cwd_anchor = Path.cwd() / p
+        cfg_anchor = _cfg_dir / p
+        # Prefer cwd; fall back to cfg-dir only if it disambiguates a real path.
+        if not cwd_anchor.exists() and cfg_anchor.exists():
+            chosen = cfg_anchor
+        else:
+            chosen = cwd_anchor
+        try:
+            return str(chosen.resolve())
+        except OSError:
+            return str(chosen.absolute())
+
+    # project_root + scratchpad are ALWAYS local filesystem roots.
+    for _path_key in ("project_root", "scratchpad"):
+        _val = config.get(_path_key)
+        if isinstance(_val, str) and _val:
+            config[_path_key] = _abs_under_cfg(_val)
+    # scope_file is a local file IF set; "" means whole-tree scope (leave as-is).
+    # docs_path may be a space-joined URL list (bounty mode) rather than a path —
+    # only absolutize it when it is a single token that resolves to a real local
+    # path, so a URL list or empty value is never corrupted.
+    _sf = config.get("scope_file")
+    if isinstance(_sf, str) and _sf.strip():
+        config["scope_file"] = _abs_under_cfg(_sf.strip())
+    _dp = config.get("docs_path")
+    if isinstance(_dp, str) and _dp.strip() and " " not in _dp.strip() \
+            and "://" not in _dp:
+        _dp_abs = _abs_under_cfg(_dp.strip())
+        if Path(_dp_abs).exists():
+            config["docs_path"] = _dp_abs
 
     # STARTUP AUTO-CORRECT: mechanically detect the ecosystem from source-suffix
     # counts + build-manifest markers and SELF-HEAL a wrong configured language
