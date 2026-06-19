@@ -15312,6 +15312,66 @@ def _persist_corrected_language(
         return False
 
 
+def _ensure_claude_folder_trusted(*paths: str) -> list[str]:
+    """Pre-accept Claude Code's per-FOLDER trust dialog for the given dirs.
+
+    A PTY worker launched with cwd in a directory Claude Code has never opened
+    hangs FOREVER on the interactive "Is this a project you trust?" dialog —
+    there is no stdin to answer it, so the worker produces 0 bytes and dies on
+    the phase budget. `--dangerously-skip-permissions` does NOT cover this; trust
+    is recorded per-directory in ~/.claude.json under
+    projects.<abspath>.hasTrustDialogAccepted (observed values use forward
+    slashes even on Windows). Freshly-staged dirs (e.g. a bounty harness) are
+    never trusted, so the audit hangs at recon.
+
+    Idempotently set hasTrustDialogAccepted=true for each path (writing both
+    slash forms so Claude's lookup hits regardless of normalization), preserving
+    ALL other config. Returns the keys newly trusted. NEVER raises and never
+    clobbers an unreadable/locked config (better to risk the prompt than to
+    corrupt the user's global Claude state)."""
+    trusted: list[str] = []
+    try:
+        cj = Path.home() / ".claude.json"
+        if cj.is_file():
+            try:
+                data = json.loads(cj.read_text(encoding="utf-8") or "{}")
+            except (json.JSONDecodeError, OSError):
+                return []
+        else:
+            data = {}
+        if not isinstance(data, dict):
+            return []
+        projects = data.get("projects")
+        if not isinstance(projects, dict):
+            projects = {}
+            data["projects"] = projects
+        changed = False
+        for raw in paths:
+            if not raw:
+                continue
+            try:
+                base = str(Path(raw).resolve())
+            except OSError:
+                base = str(raw)
+            for key in {base, base.replace("\\", "/")}:
+                entry = projects.get(key)
+                if not isinstance(entry, dict):
+                    entry = {}
+                if entry.get("hasTrustDialogAccepted") is not True:
+                    entry["hasTrustDialogAccepted"] = True
+                    entry.setdefault("projectOnboardingSeenCount", 1)
+                    projects[key] = entry
+                    changed = True
+                    trusted.append(key)
+        if changed:
+            tmp = cj.with_name(cj.name + ".plamen-tmp")
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            tmp.replace(cj)
+    except Exception:
+        return []
+    return trusted
+
+
 def main():
     # Terminal: WARNING+ only (keep TUI clean).
     # File: everything (INFO+) for debugging via `tail -f _plamen.log`.
@@ -15442,6 +15502,25 @@ def main():
         _dp_abs = _abs_under_cfg(_dp.strip())
         if Path(_dp_abs).exists():
             config["docs_path"] = _dp_abs
+
+    # FOLDER-TRUST PRE-ACCEPT (claude backend): a PTY worker whose cwd is a dir
+    # Claude Code has never opened hangs forever on the interactive trust dialog
+    # ("Is this a project you trust?") — fatal for a freshly-staged bounty
+    # harness or any never-opened target. Pre-accept trust for the worker cwd(s)
+    # (project_root + the methodology home) so workers launch headless. No-op
+    # once trusted; never raises. (Codex has its own sandbox model.)
+    if (config.get("cli_backend") or "claude").strip().lower() != "codex":
+        try:
+            _newly_trusted = _ensure_claude_folder_trusted(
+                config["project_root"], str(plamen_home())
+            )
+            if _newly_trusted:
+                log.info(
+                    "[startup] pre-accepted Claude folder-trust for worker cwd: %s",
+                    ", ".join(_newly_trusted),
+                )
+        except Exception as _exc:  # never let trust-prep abort the run
+            log.warning(f"[startup] folder-trust pre-accept skipped: {_exc!r}")
 
     # STARTUP AUTO-CORRECT: mechanically detect the ecosystem from source-suffix
     # counts + build-manifest markers and SELF-HEAL a wrong configured language
