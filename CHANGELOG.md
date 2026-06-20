@@ -5,6 +5,22 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] - 2026-06-20
+
+### Added
+- **EVM build-environment bootstrap in the recon pre-pass.** When a Solidity codebase is analyzed without a Foundry project (no `foundry.toml`), the recon pre-pass now best-effort scaffolds one (`foundry.toml` + `forge-std` + common libraries + `forge build`) so depth/verification have a compilable target. Best-effort and non-fatal — a failed bootstrap degrades cleanly to source-only analysis.
+
+### Changed
+- **`sc_semantic_dedup` redesigned cluster-first.** Replaced the O(n²) all-pairs comparison with multi-signal blocking → bounded per-block LLM `MERGE:`/`KEEP:` decisions → union-find transitive closure with a survivor-superset gate. Scales to large inventories without the pair-count explosion, and is zero-loss (every absorbed finding is embedded in its survivor).
+- **Proven-only mode preserves structurally-untestable findings.** When `proven_only` is on, a `[CODE-TRACE]` finding whose verifier declined to write a PoC for a genuine structural reason (`STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION`, deployment-only, unmockable external) now keeps its verifier-stated severity instead of a blanket Low cap; weak/lazy traces (a harness exists but no PoC was written; spec/docs-only; `NO_BUILD_ENVIRONMENT` contradicted by a SUCCESS build) are still capped. Conservative + additive — relative to the blanket cap this can only RAISE severity — and recorded as `STRUCTURAL-UNTESTABLE(orig_sev)` in the report-index trust-adjustment trail.
+
+### Fixed
+- **Proven-only severity no longer caps production-verified findings.** The `proven_only` "cap `[CODE-TRACE]` at Low" rule gated on `has_mechanical_proof`, which recognizes only mechanical-test-pass tags (`[POC-PASS]`/`[MEDUSA-PASS]`/`[FUZZ-PASS]`/…) — not production/on-chain tags. A finding confirmed against forked or live on-chain state (`[PROD-ONCHAIN]`/`[PROD-SOURCE]`/`[PROD-FORK]`, rated 0.9–1.0 by the confidence model) was therefore wrongly capped at Low. Added `EVIDENCE_TAGS_PROD` + `has_proof_grade_evidence()` (mechanical-pass **or** production tag) in `plamen_types.py`; proven-only gating now uses proof-GRADE evidence. `has_mechanical_proof` stays narrow ("a test executed and passed") for its other callers.
+- **Chain-derived High/Critical findings are first-class, not obligation telemetry.** A chain hypothesis upgraded to High/Critical with a justified Combined-Impact (`Severity-Upgrade-Justified: YES`) is now force-included into the report coverage seed (mode-agnostic), and per-chain obligation rows are de-duplicated to one row per chain id — previously a justified High could surface only as a multi-row `UNACCOUNTED-OBLIGATION` dump in Appendix B. Chain-severity extraction is format-tolerant: a bare `Chain Severity:` line, a `Chain Severity Matrix: … → HIGH` conclusion line, **or** the summary-table column.
+- **Recon degrades instead of looping on a surviving pre-pass marker.** After the worker pool and fallback are exhausted and the only remaining failure is the pre-pass status marker, recon now degrades to the pre-pass content (all backends) rather than re-spawning indefinitely; resume paths strip the stale marker.
+- **Driver path resolution: absolute project/scratchpad/scope paths + worker settings.** `project_root`, `scratchpad`, and `scope_file` are normalized to absolute paths (anchored to the config directory) and the subprocess-isolation `--settings` path is absolutized at both construction sites, fixing workers that died at launch when invoked from a different working directory.
+- **Driver pre-accepts folder-trust for the worker working directory.** Headless workers spawned in a never-opened directory hung on Claude Code's folder-trust dialog; the driver now writes `hasTrustDialogAccepted` for the project root and home into `~/.claude.json` before spawning (Claude backend only; never clobbers an unreadable or existing config).
+
 ## [2.1.1] - 2026-06-17
 
 ### Added

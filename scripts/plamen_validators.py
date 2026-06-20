@@ -28,6 +28,7 @@ from plamen_types import (
     SC_VERIFY_CRITHIGH_PHASE_NAMES,
     _VALID_PIPELINES, _VALID_MODES,
     EVIDENCE_TAGS_PROOF, EVIDENCE_TAG_NAMES_RE, has_mechanical_proof,
+    has_proof_grade_evidence,
     FINDING_BLOCK_HEADING_RE,
     normalize_severity,
     plamen_home,
@@ -130,6 +131,7 @@ __all__ = [
     "_write_chain_passthrough_outputs",
     "_body_writer_evidence_fields",
     "_expected_report_index_severities",
+    "_forced_chain_seed_rows",
     "_is_substantive_body_evidence",
     "_is_spec_support_path",
     "_is_evidence_missing_for_body",
@@ -981,6 +983,27 @@ def _read_cli_backend_from_config(scratchpad: Path) -> str:
     except Exception:
         pass
     return "claude"
+
+
+def _config_proven_only(scratchpad: Path) -> bool:
+    """Read 'proven_only' from {scratchpad}/config.json. Default False.
+
+    Proven-only mode caps `[CODE-TRACE]`-only findings at Low. The gated
+    preservation block in `_expected_report_index_severities` reads this flag
+    so the structural-untestable distinction only fires when the user opted
+    into proven-only. Defaults False (no cap) when config is absent/unreadable.
+    """
+    try:
+        import json as _json
+        cfg = scratchpad / "config.json"
+        if cfg.exists():
+            val = _json.loads(
+                cfg.read_text(encoding="utf-8", errors="replace")
+            ).get("proven_only", False)
+            return bool(val)
+    except Exception:
+        pass
+    return False
 
 
 def _classify_artifact_row(
@@ -16147,6 +16170,101 @@ def _chain_justified_upgrade_ids(scratchpad: Path) -> set[str]:
     return justified
 
 
+def _chain_section_severity(section: str, full_text: str, cid: str) -> str:
+    """Robustly extract a chain's declared severity. Real `chain_hypotheses.md`
+    files express it three different ways and we accept all three — a missed
+    severity silently drops a justified High from the coverage seed (the bug
+    this guards against). Order: most-specific first.
+      1. a bare ``Chain Severity: <tier>`` line in the section, then
+      2. a ``Chain Severity Matrix: ... -> <tier>`` conclusion line (the
+         upgraded tier sits AFTER the arrow), then
+      3. the summary-table row for the chain id (Chain Severity is its trailing
+         column; last tier token on the row wins).
+    """
+    m = re.search(
+        r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?Chain\s+Severity(?:\*\*)?\s*:\s*"
+        r"\**\s*(Critical|High|Medium|Low|Informational)\b",
+        section,
+    )
+    if m:
+        return normalize_severity(m.group(1))
+    m = re.search(
+        r"(?is)Chain\s+Severity\s+Matrix\b.*?(?:->|→|=>)\s*\**\s*"
+        r"(Critical|High|Medium|Low|Informational)\b",
+        section,
+    )
+    if m:
+        return normalize_severity(m.group(1))
+    for line in full_text.splitlines():
+        if not line.lstrip().startswith("|") or cid.lower() not in line.lower():
+            continue
+        tiers = re.findall(
+            r"\b(Critical|High|Medium|Low|Informational)\b", line, re.IGNORECASE
+        )
+        if tiers:
+            return normalize_severity(tiers[-1])
+    return ""
+
+
+def _forced_chain_seed_rows(scratchpad: Path) -> dict[str, dict[str, object]]:
+    """Force-include justified High/Critical chains into the coverage seed.
+
+    A chain that `chain_hypotheses.md` upgraded to High/Critical with a justified
+    Combined-Impact (machine line `Severity-Upgrade-Justified: YES`) is a genuine
+    compound finding whose severity is ABOVE its constituents — yet without this
+    helper it is never force-promoted to the verify queue / coverage seed in any
+    mode, so a PARTIAL/Low→High chain silently never reaches the body.
+
+    Returns ``{chain_id: {"severity": <High|Critical>, "constituents": [ids]}}``.
+    Purely additive — the caller only ADDS these IDs (chain + constituents) to
+    the seed superset, never demotes or drops anything. Severity-regression-safe.
+
+    Reuses the canonical `_chain_justified_upgrade_ids` (YES + concrete impact)
+    and `_parse_chain_constituents` semantics. Mode-agnostic by design: the
+    force-include must hold regardless of light/core/thorough.
+    """
+    justified = _chain_justified_upgrade_ids(scratchpad)
+    if not justified:
+        return {}
+    chain_path = scratchpad / "chain_hypotheses.md"
+    if not chain_path.exists():
+        return {}
+    try:
+        from plamen_parsers import _CHAIN_HYP_HEADING_RE, _CHAIN_MACHINE_LINE_RE
+        from plamen_parsers import _llm_norm as _pp_llm_norm
+    except Exception:
+        return {}
+    try:
+        text = _pp_llm_norm(chain_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    out: dict[str, dict[str, object]] = {}
+    headings = list(_CHAIN_HYP_HEADING_RE.finditer(text))
+    for i, hm in enumerate(headings):
+        cid = hm.group(1).upper()
+        if cid not in justified:
+            continue
+        start = hm.end()
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
+        section = text[start:end]
+        # Extract the declared Chain Severity from the section prose. Only
+        # force-include when it is High or Critical (the upgraded tiers that
+        # otherwise never reach the body).
+        sev = _chain_section_severity(section, text, cid)
+        if sev not in {"Critical", "High"}:
+            continue
+        # Constituent IDs from the machine line (authoritative, bounded).
+        constituents: list[str] = []
+        ml = _CHAIN_MACHINE_LINE_RE.search(section)
+        if ml:
+            for raw in re.split(r"[,\s]+", (ml.group("ids") or "").strip()):
+                rid = (_normalize_finding_id(raw) or raw).strip().upper()
+                if rid and rid != cid:
+                    constituents.append(rid)
+        out[cid] = {"severity": sev, "constituents": constituents}
+    return out
+
+
 def _reason_is_chain_restatement(reason: str) -> bool:
     """True when an Excluded Findings reason cites CHAIN-RESTATEMENT.
 
@@ -16318,7 +16436,12 @@ def _report_index_adjustment_reason_present(*values: str) -> bool:
         # for severity-provenance auto-repair. Recognize it as a canonical
         # reason so the provenance gate doesn't re-flag rows the repair
         # function just patched.
-        r"override",
+        r"override|"
+        # STRUCTURAL-UNTESTABLE(sev): proven-only structural carve-out audit
+        # trail. A preserved (uncapped) severity carrying this note records
+        # that the verifier blessed a genuine structural-untestability blocker
+        # for the finding's PoC class, so the provenance gate must accept it.
+        r"structural|untestable",
         text,
         re.IGNORECASE,
     ))
@@ -16355,8 +16478,38 @@ def _cap_report_index_severity(severity: str, cap: str) -> str:
     return sev
 
 
+def _structurally_untestable(scratchpad: Path, vtxt: str, poc_class: str) -> bool:
+    """Is this finding GENUINELY structurally untestable (preserve severity)?
+
+    True only when the verifier's PoC ledger names a real structural-untestability
+    blocker that is valid for the finding's PoC class. This is the verifier-blessed
+    case the proven-only blanket cap conflates with weak/lazy `[CODE-TRACE]`.
+
+    Reuses the already-shipped `_valid_poc_skip` distinction (which rejects
+    STRUCTURAL_* for unit/property class and unmockable EXTERNAL_* skips), then
+    adds two additional REJECTIONS so weak skips keep the cap:
+      * NO_BUILD_ENVIRONMENT cited while build_status.md reports SUCCESS (the
+        harness exists — not structurally untestable).
+      * PURE_SPEC_OR_DOCS_ONLY (a spec/docs-only finding is NOT a CONFIRMED
+        structural harm that merely lacks an executable harness).
+    Recall-safe: this can ONLY mark FEWER findings as untestable than
+    `_valid_poc_skip` alone, so it never preserves a weak finding.
+    """
+    skip = _poc_skip_code(vtxt)
+    if not skip:
+        return False
+    if not _valid_poc_skip(vtxt, poc_class):
+        return False
+    if "NO_BUILD_ENVIRONMENT" in skip and _build_succeeded(scratchpad) is True:
+        return False
+    if "PURE_SPEC_OR_DOCS_ONLY" in skip:
+        return False
+    return True
+
+
 def _expected_report_index_severities(scratchpad: Path) -> dict[str, str]:
     caps = _poc_demotion_caps_for_validator(scratchpad)
+    proven_only = _config_proven_only(scratchpad)
     out: dict[str, str] = {}
     for row in parse_verification_queue_rows(scratchpad):
         fid = (row.get("finding id") or "").strip()
@@ -16387,6 +16540,23 @@ def _expected_report_index_severities(scratchpad: Path) -> dict[str, str]:
             sev = _demote_severity_once(sev)
         if fid in caps:
             sev = _cap_report_index_severity(sev, caps[fid])
+        # Proven-only cap for [CODE-TRACE]-only findings, WITH a structural-
+        # untestability carve-out. The blanket "cap [CODE-TRACE] at Low" rule
+        # conflates (1) weak/lazy traces (a harness exists but no PoC was
+        # written) with (2) genuinely structurally-untestable CONFIRMED findings
+        # whose verifier explicitly declined to downgrade. Only (1) keeps the
+        # Low cap; (2) preserves the verifier-stated severity. Reuses the shipped
+        # `_valid_poc_skip` distinction — no new heuristic. Gated behind
+        # proven_only + best-tag-is-CODE-TRACE-only, so it is a no-op for
+        # non-proven-only runs and for any POC-PASS/MEDUSA-PASS/PROD-* finding
+        # (those carry a proof-grade tag). Conservative + additive: relative to
+        # the current blanket cap this can only RAISE severity (case 2), never
+        # lower it.
+        if proven_only and not has_proof_grade_evidence(vtxt):
+            poc_class = _effective_poc_class(row.get("poc class") or "", vtxt)
+            if not _structurally_untestable(scratchpad, vtxt, poc_class):
+                sev = _cap_report_index_severity(sev, "Low")
+            # else: verifier-blessed structural untestability → preserve sev
         out[fid] = sev
     return out
 
@@ -16917,10 +17087,16 @@ def _validate_obligation_ledger_retention(scratchpad: Path, coverage_text: str) 
             )
         ):
             continue
+        # Human-readable, per-row distinct issue text: name the source_id +
+        # severity + a one-line target excerpt so deduplicated obligation rows
+        # never read as identical clones.
+        target_excerpt = re.sub(r"\s+", " ", str(row.get("target") or "")).strip()[:160]
         issues.append(
-            f"obligation retention: active {cls} {oid} not preserved by exact "
-            "report coverage, absorbing report ID, explicit refutation, or a "
-            "tracked deferral/appendix disposition"
+            f"obligation retention: active {cls} {oid} "
+            f"(chain {source_id or 'unknown'}, {sev}"
+            + (f", \"{target_excerpt}\"" if target_excerpt else "")
+            + ") not preserved by exact report coverage, absorbing report ID, "
+            "explicit refutation, or a tracked deferral/appendix disposition"
         )
     return issues[:10]
 

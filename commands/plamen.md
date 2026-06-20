@@ -60,7 +60,7 @@ description: "Launch the V2 deterministic Smart Contract audit pipeline (same as
 - If it contains `network:` followed by a network name (e.g., `ethereum`, `arbitrum`, `optimism`, `base`, `polygon`, `bsc`, `avalanche`, or an RPC URL), set `NETWORK` to that value. Used for production verification and fork testing.
 - If it contains `scope:` followed by a file path, set `SCOPE_FILE` to that path. The file should list in-scope contracts/files.
 - If it contains `notes:` followed by text (up to end of arguments or next known prefix), set `SCOPE_NOTES` to that text. Passed to recon as additional audit context (e.g., "focus on vault module, ignore governance").
-- If it contains `proven-only:` followed by `true` (or just `proven-only: true`), set `PROVEN_ONLY = true`. When enabled, findings whose best evidence is `[CODE-TRACE]` (no executed PoC or fuzzer counterexample) are capped at Low severity in the report. Default: false.
+- If it contains `proven-only:` followed by `true` (or just `proven-only: true`), set `PROVEN_ONLY = true`. When enabled, findings whose best evidence is `[CODE-TRACE]` (no executed PoC or fuzzer counterexample) are capped at Low severity in the report. EXCEPTION: a genuinely structurally-untestable CONFIRMED finding (verify PoC ledger names a valid structural blocker for its PoC Class — `STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION` for structural/integration, `EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS`, or `DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL` with no local harness) preserves the verifier-stated severity and records `STRUCTURAL-UNTESTABLE(sev)`; weak/lazy `[CODE-TRACE]` is still capped with `PROVEN(sev)`. Default: false.
 - If it contains `wrapper-launch`, set `LAUNCHED_FROM_WRAPPER = true`. The user already confirmed the launch in the terminal wrapper " skip Step 0d (cost estimate + confirmation) entirely and jump directly to Step 1 (language detection). Do NOT show a second confirmation prompt.
 - If MODE, PROJECT_PATH, DOCS_PATH (or nodocs), AND `proven-only:` are all resolved AND `wrapper-launch` is present, skip the ENTIRE wizard " jump directly to Step 1 (language detection). No cost estimate, no confirmation.
 - If MODE, PROJECT_PATH, DOCS_PATH (or nodocs), AND `proven-only:` are all resolved but NO `wrapper-launch`, skip the wizard " jump to "Step 0d: Cost Estimate + Launch Confirmation".
@@ -82,7 +82,7 @@ First, output the banner as text (no tool calls):
 â•šâ•â•     â•šâ•â•â•â•â•â•â•â•šâ•â•  â•šâ•â•â•šâ•â•     â•šâ•â•â•šâ•â•â•â•â•â•â•â•šâ•â•  â•šâ•â•â•â•
 ```
 
-**Web3 Security Auditor** v2.1.1
+**Web3 Security Auditor** v2.1.2
 
 ### Version Check (MANDATORY " run before toolchain probe)
 
@@ -92,11 +92,11 @@ Read the VERSION file and compare against the version in your CLAUDE.md context:
 cat ~/.claude/VERSION 2>/dev/null || cat ~/.plamen/VERSION 2>/dev/null || echo "unknown"
 ```
 
-The VERSION file should say `2.1.1`. Compare this against the version in the header of this prompt (`v2.1.1`). If they differ, warn the user:
+The VERSION file should say `2.1.2`. Compare this against the version in the header of this prompt (`v2.1.2`). If they differ, warn the user:
 
 > **Version mismatch detected.** Your CLAUDE.md rules are from v{your version} but the repo is at v{VERSION file}. Run `cd ~/.plamen && git pull && plamen install` to update. Proceeding with stale rules may cause wrong agent counts or skipped pipeline steps.
 
-If the VERSION file says a NEWER version than `2.1.1` (the version hardcoded in this prompt), it means the repo was updated but `plamen install` was not re-run to re-inject the updated CLAUDE.md. The same warning applies.
+If the VERSION file says a NEWER version than `2.1.2` (the version hardcoded in this prompt), it means the repo was updated but `plamen install` was not re-run to re-inject the updated CLAUDE.md. The same warning applies.
 
 **Do NOT skip this check.** A version mismatch means the orchestrator rules (agent counts, mandatory steps, mode table) in CLAUDE.md are out of sync with the skills, prompts, and templates on disk.
 

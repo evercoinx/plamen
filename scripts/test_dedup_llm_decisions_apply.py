@@ -243,7 +243,7 @@ def test_llm_flip_direction_honored(tmp_path=None):
     assert "[INV-1]" in out
 
 
-# ─── chained survivor not collapsed ───────────────────────────────
+# ─── chained merge collapses transitively (union-find redesign) ────
 
 def test_survivor_of_one_merge_not_absorbed_by_another(tmp_path=None):
     sp = Path(tmp_path or _mktmp())
@@ -252,9 +252,16 @@ def test_survivor_of_one_merge_not_absorbed_by_another(tmp_path=None):
         _sc_block("INV-2", "b", "x.sol:1-5", "Low", ["A-1", "A-2"]),
         _sc_block("INV-3", "c", "x.sol:1-5", "Low", ["A-1", "A-2", "A-3"]),
     ])
-    # INV-1 -> INV-2 and INV-2 -> INV-3. INV-2 is both an absorbed AND a
-    # survivor; the chained merge whose absorbed side (INV-2) is itself a
-    # survivor must be dropped to avoid losing INV-2's distinct content.
+    # INV-1 -> INV-2 and INV-2 -> INV-3 are two MERGE rows over the SAME
+    # signal cluster. Under the dedup REDESIGN (union-find transitive closure),
+    # {INV-1, INV-2, INV-3} is ONE component: INV-3 is the source-ID superset
+    # survivor, so BOTH INV-1 and INV-2 are absorbed into INV-3 (2 merges).
+    # The invariant the old pairwise contract protected — INV-2's distinct
+    # content must NOT be lost — is STILL enforced: INV-2's body is coupled
+    # into the INV-3 survivor via the zero-loss `Coupled from` engine, and the
+    # survivor INV-3 remains. The old code dropped the chained merge as a
+    # workaround; the redesign instead recovers transitivity and couples
+    # losslessly, which is strictly more correct (no duplicate INV-2 left).
     (sp / "dedup_decisions.md").write_text(
         _decisions(
             "| INV-1 | MERGED into INV-2 |\n"
@@ -263,12 +270,16 @@ def test_survivor_of_one_merge_not_absorbed_by_another(tmp_path=None):
         encoding="utf-8",
     )
     n = apply_llm_dedup_decisions(sp, "sc_semantic_dedup")
-    # Only INV-1 -> INV-2 applies (INV-2 -> INV-3 dropped: INV-2 is a survivor).
-    assert n == 1, f"expected 1 safe merge, got {n}"
+    # Transitive component {INV-1,INV-2,INV-3} -> survivor INV-3 absorbs both.
+    assert n == 2, f"expected 2 transitive merges, got {n}"
     out = (sp / "findings_inventory_deduped.md").read_text(encoding="utf-8")
+    # Both absorbed standalone blocks removed, survivor kept.
     assert "### Finding [INV-1]" not in out
-    assert "[INV-2]" in out
-    assert "[INV-3]" in out
+    assert "### Finding [INV-2]" not in out
+    assert "### Finding [INV-3]" in out
+    # ZERO-LOSS: INV-1's and INV-2's distinct content coupled into the survivor.
+    assert "Coupled from INV-1" in out
+    assert "Coupled from INV-2" in out
 
 
 # ─── small audit unaffected ───────────────────────────────────────

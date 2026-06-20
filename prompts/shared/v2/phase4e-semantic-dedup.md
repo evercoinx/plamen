@@ -256,6 +256,51 @@ The `Coupled-content` column is additive and auditable; do not omit it on MERGE
 rows. In multi-round runs, APPEND this round's decisions/rows to the existing
 `dedup_decisions.md` (do NOT overwrite prior rounds' decisions).
 
+### Group-line output (preferred)
+
+When the driver supplies `dedup_blocks.md` (in-context clustering blocks) and
+`dedup_focus_inventory.md`, you SHOULD emit decisions in the compact,
+line-oriented group form below. It scales to a few KB of output for any number
+of findings, so the whole inventory is reviewable in a single turn. This form
+**co-exists** with the legacy heading/row forms above — the driver unions all
+forms into one union-find before applying merges, so you may emit EITHER, but
+the group-lines are preferred for large inventories.
+
+For EACH `## Block N` table in `dedup_blocks.md`:
+
+- Read every listed finding's full body in `dedup_focus_inventory.md`.
+- Group findings that are the SAME defect (same root cause + same fix) and emit
+  ONE line per group you decide to merge:
+
+  ```
+  MERGE: <survivor_id>, <absorbed_id>, <absorbed_id>...	<=8-word reason
+  KEEP: <id>
+  ```
+
+- `MERGE:` — the FIRST id is the survivor, every later id is absorbed into it.
+  A `MERGE:` line MUST list at least two IDs; a single-ID MERGE is ignored.
+  The optional reason follows the ID list after a TAB and is ≤8 words.
+- `KEEP:` — a finding you reviewed and are keeping standalone. Advisory only:
+  it has no effect on apply and is used solely by the coverage gate to confirm
+  the block was reviewed.
+- **IDs only.** No JSON, no prose tables, no inventory/queue rewrite. IDs match
+  `(?:INV|F)-\d+`, case-insensitive, optional `[ ]` brackets.
+- The same survivor-superset gate applies: the survivor must be the finding
+  whose **Source IDs** are a SUPERSET and whose Location SUBSUMES the others. If
+  neither side is a superset, KEEP SEPARATE — the driver re-runs the
+  survivor-superset gate over every group and DROPS (keeps separate) any member
+  the gate rejects, so an over-eager MERGE never forces an unsafe merge.
+- **Cross-block transitivity** is recovered by the driver automatically: if one
+  block emits `MERGE: A, B` and another emits `MERGE: B, C`, the driver's
+  union-find resolves the component `{A, B, C}` and merges all three into a
+  single gate-chosen survivor. You do NOT need to restate cross-block links.
+- Never merge across different severity tiers; never merge a distinct second
+  defect. When in doubt, KEEP SEPARATE.
+
+Append all `MERGE:` / `KEEP:` lines to `dedup_decisions.md`. The
+zero-data-loss mandate, survivor coupling, and higher-severity inheritance
+(below) are applied mechanically by the driver on every group you emit.
+
 ### Survivor coupling (ZERO-DATA-LOSS — applies to both SC and L1)
 
 Before you remove ANY absorbed finding, you MUST first edit the SURVIVOR so it
