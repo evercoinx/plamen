@@ -632,6 +632,9 @@ def check_dependencies() -> bool:
             ("scout",   _find_bin("cargo-scout-audit", ["~/.cargo/bin"])),
             ("cargo-fuzz", _find_bin("cargo-fuzz", _CARGO_PATHS)),
         ]),
+        ("DAML", [
+            ("daml",    _find_bin("daml", _DAML_PATHS)),
+        ]),
         ("L1 (Go)", [
             ("go",       _find_bin("go", _GO_PATHS)),
             ("scip-go",  _find_bin("scip-go", _GO_PATHS)),
@@ -844,6 +847,9 @@ _AVM_PATHS = ["~/.avm/bin"]
 _CARGO_PATHS = ["~/.cargo/bin"]
 _GO_PATHS = ["~/.local/go/bin", "~/go/bin", "/usr/local/go/bin",
              "/c/Program Files/Go/bin", "C:/Program Files/Go/bin"]
+# DAML SDK install dirs: the Unix `get.daml.com` installer drops into
+# ~/.daml/bin; the Windows installer uses the APPDATA roaming form.
+_DAML_PATHS = ["~/.daml/bin", "~/AppData/Roaming/daml/bin"]
 
 
 _GO_BIN_DIR_CACHE = []  # memo box: [] = unresolved, [val] = resolved (val may be "")
@@ -1178,6 +1184,19 @@ def _stellar_cmds():
     return ['cargo install --locked stellar-cli']
 
 
+def _daml_sdk_cmds():
+    # JVM-based runtime: the DAML SDK requires a JDK at runtime. We do NOT
+    # auto-install the JDK (prereq is None in the recipe row) — it is documented
+    # as a manual requirement. Mirrors _stellar_cmds per-OS channel selection.
+    if sys.platform == "win32":
+        if _has_bash():
+            return ['curl -sSL https://get.daml.com | sh']
+        return ['winget install --id DigitalAsset.DamlSdk --accept-source-agreements --accept-package-agreements']
+    if sys.platform == "darwin" and _has_brew():
+        return ['brew install --cask digital-asset/daml/daml-sdk || curl -sSL https://get.daml.com | sh']
+    return ['curl -sSL https://get.daml.com | sh']
+
+
 def _scout_soroban_cmds():
     return ['cargo install cargo-scout-audit --locked']
 
@@ -1360,6 +1379,18 @@ _INSTALL_RECIPES = {
          ["~/.cargo/bin"], "rust"),
     ],
 
+    "DAML": [
+        # The DAML runtime is JVM-based and needs a JDK, but we do NOT
+        # auto-install the JDK (prereq=None) — it is documented as a manual
+        # requirement (winget Microsoft.OpenJDK / brew temurin / apt). The SDK
+        # installer itself is per-OS (mirrors the Stellar CLI channel logic).
+        ("DAML SDK (daml build / daml test / damlc)",
+         lambda: _find_bin("daml", _DAML_PATHS),
+         _daml_sdk_cmds,
+         ["daml"], "~2-4 min",
+         _DAML_PATHS, None),
+    ],
+
     "L1 (Go)": [
         ("scip-go (SCIP semantic index)",
          lambda: _find_bin("scip-go", _GO_PATHS),
@@ -1508,6 +1539,7 @@ _VERSION_PROBES = {
     "semgrep":            "--version",
     "go":                 "version",  # subcommand, not flag
     "cargo":              "--version",
+    "daml":               "version",  # subcommand, not flag
 }
 
 
@@ -1578,6 +1610,7 @@ def _report_toolchain_visibility(w):
         ("Aptos CLI",                  "aptos",  "plamen setup → Move", "Aptos Move audits"),
         ("Sui CLI",                    "sui",    "plamen setup → Move", "Sui Move audits"),
         ("Stellar CLI",                "stellar","plamen setup → Soroban", "Soroban audits"),
+        ("DAML SDK",                   "daml",   "plamen setup → DAML, or (in a real terminal) `curl -sSL https://get.daml.com | sh` (needs a JDK on PATH)", "DAML / Canton audits"),
         ("Go (scip-go, medusa)",       "go",     "plamen setup → installs Go, or system package manager", "L1 mode + Medusa"),
         ("Rust (cargo)",               "cargo",  "plamen setup → installs Rust, or (in a real terminal) `sh -c \"$(curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs)\"`", "L1 mode + Soroban + Solana"),
         ("cargo-fuzz",                 "cargo-fuzz", "plamen setup → Soroban / L1, or `rustup toolchain install nightly && cargo install cargo-fuzz --locked`", "Soroban + L1-Rust Thorough fuzz"),
@@ -1594,6 +1627,7 @@ def _report_toolchain_visibility(w):
         "aptos": ["~/.aptoscli/bin"],
         "sui": ["~/AppData/Local/bin", "~/.local/bin"],
         "stellar": _CARGO_PATHS + ["C:/Program Files/Stellar CLI", "C:/Program Files (x86)/Stellar CLI"],
+        "daml": _DAML_PATHS,
         "go": _GO_PATHS,
         "cargo": _CARGO_PATHS,
         "cargo-fuzz": _CARGO_PATHS,
@@ -4468,7 +4502,7 @@ def show_hint_panel():
 
 # Dirs skipped at ANY depth (build artifacts, tooling, never contain source)
 _SKIP_ALWAYS = {'node_modules', '.git', 'cache', 'artifacts', '.anchor', '.aptos', '.stellar', '.soroban',
-                'typechain', 'typechain-types', 'coverage', '__pycache__', 'vendor'}
+                '.daml', 'typechain', 'typechain-types', 'coverage', '__pycache__', 'vendor'}
 # Dirs skipped only at project ROOT level (contain deps/tests/scripts, not source)
 _SKIP_ROOT = {'lib', 'target', 'build', 'out', 'test', 'tests', 'mock', 'mocks',
               'script', 'deploy', 'migrations', 'flatten', 'docs', 'doc'}
@@ -4564,11 +4598,17 @@ def _count_loc(target: str, extensions: set, skip_patterns: set = None) -> int:
 
 
 def _detect_language(target: str) -> str:
-    """Detect project language: evm, solana, soroban, aptos, sui, go, rust."""
+    """Detect project language: evm, solana, soroban, aptos, sui, daml, go, rust."""
     sol_count = _count_loc(target, {".sol"})
     go_count = _count_loc(target, {".go"})
     rs_count = _count_loc(target, {".rs"})
     move_count = _count_loc(target, {".move"})
+    daml_count = _count_loc(target, {".daml"})
+
+    # .daml is an unambiguous source suffix (one suffix -> one language). When
+    # any .daml source is present and at least co-dominant, the project is DAML.
+    if daml_count > 0 and daml_count >= max(sol_count, go_count, rs_count, move_count):
+        return "daml"
 
     if sol_count > 0 and sol_count >= max(go_count, rs_count, move_count):
         return "evm"

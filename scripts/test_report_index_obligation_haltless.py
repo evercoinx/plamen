@@ -1,7 +1,7 @@
 """Haltless fix for the report_index obligation-retention halt.
 
 Reproduces the live L1 report_index hard-halt where an active Medium+
-`exact_value_binding` obligation whose only coverage disposition was
+`chain_upgrade_retention` obligation whose only coverage disposition was
 "DEFERRED — <reason>" caused `_validate_obligation_ledger_retention` to emit an
 issue that propagated through `_validate_report_coverage_semantic_contract` →
 `_validate_report_coverage_accounting` → driver `sys.exit(EXIT_DEGRADED)`.
@@ -36,8 +36,8 @@ _OBLIGATION_LEDGER = (
     '{\n'
     '  "schema_version": "plamen.obligation_ledger.v1",\n'
     '  "obligations": [\n'
-    '    {"id":"OBL-AB-001","class":"exact_value_binding","status":"active",'
-    '"severity_signal":"Medium","field_a":"msg.value","field_b":"amount"}\n'
+    '    {"id":"OBL-CHAIN-CH-1","class":"chain_upgrade_retention","status":"active",'
+    '"severity_signal":"Medium","source_id":"CH-1"}\n'
     '  ]\n'
     '}\n'
 )
@@ -57,7 +57,7 @@ def test_deferred_obligation_passes(tmp_path):
     # so the exact-pair relation does NOT prematurely close it — this exercises
     # the DEFERRED-acceptance path specifically, not pair closure.
     coverage = (
-        "OBL-AB-001 binding DEFERRED for follow-up review with documented "
+        "OBL-CHAIN-CH-1 chain DEFERRED for follow-up review with documented "
         "reason; lane did not run in this mode.\n"
     )
     issues = v._validate_obligation_ledger_retention(tmp_path, coverage)
@@ -78,7 +78,7 @@ def test_appendix_only_obligation_passes(tmp_path):
         _OBLIGATION_LEDGER, encoding="utf-8"
     )
     coverage = (
-        "OBL-AB-001 binding APPENDIX_ONLY minor disposition moved to appendix "
+        "OBL-CHAIN-CH-1 chain APPENDIX_ONLY minor disposition moved to appendix "
         "with documented reason.\n"
     )
     issues = v._validate_obligation_ledger_retention(tmp_path, coverage)
@@ -101,8 +101,8 @@ def test_unmentioned_obligation_still_flagged(tmp_path):
     # 3a. Validator-level: a genuinely unmentioned obligation (no disposition,
     # no report ID, no token) is STILL flagged. Silent-drop protection intact.
     coverage_text = (
-        "A nearby token-flow issue is covered, but the exact msg.value/amount "
-        "pair is never named and has no disposition."
+        "A nearby composition is discussed, but the CH-1 chain "
+        "is never named and has no disposition."
     )
     direct = v._validate_obligation_ledger_retention(tmp_path, coverage_text)
     assert direct, "Unmentioned obligation MUST still be flagged by the gate."
@@ -166,22 +166,22 @@ def test_report_id_or_refutation_still_passes(tmp_path):
     # Report ID present in the relevant unit.
     by_report_id = v._validate_obligation_ledger_retention(
         tmp_path,
-        "H-01 preserves OBL-AB-001 msg.value not validated against amount.",
+        "H-01 preserves OBL-CHAIN-CH-1 chain composition.",
     )
     assert by_report_id == [], f"report ID must satisfy gate. got: {by_report_id}"
 
     # Refutation token present (same claim unit as the obligation ID).
     by_refutation = v._validate_obligation_ledger_retention(
         tmp_path,
-        "OBL-AB-001 msg.value/amount binding REFUTED with no reachable path.",
+        "OBL-CHAIN-CH-1 chain REFUTED with no reachable path.",
     )
     assert by_refutation == [], (
         f"refutation token must satisfy gate. got: {by_refutation}"
     )
 
-    # Exact pair closure (existing path) still works.
-    by_pair = v._validate_obligation_ledger_retention(
+    # Merge disposition (existing path) still works.
+    by_merge = v._validate_obligation_ledger_retention(
         tmp_path,
-        "OBL-AB-001 msg.value is validated against amount before transfer.",
+        "CH-1 chain MERGED INTO H-01.",
     )
-    assert by_pair == [], f"exact pair closure must satisfy gate. got: {by_pair}"
+    assert by_merge == [], f"merge disposition must satisfy gate. got: {by_merge}"

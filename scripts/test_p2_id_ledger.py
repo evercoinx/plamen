@@ -600,22 +600,6 @@ def test_p25_backstop_ignores_report_tier_ids(tmp_path):
     assert issues == []
 
 
-def test_p25_backstop_ignores_asset_binding_matrix_ids(tmp_path):
-    """AB-* IDs are scope/asset-binding rows, not finding ledger IDs."""
-    id_ledger_register(
-        tmp_path, finding_id="HH-01", owner_phase="chain",
-        owner_attempt=1, owning_artifact="hypotheses.md", title="real high",
-    )
-    (tmp_path / "cross_batch_consistency.md").write_text(
-        "| Finding ID | Status | Notes |\n"
-        "|---|---|---|\n"
-        "| HH-01 | CONSISTENT | Related asset-binding row AB-001 was checked. |\n",
-        encoding="utf-8",
-    )
-    issues = _validate_consumer_ids_in_ledger(tmp_path, "crossbatch")
-    assert issues == []
-
-
 def test_p25_backstop_ignores_inv_for_now(tmp_path):
     """INV-* allowed without ledger entry (legacy compatibility)."""
     # No ledger entries; but consumer references INV-099.

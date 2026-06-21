@@ -46,6 +46,7 @@ You do **not** need all chain tools. Install only the ones for your target:
 | **Aptos Move** | Aptos CLI | `plamen setup` → select Move |
 | **Sui Move** | Sui CLI | `plamen setup` → select Move |
 | **Soroban / Stellar** | Stellar CLI + Rust | `plamen setup` → select Soroban |
+| **DAML / Canton** | DAML SDK (`daml` CLI) | install the DAML SDK; auto-detected on `.daml` sources |
 | **L1 / Node Client** | Go or Rust + scip-go/rust-analyzer | `plamen setup` → select L1 |
 
 > **Slither** (EVM static analysis) and **Medusa** (EVM stateful fuzzing) are recommended but optional. The pipeline works without them — it just has less static analysis coverage.

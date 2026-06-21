@@ -223,8 +223,14 @@ def test_dedup_prompt_override_mentions_bounded_focus_inputs():
     try:
         prompt = D.build_phase_prompt(v1, phase, config)
         assert "dedup_focus_inventory.md" in prompt
-        assert "dedup_candidate_pairs_full.md" in prompt
-        assert "do not expand the live packet" in prompt
+        # Cluster-first redesign: the PRIMARY bounded input is now the
+        # clustering-blocks file. The candidate-pairs files are fallback-only
+        # shim artifacts, no longer handed to the LLM. The test's intent —
+        # the prompt points at BOUNDED inputs, never the full inventory —
+        # is preserved by dedup_blocks.md + dedup_focus_inventory.md.
+        assert "dedup_blocks.md" in prompt
+        # No-full-inventory guard (the bounded-input invariant) preserved.
+        assert "Do NOT read" in prompt and "findings_inventory.md" in prompt
     finally:
         v1.unlink(missing_ok=True)
 

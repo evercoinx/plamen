@@ -235,7 +235,13 @@ def _format_test_command(template: str, test_function: str,
         cmd = cmd.replace("test_{id}", test_function)
     cmd = cmd.replace("{id}", id_suffix)
     if test_file:
-        cmd = cmd.replace("{test_path}", test_file.replace("\\", "/"))
+        norm_file = test_file.replace("\\", "/")
+        cmd = cmd.replace("{test_path}", norm_file)
+        # DAML: `daml test --files {file}` has no per-test name filter
+        # (test_filter_mode == "daml_no_filter"). `daml test` runs every
+        # in-scope Script(); isolation is file-scoped, so the {file} token is
+        # the per-PoC isolated file path. NEVER attempt --match-test/--filter.
+        cmd = cmd.replace("{file}", norm_file)
     # Tokenize on whitespace (registry commands don't contain quoted args)
     argv = cmd.split()
     if lang in ("solana", "soroban", "l1_rust") and test_function:
@@ -264,6 +270,7 @@ _BUILD_MANIFESTS: dict[str, tuple[str, ...]] = {
     "sui": ("Move.toml",),
     "l1_go": ("go.mod",),
     "l1_rust": ("Cargo.toml",),
+    "daml": ("daml.yaml", "Daml.toml"),
 }
 
 
@@ -663,6 +670,28 @@ def _classify_non_evm_outcome(language: str, rc: int, stdout: str) -> str:
         if rc != 0:
             return "FAIL"
         # rc==0 but no PASS/OK marker → zero tests matched, not a real pass.
+        return "NO_TEST_MATCH"
+    # DAML (Canton) — `daml test --files <file>` runs every Script() in scope.
+    # No per-test name filter (daml_no_filter); isolation is file-scoped.
+    if language == "daml":
+        sl = s.lower()
+        # Compilation problems surface before any test runs.
+        if re.search(r"error:|file does not compile|parse error|"
+                     r"type checking|scope error|unknown identifier", sl):
+            return "COMPILE_FAIL"
+        # No Script() in the file → nothing executed, not a pass.
+        if "no scripts" in sl or re.search(r"\b0\s+(?:of\s+\d+\s+)?(?:tests?|scripts?)\b", sl):
+            return "NO_TEST_MATCH"
+        # Runtime PoC failures map to FAIL (the assertion/precondition fired).
+        if rc != 0 or re.search(
+            r"failed|preconditionfailed|assertion|unhandled exception|"
+            r"abort|errors?:\s*[1-9]", sl
+        ):
+            return "FAIL"
+        # rc==0 plus a positive test-summary marker is a genuine pass.
+        if re.search(r"test summary|tests?\s+passed|\bok\b|all scripts? ran", sl):
+            return "PASS"
+        # rc==0 but no positive marker → treat as zero-matched, not a pass.
         return "NO_TEST_MATCH"
     return "EXEC_ERROR"
 

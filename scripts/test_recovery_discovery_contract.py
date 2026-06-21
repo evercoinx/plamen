@@ -144,27 +144,6 @@ def test_attention_repair_queues_missing_perturbation_blocks(tmp_path: Path):
     assert any(i["kind"] == "missing-perturbation-block" for i in items)
 
 
-def test_asset_binding_coverage_requires_exact_pair_claim():
-    mech = _load("plamen_mechanical")
-
-    adjacent = (
-        "## Finding [H-1]: Asset mismatch\n"
-        "executedAsset is not validated and may be user controlled. "
-        "declaredAsset appears elsewhere in the route metadata.\n"
-    )
-    exact = (
-        "## Finding [H-2]: Asset mismatch\n"
-        "declaredAsset is not validated against executedAsset before value moves.\n"
-    )
-
-    assert not mech._active_binding_pair_covered(
-        adjacent, "declaredAsset", "executedAsset"
-    )
-    assert mech._active_binding_pair_covered(
-        exact, "declaredAsset", "executedAsset"
-    )
-
-
 def test_chain_anti_absorption_repair_splits_overmerged_groups(tmp_path: Path):
     validators = _load("plamen_validators")
     (tmp_path / "findings_inventory.md").write_text(

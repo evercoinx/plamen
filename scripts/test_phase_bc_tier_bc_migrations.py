@@ -408,67 +408,6 @@ def test_c_invariants_p2_legacy_colon_form_still_silent(caplog):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  TIER C / SITE — _validate_attention_repair rich [TRACE]/[VARIATION] closures
-# ════════════════════════════════════════════════════════════════════════════
-
-def _attention_scratch(summary_body: str) -> Path:
-    queue = (
-        "# Attention Repair Queue\n"
-        "| # | Kind | Target |\n"
-        "| --- | --- | --- |\n"
-        "| 1 | asset-binding-gap | AB-1: `tokenA` <-> `tokenB` |\n"
-    )
-    summary = "# Attention Repair Summary\n" + summary_body
-    return _scratch(
-        attention_repair_queue__md=queue,
-        attention_repair_summary__md=summary,
-        attention_repair_findings__md="# Findings\n" + ("x" * 50) + "\n",
-    )
-
-
-def test_c_attention_repair_rigid_safe_reason_still_accepted():
-    # STRICT SUPERSET: the rigid SAFE_REASON:<ENUM> closure naming both fields
-    # is still accepted (no soft asset-pair WARN).
-    body = (
-        "| 1 | SAFE | proof | "
-        "SAFE_REASON: EXPLICIT_BINDING_CHECK tokenA equals tokenB by construction |\n"
-    )
-    d = _attention_scratch(body)
-    hard, soft = V._validate_attention_repair(d, "thorough")
-    assert hard == []
-    assert not any("asset-binding closure is vague" in s for s in soft)
-
-
-def test_c_attention_repair_rich_trace_closure_no_false_warn():
-    # THE LIVE SHAPE: a SAFE row closed with a rich [TRACE: ...] depth-evidence
-    # closure that names BOTH queued fields must NOT emit the false
-    # "marks SAFE without SAFE_REASON" soft WARN.
-    body = (
-        "| 1 | SAFE | proof | "
-        "[TRACE: tokenA → tokenB binding verified at L120, disjoint paths] |\n"
-    )
-    d = _attention_scratch(body)
-    hard, soft = V._validate_attention_repair(d, "thorough")
-    assert hard == []
-    assert not any("marks SAFE without" in s for s in soft), soft
-
-
-def test_c_attention_repair_safe_without_any_closure_still_warns():
-    # NEGATIVE CONTROL: a SAFE row with NO closure form (no enum, no depth tag)
-    # still produces the soft WARN (no over-relaxation). Pad the summary past
-    # the 100-byte stub floor so the mechanical hard gate is not what fires.
-    body = (
-        "| 1 | SAFE | trust me | it is fine |\n"
-        "Some additional narrative padding so the summary clears the stub size "
-        "floor and the asset-pair soft gate is the only signal under test.\n"
-    )
-    d = _attention_scratch(body)
-    hard, soft = V._validate_attention_repair(d, "thorough")
-    assert hard == []
-    assert any("asset-binding closure is vague" in s or "marks SAFE" in s for s in soft)
-
-
-# ════════════════════════════════════════════════════════════════════════════
 #  TIER C / SITE — _missing_perturbation_block_ids tolerant Verdict/Severity
 # ════════════════════════════════════════════════════════════════════════════
 

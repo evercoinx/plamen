@@ -70,61 +70,26 @@ def test_oblig_receipt_re_unicode_arrow():
     assert m.group("status").upper() == "DISMISSED"
 
 
-def test_asset_binding_matrix_ignores_stale_report_coverage(tmp_path):
-    m = _m()
-    (tmp_path / "design_context.md").write_text(
-        "Gateway swap path mentions params.fromToken, zrc20, params.toToken, targetZRC20, amount, and value moves.\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "report_index.md").write_text(
-        "Stale prior report says params.fromToken is checked against zrc20.\n",
-        encoding="utf-8",
-    )
-    rows, gaps = m._write_asset_binding_matrix(tmp_path, "thorough")
-    assert rows > 0
-    assert gaps > 0
-    ledger = (tmp_path / "obligation_ledger.json").read_text(encoding="utf-8")
-    assert "exact_value_binding" in ledger
-    assert '"status": "active"' in ledger
-
-
-def test_asset_binding_matrix_accepts_attention_repair_exact_closure(tmp_path):
-    m = _m()
-    (tmp_path / "design_context.md").write_text(
-        "Swap gateway value path mentions params.fromToken and zrc20 before value moves.\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "attention_repair_summary.md").write_text(
-        "| Queue # | Kind | Target | Verdict | Evidence | Notes |\n"
-        "|---|---|---|---|---|---|\n"
-        "| 1 | asset-binding-gap | `AB-001: params.fromToken <-> zrc20` | SAFE | Router.sol:L10 proves params.fromToken is validated against zrc20 before transfer | SAFE_REASON:EXPLICIT_BINDING_CHECK |\n",
-        encoding="utf-8",
-    )
-    rows, gaps = m._write_asset_binding_matrix(tmp_path, "thorough")
-    assert rows >= 1
-    assert gaps == 0
-
-
-def test_obligation_retention_requires_exact_value_pair_or_absorber(tmp_path):
+def test_obligation_retention_requires_chain_upgrade_coverage_or_absorber(tmp_path):
     v = _v()
     (tmp_path / "obligation_ledger.json").write_text(
         '{\n'
         '  "schema_version": "plamen.obligation_ledger.v1",\n'
         '  "obligations": [\n'
-        '    {"id":"OBL-AB-001","class":"exact_value_binding","status":"active",'
-        '"severity_signal":"High","field_a":"params.fromToken","field_b":"zrc20"}\n'
+        '    {"id":"OBL-CHAIN-CH-1","class":"chain_upgrade_retention","status":"active",'
+        '"severity_signal":"High","source_id":"CH-1"}\n'
         '  ]\n'
         '}\n',
         encoding="utf-8",
     )
     bad = v._validate_obligation_ledger_retention(
         tmp_path,
-        "A nearby token-flow issue is covered, but the exact pair is never named.",
+        "A nearby composition is discussed, but the chain itself is never named.",
     )
     assert bad
     good = v._validate_obligation_ledger_retention(
         tmp_path,
-        "H-01 preserves params.fromToken not validated against zrc20 before transfer.",
+        "CH-1 is preserved and merged into H-01 in the report.",
     )
     assert good == []
 
@@ -136,11 +101,11 @@ def test_report_coverage_parser_does_not_read_obligation_status_as_severity():
         "| Source File | Candidate ID / Label | Severity Signal | Status | Report ID / Refutation / Reason |\n"
         "|---|---|---|---|---|\n"
         "| depth_token_flow_findings.md | H-01 (INV-001) | High | PROMOTED | H-01 |\n\n"
-        "## Asset Binding Obligations\n\n"
+        "## Chain Retention Obligations\n\n"
         "| Obligation ID | Field Binding | Status | Covered By |\n"
         "|---|---|---|---|\n"
-        "| OBL-AB-001 | params.toToken <-> decoded.targetZRC20 | covered | H-01 |\n"
-        "| OBL-AB-002 | params.fromToken <-> zrc20 | covered | M-01 |\n"
+        "| OBL-CHAIN-CH-1 | inputToken <-> outputToken | covered | H-01 |\n"
+        "| OBL-CHAIN-CH-2 | fromToken <-> toToken | covered | M-01 |\n"
     )
     rows = v._parse_report_coverage_rows_for_contract(text)
     assert len(rows) == 1
@@ -503,3 +468,329 @@ def test_gates_exported_via_all():
     ):
         assert hasattr(v, name)
         assert name in v.__all__
+
+
+# ===========================================================================
+# Work Item 2 Part (b): chain-High first-class + collapse duplicate
+# obligation rows. All fixtures are synthetic/generic (no protocol names).
+# ===========================================================================
+
+
+def _chain_section(chain_id, a_id, b_id, *, justified, combined_impact="NONE", severity="High"):
+    """Render one chain hypothesis section (phase4c-chain-prompt.md format)."""
+    blocks = [
+        f"## Chain Hypothesis {chain_id}",
+        "### Blocked Finding (A)",
+        f"- **ID**: {a_id}, **Title**: blocked attack",
+        "### Enabler Finding (B)",
+        f"- **ID**: {b_id}, **Title**: enabler finding",
+        "### Severity Reassessment",
+        f"Chain Severity: {severity}",
+        f"Constituents: {a_id},{b_id} | Severity-Upgrade-Justified: "
+        f"{'YES' if justified else 'NO'} | Combined-Impact: {combined_impact}",
+        "",
+    ]
+    return "\n".join(blocks)
+
+
+# --- B1: obligation ledger dedup ------------------------------------------
+
+
+def test_composition_obligation_dedup_by_chain_id(tmp_path):
+    """CH-1 referenced on 6 lines + CH-2 on 3 -> exactly 2 obligation rows,
+    not 9. Highest severity retained; evidence unioned."""
+    m = _m()
+    sp = tmp_path
+    lines = ["# Composition Coverage", ""]
+    for _ in range(6):
+        lines.append("| A | B | NO | CH-1 UPGRADE: cross-user fund loss | note |")
+    for _ in range(3):
+        lines.append("| C | D | NO | CH-2 COMPOSED theft of funds | note |")
+    (sp / "composition_coverage.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    rows = m._composition_obligation_rows(sp)
+    assert len(rows) == 2, f"expected 2 deduped rows, got {len(rows)}"
+    by_src = {str(r["source_id"]): r for r in rows}
+    assert set(by_src) == {"CH-1", "CH-2"}
+    assert by_src["CH-1"]["severity_signal"] in ("High", "Medium")
+    assert ";" in str(by_src["CH-1"]["evidence"])
+
+
+def test_composition_obligation_single_line_one_row(tmp_path):
+    """Guard: a single-chain single-line input still yields exactly 1 row."""
+    m = _m()
+    sp = tmp_path
+    (sp / "composition_coverage.md").write_text(
+        "# Composition Coverage\n\n"
+        "| A | B | NO | CH-7 UPGRADE drain of funds | note |\n",
+        encoding="utf-8",
+    )
+    rows = m._composition_obligation_rows(sp)
+    assert len(rows) == 1
+    assert rows[0]["source_id"] == "CH-7"
+    assert rows[0]["status"] == "active"
+
+
+def test_composition_obligation_all_declined_covered(tmp_path):
+    """Conservative declined flag: a chain is covered only if EVERY line
+    declined; one non-declined line keeps it active."""
+    m = _m()
+    sp = tmp_path
+    (sp / "composition_coverage.md").write_text(
+        "# Composition Coverage\n\n"
+        "| A | B | NO | CH-9 UPGRADE fund loss, noting but not assigning a formal CH ID | x |\n"
+        "| A | B | NO | CH-9 UPGRADE fund loss real exploit path | x |\n",
+        encoding="utf-8",
+    )
+    rows = m._composition_obligation_rows(sp)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "active"
+
+
+# --- B1: readable risk rows -----------------------------------------------
+
+
+def test_obligation_retention_rows_are_distinct(tmp_path):
+    """2-row ledger + non-preserving coverage -> 2 DISTINCT issue strings each
+    naming source_id + severity + target excerpt, not N identical clones."""
+    v = _v()
+    m = _m()
+    sp = tmp_path
+    lines = ["# Composition Coverage", ""]
+    for _ in range(4):
+        lines.append("| A | B | NO | CH-1 UPGRADE cross-user fund loss alpha | n |")
+    for _ in range(3):
+        lines.append("| C | D | NO | CH-2 UPGRADE theft of funds beta | n |")
+    (sp / "composition_coverage.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    m._write_obligation_ledger(sp, "thorough")
+    issues = v._validate_obligation_ledger_retention(sp, "no coverage here at all")
+    assert len(issues) == 2, f"expected 2 distinct issues, got {issues}"
+    assert issues[0] != issues[1]
+    joined = " ".join(issues)
+    assert "CH-1" in joined and "CH-2" in joined
+
+
+# --- B2: force-include justified High chains into the seed -----------------
+
+
+def test_forced_chain_seed_rows_include_justified_high(tmp_path):
+    """A justified High chain with a constituent absent from the queue is
+    force-included (chain id + constituents) by _forced_chain_seed_rows."""
+    v = _v()
+    sp = tmp_path
+    (sp / "chain_hypotheses.md").write_text(
+        "# Chain Hypotheses\n\n"
+        + _chain_section("CH-1", "H-1", "H-23", justified=True,
+                         combined_impact="cross-user drain not possible alone",
+                         severity="High"),
+        encoding="utf-8",
+    )
+    forced = v._forced_chain_seed_rows(sp)
+    assert "CH-1" in forced
+    assert forced["CH-1"]["severity"] == "High"
+    assert set(forced["CH-1"]["constituents"]) == {"H-1", "H-23"}
+
+
+def test_forced_chain_seed_skips_unjustified(tmp_path):
+    """An unjustified chain (Severity-Upgrade-Justified: NO) is NOT force-
+    included -- it is absorbed into its constituents elsewhere."""
+    v = _v()
+    sp = tmp_path
+    (sp / "chain_hypotheses.md").write_text(
+        "# Chain Hypotheses\n\n"
+        + _chain_section("CH-2", "H-1", "H-2", justified=False,
+                         combined_impact="NONE", severity="High"),
+        encoding="utf-8",
+    )
+    assert v._forced_chain_seed_rows(sp) == {}
+
+
+def test_forced_chain_seed_matrix_arrow_format(tmp_path):
+    """REAL chain_hypotheses.md format: severity is declared via
+    'Chain Severity Matrix: ... -> HIGH' (NOT a bare 'Chain Severity:' line).
+    Regression for the silent-drop bug where a justified High chain expressed
+    this way was missed and never force-included (caught on the live BB run)."""
+    v = _v()
+    sp = tmp_path
+    section = "\n".join([
+        "## Chain Hypothesis CH-1",
+        "### Blocked Finding (A)",
+        "- **ID**: H-23, **Title**: blocked attack",
+        "### Enabler Finding (B)",
+        "- **ID**: H-01, **Title**: enabler finding",
+        "### Severity Reassessment",
+        "**Chain Severity Matrix**: LOW (A) + MEDIUM+ (B) → **HIGH**",
+        "`Constituents: H-23,H-01 | Severity-Upgrade-Justified: YES | "
+        "Combined-Impact: dual-victim drain neither constituent produces alone`",
+        "",
+    ])
+    (sp / "chain_hypotheses.md").write_text(
+        "# Chain Hypotheses\n\n" + section, encoding="utf-8"
+    )
+    forced = v._forced_chain_seed_rows(sp)
+    assert "CH-1" in forced, "matrix-arrow-form High must be force-included"
+    assert forced["CH-1"]["severity"] == "High"
+    assert set(forced["CH-1"]["constituents"]) == {"H-23", "H-01"}
+
+
+def test_forced_chain_seed_summary_table_fallback(tmp_path):
+    """When the section has neither a bare 'Chain Severity:' line nor a matrix
+    arrow, the chain id's summary-table row supplies the severity (3rd
+    fallback in _chain_section_severity)."""
+    v = _v()
+    sp = tmp_path
+    section = "\n".join([
+        "## Summary",
+        "| Chain ID | Finding A | Finding B | Chain Severity |",
+        "|----------|-----------|-----------|----------------|",
+        "| CH-9 | H-1 (blocked) | H-2 (enabler) | **High** |",
+        "",
+        "## Chain Hypothesis CH-9",
+        "### Severity Reassessment",
+        "`Constituents: H-1,H-2 | Severity-Upgrade-Justified: YES | "
+        "Combined-Impact: concrete combined loss`",
+        "",
+    ])
+    (sp / "chain_hypotheses.md").write_text(
+        "# Chain Hypotheses\n\n" + section, encoding="utf-8"
+    )
+    forced = v._forced_chain_seed_rows(sp)
+    assert forced.get("CH-9", {}).get("severity") == "High"
+
+
+def test_chain_section_severity_three_forms(tmp_path):
+    """Unit guard on the format-tolerant extractor: bare line, matrix arrow,
+    and summary-table forms all resolve; absent severity returns ''."""
+    v = _v()
+    assert v._chain_section_severity("Chain Severity: Critical", "", "CH-1") == "Critical"
+    assert v._chain_section_severity(
+        "**Chain Severity Matrix**: LOW + MEDIUM → **HIGH**", "", "CH-1") == "High"
+    full = "| CH-1 | a | b | **High** |"
+    assert v._chain_section_severity("no severity here", full, "CH-1") == "High"
+    assert v._chain_section_severity("nothing", "", "CH-1") == ""
+
+
+def test_forced_chain_seed_mode_agnostic(tmp_path):
+    """Force-include is mode-agnostic: the helper reads no mode and is
+    deterministic across calls."""
+    v = _v()
+    sp = tmp_path
+    (sp / "chain_hypotheses.md").write_text(
+        "# Chain Hypotheses\n\n"
+        + _chain_section("CH-5", "H-3", "H-8", justified=True,
+                         combined_impact="liveness brick absent in either alone",
+                         severity="Critical"),
+        encoding="utf-8",
+    )
+    a = v._forced_chain_seed_rows(sp)
+    b = v._forced_chain_seed_rows(sp)
+    assert a == b
+    assert a["CH-5"]["severity"] == "Critical"
+
+
+# --- B2 #4: deferred-note fallback ----------------------------------------
+
+
+def test_deferred_chain_note_when_unqueueable(tmp_path):
+    """A justified High chain whose constituents are absent from the verify
+    queue -> exactly ONE deferred note line + obligation row marked covered."""
+    v = _v()
+    m = _m()
+    sp = tmp_path
+    (sp / "chain_hypotheses.md").write_text(
+        "# Chain Hypotheses\n\n"
+        + _chain_section("CH-1", "H-1", "H-23", justified=True,
+                         combined_impact="cross-user drain absent alone",
+                         severity="High"),
+        encoding="utf-8",
+    )
+    (sp / "verification_queue.md").write_text(
+        "| Queue # | Finding ID | Severity | Title |\n"
+        "|---------|------------|----------|-------|\n",
+        encoding="utf-8",
+    )
+    (sp / "composition_coverage.md").write_text(
+        "# Composition Coverage\n\n"
+        "| A | B | NO | CH-1 UPGRADE cross-user fund loss | n |\n",
+        encoding="utf-8",
+    )
+    m._write_obligation_ledger(sp, "core")
+    note_path = sp / "report_semantic_chain_deferred.md"
+    assert note_path.exists()
+    text = note_path.read_text(encoding="utf-8")
+    assert text.count("Deferred finding (chain-derived, estimated High)") == 1
+    assert "CH-1" in text and "H-1" in text and "H-23" in text
+    issues = v._validate_obligation_ledger_retention(sp, "no coverage")
+    assert issues == [], f"expected no UNACCOUNTED obligations, got {issues}"
+
+
+def test_deferred_chain_note_skipped_when_queueable(tmp_path):
+    """If a constituent IS in the verify queue, the chain is queue-able and no
+    deferred note is emitted (it reaches the body via verification)."""
+    m = _m()
+    sp = tmp_path
+    (sp / "chain_hypotheses.md").write_text(
+        "# Chain Hypotheses\n\n"
+        + _chain_section("CH-1", "H-1", "H-23", justified=True,
+                         combined_impact="cross-user drain absent alone",
+                         severity="High"),
+        encoding="utf-8",
+    )
+    (sp / "verification_queue.md").write_text(
+        "| Queue # | Finding ID | Severity | Title |\n"
+        "|---------|------------|----------|-------|\n"
+        "| 1 | H-1 | High | constituent in queue |\n",
+        encoding="utf-8",
+    )
+    deferred = m._render_deferred_chain_notes(sp)
+    assert deferred == set()
+    assert not (sp / "report_semantic_chain_deferred.md").exists()
+
+
+# --- B2 test 5: severity-regression guard (load-bearing) ------------------
+
+
+def _verify_for(sp, fid, sev):
+    (sp / f"verify_{fid}.md").write_text(
+        f"**Severity**: {sev}\n\n**Verdict**: CONFIRMED\n\n"
+        "**Evidence Tag**: [POC-PASS]\n",
+        encoding="utf-8",
+    )
+
+
+def test_chain_force_include_is_additive_no_severity_regression(tmp_path):
+    """Snapshot the per-finding expected severities BEFORE and AFTER adding a
+    justified-High chain file. The force-include / deferred logic is ADD-only:
+    no EXISTING finding's severity may change."""
+    v = _v()
+    sp = tmp_path
+    (sp / "config.json").write_text("{}", encoding="utf-8")
+    (sp / "verification_queue.md").write_text(
+        "| Queue # | Finding ID | Severity | Title |\n"
+        "|---------|------------|----------|-------|\n"
+        "| 1 | INV-A | Medium | a |\n"
+        "| 2 | INV-B | High | b |\n",
+        encoding="utf-8",
+    )
+    _verify_for(sp, "INV-A", "Medium")
+    _verify_for(sp, "INV-B", "High")
+
+    before = dict(v._expected_report_index_severities(sp))
+
+    # Now add a justified-High chain referencing OTHER ids (not in the queue).
+    (sp / "chain_hypotheses.md").write_text(
+        "# Chain Hypotheses\n\n"
+        + _chain_section("CH-1", "H-9", "H-10", justified=True,
+                         combined_impact="compound drain absent alone",
+                         severity="High"),
+        encoding="utf-8",
+    )
+    after = dict(v._expected_report_index_severities(sp))
+
+    # Every pre-existing finding's severity is byte-identical.
+    for fid, sev in before.items():
+        assert after.get(fid) == sev, (
+            f"severity regression: {fid} {sev} -> {after.get(fid)}"
+        )
+    # The expected-severities map is queue-driven and unchanged (the chain seed
+    # promotion happens in the driver seed builder, additively).
+    assert set(after) == set(before)

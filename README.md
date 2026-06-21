@@ -1,10 +1,10 @@
-# Plamen (v2.1.0)
+# Plamen (v2.1.3)
 
 Autonomous Web3 security auditor for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [OpenAI Codex CLI](https://github.com/openai/codex).
 
 Orchestrates 18-100 AI agents across 8 phases to produce audit reports with verified PoC exploits — for **smart contracts** and **L1 node-client infrastructure**.
 
-Supports **EVM/Solidity**, **Solana/Anchor**, **Aptos Move**, **Sui Move**, **Soroban/Stellar**, and **L1 Go/Rust node clients**.
+Supports **EVM/Solidity**, **Solana/Anchor**, **Aptos Move**, **Sui Move**, **Soroban/Stellar**, **DAML/Canton**, and **L1 Go/Rust node clients**.
 
 ---
 
@@ -449,6 +449,7 @@ Codex shares methodology via `~/.codex/plamen/` (symlinked to `~/.plamen/`). Con
 | **Aptos Move** | aptos CLI | Move Prover | Parameterized tests |
 | **Sui Move** | sui CLI | -- | Parameterized tests |
 | **Soroban/Stellar** | Stellar CLI | -- | proptest, cargo-fuzz |
+| **DAML/Canton** | daml CLI (`daml build`/`daml test`) | -- (DLint is style-only) | DAML Script boundary-value tests |
 | **L1 Go/Rust** | go build, cargo | scip-go, rust-analyzer, Opengrep | proptest, go test -fuzz |
 
 Ecosystem (language) is auto-detected and **auto-corrected at startup** with no halt-to-rerun — the resolved ecosystem is shown on the startup banner. Detection uses manifest-priority rules (a suffix-only match never clobbers an explicit config; Pinocchio / native-SDK Solana is detected at high confidence).

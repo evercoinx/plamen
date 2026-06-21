@@ -18,14 +18,15 @@ skill execution gaps, invariant fuzz results, Medusa fuzz findings, and the
 depth lifecycle markers. Record any extra context inside a depth-owned
 output and stop.
 
-If `{SCRATCHPAD}/asset_binding_matrix.md` exists, treat it as a compact
-driver-generated value-binding checklist. It is not an expected-finding list.
-For each row relevant to your assigned role, either produce a normal finding
-with file:line evidence for an unbound asset/amount/recipient/provenance pair,
-or record why the pair is bound, unreachable, or irrelevant. Close rows exactly:
-if the row asks about `A <-> B`, do not treat a nearby issue involving only
-`A`, only `B`, or a sibling field as coverage. Your finding or dismissal must
-name both fields and the relationship between them.
+If `{SCRATCHPAD}/security_obligations.md` exists, treat it as a compact
+driver-generated security-obligation checklist (generic vulnerability-class
+questions, e.g. "are asset-in/out/recipient/amount bound to trusted context
+before value moves?"). It is NOT an expected-finding list. For each obligation
+relevant to your assigned role, either produce a normal finding with file:line
+evidence where the obligation is violated, or record why the obligation is
+satisfied, unreachable, or irrelevant in this codebase. Answer the obligation
+question as asked — do not treat a nearby unrelated issue as coverage of a
+different obligation.
 
 ## Light Mode Override
 

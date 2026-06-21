@@ -17,6 +17,7 @@ __all__ = [
     "CLAUDE_BIN", "CODEX_BIN", "Checkpoint",
     "plamen_home",
     "EVIDENCE_TAGS_PROOF", "EVIDENCE_TAGS_TRACE", "EVIDENCE_TAGS_FAIL",
+    "EVIDENCE_TAGS_PROD", "has_proof_grade_evidence",
     "EVIDENCE_TAGS_ALL", "EVIDENCE_TAG_DEFAULT", "EVIDENCE_TAG_NAMES_RE",
     "DEPTH_EVIDENCE_TAG_NAMES", "DEPTH_EVIDENCE_TAG_RE",
     "FINDING_BLOCK_HEADING_RE",
@@ -176,14 +177,36 @@ EVIDENCE_TAGS_PROOF: frozenset[str] = frozenset({
 })
 EVIDENCE_TAGS_TRACE: frozenset[str] = frozenset({"[CODE-TRACE]", "[LSP-TRACE]"})
 EVIDENCE_TAGS_FAIL: frozenset[str] = frozenset({"[POC-FAIL]"})
+# Production / on-chain proof-grade tags (confidence model rates these 0.9-1.0).
+# Verifiers emit these when a finding is confirmed against forked or live
+# on-chain state. Kept SEPARATE from EVIDENCE_TAGS_PROOF so the narrow
+# "a mechanical test passed" semantics of has_mechanical_proof stay intact;
+# proof-GRADE checks (has_proof_grade_evidence) OR these in.
+EVIDENCE_TAGS_PROD: frozenset[str] = frozenset({
+    "[PROD-ONCHAIN]", "[PROD-SOURCE]", "[PROD-FORK]",
+})
 EVIDENCE_TAGS_ALL: frozenset[str] = EVIDENCE_TAGS_PROOF | EVIDENCE_TAGS_TRACE | EVIDENCE_TAGS_FAIL
 EVIDENCE_TAG_DEFAULT = "CODE-TRACE"
 EVIDENCE_TAG_NAMES_RE = "|".join(sorted(t.strip("[]") for t in EVIDENCE_TAGS_ALL))
 
 
 def has_mechanical_proof(text: str) -> bool:
-    """True if *text* contains any proof-grade evidence tag."""
+    """True if *text* contains a mechanical-test-pass evidence tag
+    (POC/MEDUSA/FUZZ/NON-DET/DIFF/CONFORMANCE). Narrow by design."""
     return any(tag in text for tag in EVIDENCE_TAGS_PROOF)
+
+
+def has_proof_grade_evidence(text: str) -> bool:
+    """True if *text* carries proof-GRADE evidence: a mechanical-test-pass tag
+    OR a production/on-chain verification tag ([PROD-ONCHAIN/SOURCE/FORK]).
+
+    Proven-only severity gating must use THIS, not has_mechanical_proof: a
+    finding confirmed against forked/live state is proof-grade and must not be
+    capped at Low. has_mechanical_proof stays narrow (test-pass only) for the
+    callers that genuinely mean "a test executed and passed"."""
+    return has_mechanical_proof(text) or any(
+        tag in text for tag in EVIDENCE_TAGS_PROD
+    )
 
 
 # ── Depth evidence tag vocabulary (Ship A — single source of truth) ────────
@@ -675,11 +698,21 @@ def phase_model(phase: Phase, mode: str, config: Optional[dict] = None) -> str:
             (config.get("pipeline") if config else None) == "sc"
             and name == "report_index"
         )
+        # SC Thorough semantic dedup (Phase 4e) → Opus. In-context-clustering
+        # MERGE/KEEP adjudication is precision-critical (a false merge HIDES a
+        # finding), so the stronger model improves decision quality; Opus's
+        # larger budget also comfortably absorbs the bounded clustering-block
+        # input. SC-only (L1 has its own dedup path); Core/Light stay on sonnet.
+        is_sc_semantic_dedup = (
+            (config.get("pipeline") if config else None) == "sc"
+            and name == "sc_semantic_dedup"
+        )
         promote = (
             name in ("breadth", "skeptic")
             or is_sc_verify_shard
             or is_l1_verify_shard
             or is_sc_report_index
+            or is_sc_semantic_dedup
         )
         tier = "opus" if promote else (phase.model or "sonnet").strip()
         if tier == "opus":
@@ -1325,10 +1358,23 @@ SC_PHASES = [
     Phase("report_assemble", ["Step 6c: Assembler"],
           ["AUDIT_REPORT.md"],
           base_timeout_s=3600, model="sonnet", critical=True),
+    # LLM consolidation PROPOSER. Reads the assembled AUDIT_REPORT.md and
+    # proposes cross-tier / no-location MERGES and Quality-Observation
+    # reclassifications that the mechanical signals cannot pair. Writes a
+    # decisions file ONLY — it never edits the report; the Python report_dedup
+    # phase below executes its proposals through the zero-data-loss gate.
+    # critical=False is LOAD-BEARING: a crash/timeout/degrade here MUST NOT
+    # halt the run — report_dedup then runs its mechanical-only pass exactly as
+    # before this phase existed.
+    Phase("report_dedup_agent", ["Step 6d: Report Dedup"],
+          ["report_dedup_agent_decisions.md"],
+          base_timeout_s=900, model="sonnet", critical=False),
     # Python-native cross-tier dedup. critical=False is LOAD-BEARING: a
     # crash/timeout/data-loss-veto here MUST NOT halt the run or corrupt the
     # delivered AUDIT_REPORT.md. Gate artifact is the always-written mapping,
     # NOT AUDIT_REPORT.md (the phase must not change it on a no-op/veto).
+    # Consumes report_dedup_agent_decisions.md (when present) as additional
+    # MERGE candidate pairs + QO reclassification IDs.
     Phase("report_dedup", ["Step 6d: Report Dedup"],
           ["report_dedup_mapping.md"],
           base_timeout_s=900, model="sonnet", critical=False),

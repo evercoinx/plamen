@@ -1,6 +1,6 @@
-"""Regression suite for THREE confirmed false-positive warnings/retries.
+"""Regression suite for confirmed false-positive warnings/retries.
 
-All three were reproduced against a live thorough-mode SC run and are
+All were reproduced against a live thorough-mode SC run and are
 recall-safe: each fix only suppresses a FALSE warning/retry, never drops or
 hides a finding. Every fix gets:
 
@@ -11,7 +11,6 @@ hides a finding. Every fix gets:
 Fixtures use representative/generic shapes only — no protocol, contract, or
 specific finding names are baked in. The live runs were READ-ONLY validation.
 
-(A) attention_repair asset-binding closure  — _validate_attention_repair
 (B) verify_low PoC-contract / skip-coverage  — _validate_poc_attempt_coverage
                                               + _poc_contract_required
 (C) crossbatch id-ledger consumer backstop    — _validate_consumer_ids_in_ledger
@@ -26,125 +25,6 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import plamen_validators as V  # noqa: E402
 from plamen_parsers import id_ledger_register  # noqa: E402
-
-
-# ===========================================================================
-# (A) attention_repair asset-binding closure
-# ===========================================================================
-#
-# Live FP: a CONFIRMED asset-binding-gap row whose escalated finding proves the
-# gap with a rich `[TRACE: onCall(zrc20=USDC,...) -> ...(targetZRC20=WZETA)...]`
-# closure. The trace names the CONCRETE values/symbols (zrc20, targetZRC20), not
-# the abstract queued field labels (`context.asset`), so the literal exact-pair
-# matcher missed it and warned "lacks exact field-pair closure". Root fix:
-# accept ANY substantive closure (depth-evidence tag OR SAFE_REASON OR explicit
-# relation claim). Recall-safe: a row with NO closure at all still warns.
-
-_ATTN_QUEUE_HDR = (
-    "# Attention Repair Queue\n"
-    "| # | Kind | Target | Reason | Source | Evidence hint |\n"
-    "|---|------|--------|--------|--------|---------------|\n"
-)
-
-
-def _attn_setup(
-    tmp_path: Path, queue_row: str, summary_row: str, finding_block: str
-) -> tuple[list[str], list[str]]:
-    (tmp_path / "attention_repair_queue.md").write_text(
-        _ATTN_QUEUE_HDR + queue_row + "\n", encoding="utf-8"
-    )
-    (tmp_path / "attention_repair_summary.md").write_text(
-        "# Attention Repair Summary\nverdict present\n"
-        "| Queue # | Kind | Target | Verdict | Evidence |\n"
-        "|---|---|---|---|---|\n" + summary_row + "\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "attention_repair_findings.md").write_text(
-        "# Attention Repair Findings\n" + finding_block + "\n",
-        encoding="utf-8",
-    )
-    return V._validate_attention_repair(tmp_path, "thorough")
-
-
-def _attn_pair_warnings(soft: list[str]) -> list[str]:
-    return [s for s in soft if "asset-binding closure" in s]
-
-
-def test_A_legacy_accept_exact_field_pair_closure_still_clean(tmp_path):
-    """Old correct behavior: a row whose closure literally names both queued
-    fields with a relation claim must remain CLEAN (no regression)."""
-    queue = "| 1 | asset-binding-gap | `AB-001: fieldOne <-> fieldTwo` | bound? | matrix.md | hint |"
-    summary = (
-        "| 1 | asset-binding-gap | AB-001: fieldOne <-> fieldTwo | CONFIRMED | "
-        "Src.sol:L10: fieldOne does not match fieldTwo -> ATT-1 |"
-    )
-    finding = (
-        "## Finding [ATT-1]: gap\n"
-        "**Description**: fieldOne is not validated against fieldTwo before value moves.\n"
-    )
-    _hard, soft = _attn_setup(tmp_path, queue, summary, finding)
-    assert _attn_pair_warnings(soft) == []
-
-
-def test_A_live_fp_repro_rich_trace_closure_now_clean(tmp_path):
-    """Live FP shape: CONFIRMED row, escalated finding closes the gap with a
-    rich [TRACE]/[BOUNDARY] tag naming concrete values (not the abstract queued
-    field labels). Must be CLEAN now (was a false 'lacks exact closure' warn)."""
-    queue = (
-        "| 1 | asset-binding-gap | `AB-003: context.asset <-> decoded.targetZRC20` "
-        "| bound before value moves? | matrix.md | AB-003 in matrix.md |"
-    )
-    summary = (
-        "| 1 | asset-binding-gap | AB-003: context.asset <-> decoded.targetZRC20 | "
-        "CONFIRMED | Src.sol:L443 (zrc20 param), L468 (decoded.targetZRC20); "
-        "no-swap path withdraws targetZRC20 without verifying zrc20==targetZRC20 -> ATT-1 |"
-    )
-    finding = (
-        "## Finding [ATT-1]: Gateway Asset Not Verified Against Withdrawal Target\n"
-        "**Depth Evidence**: [TRACE: onCall(zrc20=USDC, swapData=empty) -> "
-        "_doMixSwap returns amount unchanged -> _handleEvmOrSolanaWithdraw(targetZRC20=WZETA) "
-        "-> withdrawAndCall with wrong token], [BOUNDARY: swapData.length=0 -> early return]\n"
-        "**Preferred Tag**: CODE-TRACE\n"
-        "**Description**: In onCall the gateway receives the authenticated asset and "
-        "decodes a target token from the user-supplied message; no check binds them.\n"
-    )
-    _hard, soft = _attn_setup(tmp_path, queue, summary, finding)
-    assert _attn_pair_warnings(soft) == []
-
-
-def test_A_live_fp_repro_safe_explicit_equality_prose_now_clean(tmp_path):
-    """Live FP shape: a SAFE row that proves equality in prose
-    ('EXPLICIT_EQUALITY confirmed', 'identical expression') without the rigid
-    `SAFE_REASON:` token. Must be CLEAN now (was a false 'marks SAFE without
-    SAFE_REASON' warn)."""
-    queue = (
-        "| 1 | asset-binding-gap | `AB-007: outputAmount <-> targetAmount` "
-        "| bound? | matrix.md | hint |"
-    )
-    summary = (
-        "| 1 | asset-binding-gap | AB-007: outputAmount <-> targetAmount | SAFE | "
-        "Src.sol:L332-L334: amountsOut = targetAmount - amounts[0]; approve and "
-        "withdraw use identical expression; EXPLICIT_EQUALITY confirmed |"
-    )
-    finding = "## Note\nNo escalation; row is SAFE.\n"
-    _hard, soft = _attn_setup(tmp_path, queue, summary, finding)
-    assert _attn_pair_warnings(soft) == []
-
-
-def test_A_negative_control_no_closure_still_warns(tmp_path):
-    """Genuinely-bad input: a CONFIRMED row with NO closure of any kind — no
-    depth-evidence tag, no SAFE_REASON, no relation claim anywhere in its
-    closure context. The check must NOT be vacuous: it STILL warns."""
-    queue = "| 1 | asset-binding-gap | `AB-001: fieldOne <-> fieldTwo` | bound? | matrix.md | hint |"
-    summary = (
-        "| 1 | asset-binding-gap | AB-001: fieldOne <-> fieldTwo | CONFIRMED | "
-        "looked at it, seems fine, moving on |"
-    )
-    finding = "## Finding [ATT-1]: gap\n**Description**: we reviewed the area generally.\n"
-    _hard, soft = _attn_setup(tmp_path, queue, summary, finding)
-    warns = _attn_pair_warnings(soft)
-    assert warns, "negative control: a closure-less row must still warn"
-    assert "AB-001" in warns[0]
 
 
 # ===========================================================================

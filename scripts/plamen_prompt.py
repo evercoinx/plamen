@@ -927,6 +927,10 @@ _STANDALONE_PROMPT_MAP: dict[str, str] = {
     "crossbatch": "phase5-crossbatch.md",
     "report_index": "phase6a-report-index.md",
     "report_assemble": "phase6c-assembler.md",
+    # Phase 6d LLM consolidation proposer — reads the assembled report and
+    # proposes cross-tier/no-location MERGES + QO reclassifications. Real LLM
+    # phase (NOT short-circuited); writes report_dedup_agent_decisions.md only.
+    "report_dedup_agent": "phase6d-report-dedup-agent.md",
     # Phase 6d cross-tier report dedup — Python-native; stub prompt exists so
     # build_phase_prompt doesn't crash. Driver short-circuits this phase to
     # plamen_mechanical._dedup_report_python(). critical=False; never halts.
@@ -3174,25 +3178,46 @@ for the full methodology. Execute it as a single agent (yourself) -- do NOT
 spawn subagents.
 
 RESUMPTION OVERRIDE: If `{scratchpad}/dedup_decisions.md` says `PASSTHROUGH`
-or `IN_PROGRESS_PASSTHROUGH_WRITTEN` and `dedup_candidate_pairs.md` contains
-live table rows, the semantic-dedup work is NOT complete even if output files
-already exist and are larger than 200 bytes. You MUST evaluate every live pair
-and overwrite `dedup_decisions.md` plus `verification_queue_deduped.md` with
-real MERGE/GROUP/KEEP SEPARATE decisions. The prewritten passthrough is only a
-crash-safety net, not a completed phase result.
+or `IN_PROGRESS_PASSTHROUGH_WRITTEN` and `dedup_blocks.md` contains live
+candidate blocks, the semantic-dedup work is NOT complete even if output files
+already exist and are larger than 200 bytes. You MUST cluster every block and
+overwrite `dedup_decisions.md` with real MERGE/KEEP decisions. The prewritten
+passthrough is only a crash-safety net, not a completed phase result.
 
 Your inputs:
-1. `{scratchpad}/dedup_candidate_pairs.md` (pre-computed pairs with overlap scores)
-2. `{scratchpad}/dedup_focus_inventory.md` (if present; bounded full bodies for the live pair packet)
-3. `{scratchpad}/dedup_candidate_pairs_full.md` (if present; traceability only, do not expand the live packet)
-4. `{scratchpad}/findings_inventory.md` (full inventory with [LIKELY-DUP] tags)
-5. `{scratchpad}/verification_queue.md` (the queue to deduplicate)
+1. `{scratchpad}/dedup_blocks.md` (PRIMARY — findings grouped into candidate
+   duplicate blocks for in-context clustering review)
+2. `{scratchpad}/dedup_focus_inventory.md` (bounded full bodies for every ID
+   placed into a block — read these to judge each finding)
 
-Your outputs:
-1. `{scratchpad}/dedup_decisions.md` (merge/keep decisions with rationale)
-2. `{scratchpad}/verification_queue_deduped.md` (deduped queue for verification)
+You are clustering findings into duplicate GROUPS, block by block.
+For EACH `## Block N` table in dedup_blocks.md:
+  - Read every finding's body in dedup_focus_inventory.md.
+  - Group findings that are the SAME defect (same root cause + same fix).
+  - Output ONE line per group you decide to merge:
+      MERGE: <survivor>, <absorbed>, <absorbed>...   (survivor first)
+    and ONE line per finding you keep standalone:
+      KEEP: <id>
+  - IDs only. Optional <=8-word reason after a TAB. NO JSON. NO prose tables.
+  - Survivor = the finding whose source-IDs are a SUPERSET and whose location
+    SUBSUMES the others (per phase4e survivor-superset gate). If neither side
+    is a superset, KEEP SEPARATE -- do not merge.
+  - Never merge across different severity tiers. Never merge a distinct
+    second defect. When in doubt, KEEP SEPARATE.
+Append all lines to dedup_decisions.md. Do NOT rewrite any inventory/queue.
 
-Stop after writing both files. Do not proceed outside this phase.
+BACK-COMPAT (also accepted): you MAY instead emit the legacy
+`### MERGE: {{survivor}} absorbs {{absorbed}}` headings and
+`| {{absorbed}} | MERGED into {{survivor}} | ... |` status rows; the driver
+unions both forms. The new group-lines above are PREFERRED.
+
+Your output:
+1. `{scratchpad}/dedup_decisions.md` (MERGE/KEEP decision lines, IDs only — the
+   driver mechanically rebuilds `verification_queue_deduped.md` from your
+   decisions via the survivor-superset gate and zero-loss coupling)
+
+You do NOT write `verification_queue_deduped.md`. Stop after writing
+`dedup_decisions.md`. Do not proceed outside this phase.
 """.format(scratchpad=config['scratchpad'])
     elif config.get("pipeline") == "sc" and phase.name == "sc_semantic_dedup":
         phase_cost_directive = """
@@ -3203,44 +3228,61 @@ for the full methodology. Execute it as a single agent (yourself) -- do NOT
 spawn subagents.
 
 RESUMPTION OVERRIDE: If `{scratchpad}/dedup_decisions.md` says `PASSTHROUGH`
-or `IN_PROGRESS_PASSTHROUGH_WRITTEN` and `dedup_candidate_pairs.md` contains
-live table rows, the semantic-dedup work is NOT complete even if output files
-already exist and are larger than 200 bytes. You MUST evaluate every live pair
-and overwrite `dedup_decisions.md` with real MERGE/GROUP/KEEP SEPARATE
-decisions (the driver rebuilds `findings_inventory_deduped.md` from your
-decisions). The prewritten passthrough is only a crash-safety net, not a
-completed phase result.
+or `IN_PROGRESS_PASSTHROUGH_WRITTEN` and `dedup_blocks.md` contains live
+candidate blocks, the semantic-dedup work is NOT complete even if output files
+already exist and are larger than 200 bytes. You MUST cluster every block and
+overwrite `dedup_decisions.md` with real MERGE/KEEP decisions (the driver
+rebuilds `findings_inventory_deduped.md` from your decisions). The prewritten
+passthrough is only a crash-safety net, not a completed phase result.
 
 **SC mode**: You are deduplicating the findings INVENTORY before the next
 driver-owned consumer. This reduces pairwise compound-finding inflation
 quadratically.
 
 Your inputs:
-1. `{scratchpad}/dedup_candidate_pairs.md` (pre-computed pairs with overlap scores)
-2. `{scratchpad}/dedup_focus_inventory.md` (bounded full bodies for the live pair
-   packet — this carries every Location, Source IDs, Description, Impact, and
-   evidence tag you need to judge AND couple both sides of every pair)
-3. `{scratchpad}/dedup_candidate_pairs_full.md` (if present; traceability only, do not expand the live packet)
+1. `{scratchpad}/dedup_blocks.md` (PRIMARY — findings grouped into candidate
+   duplicate blocks for in-context clustering review)
+2. `{scratchpad}/dedup_focus_inventory.md` (bounded full bodies for every ID
+   placed into a block — this carries every Location, Source IDs, Description,
+   Impact, and evidence tag you need to judge each finding)
 
 Do NOT read `{scratchpad}/findings_inventory.md`. The focus inventory above
-carries every body you need to judge and couple a pair. Reading the full
-inventory is the context-collapse trigger this phase deliberately avoids.
+carries every body you need to judge a finding. Reading the full inventory is
+the context-collapse trigger this phase deliberately avoids.
+
+You are clustering findings into duplicate GROUPS, block by block.
+For EACH `## Block N` table in dedup_blocks.md:
+  - Read every finding's body in dedup_focus_inventory.md.
+  - Group findings that are the SAME defect (same root cause + same fix).
+  - Output ONE line per group you decide to merge:
+      MERGE: <survivor>, <absorbed>, <absorbed>...   (survivor first)
+    and ONE line per finding you keep standalone:
+      KEEP: <id>
+  - IDs only. Optional <=8-word reason after a TAB. NO JSON. NO prose tables.
+  - Survivor = the finding whose source-IDs are a SUPERSET and whose location
+    SUBSUMES the others (per phase4e survivor-superset gate). If neither side
+    is a superset, KEEP SEPARATE -- do not merge.
+  - Never merge across different severity tiers. Never merge a distinct
+    second defect. When in doubt, KEEP SEPARATE.
+Append all lines to dedup_decisions.md. Do NOT rewrite any inventory.
+
+BACK-COMPAT (also accepted): you MAY instead emit the legacy parser-critical
+`### MERGE: {{survivor}} absorbs {{absorbed}}` headings and
+`| {{absorbed}} | MERGED into {{survivor}} | ... |` status rows; the driver
+unions both forms into one union-find before applying. The new group-lines
+above are PREFERRED.
 
 Your output:
-1. `{scratchpad}/dedup_decisions.md` (merge/keep/group decisions with rationale,
-   including the parser-critical `### MERGE: {{survivor}} absorbs {{absorbed}}`
-   headings and `| {{absorbed}} | MERGED into {{survivor}} | ... |` status rows
-   plus the per-MERGE survivor-coupling prose — see the phase4e §Output Contract
-   and §Survivor coupling)
+1. `{scratchpad}/dedup_decisions.md` (MERGE/KEEP decision lines, IDs only)
 
 You do NOT write `findings_inventory_deduped.md`. The driver mechanically builds
-it from your `dedup_decisions.md` — coupling each absorbed finding's distinct
-Location / Impact / union Source IDs / higher severity / strongest evidence into
-the survivor and then removing the absorbed block — so your only job is faithful,
-per-pair JUDGEMENT. Emit the coupling prose in the decision rows per §Survivor
-coupling; the driver applies it. The ZERO-DATA-LOSS mandate, survivor-superset
-gate, and higher-severity inheritance govern your decisions, which the driver
-applies faithfully.
+it from your `dedup_decisions.md` -- running a union-find over all MERGE forms,
+choosing each survivor via the survivor-superset gate, then coupling each
+absorbed finding's distinct Location / Impact / union Source IDs / higher
+severity / strongest evidence into the survivor and removing the absorbed block.
+Your only job is faithful clustering JUDGEMENT. The ZERO-DATA-LOSS mandate,
+survivor-superset gate, and higher-severity inheritance govern your decisions,
+which the driver applies faithfully.
 
 Stop after writing `dedup_decisions.md`. Do not proceed outside this phase.
 """.format(scratchpad=config['scratchpad'])
@@ -3264,20 +3306,7 @@ Mandatory rules:
    file:line evidence, or cite the exact path and mark `NEEDS_HUMAN` if the
    source is unavailable.
 6. SAFE rows are valid and expected. Do not invent findings to satisfy a quota.
-   For `asset-binding-gap` rows, SAFE is valid ONLY with one of:
-   `SAFE_REASON:EXPLICIT_EQUALITY`, `SAFE_REASON:EXPLICIT_BINDING_CHECK`,
-   `SAFE_REASON:UNREACHABLE_PATH`, or `SAFE_REASON:IMPOSSIBLE_PAIR`.
-   A revert, no-balance assumption, no-normal-accumulation assumption, or
-   "self-punishing" path is not a SAFE proof for custody/value rows unless the
-   row also proves explicit binding, unreachable path, or impossible pair.
-7. Asset-binding rows are exact field-pair obligations. If the target is
-   `A <-> B`, the Evidence/Notes claim must discuss A against B directly.
-   Include one local `PAIR_CLAIM:` that names both queued fields exactly and
-   states equality, explicit binding check, mismatch, unreachable path, or
-   impossible pair.
-   Similar topic coverage or an existing finding ID only closes the row when
-   the cited finding names both fields and their relationship.
-8. Stop after writing the two attention-repair files; do not proceed outside
+7. Stop after writing the two attention-repair files; do not proceed outside
    this phase.
 """
     elif config.get("pipeline") != "l1" and phase.name in SC_VERIFY_PHASE_NAMES:

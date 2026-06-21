@@ -114,8 +114,8 @@ _DEPTH_DS1 = (
     "**Location**: GatewayTransferNative.sol:L530-600\n"
     "**Verdict**: CONFIRMED\n"
     "**Preferred Tag**: [CODE-TRACE]\n"
-    "**Description**: empty swapDataZ returns amount unswapped; withdraw pays out "
-    "attacker-chosen targetZRC20 from accumulated balances. Distinct from public withdraw.\n"
+    "**Description**: empty swapData returns amount unswapped; withdraw pays out "
+    "an attacker-chosen output token from accumulated balances. Distinct from public withdraw.\n"
 )
 
 

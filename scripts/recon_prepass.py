@@ -365,9 +365,214 @@ def _tail(text: str, n: int = 2048) -> str:
         return text
     return "... [truncated] ...\n" + text[-n:]
 
+
+# ---------------------------------------------------------------------------
+# EVM Foundry build-env bootstrap (FIX 2)
+#
+# Slither and PoC verification both need a *compilable* project. When an EVM
+# scope ships bare `.sol` files with no `foundry.toml`/`hardhat.config.*`, the
+# pre-pass previously fell straight to the grep fallback ("no build env
+# detected"), so Slither never ran and later verification phases had no harness.
+# This best-effort bootstrap scaffolds a minimal Foundry env (foundry.toml +
+# forge-std + import-prefix remappings + well-known libs) and runs `forge
+# build`. It NEVER raises and is idempotent (no-op when a build manifest already
+# exists). On any failure the caller falls back to the existing grep path.
+# ---------------------------------------------------------------------------
+
+_PRAGMA_RE = re.compile(
+    r"pragma\s+solidity\s+[^;]*?(\d+\.\d+\.\d+)", re.IGNORECASE
+)
+
+# import-prefix -> (forge install spec, remapping target dir). Order matters:
+# more specific prefixes first so we do not shadow them with a broader match.
+_FORGE_LIB_SPECS: Tuple[Tuple[str, str, str, str], ...] = (
+    # (import prefix, lib dir name, forge install spec, remapping target)
+    ("@openzeppelin/contracts-upgradeable/", "openzeppelin-contracts-upgradeable",
+     "OpenZeppelin/openzeppelin-contracts-upgradeable",
+     "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/"),
+    ("@openzeppelin/contracts/", "openzeppelin-contracts",
+     "OpenZeppelin/openzeppelin-contracts",
+     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"),
+    ("@openzeppelin/", "openzeppelin-contracts",
+     "OpenZeppelin/openzeppelin-contracts",
+     "@openzeppelin/=lib/openzeppelin-contracts/"),
+    ("solmate/", "solmate", "transmissions11/solmate",
+     "solmate/=lib/solmate/src/"),
+    ("@solady/", "solady", "Vectorized/solady",
+     "@solady/=lib/solady/src/"),
+    ("solady/", "solady", "Vectorized/solady",
+     "solady/=lib/solady/src/"),
+)
+
+
+def _detect_solc_version(source_files: List[Path]) -> Optional[str]:
+    """Return the most common concrete `pragma solidity` version, or None."""
+    from collections import Counter
+    counter: Counter = Counter()
+    for f in source_files[:200]:  # bounded scan
+        text = _read_text(f)
+        if not text:
+            continue
+        for m in _PRAGMA_RE.finditer(text):
+            counter[m.group(1)] += 1
+    if not counter:
+        return None
+    return counter.most_common(1)[0][0]
+
+
+def _detect_import_libs(source_files: List[Path]) -> List[Tuple[str, str, str, str]]:
+    """Return the subset of _FORGE_LIB_SPECS whose import prefix appears in the
+    Solidity sources. De-duplicated by lib dir name, preserving order."""
+    blob_parts: List[str] = []
+    for f in source_files[:200]:  # bounded scan
+        t = _read_text(f)
+        if t:
+            blob_parts.append(t)
+    blob = "\n".join(blob_parts)
+    matched: List[Tuple[str, str, str, str]] = []
+    seen_dirs: set = set()
+    for spec in _FORGE_LIB_SPECS:
+        prefix = spec[0]
+        if prefix in blob and spec[1] not in seen_dirs:
+            matched.append(spec)
+            seen_dirs.add(spec[1])
+    return matched
+
+
+def _run_forge(args: List[str], cwd: Path, timeout: int) -> Tuple[int, str]:
+    """Run a bounded `forge ...` subprocess. Returns (rc, combined_output).
+    Never raises."""
+    try:
+        proc = subprocess.run(
+            ["forge", *args], cwd=str(cwd), timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired:
+        return 124, f"forge {' '.join(args)} timed out after {timeout}s"
+    except FileNotFoundError:
+        return 127, "forge binary not found"
+    except Exception as e:  # pragma: no cover - defensive
+        return 1, f"forge {' '.join(args)} exception: {e}"
+
+
+def _bootstrap_evm_foundry_env(
+    proj: Path, source_files: List[Path]
+) -> Tuple[bool, str]:
+    """Best-effort scaffold of a minimal Foundry build env in `proj`.
+
+    Returns (success, reason). NEVER raises. Idempotent: a no-op (returns
+    (False, ...)) when a `foundry.toml` already exists so an existing project
+    is never clobbered. Requires `forge` on PATH and at least one `.sol` file.
+    """
+    try:
+        if (proj / "foundry.toml").exists():
+            return False, "foundry.toml already exists; bootstrap skipped (idempotent)"
+        if not shutil.which("forge"):
+            return False, "forge not on PATH; cannot bootstrap Foundry env"
+        if not source_files:
+            return False, "no Solidity source files to bootstrap against"
+
+        solc = _detect_solc_version(source_files)
+        libs = _detect_import_libs(source_files)
+
+        # 1) Minimal foundry.toml. `src = "."` so flat scope dirs of bare .sol
+        #    files compile without restructuring; libs vendored under lib/.
+        solc_line = f'solc = "{solc}"\n' if solc else ""
+        foundry_toml = (
+            "[profile.default]\n"
+            'src = "."\n'
+            'out = "out"\n'
+            'libs = ["lib"]\n'
+            f"{solc_line}"
+            "auto_detect_remappings = true\n"
+        )
+        try:
+            (proj / "foundry.toml").write_text(foundry_toml, encoding="utf-8")
+        except Exception as e:
+            return False, f"could not write foundry.toml: {e}"
+
+        steps: List[str] = [f"wrote foundry.toml (solc={solc or 'auto'})"]
+
+        # 2) forge-std (test harness). Best-effort; build can still succeed
+        #    for non-test sources without it.
+        rc, out = _run_forge(
+            ["install", "foundry-rs/forge-std", "--no-commit"],
+            proj, timeout=90,
+        )
+        if rc == 0:
+            steps.append("installed forge-std")
+        else:
+            steps.append(f"forge-std install failed (rc={rc}): {_tail(out, 200)}")
+
+        # 3) Detected well-known libraries + remappings.
+        remap_lines: List[str] = []
+        for prefix, lib_dir, install_spec, remap in libs:
+            rc, out = _run_forge(
+                ["install", install_spec, "--no-commit"], proj, timeout=120,
+            )
+            if rc == 0:
+                steps.append(f"installed {install_spec}")
+                remap_lines.append(remap)
+            else:
+                steps.append(
+                    f"{install_spec} install failed (rc={rc}): {_tail(out, 200)}"
+                )
+        if remap_lines:
+            try:
+                (proj / "remappings.txt").write_text(
+                    "\n".join(remap_lines) + "\n", encoding="utf-8"
+                )
+                steps.append(f"wrote remappings.txt ({len(remap_lines)} entries)")
+            except Exception as e:
+                steps.append(f"could not write remappings.txt: {e}")
+
+        # 4) Build.
+        rc, out = _run_forge(["build"], proj, timeout=180)
+        if rc == 0:
+            steps.append("forge build SUCCESS")
+            return True, "; ".join(steps)
+        steps.append(f"forge build failed (rc={rc}): {_tail(out, 400)}")
+        return False, "; ".join(steps)
+    except Exception as e:  # pragma: no cover - defensive top-level guard
+        return False, f"bootstrap exception: {e}"
+
+
 def _write_build_status(scratch: Path, proj: Path, lang: str) -> str:
+    bootstrap_note = ""
     try:
         key = _select_build(proj, lang)
+        # FIX 2: EVM scope with bare .sol files and no build manifest. If forge
+        # is available, best-effort bootstrap a minimal Foundry env so Slither
+        # and later PoC verification have a compilable harness. Falls through to
+        # the existing grep-fallback SKIPPED status on any failure.
+        if (
+            not key
+            and lang == "evm"
+            and shutil.which("forge")
+            and not (proj / "foundry.toml").exists()
+            and not list(proj.glob("hardhat.config.*"))
+        ):
+            evm_sources = sorted(
+                _production_source_files(proj, (".sol",)), key=lambda p: _rel(p, proj)
+            )
+            if evm_sources and len(evm_sources) <= _MAX_RECON_FORGE_FILES:
+                ok, reason = _bootstrap_evm_foundry_env(proj, evm_sources)
+                if ok:
+                    key = "evm_forge"
+                    bootstrap_note = (
+                        "**Build Env Bootstrap**: SUCCESS — scaffolded a minimal "
+                        f"Foundry env ({reason}).\n\n"
+                    )
+                else:
+                    _write_text(scratch / "build_status.md",
+                                "# Build Status\n\n"
+                                "**Tool**: (none detected for lang=evm)\n\n"
+                                "**Status**: SKIPPED\n\n"
+                                "Build env bootstrap attempted but failed: "
+                                f"{reason}; grep fallback used. LLM recon may "
+                                "re-attempt with a manually configured build.\n")
+                    return "STUB"
         if not key:
             _write_text(scratch / "build_status.md",
                         "# Build Status\n\n"
@@ -481,6 +686,7 @@ def _write_build_status(scratch: Path, proj: Path, lang: str) -> str:
         status = "SUCCESS" if rc == 0 else ("TIMEOUT" if timed_out else "FAILED")
         content = (
             "# Build Status\n\n"
+            f"{bootstrap_note}"
             f"**Tool**: {key}\n"
             f"**Command**: `{' '.join(cmd)}`\n"
             f"**CWD**: `{build_cwd}`\n"
@@ -656,6 +862,29 @@ def _write_meta_buffer_stub(scratch: Path) -> str:
     return "STUB" if _write_text(scratch / "meta_buffer.md",
                                    "# RAG Meta Buffer\n(optional)\n") else "FAILED"
 
+
+# DAML is the first SAST-less ecosystem: there is no static-analysis prepass
+# (no SCIP indexer, no Scout/Slither, DLint is style-only). Recon is fully
+# read-driven — the recon LLM is the sole producer of every artifact via
+# `damlc inspect-dar --json` (structural oracle) + disciplined grep over .daml.
+# This no-op writes the SC recon artifacts as [LLM TO ENRICH] stubs so the
+# driver's prepass-read gates never fail on a missing/zero-byte file, plus a
+# marker recording WHY no mechanical extraction ran. The mechanical SC
+# extractors (LANG_DISPATCH) are deliberately skipped — they have no .daml
+# adapter and would emit empty tables.
+def _write_daml_prepass_noop(scratch: Path, proj: Path) -> str:
+    marker = (
+        "# DAML Recon Pre-Pass: NO-OP (read-driven)\n\n"
+        "No mechanical prepass for DAML. DAML has no static-analysis prepass "
+        "(no SCIP indexer, no Scout/Slither; DLint is style-only). Recon is "
+        "fully read-driven: the recon LLM produces every artifact from "
+        "`damlc inspect-dar --json` (structural oracle) and grep over `.daml` "
+        "sources. These prepass files are non-empty [LLM TO ENRICH] stubs only "
+        "so prepass-read gates do not fail; the recon phase replaces them.\n"
+    )
+    _write_text(scratch / "daml_prepass_noop.md", marker)
+    return "STUB"
+
 # template_recommendations.md — extract from skill-index.md
 _LANG_HEADING = {
     "evm":     "## EVM Skills",
@@ -663,6 +892,7 @@ _LANG_HEADING = {
     "aptos":   "## Aptos Skills",
     "sui":     "## Sui Skills",
     "soroban": "## Soroban Skills",
+    "daml":    "## DAML Skills",
     "l1":      "## L1 Skills",
 }
 
@@ -1499,6 +1729,44 @@ def run_recon_prepass(config: dict) -> Dict[str, str]:
         _safe("trust_boundaries.md", lambda: _write_trust_boundaries_l1(scratch, proj))
         _safe("attack_surface.md",   lambda: _write_attack_surface_l1(scratch, proj))
         _safe("threat_model.md",     lambda: _write_design_or_threat_stub(scratch, pipeline))
+    elif lang == "daml":
+        # DAML: no mechanical prepass (read-driven). Write a marker plus
+        # [LLM TO ENRICH] stubs for every SC recon artifact so prepass-read
+        # gates never fail; the recon LLM replaces them via damlc + grep.
+        _safe("daml_prepass_noop.md",  lambda: _write_daml_prepass_noop(scratch, proj))
+        _safe("contract_inventory.md", lambda: _write_sc_recon_stub(scratch, "contract_inventory.md",
+              "# Contract Inventory\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "| Template | Path | Choices | Signatories | Observers | Has Key | Implements |\n"
+              "|----------|------|---------|-------------|-----------|---------|------------|\n"))
+        _safe("state_variables.md",    lambda: _write_sc_recon_stub(scratch, "state_variables.md",
+              "# State Variables\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "| Template.field | Type | Role | Read/Written By |\n"
+              "|----------------|------|------|-----------------|\n"))
+        _safe("function_list.md",      lambda: _write_sc_recon_stub(scratch, "function_list.md",
+              "# Function List\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "| Template.Choice | Consume-Mode | Controller | Return | Arg-Derived Controller? |\n"
+              "|-----------------|--------------|------------|--------|-------------------------|\n"))
+        _safe("build_status.md",       lambda: _write_sc_recon_stub(scratch, "build_status.md",
+              "# Build Status\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "**Tool**: daml build\n\n**Status**: SKIPPED (recon LLM runs `daml build`)\n\n"
+              "**Chosen build root**: [LLM TO ENRICH — dir owning daml.yaml]\n"))
+        _safe("design_context.md",     lambda: _write_design_or_threat_stub(scratch, pipeline))
+        _safe("attack_surface.md",     lambda: _write_sc_recon_stub(scratch, "attack_surface.md",
+              "# Attack Surface\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "## Authorization Matrix\n[LLM TO ENRICH]\n\n"
+              "## External Dependencies\n[LLM TO ENRICH]\n"))
+        _safe("detected_patterns.md",  lambda: _write_sc_recon_stub(scratch, "detected_patterns.md",
+              "# Detected Patterns\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "## Flags\n[LLM TO ENRICH]\n"))
+        _safe("setter_list.md",        lambda: _write_sc_recon_stub(scratch, "setter_list.md",
+              "# Setter List\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
+              "| Template | Choice | Field | Controller |\n"
+              "|----------|--------|-------|------------|\n"))
+        _safe("emit_list.md",          lambda: _write_sc_recon_stub(scratch, "emit_list.md",
+              "# Disclosure List\n\n[LLM TO ENRICH] No prepass for DAML (read-driven). "
+              "Repurposed as observable-disclosure list (DAML has no events).\n\n"
+              "| Template | Exposed To (observer) | Interface view |\n"
+              "|----------|-----------------------|----------------|\n"))
     else:
         _safe("contract_inventory.md", lambda: _write_contract_inventory_sc(scratch, proj, lang))
         _safe("state_variables.md",    lambda: _write_table_artifact(scratch, proj, lang, "state"))
