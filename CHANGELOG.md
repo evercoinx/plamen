@@ -5,6 +5,11 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.3] - 2026-06-21
+
+### Fixed
+- **Headless PTY workers no longer freeze on `claude`'s first-run interactive gates.** A freshly-installed or never-configured Claude CLI puts up to three first-run **interactive** gates in front of a PTY worker — the onboarding/theme wizard, the per-folder trust dialog, and the one-time `--dangerously-skip-permissions` risk-acceptance prompt. All three are **invisible to `-p`/print-mode probes** but fatal to a headless worker: with no stdin to answer them, the worker produces zero bytes and dies on the phase budget (one observed episode burned ~90 minutes retrying). v2.1.2 pre-cleared the per-folder trust gate; this release pre-clears the two remaining **global** gates at startup in `_ensure_claude_folder_trusted` — it sets `hasCompletedOnboarding` (and a `theme` default **only** when the user has none; an existing choice is never overridden) and best-effort `bypassPermissionsModeAccepted` (the driver already passes `--dangerously-skip-permissions`, so pre-accepting its prompt is consistent; an unknown key is harmless). Idempotent, preserves all other config, never raises; Claude-backend only (Codex has its own sandbox model).
+
 ## [2.1.2] - 2026-06-20
 
 ### Added

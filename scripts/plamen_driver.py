@@ -15330,7 +15330,10 @@ def _persist_corrected_language(
 
 
 def _ensure_claude_folder_trusted(*paths: str) -> list[str]:
-    """Pre-accept Claude Code's per-FOLDER trust dialog for the given dirs.
+    """Pre-clear Claude Code's first-run interactive gates that freeze a
+    headless PTY worker: per-FOLDER trust for the given dirs, PLUS the global
+    onboarding/theme wizard and the one-time --dangerously-skip-permissions
+    risk-acceptance dialog.
 
     A PTY worker launched with cwd in a directory Claude Code has never opened
     hangs FOREVER on the interactive "Is this a project you trust?" dialog —
@@ -15381,6 +15384,32 @@ def _ensure_claude_folder_trusted(*paths: str) -> list[str]:
                     projects[key] = entry
                     changed = True
                     trusted.append(key)
+        # ── Global first-run interactive gates ────────────────────────────
+        # Per-folder trust is only the SECOND of three first-run gates a fresh
+        # `claude` install puts in front of a PTY worker; all three are
+        # invisible to `-p`/print-mode probes but freeze a real PTY worker:
+        #   A) onboarding/theme wizard  C) --dangerously-skip-permissions accept
+        # Clear them globally, idempotently, preserving all other config.
+        #   - hasCompletedOnboarding: the documented onboarding gate (skips the
+        #     whole wizard, including the theme step).
+        #   - theme: set a default ONLY if the user has none — never override an
+        #     existing choice.
+        #   - bypassPermissionsModeAccepted: BEST-EFFORT acceptance of the
+        #     dangerous-mode dialog. The exact key is not officially documented;
+        #     the driver already passes --dangerously-skip-permissions, so
+        #     pre-accepting its prompt is consistent, and an extra/unknown key is
+        #     harmless if Claude ignores it.
+        if data.get("hasCompletedOnboarding") is not True:
+            data["hasCompletedOnboarding"] = True
+            trusted.append("hasCompletedOnboarding")
+            changed = True
+        if "theme" not in data:
+            data["theme"] = "dark"
+            changed = True
+        if data.get("bypassPermissionsModeAccepted") is not True:
+            data["bypassPermissionsModeAccepted"] = True
+            trusted.append("bypassPermissionsModeAccepted")
+            changed = True
         if changed:
             tmp = cj.with_name(cj.name + ".plamen-tmp")
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
