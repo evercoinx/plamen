@@ -17592,6 +17592,30 @@ def _validate_sc_subsystem_coverage(
     return []
 
 
+# Test / fuzz / verification directory markers. A path segment is out-of-scope
+# when ANY of its delimiter-split sub-words is one of these — so `.medusa-tests`
+# (-> {medusa, tests}), `fuzz-tests`, `invariant-tests`, `verify_helpers` are all
+# excluded, while a one-word segment like `latest` or `attestation` is NOT. This
+# mirrors the dirs the recon prompt already tells recon to skip; the plain
+# exact-segment `skip_tokens` check missed dotted/hyphenated variants.
+_RECON_TEST_FUZZ_MARKERS = frozenset({
+    "test", "tests", "testing",
+    "fuzz", "fuzzing", "medusa", "echidna", "halmos",
+    "invariant", "invariants", "symbolic",
+    "verification", "verify",
+    "certora", "coverage", "mock", "mocks", "fixture", "fixtures",
+})
+
+
+def _recon_segment_is_test_fuzz(seg: str) -> bool:
+    """True when a path segment names a test/fuzz/verification dir, including
+    dotted/hyphenated variants the exact-segment skip list misses
+    (`.medusa-tests`, `fuzz-tests`). Split on . _ - and match delimited
+    sub-words only, so `latest`/`attestation` (single words) are NOT excluded."""
+    words = [w for w in re.split(r"[._-]+", (seg or "").lower()) if w]
+    return any(w in _RECON_TEST_FUZZ_MARKERS for w in words)
+
+
 def _validate_recon_coverage(scratchpad: Path, project_root: str,
                              language: str,
                              subsystem_scope: str | None = None,
@@ -17673,6 +17697,12 @@ def _validate_recon_coverage(scratchpad: Path, project_root: str,
                     continue
                 parts_lower = [seg.lower() for seg in rel.split("/")]
                 if any(tok in parts_lower for tok in skip_tokens):
+                    continue
+                # Catch dotted/hyphenated test/fuzz/verification dirs that the
+                # exact-segment skip list misses (`.medusa-tests`, `fuzz-tests`,
+                # `invariant-tests`) — recon is explicitly told to skip these, so
+                # the coverage gate must not penalize their omission.
+                if any(_recon_segment_is_test_fuzz(seg) for seg in parts_lower):
                     continue
                 if scope_prefix and not _path_in_subsystem_scope(rel, scope_prefix):
                     # Belt-and-suspenders: scope walk guarantees this is
