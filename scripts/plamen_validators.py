@@ -28,6 +28,7 @@ from plamen_types import (
     SC_VERIFY_CRITHIGH_PHASE_NAMES,
     _VALID_PIPELINES, _VALID_MODES,
     EVIDENCE_TAGS_PROOF, EVIDENCE_TAG_NAMES_RE, has_mechanical_proof,
+    has_proof_grade_evidence,
     FINDING_BLOCK_HEADING_RE,
     normalize_severity,
     plamen_home,
@@ -981,6 +982,27 @@ def _read_cli_backend_from_config(scratchpad: Path) -> str:
     except Exception:
         pass
     return "claude"
+
+
+def _config_proven_only(scratchpad: Path) -> bool:
+    """Read 'proven_only' from {scratchpad}/config.json. Default False.
+
+    Proven-only mode caps `[CODE-TRACE]`-only findings at Low. The gated
+    preservation block in `_expected_report_index_severities` reads this flag
+    so the structural-untestable distinction only fires when the user opted
+    into proven-only. Defaults False (no cap) when config is absent/unreadable.
+    """
+    try:
+        import json as _json
+        cfg = scratchpad / "config.json"
+        if cfg.exists():
+            val = _json.loads(
+                cfg.read_text(encoding="utf-8", errors="replace")
+            ).get("proven_only", False)
+            return bool(val)
+    except Exception:
+        pass
+    return False
 
 
 def _classify_artifact_row(
@@ -2970,6 +2992,7 @@ def _owned_artifact_patterns(pipeline: str, scratchpad: Optional[Path] = None) -
         ],
         "instantiate": ["spawn_manifest.md"],
         "breadth": ["analysis_*.md"],
+        "rescan_prepare": ["rescan_manifest.md"],
         "rescan": ["analysis_rescan_*.md", "analysis_percontract_*.md"],
         "inventory_prepare": [
             "inventory_shard_plan.md", "inventory_chunk_a.manifest.md",
@@ -16318,7 +16341,12 @@ def _report_index_adjustment_reason_present(*values: str) -> bool:
         # for severity-provenance auto-repair. Recognize it as a canonical
         # reason so the provenance gate doesn't re-flag rows the repair
         # function just patched.
-        r"override",
+        r"override|"
+        # STRUCTURAL-UNTESTABLE(sev): proven-only structural carve-out audit
+        # trail. A preserved (uncapped) severity carrying this note records
+        # that the verifier blessed a genuine structural-untestability blocker
+        # for the finding's PoC class, so the provenance gate must accept it.
+        r"structural|untestable",
         text,
         re.IGNORECASE,
     ))
@@ -16355,8 +16383,38 @@ def _cap_report_index_severity(severity: str, cap: str) -> str:
     return sev
 
 
+def _structurally_untestable(scratchpad: Path, vtxt: str, poc_class: str) -> bool:
+    """Is this finding GENUINELY structurally untestable (preserve severity)?
+
+    True only when the verifier's PoC ledger names a real structural-untestability
+    blocker that is valid for the finding's PoC class. This is the verifier-blessed
+    case the proven-only blanket cap conflates with weak/lazy `[CODE-TRACE]`.
+
+    Reuses the already-shipped `_valid_poc_skip` distinction (which rejects
+    STRUCTURAL_* for unit/property class and unmockable EXTERNAL_* skips), then
+    adds two additional REJECTIONS so weak skips keep the cap:
+      * NO_BUILD_ENVIRONMENT cited while build_status.md reports SUCCESS (the
+        harness exists — not structurally untestable).
+      * PURE_SPEC_OR_DOCS_ONLY (a spec/docs-only finding is NOT a CONFIRMED
+        structural harm that merely lacks an executable harness).
+    Recall-safe: this can ONLY mark FEWER findings as untestable than
+    `_valid_poc_skip` alone, so it never preserves a weak finding.
+    """
+    skip = _poc_skip_code(vtxt)
+    if not skip:
+        return False
+    if not _valid_poc_skip(vtxt, poc_class):
+        return False
+    if "NO_BUILD_ENVIRONMENT" in skip and _build_succeeded(scratchpad) is True:
+        return False
+    if "PURE_SPEC_OR_DOCS_ONLY" in skip:
+        return False
+    return True
+
+
 def _expected_report_index_severities(scratchpad: Path) -> dict[str, str]:
     caps = _poc_demotion_caps_for_validator(scratchpad)
+    proven_only = _config_proven_only(scratchpad)
     out: dict[str, str] = {}
     for row in parse_verification_queue_rows(scratchpad):
         fid = (row.get("finding id") or "").strip()
@@ -16387,6 +16445,23 @@ def _expected_report_index_severities(scratchpad: Path) -> dict[str, str]:
             sev = _demote_severity_once(sev)
         if fid in caps:
             sev = _cap_report_index_severity(sev, caps[fid])
+        # Proven-only cap for [CODE-TRACE]-only findings, WITH a structural-
+        # untestability carve-out. The blanket "cap [CODE-TRACE] at Low" rule
+        # conflates (1) weak/lazy traces (a harness exists but no PoC was
+        # written) with (2) genuinely structurally-untestable CONFIRMED findings
+        # whose verifier explicitly declined to downgrade. Only (1) keeps the
+        # Low cap; (2) preserves the verifier-stated severity. Reuses the shipped
+        # `_valid_poc_skip` distinction — no new heuristic. Gated behind
+        # proven_only + best-tag-is-CODE-TRACE-only, so it is a no-op for
+        # non-proven-only runs and for any POC-PASS/MEDUSA-PASS/PROD-* finding
+        # (those carry a proof-grade tag). Conservative + additive: relative to
+        # the current blanket cap this can only RAISE severity (case 2), never
+        # lower it.
+        if proven_only and not has_proof_grade_evidence(vtxt):
+            poc_class = _effective_poc_class(row.get("poc class") or "", vtxt)
+            if not _structurally_untestable(scratchpad, vtxt, poc_class):
+                sev = _cap_report_index_severity(sev, "Low")
+            # else: verifier-blessed structural untestability → preserve sev
         out[fid] = sev
     return out
 
@@ -17952,6 +18027,47 @@ def _validate_recon_content_structure(
             text = ""
         return text, _llm_norm(text).lower()
 
+    def _mech_artifact_complete(name: str) -> bool:
+        """A canonical mechanical inventory file is 'complete' when it exists,
+        is no longer pre-pass-marker-stamped, and carries a substantive
+        enumeration body (a real table row or per-entity line) — NOT merely
+        non-empty bytes. Mirrors the placeholder-refusal logic in
+        ``plamen_mechanical.strip_codex_prepass_markers``.
+        """
+        path = scratchpad / name
+        if not path.exists():
+            return False
+        text, _ = _read_artifact(name)
+        lines = text.splitlines()
+        # (b) line 1 must not be the pre-pass overwrite marker
+        if lines[:1] == [prepass_marker]:
+            return False
+        # body = everything after a leading marker line (none here), used to
+        # reject pure placeholder content the way the codex stripper does
+        body = text if lines[:1] != [prepass_marker] else "\n".join(lines[1:])
+        if not body.strip() or "[LLM TO ENRICH]" in body:
+            return False
+        # (c) substantive enumeration: at least one markdown table data row
+        # (a non-separator `| ... |` line) OR a per-entity bullet/numbered line.
+        for raw in body.splitlines():
+            s = raw.strip()
+            if (
+                s.startswith("|")
+                and s.endswith("|")
+                and not _is_separator_row(s)
+                and any(ch.isalnum() for ch in s.strip("|"))
+            ):
+                return True
+            if re.match(r"^(?:[-*+]\s+|\d+[.)]\s+)\S", s):
+                return True
+        return False
+
+    mech_complete = all(
+        _mech_artifact_complete(name)
+        for name in ("function_list.md", "state_variables.md", "contract_inventory.md")
+    )
+    mech_soft_suffix = " (soft: mechanical inventory complete)"
+
     for name in (
         "design_context.md",
         "attack_surface.md",
@@ -17981,17 +18097,23 @@ def _validate_recon_content_structure(
             r"|implications\b)",
             txt,
         ):
-            hard.append(
+            msg = (
                 "design_context.md missing '## Operational Implications' section "
                 "(Rule 14 — breadth/depth agents need it)"
+            )
+            (soft if mech_complete else hard).append(
+                msg + mech_soft_suffix if mech_complete else msg
             )
         if not re.search(
             r"(?im)^#+\s+.*(?:(?:key|protocol|core|safety|system|critical)\s+)?invariant",
             txt,
         ):
-            hard.append(
+            msg = (
                 "design_context.md missing Key Invariants section "
                 "(downstream agents derive analysis from invariant formulas)"
+            )
+            (soft if mech_complete else hard).append(
+                msg + mech_soft_suffix if mech_complete else msg
             )
 
     # attack_surface.md: heading format (non-blocking)
@@ -18013,9 +18135,12 @@ def _validate_recon_content_structure(
         txt, norm = _read_artifact("recon_summary.md")
         min_summary_bytes = 200 if backend == "codex" else 512
         if summary.stat().st_size < min_summary_bytes:
-            hard.append(
+            msg = (
                 "recon_summary.md is too small to be a clean handoff "
                 f"({summary.stat().st_size} bytes, min={min_summary_bytes})"
+            )
+            (soft if mech_complete else hard).append(
+                msg + mech_soft_suffix if mech_complete else msg
             )
         if not re.search(
             r"(?im)^(?:#+\s+|\*\*).*(?:recon|summary|protocol|contract|component|"

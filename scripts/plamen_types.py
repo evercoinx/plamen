@@ -17,6 +17,7 @@ __all__ = [
     "CLAUDE_BIN", "CODEX_BIN", "Checkpoint",
     "plamen_home",
     "EVIDENCE_TAGS_PROOF", "EVIDENCE_TAGS_TRACE", "EVIDENCE_TAGS_FAIL",
+    "EVIDENCE_TAGS_PROD", "has_proof_grade_evidence",
     "EVIDENCE_TAGS_ALL", "EVIDENCE_TAG_DEFAULT", "EVIDENCE_TAG_NAMES_RE",
     "DEPTH_EVIDENCE_TAG_NAMES", "DEPTH_EVIDENCE_TAG_RE",
     "FINDING_BLOCK_HEADING_RE",
@@ -176,6 +177,14 @@ EVIDENCE_TAGS_PROOF: frozenset[str] = frozenset({
 })
 EVIDENCE_TAGS_TRACE: frozenset[str] = frozenset({"[CODE-TRACE]", "[LSP-TRACE]"})
 EVIDENCE_TAGS_FAIL: frozenset[str] = frozenset({"[POC-FAIL]"})
+# Production / on-chain proof-grade tags (confidence model rates these 0.9-1.0).
+# Verifiers emit these when a finding is confirmed against forked or live
+# on-chain state. Kept SEPARATE from EVIDENCE_TAGS_PROOF so the narrow
+# "a mechanical test passed" semantics of has_mechanical_proof stay intact;
+# proof-GRADE checks (has_proof_grade_evidence) OR these in.
+EVIDENCE_TAGS_PROD: frozenset[str] = frozenset({
+    "[PROD-ONCHAIN]", "[PROD-SOURCE]", "[PROD-FORK]",
+})
 EVIDENCE_TAGS_ALL: frozenset[str] = EVIDENCE_TAGS_PROOF | EVIDENCE_TAGS_TRACE | EVIDENCE_TAGS_FAIL
 EVIDENCE_TAG_DEFAULT = "CODE-TRACE"
 EVIDENCE_TAG_NAMES_RE = "|".join(sorted(t.strip("[]") for t in EVIDENCE_TAGS_ALL))
@@ -184,6 +193,19 @@ EVIDENCE_TAG_NAMES_RE = "|".join(sorted(t.strip("[]") for t in EVIDENCE_TAGS_ALL
 def has_mechanical_proof(text: str) -> bool:
     """True if *text* contains any proof-grade evidence tag."""
     return any(tag in text for tag in EVIDENCE_TAGS_PROOF)
+
+
+def has_proof_grade_evidence(text: str) -> bool:
+    """True if *text* carries proof-GRADE evidence: a mechanical-test-pass tag
+    OR a production/on-chain verification tag ([PROD-ONCHAIN/SOURCE/FORK]).
+
+    Proven-only severity gating must use THIS, not has_mechanical_proof: a
+    finding confirmed against forked/live state is proof-grade and must not be
+    capped at Low. has_mechanical_proof stays narrow (test-pass only) for the
+    callers that genuinely mean "a test executed and passed"."""
+    return has_mechanical_proof(text) or any(
+        tag in text for tag in EVIDENCE_TAGS_PROD
+    )
 
 
 # ── Depth evidence tag vocabulary (Ship A — single source of truth) ────────
@@ -1080,6 +1102,13 @@ SC_PHASES = [
           ["analysis_*.md"],
           base_timeout_s=10800, model="sonnet", critical=True,
           min_artifacts_count=3),
+    # Cheap mechanical planning step (mirrors inventory_prepare): the driver
+    # writes rescan_manifest.md before any rescan worker spawns, so the rescan
+    # phase below stays a pure bounded worker-pool executor and never has to
+    # plan-and-execute in one overloaded coordinator on large codebases.
+    Phase("rescan_prepare", ["Phase 3b: Breadth Re-Scan (+ Phase 3c per-contract sub-step)"],
+          ["rescan_manifest.md"],
+          base_timeout_s=60, modes={"thorough"}, critical=True, model="haiku"),
     # Per-contract/scope-review output is part of the rescan phase contract
     # in Thorough mode; inventory consumes both families in one build.
     Phase("rescan", ["Phase 3b: Breadth Re-Scan (+ Phase 3c per-contract sub-step)"],

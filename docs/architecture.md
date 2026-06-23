@@ -1,6 +1,6 @@
 # Architecture
 
-> Plamen v2.1.1. The default analysis model is Opus 4.8 (`claude-opus-4-8`),
+> Plamen v2.1.4. The default analysis model is Opus 4.8 (`claude-opus-4-8`),
 > resolved via `PLAMEN_OPUS_MODEL` / `PLAMEN_THOROUGH_OPUS_MODEL` in
 > `scripts/plamen_types.py`. Runs on Windows, macOS, and Linux.
 

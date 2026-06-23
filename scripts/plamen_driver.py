@@ -5823,11 +5823,31 @@ def _build_recon_worker_prompt(
             "design_context.md directly."
         ),
         "inventory_surface": (
-            "Review source structure, contract/function/state inventory, entry "
-            "points, setters, events, external calls, and attack surface. Do not "
-            "write canonical inventory files directly."
+            "The mechanical pre-pass ALREADY wrote the FULL contract/function/"
+            "state enumeration to contract_inventory.md, function_list.md, and "
+            "state_variables.md (see the readable-inputs list below). Those files "
+            "are authoritative and are preserved at the top of the canonical "
+            "artifacts. DO NOT re-enumerate contracts, functions, or state "
+            "variables from source. Produce ONLY the narrative layer on top of "
+            "the mechanical enumeration: (1) externally-reachable entry points "
+            "with their access level (public / admin / role / contract-only), "
+            "(2) attack-surface grouping (asset movement, accounting, privileged "
+            "setters, external-call sinks), and (3) trust boundaries — which "
+            "actors reach which entry points. "
+            "Then a MANDATORY '## Enumeration Gaps' subsection: scan source for "
+            "and FLAG with file:line any GENERIC mechanism a regex/Slither pass "
+            "can miss — inline assembly, proxy/delegatecall/callcode targets, "
+            "dynamic dispatch (function pointers / selector-routed calls), "
+            "fallback()/receive(), and raw low-level .call/.staticcall/"
+            ".delegatecall — or write 'none found' with what was checked. "
+            "Do not write canonical inventory files directly."
         ),
         "templates_patterns": (
+            "Derive risk-pattern flags and template/skill/niche recommendations "
+            "FROM the mechanical enumeration (contract_inventory.md, "
+            "function_list.md, state_variables.md) plus the inventory_surface "
+            "attack-surface narrative when present — do NOT re-enumerate from "
+            "source. "
             "Derive detected risk patterns and the template/skill/niche "
             "recommendation matrix. This is recommendation data only; do not "
             "create any roster or later-phase coordination artifact."
@@ -5840,8 +5860,21 @@ def _build_recon_worker_prompt(
             "Halmos, Slither detector passes, or verification-specific commands."
         ),
         "inventory_templates": (
-            "Merged light-mode role: source inventory, attack surface, detected "
-            "patterns, event/setter maps, and template/skill recommendations."
+            "Merged light-mode role. The mechanical pre-pass ALREADY wrote the "
+            "FULL contract/function/state enumeration to contract_inventory.md, "
+            "function_list.md, and state_variables.md (see the readable-inputs "
+            "list below); those files are authoritative and preserved at the top "
+            "of the canonical artifacts. DO NOT re-enumerate from source. Build "
+            "ON TOP of the mechanical enumeration: attack surface (entry points "
+            "with access level, asset/accounting/privileged-setter/external-call "
+            "grouping, trust boundaries), detected patterns, event/setter maps, "
+            "and template/skill recommendations. "
+            "Then a MANDATORY '## Enumeration Gaps' subsection: scan source for "
+            "and FLAG with file:line any GENERIC mechanism a regex/Slither pass "
+            "can miss — inline assembly, proxy/delegatecall/callcode targets, "
+            "dynamic dispatch (function pointers / selector-routed calls), "
+            "fallback()/receive(), and raw low-level .call/.staticcall/"
+            ".delegatecall — or write 'none found' with what was checked."
         ),
     }.get(role, focus)
     return f"""# RECON WORKER
@@ -5894,6 +5927,9 @@ Driver-provided recon inputs you may read when present:
 - `{scratchpad.as_posix()}/_recon_static_probe.md`
 - `{scratchpad.as_posix()}/build_status.md`
 - `{scratchpad.as_posix()}/slither/primitive_status.md`
+- `{scratchpad.as_posix()}/contract_inventory.md`
+- `{scratchpad.as_posix()}/state_variables.md`
+- `{scratchpad.as_posix()}/function_list.md`
 
 ## Command Boundary
 
@@ -6419,7 +6455,10 @@ def _run_recon_worker_pool_pty(
                         config=config,
                         base_cmd=base_cmd,
                         env=env,
-                        timeout=max(900, min(timeout, 2400)),
+                        # full scaled budget per worker (parity with breadth/
+                        # rescan/depth); the 2400 cap starved workers below
+                        # scale_timeout on large repos.
+                        timeout=max(900, timeout),
                         quiescence_s=quiescence_s,
                         attempt=pool_attempt,
                         retry_reasons=retry_reasons_by_output.get(job["output"]),
@@ -6515,6 +6554,45 @@ def _run_recon_worker_pool_pty(
             if r.get("status") != "complete"
         }
     log.warning("[recon] worker-pool retry budget exhausted")
+    # Haltless tail: rather than discarding the work of every worker that DID
+    # reach COMPLETE, merge the completed shards and see whether the canonical
+    # gate is satisfied. A partial merge never overwrites a complete mechanical
+    # artifact (the >=100B merge branch preserves the mechanical body at top and
+    # appends the shard as a Recon Worker Addendum).
+    completed_jobs = []
+    remaining_jobs = []
+    for job in jobs:
+        ok, _reasons = _recon_worker_complete(scratchpad, job["output"], job)
+        if ok:
+            completed_jobs.append(job)
+        else:
+            remaining_jobs.append(job)
+    try:
+        _merge_recon_worker_shards(scratchpad, config)
+    except Exception as exc:
+        log.warning(f"[recon] partial-merge failed: {exc!r}")
+        return -2
+    passed, missing = gate_passes(scratchpad, project_root, phase)
+    if passed:
+        log.info(
+            "[recon] partial-merge over %d/%d completed shards passed canonical "
+            "gate; continuing haltless",
+            len(completed_jobs),
+            len(jobs),
+        )
+        return 0
+    degraded, _new_missing = _try_recon_prepass_marker_degrade(
+        scratchpad, config, list(missing)
+    )
+    if degraded:
+        return 0
+    log.warning(
+        "[recon] partial-merge over %d/%d completed shards did not satisfy "
+        "the canonical gate: %s",
+        len(completed_jobs),
+        len(jobs),
+        missing,
+    )
     return -2
 
 
@@ -13775,7 +13853,8 @@ def _run_phase_validators(
             ]
         if content_soft:
             log.warning(
-                "[recon] content format (non-blocking): %s",
+                "[recon] narrative recon gaps (non-blocking; mechanical "
+                "inventory authoritative): %s",
                 "; ".join(content_soft),
             )
         # Gate 2: injectable enrichment/promotion. Flag un-enriched placeholder
@@ -15313,7 +15392,10 @@ def _persist_corrected_language(
 
 
 def _ensure_claude_folder_trusted(*paths: str) -> list[str]:
-    """Pre-accept Claude Code's per-FOLDER trust dialog for the given dirs.
+    """Pre-clear Claude Code's first-run interactive gates that freeze a
+    headless PTY worker: per-FOLDER trust for the given dirs, PLUS the global
+    onboarding/theme wizard and the one-time --dangerously-skip-permissions
+    risk-acceptance dialog.
 
     A PTY worker launched with cwd in a directory Claude Code has never opened
     hangs FOREVER on the interactive "Is this a project you trust?" dialog —
@@ -15363,6 +15445,32 @@ def _ensure_claude_folder_trusted(*paths: str) -> list[str]:
                     projects[key] = entry
                     changed = True
                     trusted.append(key)
+        # ── Global first-run interactive gates ────────────────────────────
+        # Per-folder trust is only the SECOND of three first-run gates a fresh
+        # `claude` install puts in front of a PTY worker; all three are
+        # invisible to `-p`/print-mode probes but freeze a real PTY worker:
+        #   A) onboarding/theme wizard  C) --dangerously-skip-permissions accept
+        # Clear them globally, idempotently, preserving all other config.
+        #   - hasCompletedOnboarding: the documented onboarding gate (skips the
+        #     whole wizard, including the theme step).
+        #   - theme: set a default ONLY if the user has none — never override an
+        #     existing choice.
+        #   - bypassPermissionsModeAccepted: BEST-EFFORT acceptance of the
+        #     dangerous-mode dialog. The exact key is not officially documented;
+        #     the driver already passes --dangerously-skip-permissions, so
+        #     pre-accepting its prompt is consistent, and an extra/unknown key is
+        #     harmless if Claude ignores it.
+        if data.get("hasCompletedOnboarding") is not True:
+            data["hasCompletedOnboarding"] = True
+            trusted.append("hasCompletedOnboarding")
+            changed = True
+        if "theme" not in data:
+            data["theme"] = "dark"
+            changed = True
+        if data.get("bypassPermissionsModeAccepted") is not True:
+            data["bypassPermissionsModeAccepted"] = True
+            trusted.append("bypassPermissionsModeAccepted")
+            changed = True
         if changed:
             tmp = cj.with_name(cj.name + ".plamen-tmp")
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -15971,6 +16079,18 @@ def main():
             checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
             checkpoint.save(scratchpad)
             log.info("[inventory_prepare] wrote inventory shard plan/manifests")
+            display.print_phase_skipped(
+                phase_idx + 1, total_active, phase.name,
+                "mechanical (Python-only)",
+            )
+            continue
+
+        if phase.name == "rescan_prepare":
+            ensure_rescan_manifest(scratchpad, config)
+            checkpoint.mark_completed(phase.name)
+            checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
+            checkpoint.save(scratchpad)
+            log.info("[rescan_prepare] wrote rescan_manifest.md")
             display.print_phase_skipped(
                 phase_idx + 1, total_active, phase.name,
                 "mechanical (Python-only)",

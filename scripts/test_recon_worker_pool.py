@@ -361,6 +361,162 @@ def test_recon_worker_pool_protects_preexisting_canonical_inputs(
     assert len(seen_protected) == len(jobs)
 
 
+def test_recon_worker_pool_partial_merges_when_retry_budget_exhausted(
+    tmp_path: Path,
+    monkeypatch,
+):
+    # 2 of 4 shards complete on disk; the remaining 2 never reach COMPLETE,
+    # so the retry budget exhausts. The haltless tail must still partial-merge
+    # the completed shards, pass the canonical gate, and return 0 (not -2).
+    cfg = _cfg(tmp_path, "thorough")
+    scratch = Path(cfg["scratchpad"])
+    jobs = D._recon_worker_jobs(cfg)
+    completed = jobs[:2]
+    stuck = jobs[2:]
+    for job in completed:
+        (scratch / job["output"]).write_text(
+            _worker_shard(job["output"], job["role"], owner=job["agent_id"]),
+            encoding="utf-8",
+        )
+
+    def fake_run_single(**kwargs):
+        # Stuck workers never produce their output; status stays incomplete so
+        # the worker pool cannot finalize via the all-complete branches.
+        job = kwargs["job"]
+        return {
+            "output": job["output"],
+            "rc": -2,
+            "status": "incomplete",
+            "reasons": ["never reached COMPLETE"],
+        }
+
+    monkeypatch.setattr(D, "_run_single_recon_worker_pty", fake_run_single)
+    phase = next(ph for ph in D.SC_PHASES if ph.name == "recon")
+
+    rc = D._run_recon_worker_pool_pty(
+        scratchpad=scratch,
+        project_root=cfg["project_root"],
+        config=cfg,
+        phase=phase,
+        base_cmd=[],
+        env={},
+        timeout=1,
+        quiescence_s=0.1,
+        attempt=1,
+    )
+
+    assert rc == 0
+    # The 2 stuck shards are still absent; partial merge happened anyway.
+    for job in stuck:
+        assert not (scratch / job["output"]).exists()
+    assert (scratch / "recon_summary.md").exists()
+    assert (scratch / "design_context.md").exists()
+    passed, missing = D.gate_passes(scratch, cfg["project_root"], phase)
+    assert passed, missing
+
+
+def test_recon_worker_timeout_uses_full_scaled_budget_not_2400_cap(
+    tmp_path: Path,
+    monkeypatch,
+):
+    # The per-worker timeout must equal max(900, scaled) — no 2400 cap — so a
+    # large scaled budget reaches the worker, and a tiny scaled budget floors
+    # at 900 (parity with breadth/rescan/depth).
+    cfg = _cfg(tmp_path, "thorough")
+    scratch = Path(cfg["scratchpad"])
+    jobs = D._recon_worker_jobs(cfg)
+    seen_timeouts: list[float] = []
+
+    def make_fake(record: list[float]):
+        def fake_run_single(**kwargs):
+            record.append(kwargs["timeout"])
+            job = kwargs["job"]
+            (scratch / job["output"]).write_text(
+                _worker_shard(job["output"], job["role"], owner=job["agent_id"]),
+                encoding="utf-8",
+            )
+            return {
+                "output": job["output"],
+                "rc": 0,
+                "status": "complete",
+                "reasons": [],
+            }
+
+        return fake_run_single
+
+    phase = next(ph for ph in D.SC_PHASES if ph.name == "recon")
+
+    large = 9000.0
+    monkeypatch.setattr(D, "_run_single_recon_worker_pty", make_fake(seen_timeouts))
+    rc = D._run_recon_worker_pool_pty(
+        scratchpad=scratch,
+        project_root=cfg["project_root"],
+        config=cfg,
+        phase=phase,
+        base_cmd=[],
+        env={},
+        timeout=large,
+        quiescence_s=0.1,
+        attempt=1,
+    )
+    assert rc == 0
+    assert seen_timeouts, "expected at least one worker invocation"
+    # No 2400 cap: a large scaled budget passes through verbatim.
+    assert all(t == large for t in seen_timeouts)
+    assert all(t > 2400 for t in seen_timeouts)
+
+    # Reset for the floor case.
+    for job in jobs:
+        (scratch / job["output"]).unlink(missing_ok=True)
+    tiny_timeouts: list[float] = []
+    monkeypatch.setattr(D, "_run_single_recon_worker_pty", make_fake(tiny_timeouts))
+    rc = D._run_recon_worker_pool_pty(
+        scratchpad=scratch,
+        project_root=cfg["project_root"],
+        config=cfg,
+        phase=phase,
+        base_cmd=[],
+        env={},
+        timeout=5,
+        quiescence_s=0.1,
+        attempt=1,
+    )
+    assert rc == 0
+    assert tiny_timeouts
+    # Tiny scaled budget floors at 900.
+    assert all(t == 900 for t in tiny_timeouts)
+
+
+def test_recon_inventory_surface_prompt_builds_on_mechanical_no_reenumeration(
+    tmp_path: Path,
+):
+    cfg = _cfg(tmp_path, "thorough")
+    scratch = Path(cfg["scratchpad"])
+    job = next(
+        j for j in D._recon_worker_jobs(cfg) if j["role"] == "inventory_surface"
+    )
+
+    prompt = D._build_recon_worker_prompt(
+        job=job,
+        scratchpad=scratch,
+        project_root=cfg["project_root"],
+        config=cfg,
+        attempt=1,
+    )
+
+    # The three mechanical enumeration filenames appear in readable-inputs.
+    assert "contract_inventory.md" in prompt
+    assert "function_list.md" in prompt
+    assert "state_variables.md" in prompt
+    # Enumeration Gaps recall guard + generic-mechanism tokens.
+    assert "Enumeration Gaps" in prompt
+    assert "inline assembly" in prompt
+    assert "delegatecall" in prompt
+    assert "fallback()/receive()" in prompt
+    # No longer instructs full source re-enumeration.
+    assert "DO NOT re-enumerate" in prompt
+
+
 def test_depth_worker_pool_finalizes_when_last_attempt_completes_rows(
     tmp_path: Path,
     monkeypatch,

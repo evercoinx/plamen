@@ -259,3 +259,43 @@ def test_rescan_worker_prompt_is_one_artifact_allowlist(tmp_path):
     assert "do not spawn" in prompt.lower()
     assert "Write exactly this file" in prompt
     assert "Do not proceed outside this assigned worker contract" in prompt
+
+
+# --------------------------------------------------------------------------
+# Item 4 (Design A): rescan_prepare writes the manifest mechanically; the
+# rescan phase below stays the pure worker-pool executor. The mechanical
+# manifest must satisfy this AUTHORITATIVE exact gate once workers fill it.
+# --------------------------------------------------------------------------
+
+import plamen_mechanical as M  # noqa: E402
+
+
+def test_mechanical_prepare_manifest_satisfies_exact_gate(tmp_path):
+    sp = tmp_path / ".scratchpad"; sp.mkdir()
+    (sp / "contract_inventory.md").write_text(
+        "# Contract Inventory\n\n| C | `src/ExampleVault.sol` |\n",
+        encoding="utf-8",
+    )
+    declared = _parse_rescan_manifest_files(
+        M.ensure_rescan_manifest(sp, {}).read_text(encoding="utf-8")
+    )
+    assert declared, "mechanical manifest must declare concrete files"
+    assert any(n.startswith("analysis_percontract_") for n in declared)
+    # Before workers run, every declared file is missing → gate must NOT pass.
+    assert _rescan_manifest_exact_missing(sp, RESCAN) == declared
+    # After the worker pool fills each declared output substantively → pass.
+    for name in declared:
+        (sp / name).write_text(FRESH_SUB, encoding="utf-8")
+    assert _rescan_manifest_exact_missing(sp, RESCAN) == []
+    passed, missing = gate_passes(sp, str(tmp_path), RESCAN)
+    assert passed is True, missing
+
+
+def test_rescan_phase_contract_unchanged_by_split():
+    """The rescan phase stays the pure worker-pool executor; rescan_prepare is
+    a separate mechanical phase. Recall: the rescan output families are intact."""
+    assert RESCAN.expected_artifacts == [
+        "analysis_rescan_*.md", "analysis_percontract_*.md"
+    ]
+    prep = next(p for p in D.SC_PHASES if p.name == "rescan_prepare")
+    assert prep.expected_artifacts == ["rescan_manifest.md"]

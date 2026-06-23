@@ -54,6 +54,47 @@ def test_pretrust_creates_config_when_absent(tmp_path, monkeypatch):
     assert data["projects"][fkey]["hasTrustDialogAccepted"] is True
 
 
+def test_pretrust_clears_global_first_run_gates(tmp_path, monkeypatch):
+    """Beyond per-folder trust, the global onboarding/theme wizard and the
+    one-time --dangerously-skip-permissions acceptance are cleared so a fresh
+    `claude` install does not freeze a PTY worker (incidents A and C)."""
+    _home(monkeypatch, tmp_path)
+    D._ensure_claude_folder_trusted(str(tmp_path / "harness"))
+    data = json.loads((tmp_path / ".claude.json").read_text(encoding="utf-8"))
+    assert data["hasCompletedOnboarding"] is True
+    assert data["theme"] == "dark"           # default set when user has none
+    assert data["bypassPermissionsModeAccepted"] is True
+
+
+def test_pretrust_does_not_override_existing_theme(tmp_path, monkeypatch):
+    """A user's existing theme is NEVER overridden."""
+    _home(monkeypatch, tmp_path)
+    cj = tmp_path / ".claude.json"
+    cj.write_text(json.dumps({"theme": "light"}), encoding="utf-8")
+    D._ensure_claude_folder_trusted(str(tmp_path / "harness"))
+    data = json.loads(cj.read_text(encoding="utf-8"))
+    assert data["theme"] == "light"          # preserved, not clobbered
+    assert data["hasCompletedOnboarding"] is True
+
+
+def test_pretrust_global_gates_idempotent(tmp_path, monkeypatch):
+    """Once the global gates are set, a re-run reports nothing new from them."""
+    _home(monkeypatch, tmp_path)
+    cj = tmp_path / ".claude.json"
+    cj.write_text(json.dumps({
+        "hasCompletedOnboarding": True,
+        "theme": "dark",
+        "bypassPermissionsModeAccepted": True,
+        "projects": {},
+    }), encoding="utf-8")
+    proj = str(tmp_path / "harness")
+    newly = D._ensure_claude_folder_trusted(proj)
+    # only the fresh folder is newly trusted; the global gates were already set
+    assert "hasCompletedOnboarding" not in newly
+    assert "bypassPermissionsModeAccepted" not in newly
+    assert D._ensure_claude_folder_trusted(proj) == []   # fully idempotent
+
+
 if __name__ == "__main__":
     import pytest
     import sys

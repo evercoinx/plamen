@@ -102,6 +102,7 @@ __all__ = [
     "strip_codex_prepass_markers",
     "_write_mechanical_report_tier",
     "ensure_inventory_shard_plan",
+    "ensure_rescan_manifest",
     "estimate_rate_limit_wait_seconds",
     "hibernation_disabled",
     "maybe_hibernate_on_rate_limit",
@@ -3714,6 +3715,119 @@ def ensure_inventory_shard_plan(scratchpad: Path, target_per_shard: int = 70,
     if not plan_path.exists() or plan_path.read_text(encoding="utf-8", errors="replace") != plan_text:
         plan_path.write_text(plan_text, encoding="utf-8")
     return shard_entries
+
+
+def _rescan_manifest_slug(value: str) -> str:
+    """Sanitize a contract/file label into a rescan-manifest filename slug.
+
+    The slug must round-trip through `plamen_validators._RESCAN_MANIFEST_FILE_RE`
+    (`[A-Za-z0-9][A-Za-z0-9_.\\-]*`): non-conforming characters collapse to `_`
+    and a non-alphanumeric leading char is stripped. Returns "" if nothing
+    usable remains so the caller can fall back to the scope-review slug.
+    """
+    base = (value or "").replace("\\", "/").strip().strip("`")
+    base = Path(base).name  # drop directories; keep the leaf
+    base = re.sub(r"\.(?:sol|rs|go|move|cairo|vy|ts|js|py)$", "", base, flags=re.IGNORECASE)
+    slug = re.sub(r"[^A-Za-z0-9_.\-]", "_", base).strip("_")
+    slug = re.sub(r"_{2,}", "_", slug)
+    # Leading char must be alphanumeric per the validator regex.
+    slug = re.sub(r"^[^A-Za-z0-9]+", "", slug)
+    return slug
+
+
+def _rescan_percontract_clusters(scratchpad: Path, max_clusters: int = 6) -> list[str]:
+    """Derive per-contract cluster slugs from `contract_inventory.md`.
+
+    Reuses the same scoped-source extraction as `_synthesize_components_audited`
+    (in-scope `\\`...\\`` code-file paths above any `## Out of Scope` cut). Returns
+    a bounded, de-duplicated list of filename-safe slugs. Empty when the
+    inventory is absent or sparse — the caller then falls back to a single
+    `analysis_percontract_scope_review.md` row.
+    """
+    inventory = scratchpad / "contract_inventory.md"
+    if not inventory.exists():
+        return []
+    try:
+        text = _llm_norm(inventory.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    cut = re.search(r"(?im)^##\s+Out[- ]of[- ]Scope\b", text)
+    scoped_text = text[: cut.start()] if cut else text
+    slugs: list[str] = []
+    seen: set[str] = set()
+    for m in re.finditer(
+        r"`([^`]+\.(?:sol|rs|go|move|cairo|vy|ts|js|py))`", scoped_text, re.IGNORECASE
+    ):
+        slug = _rescan_manifest_slug(m.group(1))
+        if slug and slug.lower() not in seen:
+            seen.add(slug.lower())
+            slugs.append(slug)
+        if len(slugs) >= max_clusters:
+            break
+    return slugs
+
+
+def ensure_rescan_manifest(scratchpad: Path, config: dict) -> Path:
+    """Mechanically write `rescan_manifest.md` (Phase 3b prepare step).
+
+    Mirrors `ensure_inventory_shard_plan`: a cheap deterministic planning step
+    that emits the concrete output filenames the rescan worker pool will fill,
+    so the pure executor (`rescan` phase) never has to plan-and-execute in one
+    overloaded coordinator on large codebases.
+
+    Emits:
+      - 2-3 concrete ``analysis_rescan_<n>.md`` rows (broad re-scan agents), and
+      - >=1 concrete ``analysis_percontract_<cluster>.md`` row derived from
+        ``contract_inventory.md`` clusters; falls back to a single
+        ``analysis_percontract_scope_review.md`` row when the inventory is
+        sparse/empty.
+
+    All filenames are CONCRETE (never glob form) so the manifest round-trips
+    through ``plamen_validators._parse_rescan_manifest_files`` and satisfies the
+    authoritative ``_rescan_manifest_exact_missing`` gate. Idempotent:
+    compare-then-write, so a re-run on an unchanged scratchpad is a no-op.
+    """
+    n_rescan = max(2, min(3, int(config.get("rescan_agent_count", 3) or 3)))
+    rescan_files = [f"analysis_rescan_{n}.md" for n in range(1, n_rescan + 1)]
+
+    clusters = _rescan_percontract_clusters(scratchpad)
+    if clusters:
+        percontract_files = [f"analysis_percontract_{slug}.md" for slug in clusters]
+    else:
+        percontract_files = ["analysis_percontract_scope_review.md"]
+
+    lines = [
+        "# Rescan Manifest",
+        "",
+        "Mechanically derived plan for the Phase 3b breadth re-scan worker pool.",
+        "Each row below is a CONCRETE output file the rescan executor must fill.",
+        "Per-worker methodology is unchanged (see phase3b-rescan.md / the",
+        "EXCLUSION SOURCE RULE) — this file only enumerates the output families.",
+        "",
+        "## Re-Scan Agents",
+        "",
+        "| Output |",
+        "|--------|",
+    ]
+    lines.extend(f"| {name} |" for name in rescan_files)
+    lines += [
+        "",
+        "## Per-Contract Agents",
+        "",
+        "| Output |",
+        "|--------|",
+    ]
+    lines.extend(f"| {name} |" for name in percontract_files)
+    lines.append("")
+    content = "\n".join(lines)
+
+    manifest = scratchpad / "rescan_manifest.md"
+    if (
+        not manifest.exists()
+        or manifest.read_text(encoding="utf-8", errors="replace") != content
+    ):
+        manifest.write_text(content, encoding="utf-8")
+    return manifest
 
 
 def write_inventory_chunk_placeholder(scratchpad: Path, phase_name: str, reason: str):
