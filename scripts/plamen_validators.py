@@ -131,6 +131,7 @@ __all__ = [
     "_write_chain_passthrough_outputs",
     "_body_writer_evidence_fields",
     "_expected_report_index_severities",
+    "_forced_chain_seed_rows",
     "_is_substantive_body_evidence",
     "_is_spec_support_path",
     "_is_evidence_missing_for_body",
@@ -16170,6 +16171,101 @@ def _chain_justified_upgrade_ids(scratchpad: Path) -> set[str]:
     return justified
 
 
+def _chain_section_severity(section: str, full_text: str, cid: str) -> str:
+    """Robustly extract a chain's declared severity. Real `chain_hypotheses.md`
+    files express it three different ways and we accept all three — a missed
+    severity silently drops a justified High from the coverage seed (the bug
+    this guards against). Order: most-specific first.
+      1. a bare ``Chain Severity: <tier>`` line in the section, then
+      2. a ``Chain Severity Matrix: ... -> <tier>`` conclusion line (the
+         upgraded tier sits AFTER the arrow), then
+      3. the summary-table row for the chain id (Chain Severity is its trailing
+         column; last tier token on the row wins).
+    """
+    m = re.search(
+        r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?Chain\s+Severity(?:\*\*)?\s*:\s*"
+        r"\**\s*(Critical|High|Medium|Low|Informational)\b",
+        section,
+    )
+    if m:
+        return normalize_severity(m.group(1))
+    m = re.search(
+        r"(?is)Chain\s+Severity\s+Matrix\b.*?(?:->|→|=>)\s*\**\s*"
+        r"(Critical|High|Medium|Low|Informational)\b",
+        section,
+    )
+    if m:
+        return normalize_severity(m.group(1))
+    for line in full_text.splitlines():
+        if not line.lstrip().startswith("|") or cid.lower() not in line.lower():
+            continue
+        tiers = re.findall(
+            r"\b(Critical|High|Medium|Low|Informational)\b", line, re.IGNORECASE
+        )
+        if tiers:
+            return normalize_severity(tiers[-1])
+    return ""
+
+
+def _forced_chain_seed_rows(scratchpad: Path) -> dict[str, dict[str, object]]:
+    """Force-include justified High/Critical chains into the coverage seed.
+
+    A chain that `chain_hypotheses.md` upgraded to High/Critical with a justified
+    Combined-Impact (machine line `Severity-Upgrade-Justified: YES`) is a genuine
+    compound finding whose severity is ABOVE its constituents — yet without this
+    helper it is never force-promoted to the verify queue / coverage seed in any
+    mode, so a PARTIAL/Low→High chain silently never reaches the body.
+
+    Returns ``{chain_id: {"severity": <High|Critical>, "constituents": [ids]}}``.
+    Purely additive — the caller only ADDS these IDs (chain + constituents) to
+    the seed superset, never demotes or drops anything. Severity-regression-safe.
+
+    Reuses the canonical `_chain_justified_upgrade_ids` (YES + concrete impact)
+    and `_parse_chain_constituents` semantics. Mode-agnostic by design: the
+    force-include must hold regardless of light/core/thorough.
+    """
+    justified = _chain_justified_upgrade_ids(scratchpad)
+    if not justified:
+        return {}
+    chain_path = scratchpad / "chain_hypotheses.md"
+    if not chain_path.exists():
+        return {}
+    try:
+        from plamen_parsers import _CHAIN_HYP_HEADING_RE, _CHAIN_MACHINE_LINE_RE
+        from plamen_parsers import _llm_norm as _pp_llm_norm
+    except Exception:
+        return {}
+    try:
+        text = _pp_llm_norm(chain_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    out: dict[str, dict[str, object]] = {}
+    headings = list(_CHAIN_HYP_HEADING_RE.finditer(text))
+    for i, hm in enumerate(headings):
+        cid = hm.group(1).upper()
+        if cid not in justified:
+            continue
+        start = hm.end()
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
+        section = text[start:end]
+        # Extract the declared Chain Severity from the section prose. Only
+        # force-include when it is High or Critical (the upgraded tiers that
+        # otherwise never reach the body).
+        sev = _chain_section_severity(section, text, cid)
+        if sev not in {"Critical", "High"}:
+            continue
+        # Constituent IDs from the machine line (authoritative, bounded).
+        constituents: list[str] = []
+        ml = _CHAIN_MACHINE_LINE_RE.search(section)
+        if ml:
+            for raw in re.split(r"[,\s]+", (ml.group("ids") or "").strip()):
+                rid = (_normalize_finding_id(raw) or raw).strip().upper()
+                if rid and rid != cid:
+                    constituents.append(rid)
+        out[cid] = {"severity": sev, "constituents": constituents}
+    return out
+
+
 def _reason_is_chain_restatement(reason: str) -> bool:
     """True when an Excluded Findings reason cites CHAIN-RESTATEMENT.
 
@@ -16992,10 +17088,16 @@ def _validate_obligation_ledger_retention(scratchpad: Path, coverage_text: str) 
             )
         ):
             continue
+        # Human-readable, per-row distinct issue text: name the source_id +
+        # severity + a one-line target excerpt so deduplicated obligation rows
+        # never read as identical clones.
+        target_excerpt = re.sub(r"\s+", " ", str(row.get("target") or "")).strip()[:160]
         issues.append(
-            f"obligation retention: active {cls} {oid} not preserved by exact "
-            "report coverage, absorbing report ID, explicit refutation, or a "
-            "tracked deferral/appendix disposition"
+            f"obligation retention: active {cls} {oid} "
+            f"(chain {source_id or 'unknown'}, {sev}"
+            + (f", \"{target_excerpt}\"" if target_excerpt else "")
+            + ") not preserved by exact report coverage, absorbing report ID, "
+            "explicit refutation, or a tracked deferral/appendix disposition"
         )
     return issues[:10]
 

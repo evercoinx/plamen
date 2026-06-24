@@ -3661,6 +3661,16 @@ def _write_report_index_coverage_seed(scratchpad: Path) -> int:
     except Exception:
         absorbed_map = {}
 
+    # 5. Force-include justified High/Critical chains (and their constituents)
+    #    REGARDLESS of mode. A chain upgraded ABOVE its constituents (e.g.
+    #    PARTIAL/Low → High via a justified Combined-Impact) would otherwise
+    #    never be promoted to the verify queue / body in any mode. Purely
+    #    additive to the seed superset — ADD-only, never demotes/drops.
+    try:
+        forced_chains = _forced_chain_seed_rows(scratchpad)
+    except Exception:
+        forced_chains = {}
+
     # Union of every ID that appears in any bounded source. This is the
     # authoritative completeness set — a SUPERSET, never a filtered subset.
     all_ids: set[str] = set()
@@ -3672,6 +3682,13 @@ def _write_report_index_coverage_seed(scratchpad: Path) -> int:
         surv = (info or {}).get("survivor", "")
         if surv:
             all_ids.add(surv.upper())
+    for cid, info in forced_chains.items():
+        all_ids.add(cid)
+        # Record the chain's upgraded severity in the seed (only when the
+        # severity-matrix sev_map did not already carry a value for it).
+        sev_map.setdefault(cid, str((info or {}).get("severity", "")))
+        for con in (info or {}).get("constituents", []) or []:
+            all_ids.add(con)
 
     lines = [
         "# Report Index Coverage Seed",

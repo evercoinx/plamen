@@ -4593,7 +4593,17 @@ def _composition_obligation_rows(scratchpad: Path) -> list[dict[str, object]]:
         text = path.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return []
-    rows: list[dict[str, object]] = []
+    # Dedup by distinct chain id (source_id). A single chain referenced across
+    # ~10 lines of composition_coverage.md previously minted ~10 near-identical
+    # active rows → 10 identical UNACCOUNTED-OBLIGATION Appendix-B clones. We
+    # accumulate into a dict keyed on the chain id, keep the HIGHEST severity
+    # signal, union the evidence/target lines, and OR the `declined` flag
+    # CONSERVATIVELY (a chain is active if ANY contributing line is non-declined,
+    # i.e. covered/declined only when EVERY line declined). Pure aggregation —
+    # no severity-logic change, regression-safe.
+    _SEV_RANK = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Informational": 4}
+    by_chain: dict[str, dict[str, object]] = {}
+    order: list[str] = []
     for line_no, line in enumerate(text.splitlines(), start=1):
         if not re.search(r"\bCH-\d{1,4}\b", line, re.IGNORECASE):
             continue
@@ -4627,22 +4637,130 @@ def _composition_obligation_rows(scratchpad: Path) -> list[dict[str, object]]:
             line,
             re.IGNORECASE,
         ))
-        rows.append({
-            "id": f"OBL-CHAIN-{rid}",
-            "class": "chain_upgrade_retention",
-            "source_id": rid,
-            "status": "covered" if declined else "active",
-            "severity_signal": sev,
-            "source": "composition_coverage.md",
-            "evidence": f"composition_coverage.md:L{line_no}",
-            "target": line.strip()[:800],
-            "closure_reason": (
+        existing = by_chain.get(rid)
+        if existing is None:
+            by_chain[rid] = {
+                "id": f"OBL-CHAIN-{rid}",
+                "class": "chain_upgrade_retention",
+                "source_id": rid,
+                # active if ANY line is non-declined (covered only if ALL declined)
+                "_any_active": not declined,
+                "severity_signal": sev,
+                "source": "composition_coverage.md",
+                "evidence": f"composition_coverage.md:L{line_no}",
+                "target": line.strip()[:800],
+                "absorbing_id": "",
+            }
+            order.append(rid)
+        else:
+            # keep highest severity
+            if _SEV_RANK.get(sev, 99) < _SEV_RANK.get(
+                str(existing["severity_signal"]), 99
+            ):
+                existing["severity_signal"] = sev
+            # active if ANY contributing line is non-declined
+            existing["_any_active"] = bool(existing["_any_active"]) or (not declined)
+            # union evidence line refs and target excerpts (bounded)
+            ev = str(existing["evidence"])
+            existing["evidence"] = (ev + f"; L{line_no}")[:800]
+            tgt = str(existing["target"])
+            extra = line.strip()
+            if extra and extra not in tgt:
+                existing["target"] = (tgt + " | " + extra)[:800]
+
+    rows: list[dict[str, object]] = []
+    for rid in order:
+        agg = by_chain[rid]
+        active = bool(agg.pop("_any_active"))
+        agg["status"] = "active" if active else "covered"
+        agg["closure_reason"] = (
+            ""
+            if active
+            else (
                 "chain agent explicitly declined to promote a formal CH ID "
-                "(hypothetical/non-chain composition)" if declined else ""
-            ),
-            "absorbing_id": "",
-        })
+                "(hypothetical/non-chain composition)"
+            )
+        )
+        rows.append(agg)
     return rows
+
+
+def _render_deferred_chain_notes(scratchpad: Path) -> set[str]:
+    """Emit ONE clean deferred-High note per un-queue-able justified chain.
+
+    A chain that `chain_hypotheses.md` upgraded to High/Critical with a
+    justified Combined-Impact is a genuine compound finding. When it is
+    genuinely un-queue-able IN-MODE (neither the chain id NOR any constituent
+    reaches the verification queue — e.g. constituent body missing / PoC infra
+    absent), leaving its obligation `active` would surface a noisy
+    `UNACCOUNTED-OBLIGATION`. Instead we emit exactly ONE human-readable
+    deferred note (e.g.
+    `Deferred finding (chain-derived, estimated High) — needs verification:
+    CH-01 = H-01 ⊕ H-23`) sourced from chain_hypotheses.md, written to a
+    `report_semantic_chain_deferred.md` file that `_build_human_review_appendix`
+    folds into AUDIT_REPORT.md so the human actually sees it.
+
+    Returns the set of chain IDs that were rendered as deferred notes, so the
+    caller can mark the matching obligation rows `covered`.
+
+    Purely additive — never demotes/drops a finding; a chain that DOES reach the
+    queue is left untouched (it goes to the body via the verify path).
+    """
+    try:
+        forced = _forced_chain_seed_rows(scratchpad)
+    except Exception:
+        forced = {}
+    if not forced:
+        return set()
+    # Verify-queue ID set: the chains that already have a body/verification home.
+    queue_ids: set[str] = set()
+    try:
+        for r in parse_verification_queue_rows(scratchpad):
+            fid = (r.get("finding id") or "").strip().upper()
+            if fid:
+                queue_ids.add(fid)
+    except Exception:
+        queue_ids = set()
+
+    deferred: dict[str, dict[str, object]] = {}
+    for cid, info in forced.items():
+        constituents = [c.upper() for c in (info or {}).get("constituents", []) or []]
+        # Queue-able when the chain id OR any constituent is in the queue.
+        if cid in queue_ids or any(c in queue_ids for c in constituents):
+            continue
+        deferred[cid] = {
+            "severity": str((info or {}).get("severity", "High")) or "High",
+            "constituents": constituents,
+        }
+    if not deferred:
+        return set()
+
+    lines = ["# Report Semantic Chain Deferred", ""]
+    lines.append(
+        "Chain-derived compound findings that were upgraded to High/Critical "
+        "with a justified Combined-Impact but could not be queued for "
+        "verification in this mode (constituent body missing or PoC "
+        "infrastructure absent). Flagged for human review — NOT silently "
+        "dropped."
+    )
+    lines.append("")
+    for cid in sorted(deferred):
+        info = deferred[cid]
+        sev = str(info.get("severity") or "High")
+        cons = info.get("constituents") or []
+        joined = " ⊕ ".join(cons) if cons else "(constituents unresolved)"
+        lines.append(
+            f"- Deferred finding (chain-derived, estimated {sev}) "
+            f"— needs verification: {cid} = {joined}"
+        )
+    lines.append("")
+    try:
+        (scratchpad / "report_semantic_chain_deferred.md").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+    except Exception:
+        pass
+    return set(deferred.keys())
 
 
 def _write_obligation_ledger(scratchpad: Path, mode: str) -> int:
@@ -4656,6 +4774,19 @@ def _write_obligation_ledger(scratchpad: Path, mode: str) -> int:
     """
     obligations: list[dict[str, object]] = []
     obligations.extend(_composition_obligation_rows(scratchpad))
+
+    # Render un-queue-able justified chains as ONE clean deferred-High note
+    # each, then mark the matching obligation rows `covered` so the retention
+    # gate is satisfied and no `UNACCOUNTED-OBLIGATION` clone is produced.
+    try:
+        deferred_chain_ids = _render_deferred_chain_notes(scratchpad)
+    except Exception:
+        deferred_chain_ids = set()
+    if deferred_chain_ids:
+        for row in obligations:
+            if str(row.get("source_id") or "").upper() in deferred_chain_ids:
+                row["status"] = "covered"
+                row["closure_reason"] = "rendered as deferred chain note"
 
     payload = {
         "schema_version": "plamen.obligation_ledger.v1",
