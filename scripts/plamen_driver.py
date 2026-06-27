@@ -4163,7 +4163,7 @@ def _run_verify_recovery_shard(
     isolation_path = (scratchpad / "_subprocess_isolation.json").resolve()
     isolation_ok = False
     try:
-        isolation_payload = '{"enabledPlugins":{},"hooks":{},"mcpServers":{}}'
+        isolation_payload = SUBPROCESS_ISOLATION_PAYLOAD
         if (
             not isolation_path.exists()
             or isolation_path.read_text(encoding="utf-8").strip()
@@ -15472,11 +15472,10 @@ def _ensure_claude_folder_trusted(*paths: str) -> list[str]:
         #     whole wizard, including the theme step).
         #   - theme: set a default ONLY if the user has none — never override an
         #     existing choice.
-        #   - bypassPermissionsModeAccepted: BEST-EFFORT acceptance of the
-        #     dangerous-mode dialog. The exact key is not officially documented;
-        #     the driver already passes --dangerously-skip-permissions, so
-        #     pre-accepting its prompt is consistent, and an extra/unknown key is
-        #     harmless if Claude ignores it.
+        #   - bypassPermissionsModeAccepted: legacy BEST-EFFORT guess (kept,
+        #     harmless). The AUTHORITATIVE suppression for the dangerous-mode
+        #     dialog is `skipDangerousModePermissionPrompt` in
+        #     ~/.claude/settings.json (a DIFFERENT file) — written below.
         if data.get("hasCompletedOnboarding") is not True:
             data["hasCompletedOnboarding"] = True
             trusted.append("hasCompletedOnboarding")
@@ -15494,6 +15493,36 @@ def _ensure_claude_folder_trusted(*paths: str) -> list[str]:
             tmp.replace(cj)
     except Exception:
         return []
+    # ── Gate C, AUTHORITATIVE: the bypass-permissions dialog ──────────────────
+    # The one-time "WARNING: Claude Code running in Bypass Permissions mode"
+    # dialog is gated by the CLI on
+    #   (dangerouslySkipPermissions) && !skipDangerousModePermissionPrompt()
+    # (anthropics/claude-code#25503). The flag alone does NOT suppress it; the
+    # key lives in ~/.claude/settings.json (NOT ~/.claude.json). A PTY worker has
+    # no stdin to answer it, so without this the worker emits 0 bytes and hangs
+    # to the phase budget (observed: a 98-min bake hang on macOS). This is the
+    # exact value the CLI itself persists when you accept, so writing it is
+    # honest pre-acceptance — the driver already passes the flag. Platform-
+    # agnostic (real code condition, no keystroke simulation). Independent
+    # try/except so a settings.json failure never discards the folder-trust work.
+    try:
+        sj = Path.home() / ".claude" / "settings.json"
+        sdata: dict = {}
+        if sj.is_file():
+            try:
+                sdata = json.loads(sj.read_text(encoding="utf-8") or "{}")
+            except (json.JSONDecodeError, OSError):
+                sdata = None  # unreadable/locked — do NOT clobber
+        if isinstance(sdata, dict) and \
+                sdata.get("skipDangerousModePermissionPrompt") is not True:
+            sdata["skipDangerousModePermissionPrompt"] = True
+            sj.parent.mkdir(parents=True, exist_ok=True)
+            tmp = sj.with_name(sj.name + ".plamen-tmp")
+            tmp.write_text(json.dumps(sdata, indent=2), encoding="utf-8")
+            tmp.replace(sj)
+            trusted.append("skipDangerousModePermissionPrompt")
+    except Exception:
+        pass
     return trusted
 
 

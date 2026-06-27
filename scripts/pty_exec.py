@@ -98,7 +98,22 @@ _CONTEXT_THRASH_LOOP_S = float(os.environ.get("PLAMEN_CONTEXT_THRASH_LOOP_S", "1
 # (probe). Empty enabledPlugins/hooks/mcpServers disables those subsystems
 # (plugin / hook / MCP cold-start hangs) without touching the user's real
 # settings.json -- so OAuth keychain auth keeps working.
-SUBPROCESS_ISOLATION_PAYLOAD = '{"enabledPlugins":{},"hooks":{},"mcpServers":{}}'
+#
+# `skipDangerousModePermissionPrompt: true` suppresses the one-time interactive
+# "Bypass Permissions mode" acceptance dialog that `--dangerously-skip-permissions`
+# triggers. Per the CLI's own gate
+# `(dangerouslySkipPermissions) && !skipDangerousModePermissionPrompt()`
+# (anthropics/claude-code#25503), this is the AUTHORITATIVE key/file — a PTY
+# worker has no stdin to answer that dialog, so without it the worker produces
+# 0 bytes and hangs until the phase budget (observed: 98-min bake hang on macOS).
+# Platform-agnostic and version-robust (it is the actual code condition), so no
+# keystroke simulation is needed. `--settings` overlays this onto the base
+# config; the driver ALSO writes it to the global ~/.claude/settings.json for
+# MCP phases that do not pass `--settings`.
+SUBPROCESS_ISOLATION_PAYLOAD = (
+    '{"enabledPlugins":{},"hooks":{},"mcpServers":{},'
+    '"skipDangerousModePermissionPrompt":true}'
+)
 
 
 # Ship 8.13: auto-compaction fingerprint. When Claude Code auto-compacts a
