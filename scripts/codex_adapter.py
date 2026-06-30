@@ -48,6 +48,15 @@ PLAMEN_HOME = SCRIPT_DIR.parent
 OUTPUT_DIR = PLAMEN_HOME / "codex-adapter"
 
 
+def _rel(path: Path) -> Path:
+    """Path relative to PLAMEN_HOME for display; fall back to the raw path
+    when out-dir is outside the repo (e.g. a custom --output-dir)."""
+    try:
+        return path.relative_to(PLAMEN_HOME)
+    except ValueError:
+        return path
+
+
 def load_json(path: Path) -> dict:
     """Load a JSON file, return empty dict on failure."""
     try:
@@ -101,7 +110,30 @@ def generate_agents_md(out_dir: Path) -> None:
     # Plamen -- Web3 Security Auditing Agent
 
     You are **Plamen**, an autonomous Web3 security auditing agent running inside Codex.
-    Your methodology, prompts, and skill files live in `~/.codex/plamen/`.
+    Your methodology, prompts, and skill files live in `~/.codex/plamen/`, which is a
+    symlink to the canonical `~/.plamen/` checkout — edits land in `~/.plamen/`.
+
+    ## Backend-specific differences (Codex vs Claude)
+
+    - **Bake phase**: Codex skips the Phase 0.5 Bake step (`scip-go` /
+      `rust-analyzer scip` / Opengrep) — the index is produced at recon time
+      instead.
+    - **PTY transport**: the Claude PTY supervision transport
+      (`scripts/pty_exec.py`) is Claude-only. Codex invokes `codex exec` directly
+      through the driver; there are no PTY worker pools, no compaction heartbeat,
+      and no `PLAMEN_STATUS` marker envelope on Codex.
+    - **MCP**: the V2 driver launches `codex exec` with `--ignore-user-config`, so
+      the `[mcp_servers.*]` blocks in `~/.codex/config.toml` are NOT loaded — the
+      bundled MCP tools (slither, unified-vuln-db, solana-fender) are unavailable on
+      Codex. Use the methodology's WebSearch / web-fetch fallbacks for RAG and
+      historical-precedent steps instead of MCP.
+    - **Concurrency**: Codex supports up to 6 concurrent sub-agents via
+      `spawn_agent`. Plan parallel work within that ceiling.
+    - **Sandbox / network**: the driver runs Codex under
+      `--dangerously-bypass-approvals-and-sandbox`, so network access IS available.
+      Because MCP is off (above), WebSearch / web-fetch are the primary external-
+      knowledge path and SHOULD be used where the methodology calls for RAG or
+      historical validation. Local file I/O and shell are fine.
 
     ## Audit Modes
 
@@ -136,9 +168,17 @@ def generate_agents_md(out_dir: Path) -> None:
     10. **MCP TIMEOUT POLICY** -- Agents that call MCP tools must NOT retry on timeout.
         Record `[MCP: TIMEOUT]` and switch to fallback.
 
+    ## Hard Rule
+
+    Do not manually orchestrate Plamen phases. Do not spawn recon, breadth,
+    depth, verification, or report agents yourself. The Python driver
+    (`plamen_driver.py`) is the sole owner of phase sequencing.
+
+    For new Codex launches, `config.json` must set `"cli_backend": "codex"`.
+
     ## Phase Sequence
 
-    Follow the phase sequence defined in `scripts/plamen_types.py` (`SC_PHASES`/`L1_PHASES`):
+    Follow the phase graph defined in the V2 driver's `plamen_types.py`:
 
     ```
     Recon (1) -> Breadth (2) -> Inventory (3) -> [Re-scan (4)] -> [Per-contract (5)]
@@ -147,7 +187,7 @@ def generate_agents_md(out_dir: Path) -> None:
     ```
 
     Phases in brackets are mode-dependent. Each phase has required artifacts that
-    MUST exist before proceeding to the next phase (enforced by `plamen_driver.py` gate checks).
+    MUST exist before proceeding to the next phase (enforced by the V2 driver's artifact gates).
 
     ## File References
 
@@ -197,7 +237,7 @@ def generate_agents_md(out_dir: Path) -> None:
     path = out_dir / "AGENTS.md"
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
-    print(f"  Generated {path.relative_to(PLAMEN_HOME)}")
+    print(f"  Generated {_rel(path)}")
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +416,7 @@ def generate_config_toml(out_dir: Path) -> None:
     path = out_dir / "config.toml"
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    print(f"  Generated {path.relative_to(PLAMEN_HOME)}")
+    print(f"  Generated {_rel(path)}")
 
 
 # ---------------------------------------------------------------------------
@@ -866,7 +906,7 @@ def generate_agent_tomls(out_dir: Path) -> None:
         path = agents_dir / role["filename"]
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
-        print(f"  Generated {path.relative_to(PLAMEN_HOME)}")
+        print(f"  Generated {_rel(path)}")
 
 
 # ---------------------------------------------------------------------------
@@ -875,7 +915,7 @@ def generate_agent_tomls(out_dir: Path) -> None:
 
 def generate_skill_md(out_dir: Path) -> None:
     """Generate codex-adapter/skills/plamen/SKILL.md -- the /plamen orchestrator skill for Codex."""
-    scripts_dir = str(Path.home() / ".codex" / "plamen" / "scripts").replace("\\", "\\\\")
+    scripts_dir = str(Path.home() / ".codex" / "plamen" / "scripts").replace("\\", "/")
     content = textwrap.dedent(f"""\
     ---
     name: plamen
@@ -940,13 +980,13 @@ def generate_skill_md(out_dir: Path) -> None:
     Codex route:
 
     ```
-    python {scripts_dir}\\plamen_driver.py "{{CONFIG_PATH}}"
+    python {scripts_dir}/plamen_driver.py "{{CONFIG_PATH}}"
     ```
 
     Fresh restart:
 
     ```
-    python {scripts_dir}\\plamen_driver.py --fresh "{{CONFIG_PATH}}"
+    python {scripts_dir}/plamen_driver.py --fresh "{{CONFIG_PATH}}"
     ```
     """)
 
@@ -991,7 +1031,7 @@ def generate_skill_md(out_dir: Path) -> None:
         with open(alias_dir / "SKILL.md", "w", encoding="utf-8") as f:
             f.write(alias)
 
-    print(f"  Generated {skills_dir.relative_to(PLAMEN_HOME)}/SKILL.md and Plamen skill aliases")
+    print(f"  Generated {_rel(skills_dir)}/SKILL.md and Plamen skill aliases")
     return
 
     content = textwrap.dedent("""\
@@ -1231,7 +1271,7 @@ def generate_skill_md(out_dir: Path) -> None:
     path = skills_dir / "SKILL.md"
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
-    print(f"  Generated {path.relative_to(PLAMEN_HOME)}")
+    print(f"  Generated {_rel(path)}")
 
 
 # ---------------------------------------------------------------------------
@@ -1299,7 +1339,7 @@ def generate_commands(out_dir: Path) -> None:
         with open(commands_dir / filename, "w", encoding="utf-8") as f:
             f.write(content)
 
-    print(f"  Generated {commands_dir.relative_to(PLAMEN_HOME)}/plamen*.md")
+    print(f"  Generated {_rel(commands_dir)}/plamen*.md")
 
 
 # ---------------------------------------------------------------------------
@@ -1394,7 +1434,7 @@ def generate_readme(out_dir: Path) -> None:
     path = out_dir / "README.md"
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
-    print(f"  Generated {path.relative_to(PLAMEN_HOME)}")
+    print(f"  Generated {_rel(path)}")
 
 
 # ---------------------------------------------------------------------------
@@ -1422,10 +1462,10 @@ def main():
     generate_readme(out_dir)
 
     print()
-    print(f"Done. Generated files in {out_dir.relative_to(PLAMEN_HOME)}/")
+    print(f"Done. Generated files in {_rel(out_dir)}/")
     print()
     print("Next steps:")
-    print(f"  1. Review generated files in {out_dir.relative_to(PLAMEN_HOME)}/")
+    print(f"  1. Review generated files in {_rel(out_dir)}/")
     print("  2. Run 'plamen install --codex' to install into ~/.codex/")
     print("  3. Replace API key placeholders in config.toml")
 
