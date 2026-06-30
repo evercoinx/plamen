@@ -381,6 +381,7 @@ _OVERRIDE_SELF_CONTAINED_PHASES: frozenset[str] = frozenset({
     "sc_semantic_dedup",
     "semantic_dedup",
     "inventory_prepare",
+    "rescan_prepare",
     "inventory_chunk_a",
     "inventory_chunk_b",
     "inventory_chunk_c",
@@ -426,6 +427,7 @@ def _is_direct_execution_phase(phase_name: str, pipeline: str,
         "recon",
         "instantiate",
         "inventory_prepare",
+        "rescan_prepare",
         "inventory",
         "location_recovery",
         "invariants",
@@ -896,6 +898,10 @@ _STANDALONE_PROMPT_MAP: dict[str, str] = {
     # Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬ Individual phase standalones Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬Ã¢"â‚¬
     "instantiate": "phase2-instantiate.md",
     "breadth": "phase3-breadth.md",
+    # rescan_prepare is mechanical (driver writes rescan_manifest.md). Mapped
+    # for completeness only; it is also in _OVERRIDE_SELF_CONTAINED_PHASES, so
+    # if ever spawned it receives a DRIVER-CONTRACT-ERROR stub, not this body.
+    "rescan_prepare": "phase3b-rescan.md",
     "rescan": "phase3b-rescan.md",
     "depth": "phase4b-depth.md",
     "attention_repair": "phase4b4-attention-repair.md",
@@ -3104,6 +3110,22 @@ Required behavior:
    exist, return one line and stop.
 5. If they are missing, report `DRIVER-CONTRACT-ERROR: inventory_prepare should
    be mechanical` and stop.
+"""
+    elif phase.name == "rescan_prepare":
+        phase_cost_directive = """
+## RESCAN PREPARE OVERRIDE
+
+This phase is normally completed mechanically by `plamen_driver.py` before any
+subprocess is spawned. If this prompt is ever invoked, do not run discovery,
+analysis, verification, reporting, or any other work outside this phase.
+
+Required behavior:
+1. Read no analysis artifacts.
+2. Do not spawn subagents.
+3. Do not write any `analysis_rescan_*.md` or `analysis_percontract_*.md` file.
+4. If `rescan_manifest.md` already exists, return one line and stop.
+5. If it is missing, report `DRIVER-CONTRACT-ERROR: rescan_prepare should be
+   mechanical` and stop.
 """
     elif phase.name.startswith("inventory_chunk_"):
         phase_cost_directive = """

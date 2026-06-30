@@ -20,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import plamen_driver as D
+import plamen_mechanical as M
 from plamen_mechanical import _PREPASS_MARKER
 from plamen_validators import _validate_recon_content_structure
 
@@ -196,6 +197,59 @@ def test_degrade_declines_when_body_is_placeholder(tmp_path):
         encoding="utf-8"
     ).splitlines()[:1]
     assert first == [_PREPASS_MARKER]
+
+
+def test_partial_merge_preserves_mechanical_body_and_appends_addendum(tmp_path):
+    """Authority-preservation invariant: when contract_inventory / function_list
+    / state_variables already exceed 100 bytes (mechanical full enumeration), a
+    (partial) merge keeps that body byte-intact at the top and appends a
+    '## Recon Worker Addendum' rather than overwriting it."""
+    scratch = tmp_path
+    cfg = {
+        "project_root": str(tmp_path),
+        "scratchpad": str(scratch),
+        "language": "evm",
+        "mode": "thorough",
+        "pipeline": "sc",
+    }
+
+    # Marker-free mechanical bodies, each comfortably above 100 bytes.
+    bodies = {
+        "function_list.md": _REAL_FUNCS,
+        "state_variables.md": _REAL_STATEVARS,
+        "contract_inventory.md": (
+            "# Contract Inventory\n\n"
+            "| Contract | File | Lines |\n"
+            "|----------|------|-------|\n"
+            "| ExampleVault | ExampleVault.sol | 120 |\n"
+            "| ExampleToken | ExampleToken.sol | 80 |\n"
+        ),
+    }
+    for name, body in bodies.items():
+        assert len(body.encode("utf-8")) >= 100, name
+        (scratch / name).write_text(body, encoding="utf-8")
+
+    # Only one (partial) shard present — the inventory_surface narrative shard.
+    (scratch / "recon_inventory_surface.md").write_text(
+        "<!-- PLAMEN_ARTIFACT: recon_inventory_surface.md -->\n"
+        "<!-- PLAMEN_STATUS: COMPLETE -->\n\n"
+        "# Recon Worker inventory_surface\n\n"
+        "## Attack Surface\n\n"
+        "deposit() and withdraw() are the externally reachable entry points.\n\n"
+        "## Enumeration Gaps\n\nnone found; checked assembly and delegatecall.\n",
+        encoding="utf-8",
+    )
+
+    M._merge_recon_worker_shards(scratch, cfg)
+
+    for name, body in bodies.items():
+        merged = (scratch / name).read_text(encoding="utf-8")
+        # The original mechanical body stays byte-intact at the top.
+        assert merged.startswith(body.rstrip()), name
+        # The shard is appended as an addendum, not as a replacement.
+        assert "## Recon Worker Addendum" in merged, name
+        # The mechanical enumeration rows survive verbatim.
+        assert "Vault.sol" in merged or "ExampleVault" in merged, name
 
 
 def test_degrade_noop_when_no_recon_content_failure(tmp_path):

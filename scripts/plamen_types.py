@@ -191,8 +191,7 @@ EVIDENCE_TAG_NAMES_RE = "|".join(sorted(t.strip("[]") for t in EVIDENCE_TAGS_ALL
 
 
 def has_mechanical_proof(text: str) -> bool:
-    """True if *text* contains a mechanical-test-pass evidence tag
-    (POC/MEDUSA/FUZZ/NON-DET/DIFF/CONFORMANCE). Narrow by design."""
+    """True if *text* contains any proof-grade evidence tag."""
     return any(tag in text for tag in EVIDENCE_TAGS_PROOF)
 
 
@@ -1103,6 +1102,13 @@ SC_PHASES = [
           ["analysis_*.md"],
           base_timeout_s=10800, model="sonnet", critical=True,
           min_artifacts_count=3),
+    # Cheap mechanical planning step (mirrors inventory_prepare): the driver
+    # writes rescan_manifest.md before any rescan worker spawns, so the rescan
+    # phase below stays a pure bounded worker-pool executor and never has to
+    # plan-and-execute in one overloaded coordinator on large codebases.
+    Phase("rescan_prepare", ["Phase 3b: Breadth Re-Scan (+ Phase 3c per-contract sub-step)"],
+          ["rescan_manifest.md"],
+          base_timeout_s=60, modes={"thorough"}, critical=True, model="haiku"),
     # Per-contract/scope-review output is part of the rescan phase contract
     # in Thorough mode; inventory consumes both families in one build.
     Phase("rescan", ["Phase 3b: Breadth Re-Scan (+ Phase 3c per-contract sub-step)"],

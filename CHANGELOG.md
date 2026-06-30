@@ -5,6 +5,13 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.4] - 2026-06-23
+
+### Fixed
+- **Haltless SC recon on large codebases.** The recon worker pool no longer stalls or halts when a single role worker cannot finish on a large repo. Three coordinated changes: (1) the `inventory_surface` (and light-mode `inventory_templates`) worker now BUILDS ON the mechanical pre-pass enumeration (`contract_inventory.md` / `function_list.md` / `state_variables.md`, added to its readable inputs) and produces only the narrative attack-surface/entry-point/trust layer plus a mandatory `## Enumeration Gaps` subsection (inline assembly, delegatecall/callcode targets, dynamic dispatch, fallback/receive, low-level calls) — instead of unboundedly re-enumerating the whole codebase from source; (2) on worker-pool retry-budget exhaustion the driver runs a PARTIAL merge over whatever shards completed (the merge preserves the mechanical enumeration byte-intact and tolerates empty shards) and continues haltless when the canonical gate passes, instead of falling through to the even-larger monolithic recon; (3) each recon worker now receives the full scaled phase budget (`max(900, timeout)`) rather than a 2400s cap that starved workers below `scale_timeout` on large repos. The mechanical full enumeration stays authoritative throughout — recall-positive (a halted recon yields zero findings).
+- **Recon narrative gate softened only when the mechanical inventory is complete.** `_validate_recon_content_structure` routes the three narrative-only checks (design_context Operational Implications, Key Invariants; recon_summary minimum size) to soft/degrade-continue ONLY when all three mechanical inventory files exist, carry no surviving pre-pass marker, and contain a real enumeration body; otherwise they stay hard. All pre-pass-marker-survival checks remain hard unconditionally, so a genuinely-empty recon still halts. Recall-neutral.
+- **Rescan plan/execute split (no more monolithic first-pass coordinator).** A new mechanical `rescan_prepare` phase (Thorough only) deterministically writes `rescan_manifest.md` from the contract inventory — mirroring `inventory_prepare` — so the existing rescan worker pool executes the declared rows on the FIRST pass instead of a single coordinator having to plan and execute and dying on large repos. The per-worker rescan methodology and exclusion-list semantics are unchanged.
+
 ## [2.1.3] - 2026-06-21
 
 ### Fixed

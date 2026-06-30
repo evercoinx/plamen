@@ -95,6 +95,49 @@ def test_pretrust_global_gates_idempotent(tmp_path, monkeypatch):
     assert D._ensure_claude_folder_trusted(proj) == []   # fully idempotent
 
 
+def test_pretrust_writes_skip_dangerous_mode_prompt_to_settings(tmp_path, monkeypatch):
+    """AUTHORITATIVE bypass-dialog suppression: `skipDangerousModePermissionPrompt`
+    lands in ~/.claude/settings.json (a DIFFERENT file from ~/.claude.json). This
+    is the real CLI gate (anthropics/claude-code#25503); without it a PTY worker
+    hangs on the dangerous-mode dialog. Pre-existing settings are preserved."""
+    _home(monkeypatch, tmp_path)
+    sj = tmp_path / ".claude" / "settings.json"
+    sj.parent.mkdir(parents=True, exist_ok=True)
+    sj.write_text(json.dumps({"env": {"KEEP": "1"}}), encoding="utf-8")
+
+    newly = D._ensure_claude_folder_trusted(str(tmp_path / "harness"))
+    assert "skipDangerousModePermissionPrompt" in newly
+    sdata = json.loads(sj.read_text(encoding="utf-8"))
+    assert sdata["skipDangerousModePermissionPrompt"] is True
+    assert sdata["env"] == {"KEEP": "1"}          # existing settings preserved
+    # idempotent: re-run reports nothing new
+    assert D._ensure_claude_folder_trusted(str(tmp_path / "harness")) == []
+
+
+def test_pretrust_creates_settings_when_absent(tmp_path, monkeypatch):
+    """settings.json is created (with parent dir) when it does not yet exist."""
+    _home(monkeypatch, tmp_path)
+    D._ensure_claude_folder_trusted(str(tmp_path / "harness"))
+    sdata = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert sdata["skipDangerousModePermissionPrompt"] is True
+
+
+def test_pretrust_never_clobbers_unreadable_settings(tmp_path, monkeypatch):
+    """A corrupt settings.json is left untouched (better to risk the prompt than
+    to destroy the user's settings) and the call still completes folder trust."""
+    _home(monkeypatch, tmp_path)
+    sj = tmp_path / ".claude" / "settings.json"
+    sj.parent.mkdir(parents=True, exist_ok=True)
+    sj.write_text("{ not valid json", encoding="utf-8")
+    newly = D._ensure_claude_folder_trusted(str(tmp_path / "harness"))
+    assert "skipDangerousModePermissionPrompt" not in newly   # not written
+    assert sj.read_text(encoding="utf-8") == "{ not valid json"  # preserved
+    # folder trust still recorded despite the unreadable settings file
+    data = json.loads((tmp_path / ".claude.json").read_text(encoding="utf-8"))
+    fkey = str(pathlib.Path(str(tmp_path / "harness")).resolve()).replace("\\", "/")
+    assert data["projects"][fkey]["hasTrustDialogAccepted"] is True
+
+
 if __name__ == "__main__":
     import pytest
     import sys

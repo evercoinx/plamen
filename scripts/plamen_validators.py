@@ -2993,6 +2993,7 @@ def _owned_artifact_patterns(pipeline: str, scratchpad: Optional[Path] = None) -
         ],
         "instantiate": ["spawn_manifest.md"],
         "breadth": ["analysis_*.md"],
+        "rescan_prepare": ["rescan_manifest.md"],
         "rescan": ["analysis_rescan_*.md", "analysis_percontract_*.md"],
         "inventory_prepare": [
             "inventory_shard_plan.md", "inventory_chunk_a.manifest.md",
@@ -17768,6 +17769,30 @@ def _validate_sc_subsystem_coverage(
     return []
 
 
+# Test / fuzz / verification directory markers. A path segment is out-of-scope
+# when ANY of its delimiter-split sub-words is one of these — so `.medusa-tests`
+# (-> {medusa, tests}), `fuzz-tests`, `invariant-tests`, `verify_helpers` are all
+# excluded, while a one-word segment like `latest` or `attestation` is NOT. This
+# mirrors the dirs the recon prompt already tells recon to skip; the plain
+# exact-segment `skip_tokens` check missed dotted/hyphenated variants.
+_RECON_TEST_FUZZ_MARKERS = frozenset({
+    "test", "tests", "testing",
+    "fuzz", "fuzzing", "medusa", "echidna", "halmos",
+    "invariant", "invariants", "symbolic",
+    "verification", "verify",
+    "certora", "coverage", "mock", "mocks", "fixture", "fixtures",
+})
+
+
+def _recon_segment_is_test_fuzz(seg: str) -> bool:
+    """True when a path segment names a test/fuzz/verification dir, including
+    dotted/hyphenated variants the exact-segment skip list misses
+    (`.medusa-tests`, `fuzz-tests`). Split on . _ - and match delimited
+    sub-words only, so `latest`/`attestation` (single words) are NOT excluded."""
+    words = [w for w in re.split(r"[._-]+", (seg or "").lower()) if w]
+    return any(w in _RECON_TEST_FUZZ_MARKERS for w in words)
+
+
 def _validate_recon_coverage(scratchpad: Path, project_root: str,
                              language: str,
                              subsystem_scope: str | None = None,
@@ -17849,6 +17874,12 @@ def _validate_recon_coverage(scratchpad: Path, project_root: str,
                     continue
                 parts_lower = [seg.lower() for seg in rel.split("/")]
                 if any(tok in parts_lower for tok in skip_tokens):
+                    continue
+                # Catch dotted/hyphenated test/fuzz/verification dirs that the
+                # exact-segment skip list misses (`.medusa-tests`, `fuzz-tests`,
+                # `invariant-tests`) — recon is explicitly told to skip these, so
+                # the coverage gate must not penalize their omission.
+                if any(_recon_segment_is_test_fuzz(seg) for seg in parts_lower):
                     continue
                 if scope_prefix and not _path_in_subsystem_scope(rel, scope_prefix):
                     # Belt-and-suspenders: scope walk guarantees this is
@@ -18098,6 +18129,47 @@ def _validate_recon_content_structure(
             text = ""
         return text, _llm_norm(text).lower()
 
+    def _mech_artifact_complete(name: str) -> bool:
+        """A canonical mechanical inventory file is 'complete' when it exists,
+        is no longer pre-pass-marker-stamped, and carries a substantive
+        enumeration body (a real table row or per-entity line) — NOT merely
+        non-empty bytes. Mirrors the placeholder-refusal logic in
+        ``plamen_mechanical.strip_codex_prepass_markers``.
+        """
+        path = scratchpad / name
+        if not path.exists():
+            return False
+        text, _ = _read_artifact(name)
+        lines = text.splitlines()
+        # (b) line 1 must not be the pre-pass overwrite marker
+        if lines[:1] == [prepass_marker]:
+            return False
+        # body = everything after a leading marker line (none here), used to
+        # reject pure placeholder content the way the codex stripper does
+        body = text if lines[:1] != [prepass_marker] else "\n".join(lines[1:])
+        if not body.strip() or "[LLM TO ENRICH]" in body:
+            return False
+        # (c) substantive enumeration: at least one markdown table data row
+        # (a non-separator `| ... |` line) OR a per-entity bullet/numbered line.
+        for raw in body.splitlines():
+            s = raw.strip()
+            if (
+                s.startswith("|")
+                and s.endswith("|")
+                and not _is_separator_row(s)
+                and any(ch.isalnum() for ch in s.strip("|"))
+            ):
+                return True
+            if re.match(r"^(?:[-*+]\s+|\d+[.)]\s+)\S", s):
+                return True
+        return False
+
+    mech_complete = all(
+        _mech_artifact_complete(name)
+        for name in ("function_list.md", "state_variables.md", "contract_inventory.md")
+    )
+    mech_soft_suffix = " (soft: mechanical inventory complete)"
+
     for name in (
         "design_context.md",
         "attack_surface.md",
@@ -18127,17 +18199,23 @@ def _validate_recon_content_structure(
             r"|implications\b)",
             txt,
         ):
-            hard.append(
+            msg = (
                 "design_context.md missing '## Operational Implications' section "
                 "(Rule 14 — breadth/depth agents need it)"
+            )
+            (soft if mech_complete else hard).append(
+                msg + mech_soft_suffix if mech_complete else msg
             )
         if not re.search(
             r"(?im)^#+\s+.*(?:(?:key|protocol|core|safety|system|critical)\s+)?invariant",
             txt,
         ):
-            hard.append(
+            msg = (
                 "design_context.md missing Key Invariants section "
                 "(downstream agents derive analysis from invariant formulas)"
+            )
+            (soft if mech_complete else hard).append(
+                msg + mech_soft_suffix if mech_complete else msg
             )
 
     # attack_surface.md: heading format (non-blocking)
@@ -18159,9 +18237,12 @@ def _validate_recon_content_structure(
         txt, norm = _read_artifact("recon_summary.md")
         min_summary_bytes = 200 if backend == "codex" else 512
         if summary.stat().st_size < min_summary_bytes:
-            hard.append(
+            msg = (
                 "recon_summary.md is too small to be a clean handoff "
                 f"({summary.stat().st_size} bytes, min={min_summary_bytes})"
+            )
+            (soft if mech_complete else hard).append(
+                msg + mech_soft_suffix if mech_complete else msg
             )
         if not re.search(
             r"(?im)^(?:#+\s+|\*\*).*(?:recon|summary|protocol|contract|component|"

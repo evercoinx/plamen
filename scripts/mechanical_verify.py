@@ -471,6 +471,57 @@ def _evm_forge_filter(probe, rel_path: str) -> list[str]:
     return ["--match-path", rel_path]
 
 
+_FOUNDRY_PROFILE_CMD_RE = re.compile(r"FOUNDRY_PROFILE\s*=\s*[\"']?([A-Za-z0-9_]+)")
+# `[profile.<name>]` ... `test = "<dir>"` (and `src`/`test_dir` aliases).
+_TOML_PROFILE_HDR_RE = re.compile(r"(?m)^\s*\[profile\.([A-Za-z0-9_]+)\]\s*$")
+_TOML_TEST_DIR_RE = re.compile(
+    r"(?m)^\s*(?:test|test_dir)\s*=\s*[\"']([^\"']+)[\"']")
+
+
+def _resolve_foundry_profile(probe, build_root, resolved) -> Optional[str]:
+    """Recover the FOUNDRY_PROFILE the verifier's PoC actually ran under.
+
+    The verifier records its working command (e.g. `FOUNDRY_PROFILE=poc forge
+    test ...`) on the probe; the mechanical re-run reconstructs its own argv and
+    used to drop that env var, so forge fell back to `[profile.default]` whose
+    `test` dir often does NOT contain the PoCs (custom profiles route tests to a
+    non-default dir). That silently turned a passing suite into mass
+    NO_TEST_FILE/FAIL, cascading into spurious assertion + INFLATED_PROSE
+    demotions.
+
+    Resolution order:
+      1. `FOUNDRY_PROFILE=<x>` explicitly recorded in the verify file's Command.
+      2. foundry.toml auto-detect: the non-default profile whose `test` dir
+         actually contains the resolved test file (works even when the verifier
+         never recorded the env var).
+    Returns the profile name, or None to run under the default profile."""
+    cmd = getattr(probe, "test_command", "") or ""
+    m = _FOUNDRY_PROFILE_CMD_RE.search(cmd)
+    if m:
+        return m.group(1)
+    try:
+        toml = (Path(build_root) / "foundry.toml").read_text(encoding="utf-8")
+    except Exception:
+        return None
+    try:
+        rel = str(Path(resolved).resolve().relative_to(Path(build_root).resolve()))
+    except Exception:
+        rel = str(resolved)
+    rel = rel.replace("\\", "/")
+    # Walk each [profile.<name>] block; map name -> its test dir.
+    hdrs = list(_TOML_PROFILE_HDR_RE.finditer(toml))
+    for i, h in enumerate(hdrs):
+        name = h.group(1)
+        block = toml[h.end():(hdrs[i + 1].start() if i + 1 < len(hdrs) else len(toml))]
+        tm = _TOML_TEST_DIR_RE.search(block)
+        if not tm:
+            continue
+        test_dir = tm.group(1).strip("/").replace("\\", "/")
+        if name != "default" and (rel.startswith(test_dir + "/") or rel == test_dir):
+            return name
+    return None
+
+
 def _classify_evm_outcome(rc: int, stdout: str, isolated: bool = True) -> str:
     """Classify `forge test` output.
 
@@ -558,14 +609,25 @@ def _run_test_for_finding(verify_path: Path, build_root: Path, language: str,
         # a FAIL could be an unrelated test in the same file. Track isolation so
         # the classifier can return AMBIGUOUS instead of mis-attributing FAIL.
         _isolated = _filter[:1] == ["--match-test"]
+        # RC-harness: forge must run under the SAME FOUNDRY_PROFILE the verifier
+        # used, or a custom profile's non-default test dir is invisible and the
+        # whole suite reads as NO_TEST_FILE/FAIL. Inherit env + propagate the
+        # resolved profile (recorded command, else foundry.toml auto-detect).
+        env = os.environ.copy()
+        profile = _resolve_foundry_profile(probe, build_root, resolved)
+        if profile:
+            env["FOUNDRY_PROFILE"] = profile
+        elif env.get("FOUNDRY_PROFILE"):
+            profile = env["FOUNDRY_PROFILE"]  # already set in the parent env
         t0 = time.time()
         try:
             proc = subprocess.run(
                 cmd, cwd=str(build_root), capture_output=True, text=True,
-                timeout=per_test_timeout_s, shell=False,
+                timeout=per_test_timeout_s, shell=False, env=env,
             )
             result.duration_s = time.time() - t0
-            result.test_command_used = " ".join(cmd)
+            result.test_command_used = (
+                (f"FOUNDRY_PROFILE={profile} " if profile else "") + " ".join(cmd))
             stdout = (proc.stdout or "") + "\n" + (proc.stderr or "")
             result.stdout_tail = stdout[-3000:]
             result.status = _classify_evm_outcome(proc.returncode, stdout, isolated=_isolated)

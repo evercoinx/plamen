@@ -469,7 +469,6 @@ def test_gates_exported_via_all():
         assert hasattr(v, name)
         assert name in v.__all__
 
-
 # ===========================================================================
 # Work Item 2 Part (b): chain-High first-class + collapse duplicate
 # obligation rows. All fixtures are synthetic/generic (no protocol names).

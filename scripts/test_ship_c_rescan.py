@@ -80,3 +80,31 @@ def test_all_hyphen_names_no_longer_silently_fall_back_to_glob(tmp_path):
     ]
     passed, _ = gate_passes(sp, str(tmp_path), RESCAN)
     assert passed is False  # exact gate, not fooled by the glob bait
+
+
+# --------------------------------------------------------------------------
+# Item 4 (Design A): the mechanical rescan_prepare step writes a manifest whose
+# declared names round-trip through THIS exact gate. ensure_rescan_manifest is
+# the producer; _rescan_manifest_exact_missing (above) is the consumer.
+# --------------------------------------------------------------------------
+
+import plamen_mechanical as M  # noqa: E402
+
+
+def test_mechanical_manifest_names_are_honored_by_ship_c_gate(tmp_path):
+    """A per-contract slug derived from a hyphen/dot file name must be parseable
+    by the Ship-C-extended regex (not silently dropped to the glob fallback)."""
+    sp = tmp_path / ".scratchpad"; sp.mkdir()
+    (sp / "contract_inventory.md").write_text(
+        "# Contract Inventory\n\n| C | `src/core-vault.sol` |\n",
+        encoding="utf-8",
+    )
+    declared = _parse_rescan_manifest_files(
+        M.ensure_rescan_manifest(sp, {}).read_text(encoding="utf-8")
+    )
+    # hyphen survives the slug and is parsed back out (Ship C character class).
+    assert "analysis_percontract_core-vault.md" in declared
+    # A missing declared file fails the exact gate — not silently dropped.
+    assert "analysis_percontract_core-vault.md" in (
+        _rescan_manifest_exact_missing(sp, RESCAN) or []
+    )
