@@ -92,6 +92,33 @@ in-scope contracts:
    - Adds **lifecycle action wrappers** — public functions that medusa can call
      to drive multi-step sequences (deposit→withdraw, open→close, lock→unlock),
      each forwarding to the target with bounded inputs.
+   > **External-dependency mock tier.** The deploy bullet above assumes each
+   > in-scope contract deploys with a minimal local stand-in. When the
+   > highest-value fuzzable surface — the in-scope accounting/escrow/state-machine
+   > contract — CANNOT be constructed standalone because its constructor args /
+   > immutables / interface imports require a LIVE external dependency (an AMM
+   > pool manager, oracle, router, vault, bridge endpoint, etc.; identify it from
+   > those signatures), do NOT fall straight back to code-trace. Build a MINIMAL
+   > behavioral mock of ONLY the interface subset the in-scope contract actually
+   > calls on that dependency (the methods exercised by the in-scope value paths,
+   > not the full external interface), with the simplest *faithful* behavior
+   > (e.g. an AMM pool manager mock that conserves value via constant-product /
+   > pass-through swaps; an oracle mock returning a settable price; Uniswap-V4
+   > `PoolManager` is one illustrative example), so the accounting state machine
+   > deploys and is fuzzed directly.
+   > **RECALL-SAFETY (mandatory — no fabricated coverage):** the mock MUST be
+   > faithful to the dependency's value-relevant contract. If a faithful minimal
+   > mock is NOT achievable in bounded effort (the dependency's behavior is itself
+   > security-relevant and non-trivial to reproduce), DO NOT ship a guessed mock —
+   > a wrong mock yields false PASS/FAIL. Fall back to the existing code-trace
+   > path and record the gap as an explicit coverage limitation (no silent cap),
+   > emitting `[CODE-TRACE]` for the affected properties rather than
+   > `[MEDUSA-PASS]`.
+   > **Mock fidelity receipt (mandatory):** in `medusa_fuzz_findings.md`, write
+   > one line naming which dependency was mocked and which methods, so a reviewer
+   > can judge fidelity, e.g.
+   > `Mock fidelity: mocked <Dependency> methods [<method1>, <method2>] with <faithful behavior>`
+   > OR `Mock fidelity: <Dependency> NOT mocked (faithful minimal mock infeasible: <reason>) — code-trace fallback`.
 4. **Derive `fuzz_`-prefixed boolean property functions** (NO CAP — medusa
    execution is zero token cost, test ALL meaningful invariants) from:
    `design_context.md` (economic properties), `findings_inventory.md` (bug

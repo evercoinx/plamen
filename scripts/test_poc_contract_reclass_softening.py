@@ -1,4 +1,4 @@
-"""Claude DODO verify shards degraded on the PoC-contract gate. Grounded in the
+"""Verify shards degraded on the PoC-contract gate. Grounded in the
 REAL failing ledgers from that run:
 
   FAIL (gate BUG #1): PoC Class: structural  (queue said `property`; reclassified ...)

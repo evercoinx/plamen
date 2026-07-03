@@ -913,6 +913,7 @@ _STANDALONE_PROMPT_MAP: dict[str, str] = {
     "invariants_p2": "phase4a5-invariants-p2.md",
     "rag_sweep": "phase4b5-rag-sweep.md",
     "exploration_skeptic": "phase4b6-exploration-skeptic.md",
+    "enumgap_exploration": "phase4b7-enumgap-exploration.md",
     # sc_semantic_dedup and semantic_dedup: NOT mapped here.
     # Their cost directives point the agent to read phase4e-semantic-dedup.md
     # directly. Loading it as body would leak cross-pipeline artifacts.
@@ -941,6 +942,16 @@ _STANDALONE_PROMPT_MAP: dict[str, str] = {
     # build_phase_prompt doesn't crash. Driver short-circuits this phase to
     # plamen_mechanical._dedup_report_python(). critical=False; never halts.
     "report_dedup": "phase6d-report-dedup.md",
+    # Phase 6e material-harm disposition — REAL LLM phase (NOT short-circuited).
+    # Reads the final deduped AUDIT_REPORT.md and writes disposition.md
+    # (BODY/APPENDIX per finding). critical=False; the floor phase below has a
+    # keyword-classifier fallback if this produces nothing usable.
+    "report_disposition": "phase6e-disposition.md",
+    # Phase 6e material-harm floor — Python-native; stub prompt exists so
+    # build_phase_prompt doesn't crash. Driver short-circuits this phase to
+    # plamen_mechanical.apply_material_harm_floor(). critical=False; FINAL
+    # report mutation; never halts.
+    "report_floor": "phase6e-floor.md",
     # Phase 5b mechanical PoC verification â€” Python-native; stub prompt
     # exists so build_phase_prompt doesn't crash. Driver short-circuits
     # this phase to mechanical_verify.run_phase5b_mechanical_verify().
@@ -977,7 +988,7 @@ def _resolve_recon_prompt(config: dict) -> Optional[Path]:
     # Ship 8.14: prefer the V2 single-agent direct-execution recon prompt over
     # the legacy multi-agent orchestrator prompt. The legacy prompt spawns
     # Agent 1A/1B/2; under the V2 foreground-Task contract those run SERIALLY
-    # (DODO: 1A 4min -> 1B 6min -> Slither 32min -> 3000s timeout -> rc=-2
+    # (observed: 1A 4min -> 1B 6min -> Slither 32min -> 3000s timeout -> rc=-2
     # truncated recon_summary -> gate fail). The v2 prompt does the same work
     # in one context with a DRAFT-FIRST budget. Legacy stays a fallback for any
     # language that ships only the legacy file.
@@ -1515,7 +1526,7 @@ def scale_timeout(
     iterations with up to 100 agents and reasonably needs 2-3x the
     Light/Core ceiling on large repos. Pre-v2.3.6 the hard 5400s ceiling
     silently capped Thorough budget -- explained the depth-phase timeouts
-    on Irys L1 (50K+ LOC Rust monorepo).
+    on a large L1 run (50K+ LOC Rust monorepo).
 
     v2.4.1: hypothesis_count adds +90s per hypothesis above 8 for verify
     shard phases. The old 2700s monolithic verify could handle ~32
@@ -2076,6 +2087,8 @@ _L1_SKILL_DEPTH_ROUTING: dict[str, tuple[str, ...]] = {
     "CONSENSUS_TX_IDENTITY_INVARIANTS":         ("consensus_invariant", "state_trace"),
     "CONFIG_CORRECTNESS":                       ("edge_case", "state_trace"),
     "WRITE_ERROR_DIVERGENCE":                   ("state_trace", "edge_case"),
+    "COSMOS_SDK_MODULE_SAFETY":                 ("consensus_invariant", "state_trace"),
+    "COSMOS_IBC_SECURITY":                      ("consensus_invariant", "external"),
     "GO_CONCURRENCY_SAFETY":                    (),
     "RUST_UNSAFE_AUDIT":                        (),
     "DEPENDENCY_AUDIT_NODECLIENT":              (),
@@ -2662,7 +2675,7 @@ artifact written by the driver after a hard halt.
         # open breadth row at once as BACKGROUND Task calls. The persistent PTY
         # session + disk-derived gate make background safe (results are
         # collected from files, not from the turn). Foreground + "batches of 6"
-        # serialized the live DODO breadth attempt (produced only
+        # serialized a live breadth attempt in a prior run (produced only
         # analysis_cross_chain.md, then halted). Headless/Codex keep the
         # foreground batched loop (background would orphan workers there).
         _breadth_em = _derive_claude_exec_mode(config)

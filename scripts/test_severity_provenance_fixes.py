@@ -1,4 +1,4 @@
-"""Regression tests for the DODO May-2026 report_index provenance halt fix.
+"""Regression tests for a report_index provenance halt fix.
 
 Root cause: three independent driver bugs in expected-severity computation
 flagged the LLM's correct report_index output as "silent severity change":
@@ -47,7 +47,7 @@ from plamen_parsers import (  # noqa: E402
 # -------- _extract_verifier_severity_with_adjustment ----------------------
 
 def test_adjustment_parens_idiom_returns_adjusted_value():
-    """The DODO failure mode verbatim:
+    """The failure mode verbatim:
     `Severity: High (adjusted to Medium — external precondition required)`"""
     inputs = [
         "High (adjusted to Medium - external precondition required; see below)",
@@ -90,7 +90,7 @@ def test_empty_input_handled():
 # -------- _enforce_severity_matrix symmetric rule --------------------------
 
 def test_explicit_verifier_severity_wins_when_higher_than_matrix():
-    """The DODO H-9 failure mode: verifier wrote High, matrix computed
+    """The H-9 failure mode: verifier wrote High, matrix computed
     Medium (false-positive fully-trusted modifier from PROSE), pre-fix
     driver returned Medium → halt. Post-fix: returns High."""
     verify_text = """
@@ -100,7 +100,7 @@ def test_explicit_verifier_severity_wins_when_higher_than_matrix():
 **Impact**: HIGH
 **Likelihood**: MEDIUM
 
-**Note on Vector B (Trusted Actor)**: While DODORouteProxy changes
+**Note on Vector B (Trusted Actor)**: While RouteProxy changes
 require the owner to act maliciously, the severity discount for
 fully-trusted actors applies only when the attack path requires the
 actor to violate their trust assumption. The overall finding severity
@@ -129,7 +129,7 @@ def test_explicit_verifier_severity_wins_when_lower_than_matrix():
 
 
 def test_inline_adjustment_in_severity_field_extracted():
-    """The DODO H-20 failure mode: verifier wrote
+    """The H-20 failure mode: verifier wrote
     `Severity: High (adjusted to Medium — external precondition required)`.
     Driver should return Medium (the post-adjustment value), not High."""
     verify_text = """
@@ -174,7 +174,7 @@ def test_no_explicit_severity_no_axes_uses_queue_fallback():
 # -------- Cross-component integration -----------------------------------
 
 def test_partial_verdict_with_explicit_severity_not_demoted(tmp_path: Path):
-    """The DODO INV-128 failure mode: verifier wrote Severity: Medium
+    """The INV-128 failure mode: verifier wrote Severity: Medium
     with Verdict: PARTIAL. Pre-fix driver auto-demoted to Low. Post-fix:
     explicit Severity field wins, no auto-demotion applied."""
     import plamen_validators as V

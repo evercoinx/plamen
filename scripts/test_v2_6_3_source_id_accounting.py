@@ -93,8 +93,8 @@ class TestExtractSourceIds:
         assert "CC-02" in ids
         assert "not-an-id" not in ids
 
-    def test_irys_real_pattern(self, scratchpad: Path):
-        """Reproduce the exact Irys L1 pattern: CC-XX, DST-X, DX-X, PERT-X,
+    def test_l1_real_pattern(self, scratchpad: Path):
+        """Reproduce an observed L1 pattern: CC-XX, DST-X, DX-X, PERT-X,
         SGI-X, VS-X, SS-X source IDs that caused 196 UNACCOUNTED."""
         inv = """\
 ### Finding [INV-001]: Test

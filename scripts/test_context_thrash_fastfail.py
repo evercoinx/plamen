@@ -218,25 +218,25 @@ def test_real_wait_loop_no_early_exit_without_thrash(tmp_path, monkeypatch):
     assert not getattr(state, "context_thrash", False)
 
 
-# ── DODO QUIET-VARIANT regression + slow-progress negative control ───────────
+# ── THRASH QUIET-VARIANT regression + slow-progress negative control ───────────
 #
 # The committed loud-only fast-fail (_CONTEXT_OVERFLOW_TEXT_RE) keyed ONLY on
 # the explicit overflow string ("Autocompact is thrashing" / "too large for the
-# context"). The DODO report_index live flaw thrashed ~27 min with a transcript
+# context"). The THRASH report_index live flaw thrashed ~27 min with a transcript
 # frozen ~124 lines carrying 14 "compact" + 3 "until auto-compact" markers but
 # ZERO explicit overflow string -> the loud-only check NEVER matched the QUIET
 # repeated-compaction variant, so the fast-fail never fired. These two real-loop
 # fixtures pin both directions of the dual-signal root fix:
-#   (1) the QUIET DODO variant (compaction fingerprint, NO overflow text,
+#   (1) the QUIET THRASH variant (compaction fingerprint, NO overflow text,
 #       frozen productive count) MUST fast-fail; and
 #   (2) a slow-but-PROGRESSING compacting turn (productive_event_count advances
 #       intermittently during the wait) must NEVER be cut off.
 
-# A DODO-shaped quiet transcript: repeated compaction-summary text events, with
+# A THRASH-shaped quiet transcript: repeated compaction-summary text events, with
 # the "until auto-compact" marker -- and crucially NO overflow string. Every
 # event is a compaction-summary text block, so event_is_productive() returns
 # False for all of them -> productive_event_count is FROZEN at 0 across polls.
-_QUIET_DODO_TRANSCRIPT = "".join(
+_QUIET_THRASH_TRANSCRIPT = "".join(
     '{"type":"assistant","message":{"content":'
     f'[{{"type":"text","text":"{txt}"}}]}}}}\n'
     for txt in (
@@ -247,8 +247,8 @@ _QUIET_DODO_TRANSCRIPT = "".join(
 )
 
 
-def test_quiet_dodo_variant_fast_fails_without_overflow_text(tmp_path, monkeypatch):
-    """ROOT-FIX REGRESSION: the QUIET DODO variant the loud-only check missed.
+def test_quiet_thrash_variant_fast_fails_without_overflow_text(tmp_path, monkeypatch):
+    """ROOT-FIX REGRESSION: the QUIET THRASH variant the loud-only check missed.
 
     No explicit overflow string anywhere (recent output is benign-looking
     compaction churn, transcript has zero overflow text). The ONLY signal is the
@@ -257,15 +257,15 @@ def test_quiet_dodo_variant_fast_fails_without_overflow_text(tmp_path, monkeypat
     """
     import pty_exec as px
     # Prove the precondition: the committed loud-only regex does NOT match this
-    # quiet variant -- it is exactly the gap that let DODO thrash for 27 min.
+    # quiet variant -- it is exactly the gap that let THRASH thrash for 27 min.
     rx, _ = _consts()
-    assert not rx.search(px._normalized_pty_text(_QUIET_DODO_TRANSCRIPT)), (
-        "the quiet DODO transcript must carry NO explicit overflow string -- "
+    assert not rx.search(px._normalized_pty_text(_QUIET_THRASH_TRANSCRIPT)), (
+        "the quiet THRASH transcript must carry NO explicit overflow string -- "
         "that is the whole point of the regression"
     )
     # But it IS a compaction fingerprint via the second signal.
     qfile = Path(tmp_path) / "quiet.jsonl"
-    qfile.write_text(_QUIET_DODO_TRANSCRIPT, encoding="utf-8")
+    qfile.write_text(_QUIET_THRASH_TRANSCRIPT, encoding="utf-8")
     assert px.transcript_shows_compaction(qfile), (
         "repeated 'compact' + 'until auto-compact' must be a compaction signature"
     )
@@ -278,7 +278,7 @@ def test_quiet_dodo_variant_fast_fails_without_overflow_text(tmp_path, monkeypat
     sess = _FakeSession(
         tmp_path,
         recent_text="reading findings_inventory.md ...",
-        transcript_text=_QUIET_DODO_TRANSCRIPT,
+        transcript_text=_QUIET_THRASH_TRANSCRIPT,
     )
     bound = px.ClaudePtySession.wait_for_turn_complete.__get__(sess, _FakeSession)
     state = bound(timeout_s=0.6, quiescence_s=8.0, poll_s=0.05,

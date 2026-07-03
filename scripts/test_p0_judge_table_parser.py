@@ -8,10 +8,10 @@ Covers:
         read_judge_decisions_json_sidecar
         consumer precedence (JSON-when-fresh, MD-fallback)
 
-The DODO 2026-05-21 halt was caused by the parser/prompt schema drift —
+An observed halt was caused by the parser/prompt schema drift —
 prompt produced table format; parser required H2 sections; UNRESOLVED set
 was empty; report_index authenticity gate halted. Fixtures here are
-synthetic (NOT DODO-scratchpad copies) to avoid overfitting.
+synthetic (NOT past-audit scratchpad copies) to avoid overfitting.
 """
 from __future__ import annotations
 

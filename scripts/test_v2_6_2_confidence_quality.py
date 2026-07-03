@@ -210,8 +210,8 @@ class TestConfidenceIter2Mandatory:
         issues = _validate_confidence_iter2_mandatory(scratchpad)
         assert issues == []
 
-    def test_real_irys_pattern(self, scratchpad: Path):
-        """Reproduce the exact Irys L1 failure pattern: 13 uniform UNCERTAIN
+    def test_real_l1_pattern(self, scratchpad: Path):
+        """Reproduce an observed L1 failure pattern: 13 uniform UNCERTAIN
         findings with High/Medium severities and no iter2 artifacts."""
         ids = [
             "DEPTH-CONSENSUS-INVARIANT-1", "DEPTH-CONSENSUS-INVARIANT-2",

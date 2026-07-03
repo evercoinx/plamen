@@ -426,3 +426,73 @@ def test_same_file_different_fix_gets_no_same_fix_flag():
         if {x["keep"], x["absorb"]} == {"M-20", "L-15"}:
             assert not any("same-fix-cross-tier" in s for s in x["signals"]), \
                 f"different-fix pair must not carry same-fix flag: {x['signals']}"
+
+
+# =============================================================================
+# Test 6: identical-location cross-tier dupe — the exact shape the early
+#         same-fix branch targets. Two agents flag the SAME bug at the IDENTICAL
+#         `file:Lstart-Lend` token (one Low, one Info), with thin / divergent
+#         Recommendations and NO antonym conflict. The Jaccard floor and the
+#         thin-recommendation veto are bypassed by the identical-location
+#         branch, so the pair MERGES; the survivor is the higher tier (Low).
+# =============================================================================
+
+_REPORT_IDENTICAL_LOC_CROSSTIER = """# Security Audit Report - demo
+
+## Low Findings
+
+### [L-10] Return value of the transfer call is not checked
+
+**Severity**: Low
+**Location**: `src/Module.sol:L100-L120`
+**Description**: The external call return value is ignored in this routine.
+**Recommendation**: Handle the return value.
+
+## Informational Findings
+
+### [I-07] Unchecked external call result
+
+**Severity**: Informational
+**Location**: `src/Module.sol:L100-L120`
+**Description**: The same external call result is silently discarded.
+**Recommendation**: Validate it.
+"""
+
+
+def test_identical_location_crosstier_dupe_merges_at_higher_tier():
+    """Identical `file:Lstart-Lend` token, distinct source IDs, thin/divergent
+    Recommendations, no antonym -> the identical-location same-fix branch
+    bypasses the Jaccard floor and thin-fix veto, so the pair is a MERGE
+    candidate whose survivor is the higher-severity (Low over Info) finding."""
+    recs = M._dedup_report_sections(_REPORT_IDENTICAL_LOC_CROSSTIER)
+    src = {"L-10": {"H-10"}, "I-07": {"H-7"}}  # distinct -> no source-id-subset
+    pairs = M._dedup_report_candidate_pairs(recs, src)
+    p = [x for x in pairs if {x["keep"], x["absorb"]} == {"L-10", "I-07"}]
+    assert p, f"identical-location cross-tier pair not generated: {pairs}"
+    assert any("identical-location cross-tier" in s for s in p[0]["signals"]), \
+        p[0]["signals"]
+    assert p[0]["keep"] == "L-10", "survivor must be the higher-severity finding"
+
+
+def test_dedup_same_fix_ok_identical_location_thin_recs_merge():
+    """Unit-level: thin/empty Recommendation pair at the same location passes the
+    same-fix gate via the early identical-location branch (no antonym)."""
+    a = {"locations": {"src/Module.sol:L100-L120"}, "fix_text": "Fix it.",
+         "desc_text": "An external call result is discarded."}
+    b = {"locations": {"src/Module.sol:L100-L120"}, "fix_text": "",
+         "desc_text": "The same external call result is discarded."}
+    ok, reason = M._dedup_same_fix_ok(a, b)
+    assert ok is True, reason
+    assert "identical-location cross-tier" in reason
+
+
+def test_dedup_same_fix_ok_identical_location_antonym_still_vetoes():
+    """The antonym veto survives inside the early branch: identical location but
+    opposite-direction fixes still stay separate (falls back to desc text)."""
+    a = {"locations": {"src/Module.sol:L100-L120"}, "fix_text": "",
+         "desc_text": "Increase the minimum bound to a safe floor."}
+    b = {"locations": {"src/Module.sol:L100-L120"}, "fix_text": "",
+         "desc_text": "Decrease the maximum bound to a safe ceiling."}
+    ok, reason = M._dedup_same_fix_ok(a, b)
+    assert ok is False, reason
+    assert "antonym" in reason

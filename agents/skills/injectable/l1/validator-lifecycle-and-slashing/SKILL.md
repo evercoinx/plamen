@@ -113,6 +113,20 @@ Epoch transitions are a critical moment when pending validators become active, e
 
 Tag: `[VL-EPOCH:{boundary}:{gap}]`
 
+## 4a. CometBFT Evidence / Vote-Aggregation
+
+For CometBFT/Tendermint-based clients, two specific aggregation checks gate slashing soundness. Skipping either lets forged equivocation evidence slash an honest validator, or lets vote-counting misattribute power.
+
+**Bounded reads**: read SCIP graph artifacts (`caller_map.md`, `callee_map.md`, `state_write_map.md`, `function_summary.md`) to find evidence-verification and vote-aggregation call-sites; on-demand single-symbol source reads for the evidence-verify and BitArray/vote-count functions only; never bulk-read large files.
+
+**Heuristics**:
+1. **Evidence verification**: grep for `DuplicateVoteEvidence`, `LightClientAttackEvidence`, `VerifyEvidence`, `evidence`. For each evidence type, verify the handler (a) re-checks the FULL signature of each conflicting vote against the accused validator's pubkey, (b) confirms both votes are for the SAME height/round/type but conflicting block IDs (true equivocation, not two distinct valid messages), and (c) rejects evidence outside the bounded age window (`MaxAgeNumBlocks` / `MaxAgeDuration`). Evidence accepted without full signature re-verification, or without height/time bounding, is a finding.
+2. **BitArray / vote-set sizing**: grep for `BitArray`, `VoteSet`, `commit.Signatures`, `votesBitArray`. Before counting votes or summing voting power from a commit/vote-set, verify the bit-array / signature-slice LENGTH equals the validator-set size for that height. A length mismatch (commit from a different-size set, or attacker-supplied over/undersized array) must be rejected before any index access or power summation — otherwise out-of-range indexing or misattributed power results.
+
+**Severity**: forged-evidence slashing of an honest validator is Critical; vote-misattribution from unchecked BitArray length is High–Critical (consensus power error / panic).
+
+Tag: `[VL-EVIDENCE-UNVERIFIED:{evidence-type}]`, `[VL-BITARRAY-MISMATCH:{site}]`
+
 ## 5. Boundary Conditions
 
 | State | Test | Expected |

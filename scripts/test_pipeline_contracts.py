@@ -1263,7 +1263,7 @@ def test_VQ_refuted_inventory_verdict_routes_to_evidence_excluded():
     inv = (
         "### Finding [INV-054]: uint8 CycleId Parameter in claim() - Within Safe Range\n"
         "**Severity**: Informational\n"
-        "**Location**: AwesomeXMinting.sol:L137\n"
+        "**Location**: Minting.sol:L137\n"
         "**Preferred Tag**: [CODE]\n"
         "**Source IDs**: AC-8, CC-26\n"
         "**Verdict**: REFUTED\n"
@@ -2425,7 +2425,7 @@ def test_P4b_loss_semantic_gap_trigger_requires_niche_artifact():
     sp = _mkscratch({
         "semantic_invariants.md": "\n".join([
             "# Semantic Invariants",
-            "- sync_gaps = 2 (`totalTitanXDistributed` vs live balance)",
+            "- sync_gaps = 2 (`totalRewardsDistributed` vs live balance)",
             "- accumulation_exposures = 1",
             "- conditional_writes = 5",
             "- cluster_gaps = 1",

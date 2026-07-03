@@ -1,6 +1,6 @@
 """_SEMANTIC_GAP_COUNTER_RE accuracy: read the flag form agents ACTUALLY write.
 
-Verified against real DODO + AwesomeX semantic_invariants.md: agents write
+Verified against real semantic_invariants.md from prior audits: agents write
 `- sync_gaps: 0` (COLON), often inside a ``` fence. The prior `=`-only regex
 matched NONE of it, so the explicit per-flag counts were always 0 and the
 niche-trigger decision fell back to the fuzzy word-presence heuristic (lines

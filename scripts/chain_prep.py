@@ -540,12 +540,41 @@ def compute_variable_finding_map(scratchpad: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
+_UNVERIFIED_VERDICTS = frozenset({
+    "NEEDS_VERIFICATION", "NEEDSVERIFICATION", "NEEDS VERIFICATION",
+    "LOW_CONFIDENCE", "LOW CONFIDENCE", "UNVERIFIED", "UNCONFIRMED",
+})
+
+
+def _is_unverified_enabler(entry: dict) -> bool:
+    """A mechanically-derived, individually-weak candidate (ENUMGAP / deriver /
+    enumeration-obligation exploration) usable as a LOW-CONFIDENCE chain enabler.
+
+    Identified by an unverified verdict OR an ENUMGAP/NEXP source-id tag. These
+    never enter the CONFIRMED/PARTIAL/CONTESTED dangerous-state baseline (they
+    are unproven at chain time), but a postcondition they CREATE can still enable
+    another finding into a compound chain. Any such chain is itself sent to
+    verification, so precision is preserved by the existing verify filter."""
+    verdict = str(entry.get("verdict") or "").strip().upper()
+    if verdict in _UNVERIFIED_VERDICTS:
+        return True
+    blob = " ".join(str(s) for s in (entry.get("source_ids") or []))
+    return bool(re.search(r"\bENUMGAP\b|\bNEXP-\d+", blob, re.IGNORECASE))
+
+
 def compute_enabler_baseline(scratchpad: Path) -> dict:
     """Overwrite enabler_results.md with a STEP 0a dangerous-state baseline.
 
     Pre-extracts every CONFIRMED/PARTIAL/CONTESTED finding into the STEP 0a
     table so Chain Agent 1 does NOT re-scan the inventory — it takes this
     finite list as given and fills the STEP 0b 5-actor reachability table.
+
+    ALSO surfaces mechanically-derived ENUMGAP/deriver candidates (unverified)
+    as a separate LOW-CONFIDENCE potential-enabler table, carrying any pre/post
+    metadata they stamped. This lets a weak candidate act as a chain enabler at
+    chain time (which runs BEFORE verify); the resulting chain is a HYPOTHESIS
+    that goes to verification like every chain, so a spurious enabler yields a
+    spurious chain that verify refutes — precision-bounded, recall-positive.
 
     Runs AFTER `_write_chain_passthrough_outputs` (which writes a stub
     enabler_results.md). If this producer fails, the stub remains and the
@@ -559,7 +588,8 @@ def compute_enabler_baseline(scratchpad: Path) -> dict:
             if str(e.get("verdict") or "").strip().upper()
             in ("CONFIRMED", "PARTIAL", "CONTESTED")
         ]
-        if not dangerous:
+        unverified = [e for e in entries if _is_unverified_enabler(e)][:40]
+        if not dangerous and not unverified:
             return {"status": "skipped", "reason": "no CONFIRMED/PARTIAL findings",
                     "states": 0}
 
@@ -580,12 +610,57 @@ def compute_enabler_baseline(scratchpad: Path) -> dict:
             "| Finding ID | Severity | Location | Dangerous State (root cause) |",
             "|------------|----------|----------|------------------------------|",
         ]
-        for idx, e in enumerate(dangerous, start=1):
-            fid = _entry_id(e, idx)
-            sev = str(e.get("severity") or "Medium")
-            loc = re.sub(r"\s+", " ", str(e.get("location") or "UNKNOWN")).replace("|", "/")
-            rc = re.sub(r"\s+", " ", str(e.get("root_cause") or e.get("title") or "")).replace("|", "/")
-            lines.append(f"| {fid} | {sev} | {loc[:120]} | {rc[:200]} |")
+        if dangerous:
+            for idx, e in enumerate(dangerous, start=1):
+                fid = _entry_id(e, idx)
+                sev = str(e.get("severity") or "Medium")
+                loc = re.sub(r"\s+", " ", str(e.get("location") or "UNKNOWN")).replace("|", "/")
+                rc = re.sub(r"\s+", " ", str(e.get("root_cause") or e.get("title") or "")).replace("|", "/")
+                lines.append(f"| {fid} | {sev} | {loc[:120]} | {rc[:200]} |")
+        else:
+            lines.append("| (none CONFIRMED/PARTIAL/CONTESTED at chain time) | - | - | - |")
+
+        # Low-confidence potential enablers: mechanically-derived ENUMGAP/deriver
+        # candidates. Unverified at chain time, so NOT in the dangerous-state
+        # baseline, but a postcondition they CREATE can enable another finding.
+        # Chain Agent 1/2 MAY use these as candidate enablers (postcondition
+        # providers) — any resulting chain is itself sent to verification, which
+        # refutes spurious enabler chains. Recall-safe, precision-bounded.
+        lines += [
+            "",
+            "## STEP 0a-LC: Low-Confidence Potential Enablers (unverified — ENUMGAP/derivers)",
+            "",
+            "These are mechanically-derived, individually-WEAK candidates "
+            "(verdict NEEDS_VERIFICATION). They are NOT proven dangerous states. "
+            "Use them ONLY as candidate ENABLERS: if a postcondition below "
+            "creates the precondition another finding needs, build a "
+            "LOW-CONFIDENCE chain hypothesis. Every such chain MUST go to "
+            "verification — a spurious enabler yields a chain that verify "
+            "refutes, so precision is preserved. Do NOT promote these to the "
+            "dangerous-state baseline.",
+            "",
+            "| Finding ID | Severity | Location | Postcondition Created (type) | Missing Precondition (type) |",
+            "|------------|----------|----------|------------------------------|-----------------------------|",
+        ]
+        if unverified:
+            for idx, e in enumerate(unverified, start=1):
+                fid = _entry_id(e, idx)
+                sev = str(e.get("severity") or "Low")
+                loc = re.sub(r"\s+", " ", str(e.get("location") or "UNKNOWN")).replace("|", "/")
+                post = re.sub(r"\s+", " ", str(e.get("postconditions_created") or "")).replace("|", "/")
+                post_t = re.sub(r"\s+", " ", str(e.get("postcondition_types") or "")).replace("|", "/")
+                pre = re.sub(r"\s+", " ", str(e.get("missing_precondition") or "")).replace("|", "/")
+                pre_t = re.sub(r"\s+", " ", str(e.get("precondition_type") or "")).replace("|", "/")
+                if not post and not pre:
+                    # No stamped metadata — fall back to the root cause so the
+                    # candidate is still visible/matchable by prose.
+                    post = re.sub(r"\s+", " ", str(e.get("root_cause") or e.get("title") or "")).replace("|", "/")
+                post_cell = (f"{post[:160]}" + (f" ({post_t[:24]})" if post_t else "")) or "-"
+                pre_cell = (f"{pre[:120]}" + (f" ({pre_t[:24]})" if pre_t else "")) if pre else "-"
+                lines.append(f"| {fid} | {sev} | {loc[:120]} | {post_cell or '-'} | {pre_cell} |")
+        else:
+            lines.append("| (none) | - | - | - | - |")
+
         lines += [
             "",
             "## STEP 0b: 5-Actor Reachability (Chain Agent 1 fills this)",
@@ -601,7 +676,8 @@ def compute_enabler_baseline(scratchpad: Path) -> dict:
         (scratchpad / "enabler_results.md").write_text(
             "\n".join(lines) + "\n", encoding="utf-8"
         )
-        return {"status": "ok", "states": len(dangerous)}
+        return {"status": "ok", "states": len(dangerous),
+                "low_confidence_enablers": len(unverified)}
     except Exception as exc:
         return {"status": "error", "error": str(exc), "states": 0}
 

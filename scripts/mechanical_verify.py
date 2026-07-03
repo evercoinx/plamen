@@ -257,7 +257,7 @@ def _format_test_command(template: str, test_function: str,
 # (foundry.toml / Cargo.toml / Move.toml / go.mod) and the test directory
 # (`test/`, `tests/`) live at the *project* root, which is frequently the
 # parent. Resolving test files against the scope dir is what produced
-# 142/142 NO_TEST_FILE on the DODO audit. _find_build_root walks UP from
+# 142/142 NO_TEST_FILE on a prior audit. _find_build_root walks UP from
 # project_root to the directory that actually owns the build.
 # ---------------------------------------------------------------------------
 
@@ -522,6 +522,100 @@ def _resolve_foundry_profile(probe, build_root, resolved) -> Optional[str]:
     return None
 
 
+_CARGO_PKG_RE = re.compile(
+    r"(?:^|\s)(?:-p|--package)(?:[=\s]+)([A-Za-z0-9_][A-Za-z0-9_-]*)")
+# Generic tokens that are NOT real test-function names — typically mis-extracted
+# from a file stem (`test.rs`, `lib.rs`) or a module path. A cargo
+# `--exact <token>` on any of these matches ZERO tests → false NO_TEST_MATCH/FAIL.
+_CARGO_BOGUS_FILTER = frozenset(
+    {"test", "tests", "mod", "lib", "main", "src", "it", "unit", "integration"})
+
+
+def _resolve_cargo_package(probe) -> Optional[str]:
+    """Recover the `-p <package>` the verifier's PoC ran under (mirrors
+    `_resolve_foundry_profile` for EVM).
+
+    The registry cargo template carries no package selector, so on a multi-member
+    workspace (e.g. `contracts/registry`, `contracts/factory`, …) the mechanical
+    re-run executes at the workspace root and cannot resolve a member's test →
+    mass NO_TEST_FILE/FAIL, and every `[POC-PASS]` fails to graduate. The
+    verifier records its working command (`cargo test -p <pkg> …`); read the
+    package back from it. Returns the package name, or None."""
+    cmd = getattr(probe, "test_command", "") or ""
+    m = _CARGO_PKG_RE.search(cmd)
+    return m.group(1) if m else None
+
+
+def _apply_cargo_workspace_fixups(argv: list, probe) -> list:
+    """Repair the two mechanical-cargo mis-reconstructions that made every
+    workspace-member Soroban/Rust PoC read as NO_TEST_FILE/FAIL:
+      (1) thread the verifier's `-p <package>` back in (registry template omits
+          it), so a workspace-member test resolves;
+      (2) drop a phantom `<generic> -- --exact` filter when the substituted test
+          name is a non-test token (e.g. `test` extracted from `test.rs`) — run
+          the package suite as the verifier actually did, instead of
+          `--exact test` which matches nothing.
+    Never raises; returns argv unchanged on any parse issue."""
+    try:
+        out = list(argv)
+        # (2) The registry template appends `-- --exact <fn>` for isolation, but
+        # the extracted filter is a BARE function name while Rust tests are
+        # module-nested (`mod xxx_tests { #[test] fn poc_… }`). `--exact
+        # <bare_fn>` then matches NOTHING (cargo `--exact` needs the full
+        # `mod::fn` path) → NO_TEST_MATCH. Cargo's SUBSTRING match on the unique
+        # function name isolates to that one test in practice (`N filtered out`),
+        # so drop the `-- --exact` tail. If the filter token is itself a bogus
+        # generic (mis-extracted from `test.rs`), also drop it → package suite.
+        if "--" in out:
+            sep = out.index("--")
+            filt_idx = None
+            for i in range(sep - 1, 0, -1):
+                if out[i].startswith("-"):
+                    continue
+                if i <= 1:  # position 1 is the `test` subcommand, never a filter
+                    break
+                filt_idx = i
+                break
+            bogus = (filt_idx is not None
+                     and out[filt_idx].lower() in _CARGO_BOGUS_FILTER)
+            del out[sep:]              # drop `-- --exact …` (substring is isolation)
+            if bogus and filt_idx is not None:
+                del out[filt_idx]      # also drop the bogus filter → package suite
+        # (3) reconcile `--features` with the verifier's recorded command: the
+        # registry template hardcodes `--features testutils`, but not every
+        # workspace member DEFINES that feature (cargo hard-errors "does not
+        # contain this feature"). Mirror exactly what the verifier ran.
+        rec = getattr(probe, "test_command", "") or ""
+        rec_feat = re.search(r"--features(?:[=\s]+)(\S+)", rec)
+        if "--features" in out:
+            fi = out.index("--features")
+            if rec_feat and fi + 1 < len(out):
+                out[fi + 1] = rec_feat.group(1)   # use verifier's feature set
+            elif fi + 1 < len(out):
+                del out[fi:fi + 2]                # verifier used none → strip
+            else:
+                del out[fi:fi + 1]
+        elif rec_feat:
+            try:
+                ti2 = out.index("test")
+                out[ti2 + 1:ti2 + 1] = ["--features", rec_feat.group(1)]
+            except ValueError:
+                out.extend(["--features", rec_feat.group(1)])
+        # (1) inject `-p <pkg>` right after the `test` subcommand if absent.
+        pkg = _resolve_cargo_package(probe)
+        has_pkg = any(
+            t in ("-p", "--package") or t.startswith("--package=") for t in out)
+        if pkg and not has_pkg:
+            try:
+                ti = out.index("test")
+                out[ti + 1:ti + 1] = ["-p", pkg]
+            except ValueError:
+                out.extend(["-p", pkg])
+        return out
+    except Exception:
+        return argv
+
+
 def _classify_evm_outcome(rc: int, stdout: str, isolated: bool = True) -> str:
     """Classify `forge test` output.
 
@@ -651,6 +745,12 @@ def _run_test_for_finding(verify_path: Path, build_root: Path, language: str,
         result.stdout_tail = "empty command after template substitution"
         return result
 
+    # Cargo workspace fixups: thread the verifier's `-p <package>` back in and
+    # drop a phantom generic `--exact` filter, so a workspace-member PoC is
+    # resolvable (RC-harness, mirrors the EVM FOUNDRY_PROFILE fix).
+    if language in ("solana", "soroban", "l1_rust"):
+        cmd = _apply_cargo_workspace_fixups(cmd, probe)
+
     # Resolve binary path (handles Windows .cmd / .exe shims)
     bin_path = shutil.which(cmd[0])
     if bin_path:
@@ -687,19 +787,24 @@ def _classify_non_evm_outcome(language: str, rc: int, stdout: str) -> str:
     s = stdout
     # Cargo (solana, soroban, l1_rust)
     if language in ("solana", "soroban", "l1_rust"):
-        if re.search(r"test result:\s*ok\.\s*0\s*passed", s) or "running 0 tests" in s:
-            return "NO_TEST_MATCH"
-        if rc == 0 and re.search(r"test result:\s*ok\.\s*[1-9]\d*\s*passed", s):
-            return "PASS"
+        # Evaluate REAL signals FIRST. A cargo run prints a per-target
+        # `test result:` line for unittests AND doc-tests; the doc-tests line is
+        # almost always `running 0 tests` / `ok. 0 passed`. Checking those zero
+        # markers first (the prior order) short-circuited a genuine
+        # `test result: ok. 72 passed` unittest section to NO_TEST_MATCH — every
+        # passing Soroban/Rust suite was silently discarded.
         if re.search(r"error\[E\d+\]|could not compile|error: linking", s):
             return "COMPILE_FAIL"
-        if re.search(r"[1-9]\d*\s+passed;\s+0\s+failed", s) and rc == 0:
-            return "PASS"
-        if re.search(r"\d+\s+failed", s) or rc != 0:
-            if "0 tests" in s or "0 passed" in s:
-                return "NO_TEST_MATCH"
+        if re.search(r"test result:\s*FAILED", s) or re.search(r"[1-9]\d*\s+failed", s):
             return "FAIL"
-        return "FAIL"
+        if rc == 0 and re.search(r"test result:\s*ok\.\s*[1-9]\d*\s*passed", s):
+            return "PASS"
+        # No pass and no failure recorded → genuinely zero tests matched.
+        if "running 0 tests" in s or re.search(r"test result:\s*ok\.\s*0\s*passed", s):
+            return "NO_TEST_MATCH"
+        if rc != 0:
+            return "FAIL"
+        return "NO_TEST_MATCH"
     # Go testing
     if language == "l1_go":
         # Zero-tests-matched must NOT be read as a pass (the `ok\tpkg` summary
@@ -995,19 +1100,91 @@ def _extract_verifier_prose_tag(verify_path: Path) -> str:
     return m.group(0).upper() if m else ""
 
 
-def _classify_integrity(prose_tag: str, mechanical_status: str) -> tuple[str, str]:
+# ---------------------------------------------------------------------------
+# Harm-assertion detection (v2.8.17)
+#
+# A NO_TEST_FILE status means the mechanical layer could not re-locate / re-run
+# the test file — a harness/file-location failure, NOT proof the exploit is
+# false. When the verifier actually wrote a real asserting PoC, that finding
+# must not be severity-capped to [CODE-TRACE] on a tooling gap. This detector
+# recognizes whether the verify prose contains an explicit harm assertion,
+# INCLUDING revert / error-expectation forms that narrow positive-assertion
+# vocabularies miss (e.g. `try_foo(..).is_err()`). It is strictly ADDITIVE:
+# it can only REDUCE false "no assertion" downgrades, never introduce one.
+# ---------------------------------------------------------------------------
+
+_HARM_ASSERTION_RE = re.compile(
+    "|".join((
+        # Revert / error-expectation forms (Rust / Soroban + generic)
+        r"\.is_err\s*\(\s*\)",            # x.is_err() / try_foo(..).is_err()
+        r"\.is_ok\s*\(\s*\)",             # x.is_ok() on a call result
+        r"\.expect_err\s*\(",             # x.expect_err("...")
+        r"\.unwrap_err\s*\(\s*\)",        # x.unwrap_err()
+        r"#\[\s*should_panic",            # #[should_panic] / #[should_panic(expected=..)]
+        r"\bshould_panic\s*\(",           # should_panic(expected = ...)
+        r"\bmatches!\s*\([^)]*\bErr\b",   # matches!(x, Err(..))
+        r"==\s*Err\s*\(",                 # x == Err(..)
+        # Generic positive assertions (existing recognized forms — kept)
+        r"\bassert!\s*\(",                # assert!(..) incl. assert!(x.is_err())
+        r"\bassert_eq!\s*\(",             # assert_eq!(x, Err(..))
+        r"\bassert_ne!\s*\(",
+        r"\bassertEq\b", r"\bassertTrue\b", r"\bassertFalse\b",
+        r"\bassertGt\b", r"\bassertLt\b",
+        r"\bexpectRevert\b",              # Foundry vm.expectRevert
+        r"\bassert\.[A-Za-z]",            # Go testify assert.X
+        r"\brequire\.[A-Za-z]",           # Go testify require.X
+    ))
+)
+
+
+def _contains_harm_assertion(text: str) -> bool:
+    """True if `text` contains an explicit harm/error-expectation assertion.
+
+    Recognizes revert/error-expectation assertions (`.is_err()`,
+    `#[should_panic]`, `.expect_err(..)`, `.unwrap_err()`, `matches!(.., Err(..))`,
+    `assert_eq!(.., Err(..))`) in addition to positive assertion forms. Scans the
+    whole verify prose (fenced code blocks included) — a real PoC snippet may
+    live either inside or outside a code fence in a verify_<ID>.md file.
+    """
+    if not text:
+        return False
+    return bool(_HARM_ASSERTION_RE.search(text))
+
+
+def _read_verify_text(verify_path: Path) -> str:
+    """Best-effort read of a verify_<ID>.md file; '' on any error/absence."""
+    try:
+        return verify_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _classify_integrity(prose_tag: str, mechanical_status: str,
+                        verify_text: str = "") -> tuple[str, str]:
     """v2.0.8 (P3.1): given the verifier prose tag and the mechanical
     execution status, return (integrity_state, effective_tag).
 
-    Three states:
+    States:
       - CONSISTENT: prose tag matches mechanical reality.
       - INFLATED_PROSE: prose claims proof-grade evidence
         ([POC-PASS]/[MEDUSA-PASS]/etc.) but mechanical did NOT confirm
-        (NO_TEST_FILE / FAIL / COMPILE_FAIL / TIMEOUT). Effective tag
-        forced to [CODE-TRACE] with [INTEGRITY-DOWNGRADE] flag.
+        (NO_TEST_FILE / FAIL / COMPILE_FAIL / TIMEOUT) AND the verify prose
+        carries no explicit harm assertion. Effective tag forced to
+        [CODE-TRACE] with [INTEGRITY-DOWNGRADE] flag.
+      - POC_UNVERIFIED_HARNESS (v2.8.17): prose claims proof-grade evidence,
+        the verify prose DOES contain an explicit harm assertion, but the
+        mechanical layer hit a NO_TEST_FILE harness/file-location failure.
+        This is a tooling gap, not disproof — the effective tag PRESERVES the
+        upstream severity (keeps the prose tag) and adds
+        `[POC-UNVERIFIED-HARNESS] [NEEDS-BUILD]`. It carries NO
+        [INTEGRITY-DOWNGRADE], so the driver's verdict-flip (gated on
+        INFLATED_PROSE) leaves CONFIRMED intact.
       - MECHANICAL_UNAVAILABLE: no mechanical record (finding not in
         manifest, or toolchain unavailable). Effective tag = prose tag
         with [MECHANICAL-UNAVAILABLE] flag.
+
+    `verify_text` is the verify_<ID>.md prose (optional for back-compat; when
+    empty the harness carve-out cannot fire and behavior is unchanged).
     """
     prose_upper = (prose_tag or "").upper()
     status = (mechanical_status or "").upper()
@@ -1038,7 +1215,20 @@ def _classify_integrity(prose_tag: str, mechanical_status: str) -> tuple[str, st
     # NO_TEST_FILE / NO_TEST_MATCH / COMPILE_FAIL / TIMEOUT / BUILD_FAILED /
     # EXEC_ERROR — mechanical did NOT confirm proof.
     if prose_is_proof:
-        # Codex Point 5: the canonical phantom-[POC-PASS] downgrade case.
+        # v2.8.17 harness-failure carve-out: NO_TEST_FILE is a file-location /
+        # harness failure, NOT evidence the exploit is false. When the verifier
+        # DID write a real asserting PoC (a recognized harm assertion — incl.
+        # revert/error-expectation forms — is present in the verify prose) and
+        # claimed proof-grade evidence, demoting to [CODE-TRACE] wrongly caps
+        # severity on a tooling gap. Emit a DISTINCT, non-severity-capping
+        # disposition that PRESERVES the upstream severity and routes to a build
+        # re-run. It carries no [INTEGRITY-DOWNGRADE], so the driver's verdict
+        # flip (gated on INFLATED_PROSE) leaves CONFIRMED intact.
+        if status == "NO_TEST_FILE" and _contains_harm_assertion(verify_text):
+            return ("POC_UNVERIFIED_HARNESS",
+                    f"{prose_tag} [POC-UNVERIFIED-HARNESS] [NEEDS-BUILD]")
+        # Codex Point 5: the canonical phantom-[POC-PASS] downgrade case
+        # (assertion-less prose, or a genuine mechanical FAIL/COMPILE/TIMEOUT).
         return ("INFLATED_PROSE",
                 "[CODE-TRACE] [INTEGRITY-DOWNGRADE]")
     # Prose was honest about not having proof; preserve it.
@@ -1083,8 +1273,9 @@ def _write_verdict_manifest(results: list, scratchpad: Path) -> None:
     for r in results:
         verify_path = scratchpad / r.verify_file
         prose_tag = _extract_verifier_prose_tag(verify_path)
+        verify_text = _read_verify_text(verify_path)
         integrity_state, effective_tag = _classify_integrity(
-            prose_tag, r.status
+            prose_tag, r.status, verify_text
         )
         verdicts.append({
             "finding_id": r.finding_id or "",

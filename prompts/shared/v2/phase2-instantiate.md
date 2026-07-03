@@ -187,7 +187,7 @@ Rules:
   `Skill | Type | Inject Into | Delivery Mode`.
   `Inject Into` MUST be a parseable breadth agent id such as `B2` or a depth
   role such as `depth-external`; do not use prose-only targets.
-- If recon evidence includes `NON_EVM_TARGET`, Solana, Bitcoin, `AccountEncoder`,
+- If recon evidence includes `NON_EVM_TARGET`, Solana, Bitcoin,
   pubkey/base58/bech32/Borsh, or any EVM-to-foreign-VM outbound encoding,
   `CROSS_VM_SERIALIZATION_CONFORMANCE` is REQUIRED and MUST appear in
   `## Skill Bindings` twice: once injected into the cross-chain/encoding

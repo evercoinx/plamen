@@ -2,8 +2,8 @@
 
 Background: the Medusa stateful-fuzz campaign was historically configured
 with Medusa's default `stopOnFailedTest: true`, which halts the entire
-campaign at the first invariant violation. The DODO Crosschain Dex
-Thorough audit (May 2026) demonstrated the impact: MEDUSA-1 fired in
+campaign at the first invariant violation. A prior cross-chain DEX
+Thorough audit demonstrated the impact: MEDUSA-1 fired in
 <1 second, the remaining ~24 invariants never got the deep-state
 exploration they needed, and the configured 15-minute budget was
 effectively wasted.

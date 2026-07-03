@@ -1,4 +1,4 @@
-"""Pipeline v2.8.9 — depth/scanner promotion retention leak (DODO retention sweep).
+"""Pipeline v2.8.9 — depth/scanner promotion retention leak (retention sweep).
 
 Root cause: the depth-promotion bridge (`_promote_depth_findings_to_inventory`)
 and its receipt gate (`_validate_depth_promotion_receipt`) parse finding blocks

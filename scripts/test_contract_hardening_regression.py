@@ -430,11 +430,11 @@ def test_verify_path_recovery_ignores_generated_poc_test_paths(tmp_path: Path):
     sp = tmp_path / ".scratchpad"
     scip = sp / "scip"
     scip.mkdir(parents=True)
-    _write(scip / "repo_map.md", "## path: AwesomeXBuyAndBurn.sol\n")
+    _write(scip / "repo_map.md", "## path: BuyAndBurn.sol\n")
     _write(
         sp / "verify_INV-104.md",
         "# Verification: INV-104\n\n"
-        "**Location**: AwesomeXBuyAndBurn.sol:L495-L522\n\n"
+        "**Location**: BuyAndBurn.sol:L495-L522\n\n"
         "## PoC Attempt\n"
         "- Test File: D:\\Programming\\Audit\\test\\Test_H21_LoopGas.t.sol\n\n"
         "### Error Trace\n"
@@ -451,19 +451,19 @@ def test_verify_path_recovery_ignores_generated_poc_test_paths(tmp_path: Path):
 def test_location_parser_prefers_production_over_poc_test_file() -> None:
     rel, line = D._parse_location_ref(
         "Test File: test/Test_H43_Uint192Cast.t.sol:L10; "
-        "Vulnerable code: AwesomeXMinting.sol:L155"
+        "Vulnerable code: Minting.sol:L155"
     )
 
-    assert rel == "AwesomeXMinting.sol"
+    assert rel == "Minting.sol"
     assert line == 155
 
 
 def test_location_parser_does_not_truncate_method_name_to_c_file() -> None:
     rel, line = D._parse_location_ref(
-        "AwesomeXBuyAndBurn.sol:_getTWAPAveragePriceX96(), OracleLibrary.consult()"
+        "BuyAndBurn.sol:_getTWAPAveragePriceX96(), OracleLibrary.consult()"
     )
 
-    assert rel == "AwesomeXBuyAndBurn.sol"
+    assert rel == "BuyAndBurn.sol"
     assert line is None
 
 

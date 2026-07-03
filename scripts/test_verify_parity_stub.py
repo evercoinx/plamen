@@ -191,7 +191,7 @@ class TestParityGateIntegration:
         assert issues == []
 
     def test_large_scale_partial_output(self, tmp_path: Path):
-        """Simulates the Irys L1 scenario: 103 queued, 87 present, 16 missing."""
+        """Simulates a large L1 scenario: 103 queued, 87 present, 16 missing."""
         queue_rows = [{"finding_id": f"H-{i:02d}", "severity": "High"} for i in range(1, 104)]
         _write_queue(tmp_path, queue_rows)
         for i in range(1, 88):

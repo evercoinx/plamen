@@ -281,7 +281,10 @@ def test_report_index_gets_hyp_scaling(tmp_path):
     from plamen_prompt import scale_timeout
 
     # 47 hypotheses at base 1500s → should get extra time
-    timeout = scale_timeout(1500, ".", "evm", mode="core", hypothesis_count=47)
+    # Use an empty tmp dir as project_root so count_loc(...) ≈ 0 and the base
+    # timeout stays well below the ceiling — otherwise measuring the whole repo
+    # saturates the ceiling and hides the hypothesis-count scaling.
+    timeout = scale_timeout(1500, str(tmp_path), "evm", mode="core", hypothesis_count=47)
     assert timeout > 1500, f"Expected >1500s for 47 hyps, got {timeout}"
     # extra_hyp = (47-8)*90 = 3510; 1500 + 3510 = 5010
     assert timeout >= 4500, f"Expected >=4500s for 47 hyps, got {timeout}"
@@ -291,8 +294,11 @@ def test_chain_gets_hyp_scaling(tmp_path):
     """chain timeout should scale with hypothesis count."""
     from plamen_prompt import scale_timeout
 
-    timeout_0 = scale_timeout(1500, ".", "evm", mode="core", hypothesis_count=0)
-    timeout_47 = scale_timeout(1500, ".", "evm", mode="core", hypothesis_count=47)
+    # Empty tmp project_root → base timeout stays below the ceiling so the
+    # hypothesis-count scaling is observable (measuring the whole repo would
+    # saturate both results at the ceiling → 14400 > 14400 spuriously fails).
+    timeout_0 = scale_timeout(1500, str(tmp_path), "evm", mode="core", hypothesis_count=0)
+    timeout_47 = scale_timeout(1500, str(tmp_path), "evm", mode="core", hypothesis_count=47)
     assert timeout_47 > timeout_0, "Chain timeout must grow with hypothesis count"
 
 
@@ -300,8 +306,11 @@ def test_crossbatch_gets_hyp_scaling(tmp_path):
     """crossbatch timeout should scale with hypothesis count."""
     from plamen_prompt import scale_timeout
 
-    timeout_0 = scale_timeout(900, ".", "evm", mode="core", hypothesis_count=0)
-    timeout_47 = scale_timeout(900, ".", "evm", mode="core", hypothesis_count=47)
+    # Empty tmp project_root → base timeout stays below the ceiling so the
+    # hypothesis-count scaling is observable (measuring the whole repo would
+    # saturate both results at the ceiling → 14400 > 14400 spuriously fails).
+    timeout_0 = scale_timeout(900, str(tmp_path), "evm", mode="core", hypothesis_count=0)
+    timeout_47 = scale_timeout(900, str(tmp_path), "evm", mode="core", hypothesis_count=47)
     assert timeout_47 > timeout_0, "Crossbatch timeout must grow with hypothesis count"
 
 
@@ -371,14 +380,14 @@ def test_location_integrity_multi_range_relaxed():
     from plamen_validators import _validate_report_body
 
     manifest = _make_body_manifest([
-        {"report_id": "H-01", "location": "src/AwesomeXBuyAndBurn.sol:L361-366,L381-386"},
+        {"report_id": "H-01", "location": "src/TokenBuyAndBurn.sol:L361-366,L381-386"},
     ])
     body = textwrap.dedent("""\
     ## High Findings
 
     ### [H-01] Burn Logic Bug [VERIFIED]
     **Severity**: High
-    **Location**: `src/AwesomeXBuyAndBurn.sol:L361-366` and `src/AwesomeXBuyAndBurn.sol:L381-386`
+    **Location**: `src/TokenBuyAndBurn.sol:L361-366` and `src/TokenBuyAndBurn.sol:L381-386`
     **Description**: The burn function has issues at two sites.
     **Impact**: Tokens intended for burning are stranded, breaking the burn accounting.
     **PoC Result**: Test reproduces the stranded balance; assertion passed.
@@ -962,22 +971,22 @@ def test_components_audited_synthesizes_from_contract_inventory(tmp_path: Path):
         # Contract Inventory
 
         ## Primary In-Scope Contracts
-        - **File**: `src/AwesomeX.sol`
-        - **File**: `src/AwesomeXBuyAndBurn.sol`
+        - **File**: `src/Token.sol`
+        - **File**: `src/TokenBuyAndBurn.sol`
 
         ## Support Files (In-Scope)
-        - **File**: `src/interfaces/IDragonX.sol`
+        - **File**: `src/interfaces/IReward.sol`
 
         ## Out-of-Scope / Mock Files
-        - **File**: `test/MockDragonX.sol`
+        - **File**: `test/MockReward.sol`
     """), encoding="utf-8")
 
     table = _synthesize_components_audited(scratchpad)
 
-    assert "AwesomeX.sol" in table
-    assert "AwesomeXBuyAndBurn.sol" in table
-    assert "IDragonX.sol" in table
-    assert "MockDragonX.sol" not in table
+    assert "Token.sol" in table
+    assert "TokenBuyAndBurn.sol" in table
+    assert "IReward.sol" in table
+    assert "MockReward.sol" not in table
 
 
 def test_components_audited_synthesizes_from_contract_inventory(tmp_path: Path):
@@ -990,22 +999,22 @@ def test_components_audited_synthesizes_from_contract_inventory(tmp_path: Path):
         # Contract Inventory
 
         ## Primary In-Scope Contracts
-        - **File**: `src/AwesomeX.sol`
-        - **File**: `src/AwesomeXBuyAndBurn.sol`
+        - **File**: `src/Token.sol`
+        - **File**: `src/TokenBuyAndBurn.sol`
 
         ## Support Files (In-Scope)
-        - **File**: `src/interfaces/IDragonX.sol`
+        - **File**: `src/interfaces/IReward.sol`
 
         ## Out-of-Scope / Mock Files
-        - **File**: `test/MockDragonX.sol`
+        - **File**: `test/MockReward.sol`
     """), encoding="utf-8")
 
     table = _synthesize_components_audited(scratchpad)
 
-    assert "AwesomeX.sol" in table
-    assert "AwesomeXBuyAndBurn.sol" in table
-    assert "IDragonX.sol" in table
-    assert "MockDragonX.sol" not in table
+    assert "Token.sol" in table
+    assert "TokenBuyAndBurn.sol" in table
+    assert "IReward.sol" in table
+    assert "MockReward.sol" not in table
 
 
 # ── v2.5.2 Fix 3: promotion-dropout self-heal ─────────────────────────

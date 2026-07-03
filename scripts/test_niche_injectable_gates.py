@@ -90,7 +90,7 @@ def test_gate1_binding_none_addendum_and_spawn_list_three_repairs_union(
     ]
     tr = _BINDING_NICHE_TABLE_NONE + "\n" + _binding_rules_prose(niches)
     (tmp_path / "template_recommendations.md").write_text(tr, encoding="utf-8")
-    # spawn_manifest C starts EMPTY (the DODO failure: dispatched nothing).
+    # spawn_manifest C starts EMPTY (an observed failure: dispatched nothing).
     (tmp_path / "spawn_manifest.md").write_text(
         _spawn_manifest_with_niches([]), encoding="utf-8"
     )
@@ -180,7 +180,7 @@ def test_gate1_light_mode_skipped(tmp_path: Path):
 
 def test_gate2_injectable_placeholder_fails(tmp_path: Path):
     """(v) CROSS_VM left Required=NO + [LLM TO ENRICH] while NON_EVM_TARGET is
-    present -> Gate 2 fails (the real DODO case). The corrected gate catches it
+    present -> Gate 2 fails (the real observed case). The corrected gate catches it
     as trigger-present-but-not-promoted, NOT as a bare placeholder (a placeholder
     on a non-selected catalog row is the normal menu state — see the catalog
     regression test below)."""
@@ -236,7 +236,7 @@ def test_gate2_full_catalog_no_triggers_does_not_false_fire(tmp_path: Path):
 
 def test_gate2_required_no_with_trigger_absent_passes_pure_evm(tmp_path: Path):
     """(vi) injectable Required=NO with trigger absent (pure-EVM, no
-    NON_EVM_TARGET) -> Gate 2 passes (no false-fire; mirrors the DODO CROSS_VM
+    NON_EVM_TARGET) -> Gate 2 passes (no false-fire; mirrors the observed CROSS_VM
     language-gate fix)."""
     v = _load("plamen_validators")
     tr = (

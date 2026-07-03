@@ -27,11 +27,11 @@ Audit methodology (skills, rules, prompts, scanner checks) and persistent memory
 ## Part 1: The Problem This Protocol Solves
 
 ### Current state
-- **125 files**, **31,278 lines** across agents/, rules/, prompts/, skills/
-- **97 skill files** across 5 language trees + 1 injectable
-- **~100 scanner checks** across 5 trees (19-21 per tree)
+- **330+ markdown files**, **80,000+ lines** across agents/, rules/, prompts/, skills/
+- **150+ skill files** across 6 SC language trees (EVM, Solana, Aptos, Sui, Soroban, DAML) + 1 L1 tree + injectable/niche
+- **~160 scanner checks** across 6 SC trees (25-30 per tree)
 - **Every improvement is additive**: each version adds files, rules, and lines without removing old ones
-- **Cross-tree duplication**: Each fix must be applied to 4-9 files (EVM, Solana, Aptos, Sui)
+- **Cross-tree duplication**: Each fix must be applied to 4-9 files (EVM, Solana, Aptos, Sui, Soroban, DAML)
 
 ### Failure modes this protocol prevents
 1. **Prompt bloat** - scanner templates growing from 300→500+ lines, agent context windows saturating
@@ -337,7 +337,7 @@ When any file approaches its line budget cap OR the user requests it, run a cons
 
 ### What to consolidate
 
-1. **Redundant cross-tree content**: If a scanner/depth check is identical across all 4 trees, extract to a shared location (`rules/shared-checks.md`). The per-tree file retains only language-specific phrasing.
+1. **Redundant cross-tree content**: If a scanner/depth check is identical across all SC trees, extract to a shared location (e.g. a `rules/shared-checks.md`). The per-tree file retains only language-specific phrasing.
 
 2. **Overlapping checks**: If two checks cover >60% of the same space, merge the smaller into the larger. Fewer focused checks > many overlapping ones.
 
@@ -397,16 +397,16 @@ When running this protocol after an audit:
 
 | File Category | Current Range | Cap | Rationale |
 |---------------|-------------|-----|-----------|
-| Scanner templates | 340-526 lines | 600 | Agent context budget |
-| Depth templates | 117-212 lines | 250 | Depth agents need room for analysis output |
-| Generic security rules | 436-938 lines | 1000 | Reference doc, not fully loaded into agents |
-| Individual skills | 31-309 lines | 300 | Injected into agent prompts alongside other content |
-| Recon prompt | 388-994 lines | 1100 | Largest per-tree file; recon agent gets dedicated context |
-| Inventory prompt | 222-287 lines | 350 | Single-purpose agent |
-| CLAUDE.md | 424 lines | 500 | Loaded into every conversation |
-| Confidence scoring | 146 lines | 200 | Reference doc for scoring agent |
-| Chain prompt | 209 lines | 250 | Single-purpose agent |
-| Report prompts | 400 lines | 500 | Template for 3 parallel writers |
+| Scanner templates | 514-671 lines | 700 | Agent context budget |
+| Depth templates | 230-326 lines | 350 | Depth agents need room for analysis output |
+| Generic security rules | 459-816 lines | 1000 | Reference doc, not fully loaded into agents |
+| Individual skills | 37-500 lines | 550 | Injected into agent prompts alongside other content |
+| Recon prompt | 653-1143 lines | 1200 | Largest per-tree file; recon agent gets dedicated context |
+| Inventory prompt | 298-378 lines | 400 | Single-purpose agent |
+| CLAUDE.md | ~90 lines (canonical `.plamen/CLAUDE.md`) | 500 | Loaded into every conversation |
+| Confidence scoring | 236 lines | 250 | Reference doc for scoring agent |
+| Chain prompt | 413 lines | 450 | Single-purpose agent |
+| Report prompts | 736 lines | 800 | Template for 3 parallel writers |
 
 ## Appendix B: Change Type Impact Matrix
 

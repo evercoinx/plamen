@@ -1,9 +1,9 @@
-"""Regression tests for the DODO Thorough-run hardening bundle (FC1-FC6).
+"""Regression tests for a Thorough-run hardening bundle (FC1-FC6).
 
-Each failure class came from the 2026-05-29 DODO cross-chain-dex Thorough run
+Each failure class came from a prior cross-chain-dex Thorough run
 (_plamen.log) where prose/LLM-quality gates hard-degraded content-valid phases,
 forcing retries, CRITICAL halts, and a 10-phase resume rewind. These tests lock
-in the root-cause fixes. They are HOW-not-WHAT: no DODO finding ID is hardcoded;
+in the root-cause fixes. They are HOW-not-WHAT: no real finding ID is hardcoded;
 synthetic IDs/titles stand in for the real ones.
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ import pty_exec
 
 
 def _mkscratch(files: dict[str, str]) -> Path:
-    sp = Path(tempfile.mkdtemp(prefix="plamen_dodo_"))
+    sp = Path(tempfile.mkdtemp(prefix="plamen_runhard_"))
     for name, body in files.items():
         (sp / name).write_text(body, encoding="utf-8")
     return sp
@@ -40,7 +40,7 @@ def test_fc1_classifier_event_setter_synonyms_are_structural():
     # mechanical fallback queue builder never demands an impossible unit PoC.
     assert classify_poc_testability("", "CODE-TRACE", "setBot and superWithdraw Emit No Events", "Medium") == "structural"
     assert classify_poc_testability("", "CODE-TRACE", "Router emits no event on config change", "Low") == "structural"
-    assert classify_poc_testability("", "CODE-TRACE", "DODOApprove Has No Admin Setter", "Low") == "structural"
+    assert classify_poc_testability("", "CODE-TRACE", "TokenApprove Has No Admin Setter", "Low") == "structural"
     assert classify_poc_testability("", "CODE-TRACE", "Pool deployed without a setter for slippage", "Low") == "structural"
 
 
@@ -171,7 +171,7 @@ def test_fc5_semantic_dedup_timeout_is_bounded():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("path", [
-    "interfaces/IDODORouteProxy.sol",
+    "interfaces/IRouteProxy.sol",
     "src/interfaces/IUniswapV2Router01.sol",
     "IUniswapV2Router01.sol",
     "contracts/mocks/ERC20Mock.sol",

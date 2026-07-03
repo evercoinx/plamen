@@ -119,8 +119,8 @@ SUBPROCESS_ISOLATION_PAYLOAD = (
 # Ship 8.13: auto-compaction fingerprint. When Claude Code auto-compacts a
 # long PTY coordinator turn, the transcript carries one of these phrases.
 # Paired (by the caller) with a DONE-then-gate-miss, this is the verified
-# DODO premature-DONE signature. Detection is DIAGNOSTIC ONLY -- it never
-# gates a phase.
+# premature-DONE signature observed in a prior run. Detection is DIAGNOSTIC
+# ONLY -- it never gates a phase.
 _COMPACTION_MARKERS = (
     "conversation compacted",
     "compacting conversation",

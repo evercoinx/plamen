@@ -135,7 +135,7 @@ class SpawnManifest(PlamenContract):
         return v
 
     # Driver-facing accessors (single source for count + outputs — kills the
-    # count-vs-outputs asymmetry that caused the DODO false HALT).
+    # count-vs-outputs asymmetry that caused a prior false HALT).
     def outputs(self) -> list[str]:
         return [a.output for a in self.agents]
 

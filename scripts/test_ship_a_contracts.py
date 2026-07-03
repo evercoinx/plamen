@@ -19,10 +19,10 @@ import plamen_markdown as M  # noqa: E402
 import plamen_contracts as C  # noqa: E402
 import plamen_types as T  # noqa: E402
 
-# A manifest that reproduces the DODO bleed: a `## Breadth Agents` table (8
+# A manifest that reproduces an observed bleed: a `## Breadth Agents` table (8
 # agents) followed by `## Required Template Coverage` whose header ALSO matches
 # the old "template+required" heuristic.
-DODO_LIKE = """# Spawn Manifest
+MANIFEST_LIKE = """# Spawn Manifest
 
 ## Breadth Agents
 
@@ -44,7 +44,7 @@ DODO_LIKE = """# Spawn Manifest
 # ───────────────────────── AST utility ──────────────────────────
 
 def test_section_scope_no_bleed():
-    rows = M.first_section_table(DODO_LIKE, r"\bbreadth\s+agents?\b",
+    rows = M.first_section_table(MANIFEST_LIKE, r"\bbreadth\s+agents?\b",
                                  required_columns=["agent_id", "expected_output"])
     assert len(rows) == 3, [r.get("agent_id") for r in rows]
     assert [r["agent_id"] for r in rows] == ["B1", "B2", "B3"]
@@ -53,7 +53,7 @@ def test_section_scope_no_bleed():
 
 
 def test_section_ends_at_next_equal_level_heading():
-    toks = M.section_tokens(DODO_LIKE, r"\bbreadth\s+agents?\b")
+    toks = M.section_tokens(MANIFEST_LIKE, r"\bbreadth\s+agents?\b")
     # the breadth section tokens must not contain the coverage table's cells
     txt = " ".join(t.content for t in toks if t.type == "inline")
     assert "Required Template Coverage" not in txt
@@ -70,17 +70,17 @@ def test_missing_section_returns_empty():
     assert M.first_section_table("# nothing here", r"breadth") == []
 
 
-def test_real_dodo_manifest_regression(tmp_path):
-    """The exact quarantined DODO manifest, if present, must yield 8 agents."""
+def test_real_manifest_regression(tmp_path):
+    """The exact quarantined manifest, if present, must yield 8 agents."""
     import glob
     hits = glob.glob(
-        r"D:\Programming\Web3\Contests\DODO Crosschain Dex\2025-05-dodo-cross-chain-dex"
+        r"D:\Programming\Web3\Contests\Acme Crosschain Dex\2025-05-acme-cross-chain-dex"
         r"\omni-chain-contracts\contracts\.scratchpad\_retry_quarantine\instantiate"
         r"\spawn_manifest.md"
     )
     if not hits:
         import pytest
-        pytest.skip("DODO manifest fixture not present on this machine")
+        pytest.skip("Manifest fixture not present on this machine")
     md = Path(hits[0]).read_text(encoding="utf-8")
     sm = C.SpawnManifest.from_markdown(md)
     assert sm.count() == 8
@@ -91,7 +91,7 @@ def test_real_dodo_manifest_regression(tmp_path):
 # ───────────────────────── SpawnManifest contract ──────────────────────────
 
 def test_spawn_from_markdown_no_bleed():
-    sm = C.SpawnManifest.from_markdown(DODO_LIKE)
+    sm = C.SpawnManifest.from_markdown(MANIFEST_LIKE)
     assert sm.count() == 3
     assert sm.outputs() == [
         "analysis_core_state.md", "analysis_access_control.md",
@@ -100,7 +100,7 @@ def test_spawn_from_markdown_no_bleed():
 
 
 def test_spawn_round_trip_render_reparse():
-    sm = C.SpawnManifest.from_markdown(DODO_LIKE)
+    sm = C.SpawnManifest.from_markdown(MANIFEST_LIKE)
     rendered = sm.render_markdown()
     sm2 = C.SpawnManifest.from_markdown(rendered)
     assert sm2.outputs() == sm.outputs()
@@ -127,14 +127,14 @@ def test_spawn_duplicate_output_rejected():
 # ───────────────────────── fallback ladder (load_contract) ─────────────────
 
 def test_load_contract_json_authoritative(tmp_path):
-    sm = C.SpawnManifest.from_markdown(DODO_LIKE)
+    sm = C.SpawnManifest.from_markdown(MANIFEST_LIKE)
     C.write_contract_sidecar(tmp_path, sm)
     loaded = C.load_contract(tmp_path, C.SpawnManifest)
     assert loaded is not None and loaded.outputs() == sm.outputs()
 
 
 def test_load_contract_absent_falls_back_to_markdown(tmp_path):
-    (tmp_path / "spawn_manifest.md").write_text(DODO_LIKE, encoding="utf-8")
+    (tmp_path / "spawn_manifest.md").write_text(MANIFEST_LIKE, encoding="utf-8")
     loaded = C.load_contract(tmp_path, C.SpawnManifest)
     assert loaded is not None and loaded.count() == 3
 
@@ -162,7 +162,7 @@ def test_load_contract_wrong_schema_version_hard_fails(tmp_path):
 
 
 def test_sidecar_idempotent_write(tmp_path):
-    sm = C.SpawnManifest.from_markdown(DODO_LIKE)
+    sm = C.SpawnManifest.from_markdown(MANIFEST_LIKE)
     p1 = C.write_contract_sidecar(tmp_path, sm)
     mtime1 = p1.stat().st_mtime_ns
     import time

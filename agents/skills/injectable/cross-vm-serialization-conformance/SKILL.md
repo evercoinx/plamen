@@ -1,9 +1,9 @@
 # CROSS_VM_SERIALIZATION_CONFORMANCE
 
-> **Trigger**: `NON_EVM_TARGET` flag (recon detects a non-EVM destination — Solana/Bitcoin/Move/Cosmos — via 32-byte pubkey constants, base58/bech32 handling, custom account/byte encoders such as `AccountEncoder`/Borsh-style packing, or a foreign chain-id/program-id).
+> **Trigger**: `NON_EVM_TARGET` flag (recon detects a non-EVM destination — Solana/Bitcoin/Move/Cosmos — via 32-byte pubkey constants, base58/bech32 handling, custom account/byte encoders (account-meta packers, Borsh-style packing), or a foreign chain-id/program-id).
 > **Inject Into**: breadth agent owning the cross-chain/encoding focus, and depth-external.
-> **Protocol Types**: any contract that SERIALIZES data on the EVM side for consumption by a DIFFERENT VM (cross-chain bridges, ZetaChain/LayerZero/Wormhole-style messaging, Solana/Bitcoin gateways).
-> **Added in**: recall-recovery (post-DODO ground-truth audit — closes the outbound-encoding gap CROSS_CHAIN_MESSAGE_INTEGRITY does not cover; that skill covers INBOUND decode/auth only).
+> **Protocol Types**: any contract that SERIALIZES data on the EVM side for consumption by a DIFFERENT VM (cross-chain bridges, general cross-chain messaging protocols, Solana/Bitcoin gateways).
+> **Added in**: recall-recovery (post a ground-truth audit comparison — closes the outbound-encoding gap CROSS_CHAIN_MESSAGE_INTEGRITY does not cover; that skill covers INBOUND decode/auth only).
 
 ## Why this exists
 
@@ -31,11 +31,24 @@ undecodable on arrival — a CONFIRMED scheme-mismatch finding regardless of
 field-level correctness.** Field-level conformance (Steps 1-3) is meaningless if
 the whole envelope is the wrong format; only proceed once the scheme is correct.
 
-**FP guard** — do NOT flag when the destination demonstrably `abi.decode`s the
-payload: an EVM-compatible reader, an EVM L2/sidechain target, or an on-chain
-re-encoding hop that re-serializes before the foreign VM sees it. Confirm the
-ACTUAL consumer's decoder before flagging. A round-trip to an EVM decoder is
-fine; a hand-off to a Borsh/BCS/Protobuf/script decoder is not.
+**FP guard (positive-evidence-to-demote — do NOT invert the burden of proof).**
+Demote/skip ONLY on POSITIVE, in-scope evidence that the payload reaches an
+`abi.decode` consumer: an EVM-compatible reader, an EVM L2/sidechain target, or
+an on-chain re-encoding hop VISIBLE IN SCOPE that re-serializes before the
+foreign VM sees it. A round-trip to an EVM decoder is fine; a hand-off to a
+Borsh/BCS/Protobuf/script decoder is not.
+
+**When the actual consumer is EXTERNAL / out-of-scope / not inspectable, the
+Step-0 default STANDS — this is a CONFIRMED finding, NOT an Informational
+"pending external research" hedge.** The destination VM's native format
+(Solana=Borsh, etc.) is the worst realistic condition (R10); assume it. Report
+at the Step-3 impact severity with an explicit
+`[EXTERNAL-ASSUMPTION: destination deserializes with <format>; non-issue ONLY if
+it abi.decodes]` note and route to the verifier. Inability to inspect the
+external consumer is NOT grounds to downgrade: the encode mismatch is proven on
+the EVM side, and only POSITIVE evidence of a safe decode path rebuts it — its
+mere possibility does not. "Requires external research → default Informational"
+is a prohibited burden inversion for this class.
 
 ### Step 1 — Enumerate the serialization surfaces
 List every site where the EVM contract builds bytes destined for a non-EVM VM:

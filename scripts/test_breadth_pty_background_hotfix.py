@@ -1,6 +1,6 @@
 """Breadth PTY execution hotfix — rendered-prompt assertions.
 
-The live DODO breadth attempt serialized workers (foreground Task contract +
+A prior live breadth attempt serialized workers (foreground Task contract +
 "bounded batches of at most 6") and produced only analysis_cross_chain.md
 before halting. Under the persistent PTY transport with a disk-derived gate,
 breadth MUST spawn every missing row at once as BACKGROUND Task calls.

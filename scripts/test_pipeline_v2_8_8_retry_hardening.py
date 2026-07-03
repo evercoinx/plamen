@@ -1,4 +1,4 @@
-"""Pipeline v2.8.8 — DODO Cross-Chain Dex Thorough-run retry-hardening fixes.
+"""Pipeline v2.8.8 — Cross-chain DEX Thorough-run retry-hardening fixes.
 
 Three avoidable-retry / false-warning classes from the 2026-05-29 Claude-PTY
 Thorough run, each fixed mechanically:
@@ -144,7 +144,7 @@ _QUEUE = (
 # project-wide mocking demonstrably feasible.
 _VERIFY_MOCK_PROOF = (
     "# Verify H-90\nSeverity: High\nEvidence Tag: [POC-PASS]\nVerdict: CONFIRMED\n\n"
-    "```solidity\ncontract DODORouteProxyMock { }\n```\n"
+    "```solidity\ncontract RouteProxyMock { }\n```\n"
 )
 
 

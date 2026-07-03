@@ -1,6 +1,6 @@
 """Pipeline v2.8.16 — Phase 1: ecosystem-agnostic verify author/executor split.
 
-Root problem (PulsechainGameWards + DODO post-mortems): the mechanical verifier
+Root problem (observed post-mortems): the mechanical verifier
 was effectively EVM-only and the LLM self-assigned its own Evidence Tag, so
 101/102 findings shipped as fabricated [POC-PASS] (INTEGRITY-DOWNGRADE
 NO_TEST_FILE) — the precision-collapse root cause. Two structural bugs:

@@ -140,7 +140,7 @@ def test_is_artifact_complete_true(tmp_path):
 def test_is_artifact_complete_false_in_progress_marker(tmp_path):
     """Test 6: an IN_PROGRESS artifact (even if substantially sized)
     must NOT register as complete. This is the central correctness
-    property that closes the DODO failure class."""
+    property that closes an observed failure class."""
     p = tmp_path / "a.md"
     body = "x" * 600
     p.write_text(
@@ -178,7 +178,7 @@ def test_structural_check_findings_count_optional_when_blocks_present(tmp_path):
     PLAMEN_FINDINGS_COUNT is now informational. A COMPLETE artifact with
     `## Finding [` blocks but NO FINDINGS_COUNT marker PASSES -- the
     findings-present decision uses block detection, not the count. This
-    removes the attempt-1 wasted retry the canonical DODO files hit."""
+    removes the attempt-1 wasted retry the canonical files hit in a past audit."""
     p = tmp_path / "a.md"
     p.write_text(
         "<!-- PLAMEN_STATUS: COMPLETE -->\n"

@@ -6,7 +6,7 @@ Covers:
         effective_tag is the authoritative downstream evidence.
   P3.2  Skeptic prompt directive references effective_tag.
   P3.3  Report-index prompt rule 5 references effective_tag (not verifier prose).
-  P3.4  Tests for all of the above plus a synthetic DODO inflation case.
+  P3.4  Tests for all of the above plus a synthetic inflation case.
 """
 from __future__ import annotations
 
@@ -199,12 +199,12 @@ def test_p31_read_rejects_wrong_schema(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# P3.1 — DODO-shape inflation scenario (synthetic)
+# P3.1 — inflation-shape scenario (synthetic)
 # ---------------------------------------------------------------------------
 
 
-def test_p31_dodo_shape_inflation_caught(tmp_path):
-    """Synthetic mirror of the DODO failure: a verifier prose-claims
+def test_p31_inflation_shape_caught(tmp_path):
+    """Synthetic mirror of an observed failure: a verifier prose-claims
     [POC-PASS] across multiple findings, but mechanical execution shows
     NO_TEST_FILE for all of them. P3 must flag every one as INFLATED_PROSE.
     """
@@ -223,7 +223,7 @@ def test_p31_dodo_shape_inflation_caught(tmp_path):
     rows = read_verdict_manifest(tmp_path)
     inflated = [r for r in rows if r["integrity_state"] == "INFLATED_PROSE"]
     assert len(inflated) == 5, (
-        f"Expected 5 INFLATED_PROSE entries (DODO-shape scenario), got "
+        f"Expected 5 INFLATED_PROSE entries (inflation-shape scenario), got "
         f"{len(inflated)}"
     )
     # All effective_tags must carry the downgrade flag.

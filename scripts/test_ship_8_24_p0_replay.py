@@ -81,7 +81,7 @@ def test_replay_8_14_recon_uses_v2_prompt(tmp_path):
 
 
 # ==========================================================================
-# 8.15 -- recon targeted repair: DODO replay (443-byte summary)
+# 8.15 -- recon targeted repair: replay (443-byte summary)
 # ==========================================================================
 
 def test_replay_8_15_recon_failure_preserves_valid_drafts(tmp_path):

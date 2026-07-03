@@ -77,6 +77,15 @@ scripts/*
 !scripts/plamen_markdown.py
 !scripts/report_index_machinery.py
 !scripts/spike_mechanical_poc.py
+!scripts/enumeration_gate.py
+
+# ── Internal bug-bounty lane (never public) ──
+# Explicit denylist so BB coverage is structural, not incidental to `scripts/*`.
+# The trailing test re-exclusion overrides the `!scripts/test_*.py` allowlist above
+# (a later gitignore rule wins) so the impact-map seam test never enters the public tree.
+scripts/bounty/
+scripts/bounty_targets/
+scripts/test_impact_map_injection.py
 sessions/
 settings.json
 shell-snapshots/

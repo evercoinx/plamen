@@ -9,7 +9,7 @@
 | Documented post-mortems patching this class | ~15 versions (v2.1.7 → v2.8.16) |
 | Distinct fragile sites/bundles in memory catalog | 19 |
 | Fragile-regex gates found in this audit (validators + parsers + driver) | **30+** across 3 files |
-| Currently LIVE/unfixed (confirmed in code today) | **3** (all from the DODO run) |
+| Currently LIVE/unfixed (confirmed in code today) | **3** (all surfaced by a prior run) |
 | **Recall-risk / gating (can silently drop a finding or HALT a run)** | **5** |
 | **Retry-waste (futile/unwinnable retries)** | **~5** |
 | **Noise (false-WARN, non-blocking)** | **~8+** |

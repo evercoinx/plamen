@@ -15,10 +15,11 @@ Always-available, triggered by pattern flags from recon. Examples: `ORACLE_ANALY
 | Aptos | 22 (21 + core directives) |
 | Sui | 22 (21 + core directives) |
 | Soroban | 19 (13 cross-language + 6 Soroban-specific) |
+| DAML | 12 (7 DAML-specific + 5 cross-language) |
 
 ### Injectable Skills (protocol-type-specific)
 
-Loaded only when recon classifies the protocol as a matching type. Appended to existing agents (8 total):
+Loaded only when recon classifies the protocol as a matching type. Appended to existing agents (9 total):
 
 | Skill | Trigger |
 |-------|---------|
@@ -30,10 +31,11 @@ Loaded only when recon classifies the protocol as a matching type. Appended to e
 | LENDING_PROTOCOL_SECURITY | liquidate/borrow/repay/collateral/LTV/healthFactor |
 | DEX_INTEGRATION_SECURITY | swap/addLiquidity/removeLiquidity (non-DEX protocols) |
 | INTEGRATION_HAZARD_RESEARCH | NAMED_EXTERNAL_PROTOCOL flag (named external protocol imports) |
+| CROSS_VM_SERIALIZATION_CONFORMANCE | NON_EVM_TARGET flag (EVM serializes for a non-EVM VM) |
 
 ### Niche Agents (flag-triggered standalone)
 
-Spawn as independent agents (1 depth budget slot each, 8 total):
+Spawn as independent agents (1 depth budget slot each, 9 total):
 
 | Agent | Trigger |
 |-------|---------|

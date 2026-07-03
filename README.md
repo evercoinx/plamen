@@ -1,4 +1,4 @@
-# Plamen (v2.1.4)
+# Plamen (v2.2.0)
 
 Autonomous Web3 security auditor for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [OpenAI Codex CLI](https://github.com/openai/codex).
 

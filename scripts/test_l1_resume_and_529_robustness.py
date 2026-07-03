@@ -1,6 +1,6 @@
 """L1 resume + 529-overload robustness (2026-06-02).
 
-Two compounding bugs on the live L1 Thorough (Irys) run that loop at depth:
+Two compounding bugs on a live L1 Thorough run that loop at depth:
 
 BUG 1 — 529/overloaded mis-handled as a 429 usage-cap rate-limit. The depth
 phase repeatedly gets Anthropic '529 overloaded_error' ("Overloaded")

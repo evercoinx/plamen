@@ -99,8 +99,7 @@ def test_scan_skip_docker_daemon_not_running(tmp_path):
     scratch = _mkscratch(tmp_path)
     proj = _mkproj(tmp_path)
     with mock.patch("shutil.which", return_value="/usr/bin/docker"):
-        with mock.patch("subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(returncode=1, stdout="", stderr="Cannot connect")
+        with mock.patch("recon_prepass._run_hardened", return_value=(1, "Cannot connect")):
             result = _run_sec3_xray(scratch, proj)
     assert "SKIPPED" in result
     assert "daemon not running" in result
@@ -109,9 +108,11 @@ def test_scan_skip_docker_daemon_not_running(tmp_path):
 def test_scan_skip_docker_probe_timeout(tmp_path):
     scratch = _mkscratch(tmp_path)
     proj = _mkproj(tmp_path)
-    import subprocess as sp
+    # _run_hardened returns the 124 sentinel when the docker-info probe is
+    # tree-killed on timeout.
     with mock.patch("shutil.which", return_value="/usr/bin/docker"):
-        with mock.patch("subprocess.run", side_effect=sp.TimeoutExpired("docker info", 15)):
+        with mock.patch("recon_prepass._run_hardened",
+                        return_value=(124, "[hardened: timed out after 15s, tree-killed]")):
             result = _run_sec3_xray(scratch, proj)
     assert "SKIPPED" in result
     assert "not available" in result
@@ -123,8 +124,7 @@ def test_scan_skip_no_rs_files(tmp_path):
     proj.mkdir()
     (proj / "README.md").write_text("# hello", encoding="utf-8")
     with mock.patch("shutil.which", return_value="/usr/bin/docker"):
-        with mock.patch("subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(returncode=0)
+        with mock.patch("recon_prepass._run_hardened", return_value=(0, "")):
             result = _run_sec3_xray(scratch, proj)
     assert "SKIPPED" in result
     assert "no .rs files" in result
@@ -133,17 +133,16 @@ def test_scan_skip_no_rs_files(tmp_path):
 def test_scan_fail_timeout(tmp_path):
     scratch = _mkscratch(tmp_path)
     proj = _mkproj(tmp_path)
-    import subprocess as sp
     call_count = [0]
 
     def side_effect(*args, **kwargs):
         call_count[0] += 1
         if call_count[0] == 1:
-            return mock.Mock(returncode=0)  # docker info succeeds
-        raise sp.TimeoutExpired("docker run", 600)
+            return (0, "")  # docker info succeeds
+        return (124, "[hardened: timed out after 600s, tree-killed]")
 
     with mock.patch("shutil.which", return_value="/usr/bin/docker"):
-        with mock.patch("subprocess.run", side_effect=side_effect):
+        with mock.patch("recon_prepass._run_hardened", side_effect=side_effect):
             result = _run_sec3_xray(scratch, proj)
     assert "FAILED" in result
     assert "timeout" in result
@@ -157,11 +156,11 @@ def test_scan_fail_nonzero_no_sarif(tmp_path):
     def side_effect(*args, **kwargs):
         call_count[0] += 1
         if call_count[0] == 1:
-            return mock.Mock(returncode=0)  # docker info
-        return mock.Mock(returncode=2, stdout="", stderr="error")
+            return (0, "")  # docker info
+        return (2, "error")
 
     with mock.patch("shutil.which", return_value="/usr/bin/docker"):
-        with mock.patch("subprocess.run", side_effect=side_effect):
+        with mock.patch("recon_prepass._run_hardened", side_effect=side_effect):
             result = _run_sec3_xray(scratch, proj)
     assert "FAILED" in result
     assert "exit 2" in result
@@ -303,16 +302,16 @@ def test_scan_success_writes_sarif_and_summary(tmp_path):
     call_count = [0]
     sarif_path = proj / "sec3-report.sarif"
 
-    def side_effect(cmd, **kwargs):
+    def side_effect(cmd, *args, **kwargs):
         call_count[0] += 1
         if call_count[0] == 1:
-            return mock.Mock(returncode=0)  # docker info
+            return (0, "")  # docker info
         # Simulate X-Ray writing SARIF
         sarif_path.write_text(json.dumps(_SAMPLE_SEC3_SARIF), encoding="utf-8")
-        return mock.Mock(returncode=0)
+        return (0, "")
 
     with mock.patch("shutil.which", return_value="/usr/bin/docker"):
-        with mock.patch("subprocess.run", side_effect=side_effect):
+        with mock.patch("recon_prepass._run_hardened", side_effect=side_effect):
             result = _run_sec3_xray(scratch, proj)
 
     assert "WRITTEN:3 findings" in result
@@ -335,17 +334,17 @@ def test_scan_alt_sarif_filename(tmp_path):
 
     call_count = [0]
 
-    def side_effect(cmd, **kwargs):
+    def side_effect(cmd, *args, **kwargs):
         call_count[0] += 1
         if call_count[0] == 1:
-            return mock.Mock(returncode=0)  # docker info
+            return (0, "")  # docker info
         # Write to alternate filename
         alt = proj / "x-ray-report.sarif"
         alt.write_text(json.dumps(_SAMPLE_SEC3_SARIF), encoding="utf-8")
-        return mock.Mock(returncode=0)
+        return (0, "")
 
     with mock.patch("shutil.which", return_value="/usr/bin/docker"):
-        with mock.patch("subprocess.run", side_effect=side_effect):
+        with mock.patch("recon_prepass._run_hardened", side_effect=side_effect):
             result = _run_sec3_xray(scratch, proj)
 
     assert "WRITTEN:3 findings" in result
@@ -358,14 +357,14 @@ def test_scan_zero_findings(tmp_path):
     proj = _mkproj(tmp_path)
     call_count = [0]
 
-    def side_effect(cmd, **kwargs):
+    def side_effect(cmd, *args, **kwargs):
         call_count[0] += 1
         if call_count[0] == 1:
-            return mock.Mock(returncode=0)  # docker info
-        return mock.Mock(returncode=0)  # no SARIF written
+            return (0, "")  # docker info
+        return (0, "")  # no SARIF written
 
     with mock.patch("shutil.which", return_value="/usr/bin/docker"):
-        with mock.patch("subprocess.run", side_effect=side_effect):
+        with mock.patch("recon_prepass._run_hardened", side_effect=side_effect):
             result = _run_sec3_xray(scratch, proj)
 
     assert "WRITTEN:0 findings" in result

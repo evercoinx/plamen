@@ -1,6 +1,6 @@
 """TASK C — report_index tier-shard COMPLETION + seed-reconciliation.
 
-LIVE FLAW (DODO): even with the bounded-ledger scope ban, report_index thrashed
+LIVE FLAW (prior run): even with the bounded-ledger scope ban, report_index thrashed
 ~27 min because the LLM did whole-set STEP 1.5 consolidation + STEP 5/5.5
 coverage over 30 hypotheses + a 121-finding mapping in ONE turn. The fix shards
 the working set by report tier so no single turn holds the whole set, and wires
@@ -58,7 +58,7 @@ def _write_index(tmp_path, master_rows, excluded_rows=None):
     (tmp_path / "report_index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-# A representative large-ish multi-tier set (mirrors the DODO shape: many tiers,
+# A representative large-ish multi-tier set (mirrors an observed shape: many tiers,
 # a finding-mapping, and a dedup merge so the seed superset is exercised fully).
 _FINDINGS = [
     ("INV-001", "Critical"), ("INV-002", "High"), ("INV-003", "High"),

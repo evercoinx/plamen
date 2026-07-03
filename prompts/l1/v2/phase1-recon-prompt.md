@@ -166,12 +166,14 @@ Classify the target:
 | **Rust consensus client (Lighthouse/Teku)** | `beacon-chain/`, `lighthouse`, `ethereum-consensus`, `ssz-rs` |
 | **Solana validator** | `solana-labs/solana`, `agave`, `svm`, `runtime/` |
 | **Polkadot / Substrate** | `paritytech/substrate`, `frontier`, `polkadot-sdk` |
-| **Storage / data-availability chain** | `chunk_provider`, `data_root`, `publish_ledger`, `submit_ledger`, `partition_assignment`, `recall_range`, `ingress_proof`, `proof_of_access`, Arweave/Filecoin/Irys/Crust/Celestia/EigenDA fork markers |
+| **Storage / data-availability chain** | `chunk_provider`, `data_root`, `publish_ledger`, `submit_ledger`, `partition_assignment`, `recall_range`, `ingress_proof`, `proof_of_access`, Arweave/Celestia-class fork markers |
 | **Custom / research client** | anything else |
 
 Record the classification in `threat_model.md` with reasoning.
 
 If the target is classified as a storage / data-availability chain, set the `DATA_AVAILABILITY` flag in `recon_summary.md` so Phase 2 instantiation loads the `data-availability-enforcement` injectable skill into the consensus depth agent.
+
+If the project manifest (`go.mod` / `Cargo.toml`) requires the Cosmos-SDK / CometBFT framework — `cosmossdk.io/...`, `github.com/cosmos/cosmos-sdk`, `github.com/cometbft/cometbft`, `github.com/tendermint/tendermint` — or the tree has the canonical `x/<module>/{keeper,types}` + `module.go` / `abci.go` layout, set `COSMOS_SDK=true` in the `recon_summary.md` subsystem-flags line (and `IBC=true` if `github.com/cosmos/ibc-go` is present), mirroring the `DATA_AVAILABILITY` pattern above. This loads the `cosmos-sdk-module-safety` injectable skill into the consensus and state-trace depth agents. The mechanical pre-pass already seeds these flags from the manifest; keep/confirm them rather than dropping them.
 
 ### TASK 0 Step 1: Threat model layout
 
@@ -298,6 +300,15 @@ Commands to produce the relevant diff for depth agents:
 ```
 
 Set `IS_FORK=true|false` in recon_summary.md.
+
+### TASK 1 note: Differential audit for forks
+
+When `IS_FORK=true` and an upstream baseline is identifiable (OP-Geth, op-reth, cosmos-sdk, CometBFT, reth, go-ethereum, or any named parent), frame the depth pass as a DIFFERENTIAL audit, not a from-scratch audit. The unchanged base client is presumed reviewed upstream; the bug surface is the DELTA plus the integration seams where the fork's changes meet the base.
+
+- Record the diff baseline (commit/tag) and the `git diff <parent-ref>...<current-ref>` command per key subsystem in `fork_ancestry.md` (the "If fork: diff targeting" block above).
+- In the subsystem map / attack-surface output, mark which files/functions are DELTA (modified or added vs upstream) and which are INTEGRATION POINTS (call across the fork↔base boundary). Steer depth-agent attention to those, not to unchanged base code.
+- Constant changes (epoch length, slots/epoch, max validators, slashing penalties, gas/fee params) introduced by the fork are first-class DELTA targets — each requires justification.
+- This is a steering note only; do NOT disturb the COSMOS_SDK / IBC subsystem-flag handling above.
 
 ## TASK 2: Documentation ingestion
 
@@ -513,6 +524,7 @@ subsystem flags you set in `recon_summary.md`:
 | `EXECUTION=true` | `EXECUTION_CLIENT_HARDENING` |
 | `XENV=true` | `CROSS_ENVIRONMENT_SEMANTIC_DRIFT` |
 | `DATA_AVAILABILITY=true` (from TASK 0) | `DATA_AVAILABILITY_ENFORCEMENT` |
+| `COSMOS_SDK=true` (from TASK 0) | `COSMOS_SDK_MODULE_SAFETY` |
 
 Write `{scratchpad}/template_recommendations.md` EXACTLY in this format.
 Use plain `YES` / `NO` values in the `Required?` column; do not wrap them in
@@ -552,6 +564,7 @@ Do not rename columns or headers; the parser is strict.
 | CONSENSUS_TX_IDENTITY_INVARIANTS | txid/tx_hash/nonce/signature identity spans modules | depth-consensus-invariant, depth-state-trace | **YES** or NO | |
 | CONFIG_CORRECTNESS | config/settings/constants/docs with protocol bounds detected | depth-edge-case, depth-state-trace | **YES** or NO | |
 | WRITE_ERROR_DIVERGENCE | file/DB write APIs or transactional storage detected | depth-state-trace, depth-edge-case | **YES** or NO | |
+| COSMOS_SDK_MODULE_SAFETY | COSMOS_SDK=true (cosmos-sdk/cometbft/tendermint/x/ modules in manifest) | depth-consensus-invariant, depth-state-trace | **YES** or NO | |
 
 ## Niche Agents
 
@@ -591,7 +604,7 @@ After all tasks complete, write `{scratchpad}/recon_summary.md`:
 - Is fork: [true/false, parent if true]
 - Layers present: [list from TASK 0 Step 1]
 - L1_PATTERN: true
-- Subsystem flags: CONSENSUS=true, P2P=true, MEMPOOL=true, LIGHT_CLIENT=false, RPC=true, BLS=true, STATE_SYNC=true, EXECUTION=true, XENV=false, VALIDATOR_LIFECYCLE=true, HARDFORK=true
+- Subsystem flags: CONSENSUS=true, P2P=true, MEMPOOL=true, LIGHT_CLIENT=false, RPC=true, BLS=true, STATE_SYNC=true, EXECUTION=true, XENV=false, VALIDATOR_LIFECYCLE=true, HARDFORK=true, COSMOS_SDK=false
 - Primitives: [status from bake_validation.md]
 - Opengrep baseline hits: [count]
 - Skills to load in Phase 3: [list of L1 skill names matching enabled subsystem flags]

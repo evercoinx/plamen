@@ -379,7 +379,7 @@ def test_phase_added_to_l1_phases_after_verify_aggregate():
 
 
 # ---------------------------------------------------------------------------
-# Build-root resolution (the DODO 142/142 NO_TEST_FILE bug)
+# Build-root resolution (an observed mass NO_TEST_FILE bug)
 #
 # The audit's project_root is the scope dir (e.g. omni-chain-contracts/
 # contracts) but foundry.toml + test/ live at the parent. _find_build_root
@@ -458,7 +458,7 @@ def test_evm_forge_filter_match_path_last_resort():
 
 
 def test_resolve_test_path_finds_under_build_root_not_scope(tmp_path):
-    """The exact DODO bug: test file is under build_root/test/, not scope/test/."""
+    """The exact observed bug: test file is under build_root/test/, not scope/test/."""
     mv = _mv()
     build_root = tmp_path / "project"
     scope = build_root / "contracts"

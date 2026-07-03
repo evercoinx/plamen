@@ -8,7 +8,7 @@ explained inline where it's used.
 
 - **Pipeline** — the full audit. Two flavors: `sc` (smart contract) and `l1`
   (node-client infrastructure). Picked at wizard step 0.
-- **Phase** — one stage of the pipeline. SC has 39, L1 has more. Examples:
+- **Phase** — one stage of the pipeline. SC has 40+, L1 has more. Examples:
   `recon`, `breadth`, `inventory`, `depth_iter1`, `verify_critical`,
   `report_assemble`. Sequence is hard-coded in
   [`docs/architecture.md`](architecture.md).

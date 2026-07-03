@@ -47,10 +47,11 @@ _VQ_HDR = (
 
 
 def _verify_setup(
-    tmp_path: Path, fid: str, queue_class: str, ledger: str
+    tmp_path: Path, fid: str, queue_class: str, ledger: str,
+    severity: str = "Low",
 ) -> None:
     (tmp_path / "verification_queue.md").write_text(
-        _VQ_HDR + f"| {fid} | Low | t | F.sol:1 | {queue_class} |\n",
+        _VQ_HDR + f"| {fid} | {severity} | t | F.sol:1 | {queue_class} |\n",
         encoding="utf-8",
     )
     (tmp_path / f"verify_{fid}.md").write_text(ledger, encoding="utf-8")
@@ -83,15 +84,37 @@ def test_B_legacy_accept_bare_structural_still_relaxes(tmp_path):
 
 def test_B_live_fp_repro_hard_gate_honors_reclassified_class(tmp_path):
     """Hard contract gate: queue=property, verifier reclassified to structural
-    with valid structural blocker -> no longer required (no false retry)."""
-    _verify_setup(tmp_path, "HL-05", "property", _STRUCTURAL_RECLASS_LEDGER)
+    with valid structural blocker -> no longer required (no false retry).
+
+    Uses a Medium row so the reclassification-softening path is genuinely
+    exercised (Medium is required on first-pass and must relax on second-pass).
+    Low/Info are now unconditionally not-required (see the dedicated Low test
+    below), which would mask the first-pass-required precondition.
+    """
+    _verify_setup(tmp_path, "HL-05", "property", _STRUCTURAL_RECLASS_LEDGER,
+                  severity="Medium")
     content = (tmp_path / "verify_HL-05.md").read_text(encoding="utf-8")
-    row = {"poc class": "property", "severity": "Low", "finding id": "HL-05"}
+    row = {"poc class": "property", "severity": "Medium", "finding id": "HL-05"}
     # First-pass (queue) still considers it required...
     assert V._poc_contract_required(row, "thorough") is True
     # ...second-pass (content) relaxes via the declared structural class.
     assert V._poc_contract_required(row, "thorough", content) is False
     assert V._effective_poc_class("property", content) == "structural"
+
+
+def test_B_low_info_never_require_mandatory_poc(tmp_path):
+    """Low/Info findings never require a mandatory unit/property PoC in ANY
+    mode — so an all-Low/Info verify shard cannot trip the PoC-contract gate
+    and burn a futile one-shot targeted repair that a retry can never satisfy.
+    Medium+ enforcement is asserted unchanged alongside as the control."""
+    for mode in ("core", "thorough"):
+        for sev in ("Low", "Informational", "Info"):
+            row = {"poc class": "property", "severity": sev, "finding id": "L-1"}
+            assert V._poc_contract_required(row, mode) is False, (mode, sev)
+        # Control: Medium+ stays required (a fixable retry still matters).
+        for sev in ("Critical", "High", "Medium"):
+            row = {"poc class": "property", "severity": sev, "finding id": "M-1"}
+            assert V._poc_contract_required(row, mode) is True, (mode, sev)
 
 
 def test_B_live_fp_repro_soft_coverage_no_false_warn(tmp_path):

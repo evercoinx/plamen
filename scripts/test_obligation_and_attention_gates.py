@@ -212,7 +212,7 @@ def _write_function_summary(tmp_path: Path):
         "## Router.sol\n\n"
         "| Function | Visibility | Modifiers | State Reads | State Writes | External Calls | Notes |\n"
         "|----------|-----------|-----------|-------------|--------------|----------------|-------|\n"
-        "| `swap` | external | - | reserves | reserves | IDODO.mixSwap | external swap |\n",
+        "| `swap` | external | - | reserves | reserves | IExternalDex.mixSwap | external swap |\n",
         encoding="utf-8",
     )
 

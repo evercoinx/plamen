@@ -4,10 +4,10 @@ concurrently (or any Codex run, whose sessions live elsewhere), it surfaced
 ANOTHER run's multi-MB tool-result and misattributed it to the current phase:
 
   [breadth] runaway tool result detected: 38510 KB at
-  ...projects/D--...-DODO-.../.../tool-results/bvhjeso5d.txt -- a subagent
+  ...projects/D--...-Other-.../.../tool-results/bvhjeso5d.txt -- a subagent
   likely read outside PROJECT_ROOT. Coordinator may stall ...
 
-...during an L1 Irys run on Codex. False alarm on every Codex run + any
+...during an L1 run on Codex. False alarm on every Codex run + any
 concurrent run.
 
 Fix: scope the scan to the CURRENT run's project dir, keyed by
@@ -36,9 +36,9 @@ def test_encoder_matches_real_claude_dirs():
     assert _re_enc(r"D:\Programming\Audits\L1\example-node tests\target") == \
         "D--Programming-Audits-L1-example-node-tests-target"
     assert _re_enc(
-        r"D:\Programming\Web3\Contests\DODO Crosschain Dex"
-        r"\2025-05-dodo-cross-chain-dex\omni-chain-contracts\contracts"
-    ) == ("D--Programming-Web3-Contests-DODO-Crosschain-Dex-2025-05-dodo-"
+        r"D:\Programming\Web3\Contests\Acme Crosschain Dex"
+        r"\2025-05-acme-cross-chain-dex\omni-chain-contracts\contracts"
+    ) == ("D--Programming-Web3-Contests-Acme-Crosschain-Dex-2025-05-acme-"
           "cross-chain-dex-omni-chain-contracts-contracts")
     # The function itself (abspath may rewrite a relative input, so feed abs).
     assert d._claude_project_dir_name(Path("/tmp/foo bar/baz")).endswith(
@@ -85,10 +85,10 @@ def test_sibling_run_blob_ignored_current_run_caught(tmp_path, monkeypatch):
     big = d._RUNAWAY_TOOL_RESULT_BYTES + 4096
     current_root, sibling_root = _roots(tmp_path)
 
-    # The concurrent DODO run dumps a 38MB blob AFTER the Irys phase started.
-    _make_blob(projects, sibling_root, "dodo_blob.txt", big, fresh)
-    # The current Irys run has its OWN runaway blob.
-    cur = _make_blob(projects, current_root, "irys_blob.txt", big, fresh)
+    # The concurrent sibling run dumps a 38MB blob AFTER the current phase started.
+    _make_blob(projects, sibling_root, "sibling_blob.txt", big, fresh)
+    # The current run has its OWN runaway blob.
+    cur = _make_blob(projects, current_root, "current_blob.txt", big, fresh)
 
     scratchpad = current_root / ".scratchpad"
     found = d._scan_claude_tool_results_for_runaways(start, set(), scratchpad)
@@ -111,7 +111,7 @@ def test_codex_run_no_claude_dir_returns_empty(tmp_path, monkeypatch):
 
     big = d._RUNAWAY_TOOL_RESULT_BYTES + 4096
     current_root, sibling_root = _roots(tmp_path)
-    _make_blob(projects, sibling_root, "dodo_blob.txt", big, time.time())
+    _make_blob(projects, sibling_root, "sibling_blob.txt", big, time.time())
 
     # codex run: no projects/<encoded current_root> dir created at all
     scratchpad = current_root / ".scratchpad"

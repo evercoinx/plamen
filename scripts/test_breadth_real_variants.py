@@ -1,5 +1,5 @@
-"""Ship 8.2 regression: the EXACT breadth marker variants that halted the
-DODO audit on 2026-05-22, replayed end-to-end through
+"""Ship 8.2 regression: the EXACT breadth marker variants that halted a
+prior audit, replayed end-to-end through
 compute_breadth_row_statuses() AND gate_passes().
 
 The original marker contract was validated only against perfect hand-written
@@ -139,7 +139,7 @@ def _write_manifest(sp: Path) -> None:
 
 
 def _seed_failed_scratchpad(sp: Path) -> None:
-    """Reproduce the failed DODO breadth scratchpad shape."""
+    """Reproduce the failed breadth scratchpad shape from a prior audit."""
     _touch_sentinel(sp)
     _write_manifest(sp)
     for focus in _FOCUS:

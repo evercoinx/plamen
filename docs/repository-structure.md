@@ -5,7 +5,7 @@
 ├── CLAUDE.md                          # Orchestrator config — mode table, rules, file refs
 ├── plamen.py                          # Terminal wrapper (Rich + InquirerPy)
 ├── plamen.sh / plamen.bat             # Launcher scripts
-├── VERSION                            # Semantic version (2.1.0)
+├── VERSION                            # Semantic version (2.2.0)
 │
 ├── commands/                          # Claude Code slash commands (4 files)
 │   ├── plamen.md                      # /plamen — full SC audit workflow
@@ -37,11 +37,12 @@
 │   └── security-verifier.md
 │
 ├── prompts/                           # Language-specific prompts
-│   ├── evm/                           # 10 files (includes invariant-fuzz)
-│   ├── solana/                        # 10 files (includes invariant-fuzz)
-│   ├── aptos/                         # 9 files
-│   ├── sui/                           # 9 files
-│   ├── soroban/                       # 9 files (Soroban/Stellar)
+│   ├── evm/                           # 13 files (includes invariant-fuzz)
+│   ├── solana/                        # 13 files (includes invariant-fuzz)
+│   ├── aptos/                         # 12 files
+│   ├── sui/                           # 12 files
+│   ├── soroban/                       # 13 files (Soroban/Stellar)
+│   ├── daml/                          # 5 files (DAML/Canton)
 │   ├── l1/                            # L1 infrastructure prompts
 │   └── shared/                        # Shared prompt components
 │       └── v2/                        # V2-specific shared prompts
@@ -52,7 +53,8 @@
 │   ├── aptos/                         # 22 Aptos skill templates (21 + core directives)
 │   ├── sui/                           # 22 Sui skill templates (21 + core directives)
 │   ├── soroban/                       # 19 Soroban skill templates
-│   ├── injectable/                    # 8 protocol-type-specific skills
+│   ├── daml/                          # 12 DAML/Canton skill templates
+│   ├── injectable/                    # 9 protocol-type-specific skills
 │   │   └── l1/                        # 22+ L1 infrastructure skills
 │   └── niche/                         # 9 flag-triggered niche agents
 │

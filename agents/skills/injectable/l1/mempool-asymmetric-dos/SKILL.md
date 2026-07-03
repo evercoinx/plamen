@@ -175,6 +175,22 @@ When a block can contain MULTIPLE transaction types (regular data tx, commitment
 
 Tag: `[MP-NO-PER-TYPE-CAP:{tx_type}]`
 
+## 8a. CometBFT Mempool Priority / FIFO Front-running
+
+CometBFT/Tendermint mempools are FIFO by default; a priority mempool exists but must be explicitly configured and implemented correctly. FIFO ordering enables ordering games (an observer races a target tx by submitting earlier), and either ordering mode can STARVE critical low-volume messages (oracle price updates, emergency pause, slashing evidence) behind a flood of cheap txs.
+
+**Bounded reads**: read SCIP graph artifacts (`caller_map.md`, `callee_map.md`, `state_write_map.md`, `function_summary.md`) to find mempool insert/reap call-sites and any priority assignment; on-demand single-symbol source reads for the `CheckTx`/reap/priority functions only; never bulk-read large files.
+
+**Heuristics**:
+1. Grep for `mempool.Priority`, `priority`, `ReapMaxBytesMaxGas`, `CheckTx`, `Mempool`, `recheck`, `fifo`. Identify whether the mempool is FIFO or priority-based.
+2. **Ordering exposure**: if FIFO, any logic whose outcome depends on relative tx ordering (oracle-feeds, auctions, first-come settlement) is front-runnable by an observer who submits earlier — flag the affected app-level path.
+3. **Critical-message starvation**: identify protocol-critical message types (oracle update, pause/halt, governance, slashing evidence). Verify they cannot be indefinitely delayed behind attacker spam — i.e. they get a reserved lane, a priority floor, or a dedicated cap. A critical message subject to the same shared FIFO/priority queue as spammable txs, with no reservation, is a finding.
+4. **Priority assignment integrity**: if `mempool.Priority` is set in `CheckTx`, verify the priority is derived from a non-attacker-gameable signal (validated fee/stake), not from a self-declared field a sender can inflate for free.
+
+**Severity**: starvation of an oracle/pause/evidence message is High–Critical (stale price / un-haltable incident / missed slashing); ordering front-run is Medium–High per the affected app path.
+
+Tag: `[MP-FIFO-FRONTRUN:{path}]`, `[MP-CRITICAL-STARVE:{msg-type}]`
+
 ## 9. Fallback if primitives unavailable
 
 - Locate the mempool directory

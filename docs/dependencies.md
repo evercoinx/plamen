@@ -188,6 +188,19 @@ Works on all platforms. No special setup needed beyond Rust and the Stellar CLI.
 
 ---
 
+## DAML / Canton
+
+| Tool | Purpose | Install | Required? |
+|------|---------|---------|-----------|
+| DAML SDK (`daml` CLI) | Build (`daml build`) and test (`daml test`) DAML templates | [docs.daml.com/getting-started/installation.html](https://docs.daml.com/getting-started/installation.html) | Yes |
+
+DAML has no security-focused static analyzer (DLint is style-only) and no
+native fuzzer — Thorough-mode fuzzing falls back to boundary-value
+parameterized DAML Scripts. Auto-detected on `.daml` sources; works on all
+platforms.
+
+---
+
 ## L1 Infrastructure (Go/Rust Node Clients)
 
 > These tools are needed only for L1 mode (`plamen l1`). Skip if you only audit smart contracts.

@@ -32,16 +32,24 @@ import plamen_driver as D  # noqa: E402
 def test_report_dedup_present_last_sc():
     names = [p.name for p in T.SC_PHASES]
     assert "report_dedup" in names, "report_dedup missing from SC_PHASES"
-    assert names[-1] == "report_dedup", f"report_dedup not last: {names[-3:]}"
-    # must come AFTER report_assemble
+    # report_dedup must run AFTER report_assemble (operates on assembled report).
     assert names.index("report_dedup") > names.index("report_assemble")
+    # The material-harm floor is the terminal report mutation, AFTER dedup so it
+    # operates on the final deduped report; disposition precedes the floor.
+    assert names[-1] == "report_floor", f"report_floor not last: {names[-3:]}"
+    assert names.index("report_floor") > names.index("report_dedup")
+    assert names.index("report_disposition") > names.index("report_dedup")
+    assert names.index("report_floor") > names.index("report_disposition")
 
 
 def test_report_dedup_present_last_l1():
     names = [p.name for p in T.L1_PHASES]
     assert "report_dedup" in names, "report_dedup missing from L1_PHASES"
-    assert names[-1] == "report_dedup", f"report_dedup not last: {names[-3:]}"
     assert names.index("report_dedup") > names.index("report_assemble")
+    assert names[-1] == "report_floor", f"report_floor not last: {names[-3:]}"
+    assert names.index("report_floor") > names.index("report_dedup")
+    assert names.index("report_disposition") > names.index("report_dedup")
+    assert names.index("report_floor") > names.index("report_disposition")
 
 
 def test_report_dedup_critical_false():
@@ -571,35 +579,35 @@ def test_negctrl_a_true_same_fix_merges_losslessly():
         assert "DATA-LOSS GATE: PASS" in mapping
 
 
-# (b) RELATED-BUT-DISTINCT: SAME variable/topic (totalTitanXDistributed), same
+# (b) RELATED-BUT-DISTINCT: SAME variable/topic (totalRewardDistributed), same
 # function family, but OPPOSITE direction → DIFFERENT fix. Must NOT merge.
 _REPORT_RELATED_DISTINCT = """# Security Audit Report — demo
 
 ## Medium Findings
 
-### [M-09] totalTitanXDistributed not updated on inflow deposit [VERIFIED]
+### [M-09] totalRewardDistributed not updated on inflow deposit [VERIFIED]
 
 **Severity**: Medium
 **Location**: `src/Burn.sol:L235`
-**Description**: distributeTitanXForBurning deposits TitanX but never increments
-totalTitanXDistributed on the inflow path.
+**Description**: distributeRewardForBurning deposits Reward but never increments
+totalRewardDistributed on the inflow path.
 **Impact**:
-- Inflow accounting undercounts distributed TitanX.
-**Recommendation**: Increment totalTitanXDistributed on the inflow deposit path
-inside distributeTitanXForBurning so the deposited amount is recorded.
+- Inflow accounting undercounts distributed Reward.
+**Recommendation**: Increment totalRewardDistributed on the inflow deposit path
+inside distributeRewardForBurning so the deposited amount is recorded.
 
 ## Low Findings
 
-### [I-03] totalTitanXDistributed not decremented on outflow burn [VERIFIED]
+### [I-03] totalRewardDistributed not decremented on outflow burn [VERIFIED]
 
 **Severity**: Informational
 **Location**: `src/Burn.sol:L235`
-**Description**: The outflow burn path of distributeTitanXForBurning never
-decrements totalTitanXDistributed when TitanX leaves.
+**Description**: The outflow burn path of distributeRewardForBurning never
+decrements totalRewardDistributed when Reward leaves.
 **Impact**:
-- Outflow accounting overcounts remaining TitanX.
-**Recommendation**: Decrement totalTitanXDistributed on the outflow burn path
-inside distributeTitanXForBurning so the burned amount is removed.
+- Outflow accounting overcounts remaining Reward.
+**Recommendation**: Decrement totalRewardDistributed on the outflow burn path
+inside distributeRewardForBurning so the burned amount is removed.
 """
 
 _INDEX_RELATED_DISTINCT = """# Report Index
@@ -608,8 +616,8 @@ _INDEX_RELATED_DISTINCT = """# Report Index
 
 | Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |
 |-----------|-------|----------|----------|--------------|-----------|--------------------|
-| M-09 | totalTitanXDistributed not updated on inflow deposit | Medium | src/Burn.sol:L235 | VERIFIED | - | H-50 |
-| I-03 | totalTitanXDistributed not decremented on outflow burn | Informational | src/Burn.sol:L235 | VERIFIED | - | H-51 |
+| M-09 | totalRewardDistributed not updated on inflow deposit | Medium | src/Burn.sol:L235 | VERIFIED | - | H-50 |
+| I-03 | totalRewardDistributed not decremented on outflow burn | Informational | src/Burn.sol:L235 | VERIFIED | - | H-51 |
 """
 
 
@@ -740,6 +748,144 @@ def test_same_fix_gate_rejects_thin_fix_text():
              "anchors": set()}
     ok, reason = M._dedup_same_fix_ok(thin, other)
     assert not ok and "thin" in reason.lower(), reason
+
+
+# =============================================================================
+# (e) REAL-SHAPE same-root-cause merge: the bug this fix targets.
+#
+# Two agents find the SAME bug at the SAME site (OVERLAPPING-but-not-identical
+# line ranges) and write SUBSTANTIVE but DIFFERENTLY-WORDED Recommendations with
+# NO antonym. Recommendation-Jaccard is < floor here (the inert-on-real-data
+# failure mode), so the merge MUST rest on the shared TITLE / root-cause
+# identifiers instead. This mirrors the real duplicate halves split across the
+# Low and Informational tiers. (The prior thin-rec test exercised the WRONG
+# shape — substantive-but-different recs are the real shape.)
+# =============================================================================
+_REPORT_REAL_SHAPE = """# Security Audit Report — demo
+
+## Low Findings
+
+### [L-50] verifyAndLockStake strict equality bricks creation on floor change [VERIFIED]
+
+**Severity**: Low
+**Location**: `core/StakeManager.sol:90-104,44-61`
+**Description**: verifyAndLockStake re-reads the live minimum and enforces strict
+equality against the snapshot taken at deposit time, so any floor change reverts
+market creation for that staker.
+**Impact**:
+- A valid staker is temporarily blocked from creating their market.
+**Recommendation**: Replace the strict-equality guard with a `>=` floor check so
+an over-stake still passes, or compare against the value snapshotted at deposit
+time instead of the freshly-read live minimum.
+
+## Informational Findings
+
+### [I-40] verifyAndLockStake enforces exact equality against a mutable minimum [VERIFIED]
+
+**Severity**: Informational
+**Location**: `core/StakeManager.sol:91-100,45-60`
+**Description**: depositMarketStake snapshots the live minimum; verifyAndLockStake
+re-reads the live minimum and requires exact equality, so a minimum changed
+between deposit and create reverts the staker's creation despite a valid deposit.
+**Impact**:
+- The staker must withdraw and re-deposit at the new minimum to proceed.
+**Recommendation**: Treat the recorded amount as a lower bound rather than an
+exact match, or freeze the minimum at deposit time to remove the staleness window
+between deposit and verification.
+"""
+
+_INDEX_REAL_SHAPE = """# Report Index
+
+## Master Finding Index
+
+| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |
+|-----------|-------|----------|----------|--------------|-----------|--------------------|
+| L-50 | verifyAndLockStake strict equality bricks creation on floor change | Low | core/StakeManager.sol:90-104 | VERIFIED | - | H-71 |
+| I-40 | verifyAndLockStake enforces exact equality against a mutable minimum | Informational | core/StakeManager.sol:91-100 | VERIFIED | - | H-72 |
+"""
+
+
+def test_real_shape_same_root_cause_gate_passes():
+    """Overlapping (not identical) location + similar title sharing >= 2 anchors
+    + substantive-but-DIFFERENT recs + no antonym → gate MUST authorize MERGE on
+    the TITLE/root-cause signal (Recommendation Jaccard is below floor here)."""
+    recs = {r["id"]: r for r in M._dedup_report_sections(_REPORT_REAL_SHAPE)}
+    a, b = recs["L-50"], recs["I-40"]
+    # Pre-conditions that make this the REAL shape (not the thin-rec shape):
+    # ranges OVERLAP but NO exact location token is shared, so the merge cannot
+    # lean on exact-token equality — it must come from range-overlap + title.
+    assert not (a["locations"] & b["locations"]), "no exact location token may be shared"
+    assert M._dedup_locations_overlap(a["locations"], b["locations"]), \
+        "line ranges must overlap (90-104/44-61 vs 91-100/45-60)"
+    assert M._dedup_fix_jaccard(a["fix_text"], b["fix_text"]) < M._DEDUP_SAME_FIX_JACCARD, \
+        "recs must be substantively DIFFERENT (below the same-fix Jaccard floor)"
+    assert len(M._dedup_fix_terms(a["fix_text"])) >= M._DEDUP_SAME_FIX_MIN_TERMS
+    assert len(M._dedup_fix_terms(b["fix_text"])) >= M._DEDUP_SAME_FIX_MIN_TERMS
+    assert not M._dedup_fix_antonym_conflict(a["fix_text"], b["fix_text"])
+    ok, reason = M._dedup_same_fix_ok(a, b)
+    assert ok, f"real-shape duplicate halves must merge, got: {reason}"
+    assert "same-root-cause" in reason, reason
+
+
+def test_real_shape_merges_end_to_end_at_higher_tier():
+    """End-to-end: the real-shape pair merges losslessly, survivor = higher tier."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch, proj = _setup(tmp, _REPORT_REAL_SHAPE, index=_INDEX_REAL_SHAPE)
+        assert M._dedup_report_python(scratch, str(proj)) is True
+        delivered = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        # survivor is the Low (higher tier than Info); Info heading is absorbed
+        assert "### [L-50]" in delivered
+        assert "### [I-40]" not in delivered
+        assert "Consolidated from I-40" in delivered
+        # lossless against the original
+        assert M._dedup_data_loss_gate(_REPORT_REAL_SHAPE, delivered) == []
+        mapping = (scratch / "report_dedup_mapping.md").read_text(encoding="utf-8")
+        assert "MERGE" in mapping and "same-root-cause" in mapping
+
+
+def test_real_shape_negctrl_same_site_distinct_title_keeps_separate():
+    """Same-site, but the titles share < 2 meaningful anchors and have low title
+    overlap AND the recs differ → KEEP SEPARATE (guards against over-merge: two
+    different bugs in the same function must NOT be conflated)."""
+    report = """# Report
+
+## High Findings
+
+### [H-20] Access control gap in settle()
+
+**Severity**: High
+**Location**: `core/StakeManager.sol:90-104`
+**Description**: settle() lacks an onlyOwner modifier so anyone may call it.
+**Impact**:
+- Anyone can force settlement.
+**Recommendation**: Restrict settle to the owner by adding the onlyOwner modifier
+to the entry point so only governance can trigger it.
+
+## Low Findings
+
+### [L-60] Missing event in settle()
+
+**Severity**: Low
+**Location**: `core/StakeManager.sol:95-100`
+**Description**: settle() emits no event when it mutates accounting state.
+**Impact**:
+- Off-chain indexers miss settlement transitions.
+**Recommendation**: Emit a Settled event when the contract transitions so indexers
+and monitors can observe the state change reliably.
+"""
+    recs = {r["id"]: r for r in M._dedup_report_sections(report)}
+    # same site (overlapping ranges) confirmed
+    assert M._dedup_locations_overlap(recs["H-20"]["locations"], recs["L-60"]["locations"])
+    ok, reason = M._dedup_same_fix_ok(recs["H-20"], recs["L-60"])
+    assert not ok, f"different bugs in one function must NOT merge: {reason}"
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        scratch, proj = _setup(tmp, report)
+        assert M._dedup_report_python(scratch, str(proj)) is True
+        delivered = (proj / "AUDIT_REPORT.md").read_text(encoding="utf-8")
+        assert "Consolidated from" not in delivered
+        assert delivered == report
 
 
 if __name__ == "__main__":

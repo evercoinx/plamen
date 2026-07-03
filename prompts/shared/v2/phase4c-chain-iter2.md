@@ -17,7 +17,7 @@ Execute the instructions below directly and stop. Do not spawn subagents.
 Read:
 - `{SCRATCHPAD}/composition_coverage.md` (focus on NOT EXPLORED rows, especially cross-class Medium+ pairs)
 - `{SCRATCHPAD}/chain_hypotheses.md` (do NOT duplicate existing chains)
-- `{SCRATCHPAD}/findings_inventory.md` (full finding details)
+- `{SCRATCHPAD}/findings_inventory.md` — **FALLBACK-ONLY, single-finding, on-demand.** Open ONE finding's block only for a specific unexplored-pair detail. **Do NOT bulk-read this file** — on large audits it is 100K+ of prose and pulling it into one turn triggers context-collapse / autocompact-thrash (zombie-hangs the phase). Work from `composition_coverage.md` + `chain_hypotheses.md`.
 
 The first chain analysis identified `{M}` chains. Unexplored cross-class finding pairs (max 15) were NOT evaluated. Analyze ONLY these unexplored pairs for compound attack paths.
 

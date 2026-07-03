@@ -1,6 +1,6 @@
 """Lock-in tests for orchestrator HARD STOP termination contracts.
 
-Background: the DODO May-2026 audit's breadth phase took 1h06m wall-time
+Background: an observed audit's breadth phase took 1h06m wall-time
 even though the last legitimate output was written at 30:04. The LLM
 orchestrator inside the breadth subprocess produced its 6 required
 analysis files in the first 30 minutes, then kept running for another
@@ -42,7 +42,7 @@ def _assert_termination_contract(phase: str, must_contain: tuple[str, ...]):
     assert "Orchestrator Termination Contract" in text, (
         f"{phase}: 'Orchestrator Termination Contract' section heading "
         "missing. This is the load-bearing directive that prevents the "
-        "DODO-class wall-time bloat (LLM keeps running after its work is done)."
+        "observed-class wall-time bloat (LLM keeps running after its work is done)."
     )
     assert "HARD STOP" in text, (
         f"{phase}: 'HARD STOP' emphasis missing — without it the LLM "

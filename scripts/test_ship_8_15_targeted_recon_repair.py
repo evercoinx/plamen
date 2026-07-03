@@ -1,6 +1,6 @@
 """Ship 8.15 -- Targeted recon repair.
 
-Root cause (DODO post-mortem): on a recon gate failure, `_quarantine_stale_on_retry`
+Root cause (prior post-mortem): on a recon gate failure, `_quarantine_stale_on_retry`
 quarantined EVERY expected artifact >=500 bytes regardless of which one failed.
 A 443-byte recon_summary.md failure quarantined 5 VALID drafts (design_context,
 contract_inventory, state_variables, function_list, template_recommendations),
@@ -81,8 +81,8 @@ def test_targeted_quarantines_only_implicated_artifact(tmp_path):
     assert not (_qdir(sp) / "contract_inventory.md").exists()
 
 
-def test_dodo_scenario_undersized_summary_preserves_valid_drafts(tmp_path):
-    """The exact DODO failure: recon_summary.md is 443 bytes (<500) and the
+def test_undersized_summary_preserves_valid_drafts(tmp_path):
+    """The exact failure: recon_summary.md is 443 bytes (<500) and the
     only implicated file. It is below the quarantine threshold (left for the
     RESUMPTION PROTOCOL to regenerate); NO valid draft is quarantined."""
     sp = tmp_path / ".scratchpad"

@@ -20,7 +20,7 @@ Read:
 - `{SCRATCHPAD}/enabler_results.md` (enabler enumeration + cross-state interactions from Agent 1)
 - `{SCRATCHPAD}/variable_finding_map.md` (variable→finding cross-reference for variable-level matching — driver-produced by the chain-prep pre-pass; if missing, fall back to grep-based variable name matching in `findings_inventory.md`)
 - `{SCRATCHPAD}/chain_candidate_pairs.md` (pre-filtered pairs with shared state/identifier — driver-produced by the chain-prep pre-pass; this is the bounded, finite candidate set — evaluate ONLY these pairs. The complete set is in `chain_candidate_pairs_full.md`; the `chain_iter2` phase covers any tail. If `chain_candidate_pairs.md` is missing, fall back to the original algorithm.)
-- `{SCRATCHPAD}/findings_inventory.md` (for full finding details when needed)
+- `{SCRATCHPAD}/findings_inventory.md` — **FALLBACK-ONLY, single-finding, on-demand.** Open ONE specific finding's block only when a candidate pair's detail is missing from the bounded inputs above (hypotheses / finding_mapping / enabler_results / variable_finding_map / chain_candidate_pairs). **Do NOT bulk-read this file** — on large audits it is 100K+ of finding prose, and pulling it into one turn is the context-collapse / autocompact-thrash trigger this phase MUST avoid (it zombie-hangs the phase). The bounded ledgers are the authoritative working set.
 
 The pre-filter may include optional `discovery: ...` Shared Signal values
 derived from finding metadata. Treat them as prioritization hints only; they

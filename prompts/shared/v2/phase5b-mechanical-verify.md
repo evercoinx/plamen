@@ -45,7 +45,7 @@ For every `verify_*.md` in the scratchpad (excluding aggregate files
 Prior audits had the LLM verifier write the PoC, run it locally, and
 self-tag the evidence. The integrity validator then downgraded most
 `[POC-PASS]` claims because its assertion regex didn't speak Solidity. Net
-result on the DODO benchmark: 0 verified findings in the final report
+result on a prior benchmark: 0 verified findings in the final report
 despite 11/12 mechanically-passing PoCs sitting on disk. This phase
 replaces the LLM as the oracle and stamps mechanical truth into the
 verify files BEFORE skeptic/crossbatch/report_index consume them.

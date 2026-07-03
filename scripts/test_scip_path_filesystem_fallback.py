@@ -9,7 +9,7 @@ filesystem-existence check against the project/repo root: a path that exists
 on disk is RESOLVED even if SCIP never indexed it. Only paths absent from
 BOTH the SCIP map AND the filesystem stay flagged.
 
-These tests reproduce the confirmed Irys L1 false-rejection (verify_INV-007/
+These tests reproduce a confirmed L1 false-rejection (verify_INV-007/
 012/016 citing crates/p2p/src/{gossip_data_handler,gossip_service,cache}.rs,
 present on disk but absent from the partial SCIP map) and assert hallucination
 detection is preserved.
@@ -83,12 +83,12 @@ def test_path_absent_from_scip_but_exists_on_disk_resolves(tmp_path):
     assert not (scratchpad / "path_unresolved.md").exists()
 
 
-def test_irys_three_files_present_on_disk_all_resolve(tmp_path):
-    """The exact confirmed Irys regression: 3 verify shards previously
+def test_l1_three_files_present_on_disk_all_resolve(tmp_path):
+    """A confirmed L1 regression: 3 verify shards previously
     degraded because their cited p2p files were absent from the partial
     SCIP map. All three exist on disk -> path sub-check now passes."""
     scratchpad = _mkscratch(tmp_path)
-    project_root = tmp_path / "irys"
+    project_root = tmp_path / "node"
     project_root.mkdir()
 
     _write_repo_map(scratchpad, ["crates/storage/src/lib.rs"])  # no p2p

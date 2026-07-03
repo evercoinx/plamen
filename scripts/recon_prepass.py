@@ -15,8 +15,10 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -266,6 +268,140 @@ def _write_contract_inventory_sc(scratch: Path, proj: Path, lang: str) -> str:
                     f"# Contract Inventory\n\n[LLM TO ENRICH] pre-pass failed: {e}\n")
         return "FAILED"
 
+# M2 (recall): interface-vs-implementation parity. A contract that `is IFoo` but
+# whose external/public function is NOT declared in `IFoo` is an interface-
+# completeness gap (e.g. a public `doThing()` on a contract that `is IFoo`
+# while `IFoo` never declares `doThing`).
+# Inheritance-gated (only flag when the contract explicitly inherits the
+# interface) to keep false positives near zero. Mechanical Solidity parse.
+_SOL_CONTRACT_IS_RE = re.compile(
+    r"\bcontract\s+([A-Za-z_]\w*)\s+is\s+([^{]+)\{", re.MULTILINE)
+_SOL_INTERFACE_RE = re.compile(r"\binterface\s+([A-Za-z_]\w*)", re.MULTILINE)
+_SOL_NONIFACE_FNS = {"constructor", "receive", "fallback"}
+
+# Standard / inherited external functions that protocol interfaces conventionally
+# do NOT declare (they come from OZ / ERC standards / proxy bases / DEX callbacks,
+# not the contract's own custom surface). Generic names only — no protocol
+# specifics. Filtering these keeps the signal (a genuine custom omission like
+# `doThing`) while dropping standard-callback noise.
+_STD_EXTERNAL_FN_DENYLIST = {
+    "onerc721received", "onerc1155received", "onerc1155batchreceived",
+    "onerc777received", "tokensreceived", "ontokensreceived", "onflashloan",
+    "supportsinterface",
+    "initialize", "upgradeto", "upgradetoandcall", "proxiableuuid", "implementation",
+    "owner", "renounceownership", "transferownership", "pendingowner", "acceptownership",
+    "hasrole", "grantrole", "revokerole", "renouncerole", "getroleadmin",
+    "paused",
+    "unlockcallback", "uniswapv3swapcallback", "uniswapv3mintcallback",
+    "uniswapv3flashcallback", "beforeswap", "afterswap", "multicall",
+}
+
+
+def _sol_ext_pub_fns(text: str) -> dict:
+    """external/public function name -> line, excluding constructor/receive/fallback."""
+    out: dict = {}
+    for m in _EVM_FN_RE.finditer(text):
+        name = m.group(1)
+        if name in _SOL_NONIFACE_FNS or name in out:
+            continue
+        mods = m.group(2) or ""
+        vis = next((v for v in ("external", "public", "internal", "private")
+                    if re.search(rf"\b{v}\b", mods)), "public")
+        if vis in ("external", "public"):
+            out[name] = _line_of(text, m.start())
+    return out
+
+
+def _sol_declared_fns(text: str) -> set:
+    return {m.group(1) for m in _EVM_FN_RE.finditer(text)
+            if m.group(1) not in _SOL_NONIFACE_FNS}
+
+
+def compute_interface_parity_findings(project_root) -> List[dict]:
+    """Mechanically find external/public functions declared in a contract that
+    `is IFoo` but missing from `IFoo`. Conservative (inheritance-gated, per-file
+    function attribution). Returns Informational finding dicts. Never raises."""
+    root = Path(project_root)
+    try:
+        files = _production_source_files(root, (".sol",))
+    except Exception:
+        return []
+    iface_fns: dict = {}                 # interface name -> declared fn set
+    contracts: dict = {}                 # contract name -> (file, {fn:line}, parents)
+    for f in files:
+        text = _read_text(f)
+        if not text:
+            continue
+        for m in _SOL_INTERFACE_RE.finditer(text):
+            iface_fns.setdefault(m.group(1), set()).update(_sol_declared_fns(text))
+        for m in _SOL_CONTRACT_IS_RE.finditer(text):
+            cname = m.group(1)
+            parents = set(re.findall(r"\b([A-Za-z_]\w*)\b", m.group(2)))
+            if cname not in contracts:
+                contracts[cname] = (f, _sol_ext_pub_fns(text), parents)
+    findings: List[dict] = []
+    n = 0
+    for cname, (cfile, cfns, parents) in sorted(contracts.items()):
+        inherited_ifaces = [p for p in parents if p in iface_fns]
+        if not inherited_ifaces:
+            continue
+        declared: set = set()
+        for iy in inherited_ifaces:
+            declared |= iface_fns[iy]
+        for fn, line in sorted(cfns.items(), key=lambda kv: kv[1]):
+            if fn in declared or fn.lower() in _STD_EXTERNAL_FN_DENYLIST:
+                continue
+            n += 1
+            iy = inherited_ifaces[0]
+            findings.append({
+                "id": f"IFACE-{n}",
+                "title": f"Interface `{', '.join(inherited_ifaces)}` omits external `{cname}.{fn}`",
+                "location": f"{_rel(cfile, root)}:L{line}",
+                "severity": "Informational",
+                "description": (
+                    f"`{cname}` inherits `{', '.join(inherited_ifaces)}` and exposes an "
+                    f"external/public `{fn}`, but `{fn}` is not declared in the interface "
+                    "— interface/implementation drift. Integrators holding the interface "
+                    "type cannot reference the function, and ABI/spec consumers see an "
+                    "incomplete surface."),
+                "impact": (
+                    "Interface consumers cannot call the function via the interface type; "
+                    "spec/ABI completeness gap (no direct fund risk)."),
+            })
+    return findings
+
+
+def _write_interface_parity_findings(scratch: Path, proj: Path) -> str:
+    """Write interface-parity findings to niche_interface_parity_findings.md so the
+    existing post-depth niche-promotion path ingests them. Recall-safe / additive."""
+    try:
+        findings = compute_interface_parity_findings(proj)
+    except Exception as e:
+        _write_text(scratch / "niche_interface_parity_findings.md",
+                    f"# Interface Parity\n\n_skipped: {e}_\n")
+        return "SKIP"
+    if not findings:
+        _write_text(scratch / "niche_interface_parity_findings.md",
+                    "# Interface Parity Findings\n\n_None — every inherited interface "
+                    "declares its implementation's external surface._\n")
+        return "NONE"
+    lines = ["# Interface Parity Findings", "",
+             "Mechanical interface-vs-implementation completeness check "
+             "(inheritance-gated). Promoted via the niche path.", ""]
+    for fd in findings:
+        lines += [
+            f"### Finding [{fd['id']}]: {fd['title']}",
+            f"**Severity**: {fd['severity']}",
+            f"**Location**: {fd['location']}",
+            "**Preferred Tag**: [CODE-TRACE]",
+            f"**Description**: {fd['description']}",
+            f"**Impact**: {fd['impact']}",
+            "",
+        ]
+    _write_text(scratch / "niche_interface_parity_findings.md", "\n".join(lines) + "\n")
+    return "WRITTEN"
+
+
 def _write_table_artifact(scratch: Path, proj: Path, lang: str, kind: str) -> str:
     """kind: 'state' or 'fn' — dispatches to LANG_DISPATCH row function."""
     filename = {"state": "state_variables.md", "fn": "function_list.md"}[kind]
@@ -309,9 +445,81 @@ BUILD_SPECS = {
     "sui":          {"cmd": ["sui", "move", "build"],                  "timeout": 120},
 }
 
+# Size-scaled build timeout. The fixed 120s base was too short for large repos
+# (e.g. 176 .sol files + optimizer on a cold cache). Because `_run_hardened`
+# can no longer deadlock — it always returns by (timeout + grace) and tree-kills
+# the whole process group — a generous, file-count-scaled ceiling is harmless:
+# a slow build that finishes inside the window succeeds; one that genuinely
+# stalls still returns rc=124 so the caller degrades. Generic across ecosystems
+# (.sol / .rs / .move / etc. — the caller passes the relevant file count).
+_BUILD_TIMEOUT_PER_FILE_S = 4       # per source-file budget added to the base
+_BUILD_TIMEOUT_CEILING_S = 1800     # 30-min hard ceiling (bounded by hardened wrapper)
+# Source suffixes per build key, used purely to size the timeout.
+_BUILD_TIMEOUT_SUFFIXES = {
+    "evm_forge":   (".sol",),
+    "evm_hardhat": (".sol",),
+    "solana":      (".rs",),
+    "soroban":     (".rs",),
+    "aptos":       (".move",),
+    "sui":         (".move",),
+}
+
+
+# Rust ecosystems whose recon build runs via cargo. Generic by language/build
+# key (no project/crate names). Used to scope CARGO_INCREMENTAL=0 + retry-once
+# hardening to cargo-driven compiles only (EVM/foundry is excluded).
+_RUST_ECOSYSTEM_BUILD_KEYS = frozenset({"solana", "soroban"})
+
+
+def _is_rust_ecosystem_build(key: Optional[str], cmd: Optional[List[str]]) -> bool:
+    """True for a cargo-driven Rust-ecosystem recon build (solana / soroban /
+    any cargo-based rust/L1 build). Generic by ecosystem key AND by command
+    head so it stays correct if a branch substitutes another cargo subcommand
+    (e.g. `cargo build-sbf`). Never raises; returns False for EVM/Move/etc."""
+    try:
+        if key in _RUST_ECOSYSTEM_BUILD_KEYS:
+            return True
+        if cmd:
+            head = str(cmd[0]).lower()
+            # `cargo`, `cargo-build-sbf`, etc. — any cargo front-end.
+            if head == "cargo" or head.startswith("cargo-"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _scale_build_timeout(base: int, n_files: int) -> int:
+    """base + per-file budget, bounded to [base, ceiling]. Never raises."""
+    try:
+        scaled = int(base) + _BUILD_TIMEOUT_PER_FILE_S * max(0, int(n_files))
+    except Exception:
+        return int(base)
+    return max(int(base), min(_BUILD_TIMEOUT_CEILING_S, scaled))
+
+
+def _graph_implies_compiles(graph_status: Optional[str], lang: str) -> bool:
+    """True when the mechanical-graph bake already performed a FULL compile of
+    the project for this language — making a separate build-status probe a
+    redundant second compile. Currently only the EVM Slither bake compiles
+    (source=slither); the approximate source-parse / SCIP tiers do NOT, so they
+    never suppress the build probe. Generic seam: extend per language as other
+    compile-grade bakes are wired."""
+    if not isinstance(graph_status, str):
+        return False
+    if lang == "evm":
+        # `_bake_evm_graph` returns "WRITTEN:slither" only when Slither's solc
+        # compile of the whole project succeeded. The approximate fallback is
+        # "WRITTEN:evm-source (...)" — that did NOT compile, so do not suppress.
+        return graph_status.startswith("WRITTEN:slither")
+    return False
+
+
 def _select_build(proj: Path, lang: str) -> Optional[str]:
     if lang == "evm":
-        if (proj / "foundry.toml").exists() and shutil.which("forge"):
+        # foundry.toml AT or ABOVE the scope dir (audit scope is often `src/`
+        # while the Foundry root is one or more levels up).
+        if shutil.which("forge") and _resolve_evm_build_root(proj) is not None:
             return "evm_forge"
         if list(proj.glob("hardhat.config.*")) and shutil.which("npx"):
             return "evm_hardhat"
@@ -338,6 +546,59 @@ _BUILD_MANIFESTS = {
 }
 
 
+def _find_build_root_downward(
+    proj: Path, manifest_names: Tuple[str, ...], suffixes: Tuple[str, ...],
+    max_depth: int = 5,
+) -> Optional[Path]:
+    """Walk DOWN from PROJECT_PATH to find the real build project in a SUBDIR.
+
+    The mirror of the walk-up case: the audit scope sometimes points at a
+    monorepo / umbrella root that has NO build manifest of its own, while the
+    actual project lives below it (e.g. `packages/contracts/foundry.toml`,
+    `contracts/Move.toml`, `chain/Cargo.toml`). Walk-up returns None there, so
+    forge/Slither/cargo would run from the manifest-less root and fail.
+
+    Disambiguation (monorepos can hold several sub-projects): pick the manifest
+    directory that ENCLOSES the most in-scope production sources of this
+    ecosystem; ties break to the shallowest path. A manifest dir that contains
+    no production sources is never selected (it is not the audit target).
+
+    Vendored/build dirs (`lib/`, `node_modules/`, `target/`, …) are pruned via
+    SKIP_DIR_NAMES so a DEPENDENCY's manifest is never mistaken for the project.
+    Platform-agnostic (os.walk + Path). Bounded depth; never raises."""
+    try:
+        proj = proj.resolve()
+        base_depth = len(proj.parts)
+        candidates: List[Path] = []
+        for dirpath, dirnames, filenames in os.walk(proj):
+            d = Path(dirpath)
+            if len(d.parts) - base_depth >= max_depth:
+                dirnames[:] = []
+            dirnames[:] = [x for x in dirnames
+                           if x not in SKIP_DIR_NAMES and not x.startswith(".")]
+            if any(m in filenames for m in manifest_names):
+                candidates.append(d)
+        if not candidates:
+            return None
+
+        def _score(d: Path) -> Tuple[int, int]:
+            try:
+                n = len(_production_source_files(d, suffixes)) if suffixes else 0
+            except Exception:
+                n = 0
+            return (n, -len(d.parts))  # most sources, then shallowest
+
+        candidates.sort(key=_score, reverse=True)
+        top = candidates[0]
+        # Only accept a downward root that actually encloses production sources;
+        # otherwise it is not the audit target (e.g. a tooling sub-package).
+        if suffixes and not _production_source_files(top, suffixes):
+            return None
+        return top
+    except Exception:
+        return None
+
+
 def _resolve_build_root(proj: Path, lang: str, max_ancestors: int = 4) -> Optional[Path]:
     manifest = _BUILD_MANIFESTS.get(lang)
     if not manifest:
@@ -353,7 +614,295 @@ def _resolve_build_root(proj: Path, lang: str, max_ancestors: int = 4) -> Option
         if parent == cur:
             break
         cur = parent
-    return None
+    # Walk-up failed → monorepo / nested crate: search downward.
+    suffixes = (LANG_DISPATCH.get(lang) or {}).get("suffix") or ()
+    return _find_build_root_downward(proj, (manifest,), suffixes)
+
+
+def _resolve_evm_build_root(proj: Path, max_ancestors: int = 4) -> Optional[Path]:
+    """Resolve the Foundry root for an EVM audit scope.
+
+    Walk UP first: the scope is frequently a SOURCE subdir (e.g.
+    `.../smart-contracts/src`) while `foundry.toml` + `remappings.txt` + `lib/`
+    live one or more levels up. Running forge/Slither from the scope dir yields
+    EMPTY remappings, so every `@import` fails and the build is a false negative.
+
+    If walk-up finds nothing (the scope points at a monorepo / umbrella root
+    with no top-level `foundry.toml`), walk DOWN to the sub-project that holds
+    the production `.sol` sources. Returns the Foundry root, or None."""
+    cur = proj.resolve()
+    for _ in range(max_ancestors + 1):
+        try:
+            if (cur / "foundry.toml").exists():
+                return cur
+        except Exception:
+            pass
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+    # Walk-up failed → monorepo: search downward for the Foundry sub-project.
+    return _find_build_root_downward(proj, ("foundry.toml",), (".sol",))
+
+
+def _dir_empty(d: Path) -> bool:
+    try:
+        return (not d.exists()) or not any(d.iterdir())
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Hardened subprocess runner — the deadlock cure (cross-platform).
+#
+# CONFIRMED ROOT CAUSE this replaces: `subprocess.run(capture_output=True,
+# timeout=T)` kills only the DIRECT child on TimeoutExpired, then drains the OS
+# PIPE. A grandchild (solc spawned by forge, cc/ld spawned by cargo,
+# rust-analyzer/scip-go workers, ...) inherits and HOLDS the stdout/stderr pipe
+# write-handle, so the parent's drain read NEVER returns EOF → TimeoutExpired
+# never completes → the driver wedges FOREVER (observed: CPU pinned, no
+# recovery even after the forge child was killed, because solc still held the
+# pipe).
+#
+# The two load-bearing fixes here:
+#   1. DRAIN TO A TEMP FILE, NOT A PIPE. With Popen(stdout=<file>) there is no
+#      OS pipe at all — the kernel writes child output straight to the file and
+#      NOBODY can block on a read. A grandchild holding the inherited file
+#      handle cannot wedge the parent: there is no parent-side read to block.
+#   2. KILL THE WHOLE TREE. POSIX: a new session (start_new_session=True) gives
+#      the child its own process-group; os.killpg(SIGKILL) reaps forge AND its
+#      solc grandchildren. Windows: CREATE_NEW_PROCESS_GROUP + `taskkill /T /F`
+#      tree-kills forge and every grandchild.
+#
+# Contract: NEVER raises, NEVER blocks past (timeout + GRACE). On timeout returns
+# the sentinel rc 124 so existing callers (which already treat rc!=0 / 124 as a
+# graceful degrade) fall back to grep/LLM maps. Total wall time is bounded by
+# timeout + _HARDENED_GRACE_S regardless of what the child tree does.
+# ---------------------------------------------------------------------------
+
+_HARDENED_GRACE_S = 10  # bounded post-kill reap window after a timeout
+
+
+def _hardened_tree_kill(proc: "subprocess.Popen") -> None:
+    """Kill the subprocess AND all its descendants. Never raises.
+
+    POSIX: SIGKILL the child's process-group (it was started in a new session).
+    Windows: `taskkill /F /T /PID` walks and force-kills the whole tree. Both
+    reap grandchildren (solc/cc/...) that a bare proc.kill() would orphan and
+    that keep holding inherited handles."""
+    try:
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15,
+                )
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _run_hardened(cmd: List[str], cwd: Optional[Path] = None,
+                  timeout: int = 120, env: Optional[dict] = None) -> Tuple[int, str]:
+    """Hang-proof, cross-platform subprocess runner. Returns (rc, combined_output).
+
+    Drains stdout+stderr to a TEMP FILE (never an OS pipe) so a grandchild that
+    inherits the output handle can never deadlock the parent, and tree-kills the
+    whole process group on timeout. Never raises; never blocks past
+    timeout + _HARDENED_GRACE_S. On timeout returns (124, output + notice) so
+    callers degrade. stdin is /dev/null so an interactive prompt cannot block."""
+    argv = [str(c) for c in cmd]
+    cwd_s = str(cwd) if cwd is not None else None
+
+    tf = None
+    tf_name = ""
+    try:
+        tf = tempfile.NamedTemporaryFile(
+            mode="w+", suffix=".plamen_run", prefix="plamen_hardened_",
+            delete=False, encoding="utf-8", errors="replace")
+        tf_name = tf.name
+    except Exception as e:  # pragma: no cover - temp dir unavailable
+        return 1, f"hardened: temp file create failed: {e}"
+
+    popen_kwargs: Dict = {}
+    if os.name == "nt":
+        # New process group so a grandchild does not share the parent's group
+        # and the whole tree is addressable by taskkill /T.
+        popen_kwargs["creationflags"] = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        # New session → own process-group → killpg reaps the whole tree.
+        popen_kwargs["start_new_session"] = True
+
+    proc = None
+    try:
+        try:
+            proc = subprocess.Popen(
+                argv, cwd=cwd_s, env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=tf, stderr=subprocess.STDOUT,
+                **popen_kwargs,
+            )
+        except FileNotFoundError:
+            return 127, f"binary not found: {argv[0] if argv else '?'}"
+        except Exception as e:
+            return 1, f"hardened: spawn failed: {e}"
+
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _hardened_tree_kill(proc)
+            try:
+                proc.wait(timeout=_HARDENED_GRACE_S)
+            except Exception:
+                # Even if the bounded reap window elapses we do NOT block past
+                # it — the tree was already SIGKILL'd/taskkilled; return anyway.
+                pass
+
+        # Read the drained output from the temp file (close parent handle first
+        # so all buffered writes are flushed to disk).
+        try:
+            tf.close()
+        except Exception:
+            pass
+        output = ""
+        try:
+            with open(tf_name, "r", encoding="utf-8", errors="replace") as fh:
+                output = fh.read()
+        except Exception:
+            output = ""
+
+        if timed_out:
+            return 124, (output +
+                         f"\n[hardened: timed out after {timeout}s, tree-killed]")
+        rc = proc.returncode
+        return (rc if rc is not None else 1), output
+    except Exception as e:  # pragma: no cover - defensive top-level guard
+        if proc is not None:
+            _hardened_tree_kill(proc)
+        return 1, f"hardened: exception: {e}"
+    finally:
+        try:
+            if tf is not None and not tf.closed:
+                tf.close()
+        except Exception:
+            pass
+        try:
+            if tf_name:
+                os.unlink(tf_name)
+        except Exception:
+            pass
+
+
+def _run_cmd(cmd: List[str], cwd: Path, timeout: int) -> int:
+    """Run a bounded subprocess, return rc only. Never raises.
+
+    Delegates to the hang-proof `_run_hardened` (temp-file drain + tree-kill)."""
+    return _run_hardened(cmd, cwd, timeout)[0]
+
+
+# A non-default Foundry profile is auto-selected ONLY when it is the single
+# profile in the manifest (unambiguous); otherwise forge's `default` is used.
+_FOUNDRY_PROFILE_RE = re.compile(r"^\s*\[profile\.([A-Za-z0-9_-]+)\]", re.MULTILINE)
+
+
+def _resolve_foundry_profile_for_recon(root: Path) -> Optional[str]:
+    """Pick the FOUNDRY_PROFILE the recon build/Slither should run under.
+
+    Priority: (1) honor an explicit `FOUNDRY_PROFILE` from the environment
+    (user/CI choice); (2) if `foundry.toml` defines NO `default` profile but
+    exactly ONE other profile, use it (unambiguous — forge's `default` would be
+    empty and the build would fail); (3) otherwise None (let forge use default).
+    Auto-GUESSING among multiple profiles is deliberately avoided — picking a
+    fuzz/CI profile could change build semantics. Never raises."""
+    env = os.environ.get("FOUNDRY_PROFILE")
+    if env:
+        return env
+    try:
+        toml = (root / "foundry.toml").read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    profiles = _FOUNDRY_PROFILE_RE.findall(toml)
+    if "default" in profiles:
+        return None
+    uniq = sorted(set(profiles))
+    return uniq[0] if len(uniq) == 1 else None
+
+
+def _prepare_evm_build(root: Path) -> str:
+    """Best-effort dependency + solc readiness at the resolved Foundry root.
+    "Make it real, never mock" — resolve the project's REAL dependencies so
+    remappings resolve, never stub them:
+      (1) `forge install` when git-submodule deps (`.gitmodules`) are declared
+          but `lib/` is absent/empty;
+      (2) `forge soldeer install` when the repo uses Soldeer (`[dependencies]`
+          in foundry.toml or a `soldeer.lock`) but `dependencies/` is empty;
+      (3) `npm/yarn/pnpm install` when `package.json` is present but
+          `node_modules/` is empty (Hardhat, or Foundry remapping into
+          node_modules — e.g. `@openzeppelin/contracts`);
+      (4) pre-install the pragma-detected solc via `svm` so an offline/stale
+          version list does not break the build.
+    Bounded, idempotent, never raises — failures are advisory; the build is
+    still attempted afterward."""
+    notes: List[str] = []
+    try:
+        # (1) git-submodule (forge) deps
+        if (root / ".gitmodules").exists() and _dir_empty(root / "lib") and shutil.which("git"):
+            rc, _out = _run_forge(["install"], root, 300)
+            notes.append("forge install " + ("ok" if rc == 0 else f"rc={rc}"))
+        # (2) Soldeer deps
+        try:
+            ftoml = (root / "foundry.toml").read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            ftoml = ""
+        uses_soldeer = "[dependencies]" in ftoml or (root / "soldeer.lock").exists()
+        if uses_soldeer and _dir_empty(root / "dependencies") and shutil.which("forge"):
+            rc, _out = _run_forge(["soldeer", "install"], root, 300)
+            notes.append("soldeer install " + ("ok" if rc == 0 else f"rc={rc}"))
+        # (3) npm/yarn/pnpm deps (Hardhat, or Foundry remapping into node_modules)
+        if (root / "package.json").exists() and _dir_empty(root / "node_modules"):
+            if (root / "pnpm-lock.yaml").exists() and shutil.which("pnpm"):
+                rc = _run_cmd(["pnpm", "install", "--frozen-lockfile"], root, 420)
+                notes.append("pnpm install " + ("ok" if rc == 0 else f"rc={rc}"))
+            elif (root / "yarn.lock").exists() and shutil.which("yarn"):
+                rc = _run_cmd(["yarn", "install", "--frozen-lockfile"], root, 420)
+                notes.append("yarn install " + ("ok" if rc == 0 else f"rc={rc}"))
+            elif shutil.which("npm"):
+                sub = "ci" if (root / "package-lock.json").exists() else "install"
+                rc = _run_cmd(["npm", sub], root, 420)
+                notes.append(f"npm {sub} " + ("ok" if rc == 0 else f"rc={rc}"))
+        # (4) solc toolchain
+        srcs = _production_source_files(root, (".sol",))
+        solc = _detect_solc_version(srcs) if srcs else None
+        if solc and shutil.which("svm"):
+            _run_hardened(["svm", "install", solc], root, 180)
+            notes.append(f"svm install {solc}")
+        # (5) profile visibility
+        prof = _resolve_foundry_profile_for_recon(root)
+        if prof:
+            notes.append(f"FOUNDRY_PROFILE={prof}")
+    except Exception:
+        pass
+    return "; ".join(notes) or "deps present / no prep needed"
 
 _MAX_RECON_FORGE_FILES = 120
 _MAX_OPENGREP_SOURCE_FILES = 300
@@ -441,19 +990,9 @@ def _detect_import_libs(source_files: List[Path]) -> List[Tuple[str, str, str, s
 
 def _run_forge(args: List[str], cwd: Path, timeout: int) -> Tuple[int, str]:
     """Run a bounded `forge ...` subprocess. Returns (rc, combined_output).
-    Never raises."""
-    try:
-        proc = subprocess.run(
-            ["forge", *args], cwd=str(cwd), timeout=timeout,
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
-        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
-    except subprocess.TimeoutExpired:
-        return 124, f"forge {' '.join(args)} timed out after {timeout}s"
-    except FileNotFoundError:
-        return 127, "forge binary not found"
-    except Exception as e:  # pragma: no cover - defensive
-        return 1, f"forge {' '.join(args)} exception: {e}"
+    Never raises. Delegates to the hang-proof `_run_hardened` so a solc
+    grandchild holding the build pipe can never deadlock the parent."""
+    return _run_hardened(["forge", *args], cwd, timeout)
 
 
 def _bootstrap_evm_foundry_env(
@@ -466,8 +1005,16 @@ def _bootstrap_evm_foundry_env(
     is never clobbered. Requires `forge` on PATH and at least one `.sol` file.
     """
     try:
-        if (proj / "foundry.toml").exists():
-            return False, "foundry.toml already exists; bootstrap skipped (idempotent)"
+        # Never scaffold when a real Foundry root exists AT or ABOVE the scope
+        # dir. The audit scope is often a source subdir (`.../smart-contracts/src`)
+        # whose real foundry.toml + remappings + lib live one level up; writing a
+        # minimal `src = "."` env into the scope dir SHADOWS the real root (the
+        # observed pollution on a real repo → flat build with empty remappings →
+        # every import fails). Walk up, not just the local dir.
+        existing_root = _resolve_evm_build_root(proj)
+        if existing_root is not None:
+            return False, (f"Foundry root already exists at/above scope "
+                           f"({existing_root}); bootstrap skipped (idempotent)")
         if not shutil.which("forge"):
             return False, "forge not on PATH; cannot bootstrap Foundry env"
         if not source_files:
@@ -527,8 +1074,13 @@ def _bootstrap_evm_foundry_env(
             except Exception as e:
                 steps.append(f"could not write remappings.txt: {e}")
 
-        # 4) Build.
-        rc, out = _run_forge(["build"], proj, timeout=180)
+        # 4) Build. Size-scale the bootstrap build budget too (large scaffolded
+        # scopes compile slowly; the hardened wrapper keeps a long ceiling safe).
+        _nf = len(_production_source_files(proj, (".sol",)))
+        _bt = _scale_build_timeout(180, _nf)
+        log.info("[recon] evm bootstrap build: timeout scaled to %ss for %d "
+                 ".sol files", _bt, _nf)
+        rc, out = _run_forge(["build"], proj, timeout=_bt)
         if rc == 0:
             steps.append("forge build SUCCESS")
             return True, "; ".join(steps)
@@ -538,7 +1090,8 @@ def _bootstrap_evm_foundry_env(
         return False, f"bootstrap exception: {e}"
 
 
-def _write_build_status(scratch: Path, proj: Path, lang: str) -> str:
+def _write_build_status(scratch: Path, proj: Path, lang: str,
+                        graph_status: Optional[str] = None) -> str:
     bootstrap_note = ""
     try:
         key = _select_build(proj, lang)
@@ -550,7 +1103,7 @@ def _write_build_status(scratch: Path, proj: Path, lang: str) -> str:
             not key
             and lang == "evm"
             and shutil.which("forge")
-            and not (proj / "foundry.toml").exists()
+            and _resolve_evm_build_root(proj) is None
             and not list(proj.glob("hardhat.config.*"))
         ):
             evm_sources = sorted(
@@ -583,44 +1136,96 @@ def _write_build_status(scratch: Path, proj: Path, lang: str) -> str:
         spec = BUILD_SPECS[key]
         cmd = list(spec["cmd"])
         timeout = spec["timeout"]
+        build_cwd = proj
+
+        # DEDUPE (no double-compile): the mechanical-graph bake for EVM
+        # (`_bake_evm_graph` → Slither) already compiles the WHOLE project with
+        # solc to build its type-resolved graph. A separate `forge build` here
+        # would compile the same project a second time — the redundant, slow
+        # step that triggered the observed wedge on large repos. When that bake
+        # compiled (graph source=slither), the project provably builds, so we
+        # derive build_status from it and SKIP the standalone build probe. The
+        # approximate source-parse / SCIP tiers do NOT compile, so they fall
+        # through to a real build probe below (no false SUCCESS).
+        if _graph_implies_compiles(graph_status, lang):
+            log.info("[recon] build probe skipped — %s mechanical-graph bake "
+                     "already compiled the project (graph source=slither); "
+                     "deriving build_status=SUCCESS instead of recompiling", key)
+            _write_text(scratch / "build_status.md",
+                        "# Build Status\n\n"
+                        f"{bootstrap_note}"
+                        f"**Tool**: {key} (derived from Slither bake)\n\n"
+                        "**Status**: SUCCESS\n\n"
+                        "Derived from the Slither mechanical-graph bake, which "
+                        "compiled the whole project (Slither requires a "
+                        "successful solc compile to build its graph). The "
+                        "redundant standalone build probe was SKIPPED to avoid "
+                        "compiling the project twice.\n")
+            return "WRITTEN"
+
         if key == "evm_forge":
-            source_files = sorted(_production_source_files(proj, (".sol",)), key=lambda p: _rel(p, proj))
-            if not source_files:
-                _write_text(scratch / "build_status.md",
-                            "# Build Status\n\n"
-                            "**Tool**: evm_forge\n\n"
-                            "**Status**: SKIPPED\n\n"
-                            "No production Solidity source files found for bounded recon pre-pass.\n")
-                return "WRITTEN"
-            if len(source_files) > _MAX_RECON_FORGE_FILES:
-                _write_text(scratch / "build_status.md",
-                            "# Build Status\n\n"
-                            "**Tool**: evm_forge\n\n"
-                            "**Status**: SKIPPED\n\n"
-                            f"Found {len(source_files)} production Solidity files; "
-                            "skipping recon pre-pass compile to avoid an unbounded compiler fanout. "
-                            "Later repair/verification phases must compile explicit affected files.\n")
-                return "WRITTEN"
-            cmd = (
-                ["forge", "build"]
-                + [_rel(f, proj) for f in source_files]
-                + ["--threads", "1", "--no-auto-detect"]
-            )
-            # RECON-6: even within the file-count cap, the per-file argv can
-            # exceed the OS command-length limit (notably on Windows), which
-            # raises OSError/FileNotFoundError and gets recorded as a spurious
-            # build=FAILED. When the argv would be too long, fall back to a
-            # scoped whole-project `forge build` rather than mis-signal a broken
-            # build to recon/verification.
-            if sum(len(a) + 1 for a in cmd) > 7000:
-                cmd = ["forge", "build", "--threads", "1", "--no-auto-detect"]
+            root = _resolve_evm_build_root(proj)
+            if root is not None and root != proj.resolve():
+                # Real Foundry root found ABOVE the scope dir (audit scope is a
+                # source subdir like `.../smart-contracts/src`). Build the WHOLE
+                # project from the root so its foundry.toml / remappings.txt /
+                # lib resolve every `@import` — running from the scope dir gives
+                # empty remappings and every import fails (an observed
+                # build failure). Make deps + solc real first (never mock).
+                # `_bake_evm_slither_graph` resolves the same root downstream.
+                bootstrap_note = ("**Build Root**: resolved to Foundry root "
+                                  f"`{root}` (scope dir had no foundry.toml).\n\n"
+                                  "**Build Prep**: " + _prepare_evm_build(root) + "\n\n")
+                build_cwd = root
+                cmd = ["forge", "build"]
+                # Size-scale: whole-project build of a large repo (e.g. ~176
+                # .sol + optimizer, cold cache) blows past a fixed budget.
+                _nf = len(_production_source_files(root, (".sol",)))
+                timeout = _scale_build_timeout(600, _nf)
+                log.info("[recon] evm_forge whole-project build at %s: timeout "
+                         "scaled to %ss for %d .sol files", root, timeout, _nf)
+            else:
+                source_files = sorted(_production_source_files(proj, (".sol",)), key=lambda p: _rel(p, proj))
+                if not source_files:
+                    _write_text(scratch / "build_status.md",
+                                "# Build Status\n\n"
+                                "**Tool**: evm_forge\n\n"
+                                "**Status**: SKIPPED\n\n"
+                                "No production Solidity source files found for bounded recon pre-pass.\n")
+                    return "WRITTEN"
+                if len(source_files) > _MAX_RECON_FORGE_FILES:
+                    _write_text(scratch / "build_status.md",
+                                "# Build Status\n\n"
+                                "**Tool**: evm_forge\n\n"
+                                "**Status**: SKIPPED\n\n"
+                                f"Found {len(source_files)} production Solidity files; "
+                                "skipping recon pre-pass compile to avoid an unbounded compiler fanout. "
+                                "Later repair/verification phases must compile explicit affected files.\n")
+                    return "WRITTEN"
+                cmd = (
+                    ["forge", "build"]
+                    + [_rel(f, proj) for f in source_files]
+                    + ["--threads", "1", "--no-auto-detect"]
+                )
+                # RECON-6: even within the file-count cap, the per-file argv can
+                # exceed the OS command-length limit (notably on Windows), which
+                # raises OSError/FileNotFoundError and gets recorded as a spurious
+                # build=FAILED. When the argv would be too long, fall back to a
+                # scoped whole-project `forge build` rather than mis-signal a broken
+                # build to recon/verification.
+                if sum(len(a) + 1 for a in cmd) > 7000:
+                    cmd = ["forge", "build", "--threads", "1", "--no-auto-detect"]
+                # Size-scale the scoped compile too (still bounded by the file
+                # cap above, but the optimizer makes per-file cost nonlinear).
+                timeout = _scale_build_timeout(timeout, len(source_files))
+                log.info("[recon] evm_forge scoped build: timeout scaled to %ss "
+                         "for %d .sol files", timeout, len(source_files))
 
         # STEP 2C: non-EVM build parity. Give the non-EVM branches the same
         # guards EVM has: (1) a per-language source-file presence check, and
         # (2) build-root resolution so we never run a compile from a scope dir
         # (e.g. `.../<crate>/src/`) that has no build manifest. All branches
         # remain best-effort and always write build_status.md (no new halt).
-        build_cwd = proj
         if key in ("solana", "soroban", "aptos", "sui"):
             cfg = LANG_DISPATCH.get(key) or {}
             suffixes = cfg.get("suffix") or ()
@@ -666,24 +1271,84 @@ def _write_build_status(scratch: Path, proj: Path, lang: str) -> str:
                                     "is misleading, so the recon pre-pass compile is skipped. "
                                     "LLM recon should enrich build status.\n")
                         return "WRITTEN"
+            # Size-scale the non-EVM compile by source-file count (Rust crates
+            # and large Move packages compile slowly; the fixed base under-
+            # budgets big repos). `source_files` is the per-language production
+            # set gathered above.
+            timeout = _scale_build_timeout(timeout, len(source_files))
+            log.info("[recon] %s build at %s: timeout scaled to %ss for %d "
+                     "source files", key, build_cwd, timeout, len(source_files))
 
-        timed_out = False
-        try:
-            proc = subprocess.run(cmd, cwd=str(build_cwd), timeout=timeout,
-                                  capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace")
-            rc, so, se = proc.returncode, proc.stdout or "", proc.stderr or ""
-        except subprocess.TimeoutExpired as e:
-            rc = 124
-            so = e.stdout if isinstance(e.stdout, str) else ""
-            se = e.stderr if isinstance(e.stderr, str) else ""
-            timed_out = True
-        except FileNotFoundError:
-            rc, so, se = 127, "", f"binary not found: {cmd[0]}"
-        except Exception as e:
-            rc, so, se = 1, "", f"exception: {e}"
+        # Thread FOUNDRY_PROFILE for EVM so a project whose remappings/settings
+        # live under a single non-default profile compiles. None → inherit env
+        # (forge default). Honors an explicit env var first.
+        build_env = None
+        if key == "evm_forge":
+            _prof = _resolve_foundry_profile_for_recon(build_cwd)
+            if _prof:
+                build_env = {**os.environ, "FOUNDRY_PROFILE": _prof}
+        # Rust-ecosystem recon-build hardening (generic by ecosystem key, NOT a
+        # project/crate name). A stale/corrupt incremental-compilation cache —
+        # left behind by a concurrent or interrupted cargo build — makes a fresh,
+        # otherwise-clean compile emit spurious parse errors on valid source
+        # (e.g. `error: unexpected closing delimiter: }`). Disabling incremental
+        # compilation for the recon probe eliminates that whole error class; the
+        # full parent env is still inherited so toolchain/rustup overrides remain
+        # intact. EVM (forge) keeps its FOUNDRY_PROFILE env above, untouched.
+        if _is_rust_ecosystem_build(key, cmd):
+            base_env = build_env if build_env is not None else dict(os.environ)
+            build_env = {**base_env, "CARGO_INCREMENTAL": "0"}
+        # Hardhat probe: size-scale by .sol count too (no foundry; the EVM
+        # dedupe still suppresses this entirely when Slither already compiled).
+        if key == "evm_hardhat":
+            _nf = len(_production_source_files(build_cwd, (".sol",)))
+            timeout = _scale_build_timeout(timeout, _nf)
+            log.info("[recon] evm_hardhat build: timeout scaled to %ss for %d "
+                     ".sol files", timeout, _nf)
+        # Hang-proof: temp-file drain + tree-kill (a forge→solc / cargo→cc
+        # grandchild holding the build pipe can no longer wedge the driver).
+        rc, combined = _run_hardened(cmd, build_cwd, timeout, env=build_env)
+        # Retry-once on a transient non-timeout build failure. A first attempt
+        # that fails for a transient reason (a flake, or a stale incremental
+        # cache the first attempt itself invalidated) frequently succeeds on a
+        # clean second run. Scoped to exactly ONE retry, and NOT for:
+        #   - timeout (rc=124): a genuine stall — retrying just burns the budget;
+        #   - binary-not-found (rc=127): the build tool is missing — deterministic.
+        # Generic across all ecosystems (the rc∉{0,124,127} guard makes it
+        # ecosystem-agnostic); the CARGO_INCREMENTAL=0 env above already removes
+        # the dominant Rust-specific cause, so most second attempts succeed.
+        if rc not in (0, 124, 127):
+            log.warning("[recon] %s build attempt 1 FAILED (rc=%s) — retrying "
+                        "ONCE (transient flake / self-invalidated cache often "
+                        "clears on a clean re-run)", key, rc)
+            rc2, combined2 = _run_hardened(cmd, build_cwd, timeout, env=build_env)
+            if rc2 == 0:
+                log.info("[recon] %s build retry SUCCEEDED (attempt 1 rc=%s was "
+                         "transient)", key, rc)
+            else:
+                log.warning("[recon] %s build retry FAILED too (attempt 1 rc=%s, "
+                            "attempt 2 rc=%s) — degrading build_status",
+                            key, rc, rc2)
+            rc, combined = rc2, combined2
+        timed_out = rc == 124
+        # _run_hardened combines stdout+stderr; keep the diagnostic text in the
+        # stdout tail and leave stderr empty (split is purely informational).
+        so, se = combined, ""
 
         status = "SUCCESS" if rc == 0 else ("TIMEOUT" if timed_out else "FAILED")
+        # Visible degrade logging: the user manually reruns and wants to SEE the
+        # build outcome — no silent freeze. The hardened wrapper guarantees we
+        # reach this line within (timeout + grace) even on a wedged tree.
+        if timed_out:
+            log.warning("[recon] %s build timed out after %ss, tree-killed — "
+                        "degrading build_status to TIMEOUT (later phases compile "
+                        "explicit affected files on demand)", key, timeout)
+        elif rc != 0:
+            log.warning("[recon] %s build FAILED (rc=%s) — build_status=FAILED; "
+                        "recon/verification degrade to grep + on-demand compile",
+                        key, rc)
+        else:
+            log.info("[recon] %s build SUCCESS in cwd %s", key, build_cwd)
         content = (
             "# Build Status\n\n"
             f"{bootstrap_note}"
@@ -988,29 +1653,24 @@ def _bake_rust_scip(scratch: Path, proj: Path) -> str:
 
     index_path = scratch / "scip_rust.index"
 
-    # Run rust-analyzer scip
-    try:
-        proc = subprocess.run(
-            ["rust-analyzer", "scip", str(proj), "--exclude-vendored-libraries"],
-            cwd=str(proj),
-            timeout=_RUST_ANALYZER_SCIP_TIMEOUT,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        # rust-analyzer scip writes index.scip in the project root
-        ra_index = proj / "index.scip"
-        if proc.returncode != 0:
-            return f"FAILED:rust-analyzer scip exit {proc.returncode}"
-        if not ra_index.exists() or ra_index.stat().st_size < 100:
-            return "FAILED:index.scip not produced or empty"
-        # Move to scratchpad
-        shutil.move(str(ra_index), str(index_path))
-    except subprocess.TimeoutExpired:
+    # Run rust-analyzer scip (hang-proof: temp-file drain + tree-kill — a
+    # rust-analyzer worker grandchild can no longer deadlock the parent).
+    rc, _out = _run_hardened(
+        ["rust-analyzer", "scip", str(proj), "--exclude-vendored-libraries"],
+        proj, _RUST_ANALYZER_SCIP_TIMEOUT,
+    )
+    if rc == 124:
         return f"FAILED:timeout after {_RUST_ANALYZER_SCIP_TIMEOUT}s"
-    except FileNotFoundError:
+    if rc == 127:
         return "SKIPPED:rust-analyzer not found"
+    # rust-analyzer scip writes index.scip in the project root
+    ra_index = proj / "index.scip"
+    if rc != 0:
+        return f"FAILED:rust-analyzer scip exit {rc}"
+    if not ra_index.exists() or ra_index.stat().st_size < 100:
+        return "FAILED:index.scip not produced or empty"
+    try:
+        shutil.move(str(ra_index), str(index_path))
     except Exception as e:
         return f"FAILED:{e.__class__.__name__}"
 
@@ -1042,24 +1702,21 @@ def _bake_go_scip(scratch: Path, proj: Path) -> str:
     # explicitly so we never collide with a checked-in index.scip in the repo.
     ra_index = proj / "_plamen_scip_go.index"
     try:
-        proc = subprocess.run(
+        # Hang-proof: temp-file drain + tree-kill (scip-go spawns `go`
+        # subprocesses whose grandchildren can no longer wedge the parent).
+        rc, _out = _run_hardened(
             ["scip-go", "--quiet", "--output", str(ra_index)],
-            cwd=str(proj),
-            timeout=_SCIP_GO_TIMEOUT,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            proj, _SCIP_GO_TIMEOUT,
         )
-        if proc.returncode != 0:
-            return f"FAILED:scip-go exit {proc.returncode}"
+        if rc == 124:
+            return f"FAILED:timeout after {_SCIP_GO_TIMEOUT}s"
+        if rc == 127:
+            return "SKIPPED:scip-go not found"
+        if rc != 0:
+            return f"FAILED:scip-go exit {rc}"
         if not ra_index.exists() or ra_index.stat().st_size < 100:
             return "FAILED:scip-go index not produced or empty"
         shutil.move(str(ra_index), str(index_path))
-    except subprocess.TimeoutExpired:
-        return f"FAILED:timeout after {_SCIP_GO_TIMEOUT}s"
-    except FileNotFoundError:
-        return "SKIPPED:scip-go not found"
     except Exception as e:
         return f"FAILED:{e.__class__.__name__}"
     finally:
@@ -1072,6 +1729,491 @@ def _bake_go_scip(scratch: Path, proj: Path) -> str:
 
     # Convert SCIP index to graph artifacts (language-agnostic reader)
     return _scip_to_graph_artifacts(scratch, index_path, proj)
+
+
+# F1 (recall): mechanical Solidity reference graph via Slither. EVM is the only
+# SC family with NO mechanical graph today (its caller/state maps are LLM-
+# transcribed). This bakes a deterministic state_read_map / state_write_map /
+# caller_map + a machine `_mechanical_graph.json` (the coverage-gate's
+# authoritative, LLM-unclobberable source) from Slither's data-flow analysis —
+# mirroring _bake_rust_scip for the SCIP ecosystems. Best-effort: returns
+# SKIPPED/FAILED on any problem so the caller falls back to the LLM maps.
+_SLITHER_GRAPH_TIMEOUT = 300
+
+
+def _write_mechanical_graph_json(scratch: Path, source: str,
+                                 var_refs: dict, functions: dict) -> None:
+    """Write the UNIFIED `_mechanical_graph.json` every provider emits and the
+    coverage gate (G2) reads — ecosystem-agnostic, LLM-unclobberable.
+
+    var_refs:   { "<qualified var>": {"bare": str, "refs": ["<descriptor>", ...]} }
+    functions:  { "<qualified fn>":  {"bare": str, "loc": str, "callers": ["<descriptor>", ...]} }
+
+    A "descriptor" is a string the agent's finding prose can be matched against
+    (a bare function/variable name, optionally with a `(file:line)` suffix). Each
+    provider fills these from its native graph (Slither: function names; SCIP:
+    locations; Move/DAML: function/choice names)."""
+    import json
+    try:
+        (scratch / "_mechanical_graph.json").write_text(
+            json.dumps({"source": source, "var_refs": var_refs, "functions": functions},
+                       indent=1),
+            encoding="utf-8")
+    except Exception as e:
+        log.warning("[mechanical_graph] json write failed (%s): %s", source, e)
+
+
+def _slither_fn_loc(f, proj: Path) -> str:
+    try:
+        sm = f.source_mapping
+        short = getattr(getattr(sm, "filename", None), "short", "") or ""
+        line = (sm.lines[0] if getattr(sm, "lines", None) else 0)
+        return f"{short}:L{line}" if short else f"?:L{line}"
+    except Exception:
+        return "?:L0"
+
+
+def _bake_evm_slither_graph(scratch: Path, proj: Path) -> str:
+    """Run Slither on a Solidity project and emit MECHANICAL graph artifacts.
+
+    Produces `_mechanical_graph.json` (gate source) + state_read_map.md /
+    state_write_map.md / caller_map.md (depth-agent inputs), all stamped
+    `Source: slither`. Best-effort: returns WRITTEN | SKIPPED:{r} | FAILED:{r};
+    on anything other than WRITTEN the caller keeps the LLM-derived maps.
+    """
+    import json
+    try:
+        from slither import Slither  # type: ignore
+    except Exception as e:
+        return f"SKIPPED:slither not importable ({e.__class__.__name__})"
+    if not any(proj.rglob("*.sol")):
+        return "SKIPPED:no .sol sources"
+
+    # Slither/crytic-compile auto-detects foundry.toml / hardhat / single dir,
+    # but only at the directory it is pointed at. The audit scope is often a
+    # source subdir (`.../smart-contracts/src`) while foundry.toml + remappings
+    # + lib live at the Foundry root above it — point Slither at the resolved
+    # ROOT so the project's own remappings resolve every @import (otherwise every
+    # import fails and the precise graph is lost to the approximate fallback).
+    # Compilation can still fail for many reasons (solc version, missing deps) —
+    # that is a graceful SKIP to the LLM maps, never a halt.
+    slither_target = _resolve_evm_build_root(proj) or proj
+    # Honor the same single-non-default FOUNDRY_PROFILE the recon build uses so
+    # Slither (crytic-compile reads the env) compiles a profile-gated project.
+    # Restore the prior env afterward — never leak into other subprocesses.
+    _prof = _resolve_foundry_profile_for_recon(Path(slither_target))
+    _prev_prof = os.environ.get("FOUNDRY_PROFILE")
+    if _prof:
+        os.environ["FOUNDRY_PROFILE"] = _prof
+    import io
+    import contextlib
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            sl = Slither(str(slither_target))
+    except Exception as e:
+        return f"FAILED:slither compile ({str(e)[:140].replace(chr(10), ' ')})"
+    finally:
+        if _prof:
+            if _prev_prof is None:
+                os.environ.pop("FOUNDRY_PROFILE", None)
+            else:
+                os.environ["FOUNDRY_PROFILE"] = _prev_prof
+
+    fn_loc: Dict[str, str] = {}
+    var_readers: Dict[str, set] = {}
+    var_writers: Dict[str, set] = {}
+    fn_callees: Dict[str, set] = {}     # qualified fn -> set(qualified callee)
+    bare_of: Dict[str, str] = {}        # qualified -> bare name
+    try:
+        for c in sl.contracts:
+            if getattr(c, "is_interface", False):
+                continue
+            for f in getattr(c, "functions_declared", []) or []:
+                fname = getattr(f, "name", "") or ""
+                if not fname:
+                    continue
+                fkey = f"{c.name}.{fname}"
+                bare_of[fkey] = fname
+                fn_loc.setdefault(fkey, _slither_fn_loc(f, proj))
+                for v in getattr(f, "state_variables_read", []) or []:
+                    vk = f"{getattr(v.contract, 'name', c.name)}.{v.name}"
+                    bare_of[vk] = v.name
+                    var_readers.setdefault(vk, set()).add(fkey)
+                for v in getattr(f, "state_variables_written", []) or []:
+                    vk = f"{getattr(v.contract, 'name', c.name)}.{v.name}"
+                    bare_of[vk] = v.name
+                    var_writers.setdefault(vk, set()).add(fkey)
+                for ic in (getattr(f, "internal_calls", []) or []):
+                    callee = getattr(ic, "function", ic)
+                    cn = getattr(callee, "name", None)
+                    cc = getattr(getattr(callee, "contract", None), "name", c.name)
+                    if cn:
+                        fn_callees.setdefault(fkey, set()).add(f"{cc}.{cn}")
+                for hc in (getattr(f, "high_level_calls", []) or []):
+                    # high_level_calls entries are (Contract, Function) tuples or objects
+                    callee = None
+                    if isinstance(hc, (tuple, list)) and len(hc) >= 2:
+                        callee = hc[1]
+                    callee = getattr(callee, "function", callee)
+                    cn = getattr(callee, "name", None)
+                    cc = getattr(getattr(callee, "contract", None), "name", "")
+                    if cn and cc:
+                        fn_callees.setdefault(fkey, set()).add(f"{cc}.{cn}")
+    except Exception as e:
+        return f"FAILED:slither walk ({e.__class__.__name__})"
+
+    # Invert callees -> direct callers.
+    fn_callers: Dict[str, set] = {}
+    for caller, callees in fn_callees.items():
+        for callee in callees:
+            fn_callers.setdefault(callee, set()).add(caller)
+
+    if not fn_loc:
+        return "FAILED:no functions extracted"
+
+    def _bare(k: str) -> str:
+        return bare_of.get(k, k.split(".")[-1])
+
+    def _desc(keys: set) -> list:
+        # descriptor = bare function name (what agents cite) + location
+        return sorted(f"{_bare(k)} ({fn_loc.get(k, '?')})" for k in keys)
+
+    def _with_loc(keys: set) -> list:
+        return _desc(keys)
+
+    # Unified machine artifact (gate-authoritative; LLM never writes this).
+    var_refs = {}
+    for vk in set(var_readers) | set(var_writers):
+        refs = var_readers.get(vk, set()) | var_writers.get(vk, set())
+        var_refs[vk] = {"bare": _bare(vk), "refs": _desc(refs)}
+    functions = {
+        fk: {"bare": _bare(fk), "loc": fn_loc.get(fk, "?"),
+             "callers": sorted(_bare(ck) for ck in fn_callers.get(fk, set()))}
+        for fk in fn_loc
+    }
+    _write_mechanical_graph_json(scratch, "slither", var_refs, functions)
+
+    # Human-readable maps (depth-agent inputs), stamped mechanical.
+    def _emit_var_map(filename: str, title: str, data: Dict[str, set], col: str):
+        lines = [f"# {title}", "",
+                 f"> **Status**: POPULATED / **Source**: slither (mechanical data-flow).",
+                 f"> {len(data)} state variable(s).", "",
+                 f"| State Variable | {col} (function @ file:line) |",
+                 "|----------------|-------------------------------|"]
+        for v in sorted(data):
+            lines.append(f"| `{v}` | {', '.join(_with_loc(data[v])) or '_(none)_'} |")
+        _write_text(scratch / filename, "\n".join(lines) + "\n")
+
+    _emit_var_map("state_read_map.md", "State Read Map", var_readers, "Readers")
+    _emit_var_map("state_write_map.md", "State Write Map", var_writers, "Writers")
+
+    cm = ["# Caller Map", "",
+          "> **Status**: POPULATED / **Source**: slither (mechanical call graph).",
+          f"> {len(fn_loc)} function(s).", "",
+          "| Function | Direct callers (function @ file:line) |",
+          "|----------|----------------------------------------|"]
+    for fk in sorted(fn_loc):
+        cm.append(f"| `{fk}` ({fn_loc[fk]}) | {', '.join(_with_loc(fn_callers.get(fk, set()))) or '_(none)_'} |")
+    _write_text(scratch / "caller_map.md", "\n".join(cm) + "\n")
+
+    return "WRITTEN"
+
+
+_EVM_CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+_EVM_CALL_STOP = {"if", "while", "for", "require", "assert", "revert", "return",
+                  "emit", "new", "function", "modifier", "mapping", "address",
+                  "uint", "int", "bool", "bytes", "string", "memory", "storage",
+                  "calldata", "keccak256", "abi", "type", "payable", "this",
+                  "super", "delete", "sizeof"}
+
+
+def _bake_evm_source_graph(scratch: Path, proj: Path) -> str:
+    """Compilation-free APPROXIMATE Solidity reference graph: function ->
+    {state-var symbols it references, callees}. Mirrors the Move/DAML providers
+    (same accepted approximation tier). The coverage gate keys on co-referencers
+    of IN-SCOPE state symbols, all of which live in the audited source files —
+    so a source parse captures the gate's required set WITHOUT resolving external
+    dependencies or compiling. Used as the always-available fallback beneath the
+    Slither precision tier (which needs the project to build)."""
+    files = _production_source_files(proj, (".sol",))
+    if not files:
+        return "SKIPPED:no .sol sources"
+    fn_loc: Dict[str, str] = {}
+    sym_refs: Dict[str, set] = {}
+    fn_callees: Dict[str, set] = {}
+    try:
+        for f in files:
+            text = _read_text(f)
+            if not text:
+                continue
+            # state variables declared in this file (name -> declaration).
+            state_vars = {m.group(2) for m in _EVM_STATE_RE.finditer(text)}
+            decls = list(_EVM_FN_RE.finditer(text))
+            for i, m in enumerate(decls):
+                name = m.group(1)
+                end = decls[i + 1].start() if i + 1 < len(decls) else len(text)
+                body = text[m.end():end]
+                fn_loc.setdefault(name, f"{_rel(f, proj)}:L{_line_of(text, m.start())}")
+                # which in-scope state vars does this function body mention?
+                body_idents = set(_EVM_CALL_RE.findall(body)) | set(
+                    re.findall(r"\b([A-Za-z_]\w*)\b", body))
+                for v in state_vars:
+                    if v in body_idents:
+                        sym_refs.setdefault(v, set()).add(name)
+                for cm in _EVM_CALL_RE.finditer(body):
+                    cn = cm.group(1)
+                    if cn != name and cn not in _EVM_CALL_STOP:
+                        # _finalize keeps only callees that are real functions.
+                        fn_callees.setdefault(name, set()).add(cn)
+    except Exception as e:
+        return f"FAILED:evm source parse ({e.__class__.__name__})"
+    return _finalize_source_graph(scratch, "evm-source", fn_loc, sym_refs, fn_callees)
+
+
+def _bake_evm_graph(scratch: Path, proj: Path) -> str:
+    """EVM graph provider with tiered degradation (never mock the compiler):
+      1. Slither (PRECISE, type-resolved) when the project builds.
+      2. compilation-free source parse (APPROXIMATE) otherwise — same tier the
+         Move/DAML providers run at; gives the coverage gate a real (if coarser)
+         reference set with zero build dependency.
+    Mocking missing dependencies to force a Slither compile is deliberately NOT
+    done: type-unsound stubs fabricate data-flow, which would make the gate's
+    denominator untrustworthy — strictly worse than the honest approximate tier."""
+    slither = _bake_evm_slither_graph(scratch, proj)
+    if slither == "WRITTEN":
+        return "WRITTEN:slither"
+    fallback = _bake_evm_source_graph(scratch, proj)
+    return (f"WRITTEN:evm-source (slither {slither})"
+            if fallback == "WRITTEN" else f"FAILED:slither={slither}; source={fallback}")
+
+
+# Move (Aptos/Sui) + DAML reference-graph providers. No mechanical indexer is
+# wired for these, so these are APPROXIMATE source parsers (function/choice ->
+# referenced field/resource symbols + callees). Approximate-but-present feeds the
+# coverage gate where a precise graph (Slither/SCIP) is unavailable.
+_MOVE_FN_DECL_RE = re.compile(
+    r"\b(?:public\s*(?:\([^)]*\))?\s+)?(?:entry\s+)?fun\s+(\w+)\s*[<(]", re.MULTILINE)
+_MOVE_FIELD_ACCESS_RE = re.compile(r"\.\s*([a-z_]\w*)\b")
+_MOVE_BORROW_RE = re.compile(r"\bborrow_global(?:_mut)?\s*<\s*([A-Za-z_]\w*)")
+_MOVE_CALL_RE = re.compile(r"\b([a-z_]\w*)\s*\(")
+_MOVE_CALL_STOP = {"if", "while", "for", "assert", "let", "return", "vector",
+                   "move_to", "move_from", "exists", "copy", "freeze", "abort"}
+
+
+def _bake_move_graph(scratch: Path, proj: Path) -> str:
+    """Approximate Move reference graph: function -> {field/resource symbols, callees}."""
+    files = _production_source_files(proj, (".move",))
+    if not files:
+        return "SKIPPED:no .move sources"
+    fn_loc: Dict[str, str] = {}
+    sym_refs: Dict[str, set] = {}
+    fn_callees: Dict[str, set] = {}
+    try:
+        for f in files:
+            text = _read_text(f)
+            if not text:
+                continue
+            decls = list(_MOVE_FN_DECL_RE.finditer(text))
+            for i, m in enumerate(decls):
+                name = m.group(1)
+                end = decls[i + 1].start() if i + 1 < len(decls) else len(text)
+                body = text[m.end():end]
+                fn_loc.setdefault(name, f"{_rel(f, proj)}:L{_line_of(text, m.start())}")
+                for fm in _MOVE_FIELD_ACCESS_RE.finditer(body):
+                    sym_refs.setdefault(fm.group(1), set()).add(name)
+                for bm in _MOVE_BORROW_RE.finditer(body):
+                    sym_refs.setdefault(bm.group(1), set()).add(name)
+                for cm in _MOVE_CALL_RE.finditer(body):
+                    cn = cm.group(1)
+                    if cn != name and cn not in _MOVE_CALL_STOP:
+                        # _finalize keeps only callees that are real functions.
+                        fn_callees.setdefault(name, set()).add(cn)
+    except Exception as e:
+        return f"FAILED:move parse ({e.__class__.__name__})"
+    return _finalize_source_graph(scratch, "move", fn_loc, sym_refs, fn_callees)
+
+
+_DAML_CHOICE_RE = re.compile(r"\b(?:nonconsuming\s+)?choice\s+(\w+)\b", re.MULTILINE)
+_DAML_EXERCISE_RE = re.compile(r"\bexercise(?:Cmd)?\s+\w+\s+(\w+)")
+_DAML_IDENT_RE = re.compile(r"\b([a-z_]\w*)\b")
+
+
+def _bake_daml_graph(scratch: Path, proj: Path) -> str:
+    """Approximate DAML reference graph: choice -> {field idents referenced, exercised choices}."""
+    files = _production_source_files(proj, (".daml",))
+    if not files:
+        return "SKIPPED:no .daml sources"
+    fn_loc: Dict[str, str] = {}
+    sym_refs: Dict[str, set] = {}
+    fn_callees: Dict[str, set] = {}
+    try:
+        for f in files:
+            text = _read_text(f)
+            if not text:
+                continue
+            decls = list(_DAML_CHOICE_RE.finditer(text))
+            for i, m in enumerate(decls):
+                name = m.group(1)
+                end = decls[i + 1].start() if i + 1 < len(decls) else len(text)
+                body = text[m.end():end]
+                fn_loc.setdefault(name, f"{_rel(f, proj)}:L{_line_of(text, m.start())}")
+                for em in _DAML_EXERCISE_RE.finditer(body):
+                    fn_callees.setdefault(name, set()).add(em.group(1))
+                # field/ident references (bare identifiers in the choice body) —
+                # approximate: any lowercase identifier the choice mentions.
+                for im in _DAML_IDENT_RE.finditer(body):
+                    ident = im.group(1)
+                    if len(ident) > 3 and ident not in (
+                            "with", "controller", "where", "then", "else", "return",
+                            "create", "exercise", "fetch", "assert", "pure", "this"):
+                        sym_refs.setdefault(ident, set()).add(name)
+    except Exception as e:
+        return f"FAILED:daml parse ({e.__class__.__name__})"
+    return _finalize_source_graph(scratch, "daml", fn_loc, sym_refs, fn_callees)
+
+
+def _finalize_source_graph(scratch: Path, source: str, fn_loc: Dict[str, str],
+                           sym_refs: Dict[str, set], fn_callees: Dict[str, set]) -> str:
+    """Shared tail for the approximate source-parse providers (Move/DAML): invert
+    callees, build the unified schema, emit `_mechanical_graph.json` + the maps."""
+    if not fn_loc:
+        return "FAILED:no functions/choices extracted"
+    fn_callers: Dict[str, set] = {}
+    for caller, callees in fn_callees.items():
+        for callee in callees:
+            if callee in fn_loc:
+                fn_callers.setdefault(callee, set()).add(caller)
+    # drop symbols referenced by too many functions (noise) for the gate.
+    var_refs = {
+        s: {"bare": s, "refs": sorted(f"{fn} ({fn_loc.get(fn, '?')})" for fn in fns)}
+        for s, fns in sym_refs.items() if 1 < len(fns) <= 25
+    }
+    functions = {
+        fn: {"bare": fn, "loc": loc, "callers": sorted(fn_callers.get(fn, set()))}
+        for fn, loc in fn_loc.items()
+    }
+    _write_mechanical_graph_json(scratch, source, var_refs, functions)
+    return "WRITTEN"
+
+
+# Rust (Solana/Soroban/L1) + Go (L1) compilation-free source-parse providers.
+# These are the Tier-2 fallback BENEATH the precise SCIP bake: when SCIP is
+# unavailable (no rust-analyzer / scip-go on PATH) or fails, the SCIP ecosystems
+# previously dropped straight to advisory (no graph → the enumeration gate
+# no-ops). These give the gate a real-if-approximate reference graph with zero
+# toolchain dependency, exactly as Move/DAML/EVM-source do for their families.
+_RUST_FN_DECL_RE = re.compile(
+    r"\b(?:pub\s*(?:\([^)]*\)\s*)?)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?"
+    r"(?:extern\s+\"[^\"]*\"\s+)?fn\s+(\w+)\s*[<(]", re.MULTILINE)
+_RUST_FIELD_ACCESS_RE = re.compile(r"\.\s*([a-z_]\w*)\b")
+_RUST_CALL_RE = re.compile(r"\b([a-z_]\w*)\s*\(")
+_RUST_CALL_STOP = {
+    "if", "while", "for", "match", "let", "return", "fn", "loop", "move",
+    "vec", "println", "print", "eprintln", "format", "write", "writeln",
+    "assert", "assert_eq", "assert_ne", "debug_assert", "panic", "unreachable",
+    "unwrap", "expect", "clone", "into", "from", "to_string", "as_ref",
+    "as_mut", "iter", "map", "filter", "collect", "len", "is_empty", "push",
+    "pop", "insert", "remove", "get", "contains", "some", "none", "ok", "err",
+    "box", "rc", "arc", "mutex", "self", "super", "drop", "default", "new",
+}
+
+_GO_FN_DECL_RE = re.compile(
+    r"\bfunc\s+(?:\([^)]*\)\s*)?(\w+)\s*[<(]", re.MULTILINE)
+_GO_FIELD_ACCESS_RE = re.compile(r"\.\s*([A-Za-z_]\w*)\b")
+_GO_CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+_GO_CALL_STOP = {
+    "if", "for", "switch", "select", "func", "return", "go", "defer", "range",
+    "make", "new", "len", "cap", "append", "copy", "delete", "panic", "recover",
+    "print", "println", "close", "var", "const", "type", "struct", "interface",
+    "map", "chan", "string", "int", "error", "bool", "byte", "rune", "nil",
+}
+
+
+def _bake_rust_source_graph(scratch: Path, proj: Path) -> str:
+    """Compilation-free APPROXIMATE Rust reference graph (Tier-2 SCIP fallback):
+    function -> {struct-field/symbol references, callees}. Mirrors the Move
+    provider; needs no rust-analyzer/cargo."""
+    files = _production_source_files(proj, (".rs",))
+    if not files:
+        return "SKIPPED:no .rs sources"
+    fn_loc: Dict[str, str] = {}
+    sym_refs: Dict[str, set] = {}
+    fn_callees: Dict[str, set] = {}
+    try:
+        for f in files:
+            text = _read_text(f)
+            if not text:
+                continue
+            decls = list(_RUST_FN_DECL_RE.finditer(text))
+            for i, m in enumerate(decls):
+                name = m.group(1)
+                end = decls[i + 1].start() if i + 1 < len(decls) else len(text)
+                body = text[m.end():end]
+                fn_loc.setdefault(name, f"{_rel(f, proj)}:L{_line_of(text, m.start())}")
+                for fm in _RUST_FIELD_ACCESS_RE.finditer(body):
+                    sym_refs.setdefault(fm.group(1), set()).add(name)
+                for cm in _RUST_CALL_RE.finditer(body):
+                    cn = cm.group(1)
+                    if cn != name and cn not in _RUST_CALL_STOP:
+                        fn_callees.setdefault(name, set()).add(cn)
+    except Exception as e:
+        return f"FAILED:rust source parse ({e.__class__.__name__})"
+    return _finalize_source_graph(scratch, "rust-source", fn_loc, sym_refs, fn_callees)
+
+
+def _bake_go_source_graph(scratch: Path, proj: Path) -> str:
+    """Compilation-free APPROXIMATE Go reference graph (Tier-2 SCIP fallback):
+    function/method -> {struct-field/symbol references, callees}. Needs no
+    scip-go/go toolchain."""
+    files = _production_source_files(proj, (".go",))
+    if not files:
+        return "SKIPPED:no .go sources"
+    fn_loc: Dict[str, str] = {}
+    sym_refs: Dict[str, set] = {}
+    fn_callees: Dict[str, set] = {}
+    try:
+        for f in files:
+            text = _read_text(f)
+            if not text:
+                continue
+            decls = list(_GO_FN_DECL_RE.finditer(text))
+            for i, m in enumerate(decls):
+                name = m.group(1)
+                end = decls[i + 1].start() if i + 1 < len(decls) else len(text)
+                body = text[m.end():end]
+                fn_loc.setdefault(name, f"{_rel(f, proj)}:L{_line_of(text, m.start())}")
+                for fm in _GO_FIELD_ACCESS_RE.finditer(body):
+                    sym_refs.setdefault(fm.group(1), set()).add(name)
+                for cm in _GO_CALL_RE.finditer(body):
+                    cn = cm.group(1)
+                    if cn != name and cn not in _GO_CALL_STOP:
+                        fn_callees.setdefault(name, set()).add(cn)
+    except Exception as e:
+        return f"FAILED:go source parse ({e.__class__.__name__})"
+    return _finalize_source_graph(scratch, "go-source", fn_loc, sym_refs, fn_callees)
+
+
+def _bake_rust_graph(scratch: Path, proj: Path) -> str:
+    """Tiered Rust graph (never mock): precise SCIP when the toolchain is present
+    and the index builds, else the compilation-free source parse so the
+    enumeration gate still has a graph. Mirrors `_bake_evm_graph`."""
+    scip = _bake_rust_scip(scratch, proj)
+    if scip == "WRITTEN":
+        return "WRITTEN:scip"
+    src = _bake_rust_source_graph(scratch, proj)
+    return (f"WRITTEN:rust-source (scip {scip})"
+            if src == "WRITTEN" else f"FAILED:scip={scip}; source={src}")
+
+
+def _bake_go_graph(scratch: Path, proj: Path) -> str:
+    """Tiered Go graph (never mock): precise SCIP when scip-go is present and the
+    index builds, else the compilation-free source parse."""
+    scip = _bake_go_scip(scratch, proj)
+    if scip == "WRITTEN":
+        return "WRITTEN:scip"
+    src = _bake_go_source_graph(scratch, proj)
+    return (f"WRITTEN:go-source (scip {scip})"
+            if src == "WRITTEN" else f"FAILED:scip={scip}; source={src}")
 
 
 def _scip_to_graph_artifacts(scratch: Path, index_path: Path, proj: Path) -> str:
@@ -1249,6 +2391,20 @@ def _scip_to_graph_artifacts(scratch: Path, index_path: Path, proj: Path) -> str
             )
         _write_text(scratch / "function_summary.md", "\n".join(lines))
 
+        # Unified machine artifact for the coverage gate (G2). SCIP descriptors
+        # are reference LOCATIONS (it does not resolve reader function names);
+        # var_refs are all-references (reads+writes combined). The gate matches a
+        # descriptor by bare name OR location against the agent's finding prose.
+        var_refs = {v: {"bare": v, "refs": sorted(locs)}
+                    for v, locs in state_writers.items()}
+        functions = {
+            fn: {"bare": fn,
+                 "loc": f"{data['path']}:L{data['line']}",
+                 "callers": sorted(callers.get(fn, []))}
+            for fn, data in fn_info.items()
+        }
+        _write_mechanical_graph_json(scratch, "scip", var_refs, functions)
+
         # Record status
         status_lines = [
             f"- SCIP_RUST_BAKE: COMPLETE",
@@ -1327,17 +2483,13 @@ def _ensure_opengrep_rules() -> Dict[str, Path]:
         # directory'. Try to initialize the submodule first; if that fails,
         # remove the stale/partial tree so the clone has an empty target.
         if local.exists() and not (local / ".git").exists():
-            try:
-                init = subprocess.run(
-                    ["git", "submodule", "update", "--init", str(local)],
-                    timeout=60, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace",
-                )
-                if init.returncode == 0 and (local / ".git").exists():
-                    available[name] = local
-                    continue
-            except Exception:
-                pass
+            init_rc, _init_out = _run_hardened(
+                ["git", "submodule", "update", "--init", str(local)],
+                None, 60,
+            )
+            if init_rc == 0 and (local / ".git").exists():
+                available[name] = local
+                continue
             try:
                 shutil.rmtree(local)
             except Exception as e:
@@ -1346,22 +2498,16 @@ def _ensure_opengrep_rules() -> Dict[str, Path]:
                     f"{e.__class__.__name__}: {e}"
                 )
                 continue
-        try:
-            proc = subprocess.run(
-                ["git", "clone", "--depth", "1", url, str(local)],
-                timeout=60, capture_output=True, text=True,
-                encoding="utf-8", errors="replace",
-            )
-            if local.exists() and (local / ".git").exists():
-                available[name] = local
-            else:
-                detail = (getattr(proc, "stderr", "") or "").strip().splitlines()
-                reason = detail[-1] if detail else f"git clone exited {getattr(proc, 'returncode', '?')}"
-                _OPENGREP_RULE_FAILURES[name] = f"clone failed: {reason}"
-        except Exception as e:
-            _OPENGREP_RULE_FAILURES[name] = (
-                f"clone failed: {e.__class__.__name__}: {e}"
-            )
+        clone_rc, clone_out = _run_hardened(
+            ["git", "clone", "--depth", "1", url, str(local)],
+            None, 60,
+        )
+        if local.exists() and (local / ".git").exists():
+            available[name] = local
+        else:
+            detail = (clone_out or "").strip().splitlines()
+            reason = detail[-1] if detail else f"git clone exited {clone_rc}"
+            _OPENGREP_RULE_FAILURES[name] = f"clone failed: {reason}"
     return available
 
 
@@ -1414,43 +2560,19 @@ def _run_opengrep_scan(scratch: Path, proj: Path, lang: str) -> str:
     cmd.extend(["--sarif-output", str(sarif_path)])
     cmd.extend([_rel(p, proj) for p in source_files])
 
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(proj),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        try:
-            so, se = proc.communicate(timeout=_OPENGREP_SCAN_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                )
-            else:
-                proc.kill()
-            try:
-                so, se = proc.communicate(timeout=5)
-            except Exception:
-                so, se = "", ""
-            return f"FAILED:timeout after {_OPENGREP_SCAN_TIMEOUT}s"
-    except FileNotFoundError:
+    # Hang-proof: temp-file drain + tree-kill. The prior Popen+communicate()
+    # drained an OS PIPE — exactly the construct a grandchild holding the handle
+    # can wedge forever; _run_hardened removes the pipe entirely.
+    rc, _out = _run_hardened(cmd, proj, _OPENGREP_SCAN_TIMEOUT)
+    if rc == 124:
+        return f"FAILED:timeout after {_OPENGREP_SCAN_TIMEOUT}s"
+    if rc == 127:
         return "SKIPPED:opengrep not found"
-    except Exception as e:
-        return f"FAILED:{e.__class__.__name__}"
 
     # opengrep returns 0 on success (even with findings), 1 on findings in some modes
     if not sarif_path.exists() or sarif_path.stat().st_size < 10:
-        if proc.returncode != 0:
-            return f"FAILED:exit {proc.returncode}, no SARIF produced"
+        if rc != 0:
+            return f"FAILED:exit {rc}, no SARIF produced"
         return "WRITTEN:0 findings"
 
     # Parse SARIF and write human-readable summary
@@ -1542,19 +2664,12 @@ def _run_sec3_xray(scratch: Path, proj: Path) -> str:
     if not shutil.which("docker"):
         return "SKIPPED:docker not found"
 
-    # Verify Docker is running
-    try:
-        probe = subprocess.run(
-            ["docker", "info"], timeout=15,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-        )
-        if probe.returncode != 0:
-            return "SKIPPED:docker daemon not running"
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    # Verify Docker is running (hang-proof probe).
+    probe_rc, _probe_out = _run_hardened(["docker", "info"], None, 15)
+    if probe_rc in (124, 127):
         return "SKIPPED:docker not available"
-    except Exception:
-        return "SKIPPED:docker probe failed"
+    if probe_rc != 0:
+        return "SKIPPED:docker daemon not running"
 
     # Check project has Rust/Solana source files
     source_files = _iter_files(proj, (".rs",))
@@ -1570,18 +2685,13 @@ def _run_sec3_xray(scratch: Path, proj: Path) -> str:
         "/workspace",
     ]
 
-    try:
-        proc = subprocess.run(
-            cmd, timeout=_SEC3_XRAY_TIMEOUT,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-        )
-    except subprocess.TimeoutExpired:
+    # Hang-proof: temp-file drain + tree-kill (the X-Ray container / LLVM
+    # workers can no longer wedge the parent on a held pipe handle).
+    rc, _xray_out = _run_hardened(cmd, None, _SEC3_XRAY_TIMEOUT)
+    if rc == 124:
         return f"FAILED:timeout after {_SEC3_XRAY_TIMEOUT}s"
-    except FileNotFoundError:
+    if rc == 127:
         return "SKIPPED:docker not found"
-    except Exception as e:
-        return f"FAILED:{e.__class__.__name__}"
 
     # X-Ray writes SARIF into the workspace root
     sarif_source = proj / _SEC3_SARIF_FILENAME
@@ -1597,8 +2707,8 @@ def _run_sec3_xray(scratch: Path, proj: Path) -> str:
                 break
 
     if not sarif_source.exists() or sarif_source.stat().st_size < 10:
-        if proc.returncode != 0:
-            return f"FAILED:exit {proc.returncode}, no SARIF produced"
+        if rc != 0:
+            return f"FAILED:exit {rc}, no SARIF produced"
         return "WRITTEN:0 findings"
 
     # Move SARIF to scratchpad
@@ -1686,6 +2796,206 @@ def _parse_sec3_sarif(scratch: Path, sarif_path: Path) -> int:
     return len(findings)
 
 
+# ---------------------------------------------------------------------------
+# Cosmos-SDK / CometBFT framework detection (L1)
+# ---------------------------------------------------------------------------
+#
+# Framework triggers only (like Foundry/Anchor) — never a named chain's answer.
+# When a Cosmos-SDK / CometBFT / Tendermint dependency is found in the manifest,
+# mechanically seed the COSMOS_SDK flag (and IBC when ibc-go is present) so the
+# COSMOS_SDK_MODULE_SAFETY injectable skill is marked Required=YES. Manifest
+# priority: a dependency in go.mod/Cargo.toml is authoritative.
+
+# Dependency-path substrings that identify the Cosmos-SDK / CometBFT framework.
+_COSMOS_MARKERS = (
+    "cosmossdk.io",
+    "github.com/cosmos/cosmos-sdk",
+    "github.com/cometbft/cometbft",
+    "github.com/tendermint/tendermint",
+    "github.com/tendermint/tm-db",
+)
+# IBC markers (a distinct cross-chain subsystem flag).
+_IBC_MARKERS = (
+    "github.com/cosmos/ibc-go",
+    "cosmossdk.io/ibc",
+)
+# Cosmos-SDK Rust ecosystem (less common, but cw / cosmwasm chains link these).
+_COSMOS_RUST_MARKERS = (
+    "cosmwasm-std",
+    "cosmrs",
+    "cosmos-sdk-proto",
+    "tendermint-rpc",
+    "tendermint-proto",
+)
+
+
+def _detect_cosmos_markers(proj: Path) -> Tuple[bool, bool]:
+    """Scan go.mod and Cargo.toml for Cosmos-SDK / CometBFT / IBC markers.
+
+    Returns (cosmos_sdk_found, ibc_found). Best-effort and non-fatal: any read
+    failure yields (False, False) for that manifest. Also checks an `x/<module>`
+    tree as a corroborating structural signal for Go app-chains.
+    """
+    cosmos = False
+    ibc = False
+    for manifest in ("go.mod", "Cargo.toml"):
+        text = _read_text(proj / manifest)
+        if not text:
+            continue
+        low = text.lower()
+        if any(m in low for m in _COSMOS_MARKERS):
+            cosmos = True
+        if manifest == "Cargo.toml" and any(m in low for m in _COSMOS_RUST_MARKERS):
+            cosmos = True
+        if any(m in low for m in _IBC_MARKERS):
+            ibc = True
+    # Structural corroboration: a top-level `x/` dir with module subdirs is the
+    # canonical Cosmos-SDK module layout. Only used to confirm, never alone —
+    # manifest dependency is the authoritative signal above.
+    if not cosmos:
+        try:
+            xdir = proj / "x"
+            if xdir.is_dir():
+                has_module = any(
+                    (sub / "module.go").exists() or (sub / "keeper").is_dir()
+                    for sub in xdir.iterdir()
+                    if sub.is_dir()
+                )
+                # Require a manifest hint too, to avoid false positives on
+                # unrelated `x/` dirs.
+                if has_module and (proj / "go.mod").exists():
+                    gm = _read_text(proj / "go.mod").lower()
+                    if any(m in gm for m in _COSMOS_MARKERS):
+                        cosmos = True
+        except OSError:
+            pass
+    return cosmos, ibc
+
+
+def _seed_cosmos_flag(scratch: Path, proj: Path) -> str:
+    """If Cosmos-SDK markers are present, mark COSMOS_SDK_MODULE_SAFETY Required=YES
+    and emit COSMOS_SDK (and IBC) flags into the recon artifacts.
+
+    Mechanical + manifest-priority. Only rewrites pre-pass-owned files (those
+    still carrying `_PREPASS_MARKER`); enriched files are left untouched by
+    `_write_text`.
+
+    Returns: DETECTED:COSMOS_SDK[,IBC] | NOT_DETECTED | FAILED:{reason}
+    """
+    try:
+        cosmos, ibc = _detect_cosmos_markers(proj)
+        if not cosmos:
+            return "NOT_DETECTED"
+
+        flags = ["COSMOS_SDK"] + (["IBC"] if ibc else [])
+
+        # 1) Flip the relevant skill rows in template_recommendations.md to
+        #    Required=YES (only if the file is still pre-pass-owned). COSMOS_SDK
+        #    always; COSMOS_IBC_SECURITY only when the IBC flag is present.
+        #    skill_name -> rationale phrase
+        rows_to_flip = {
+            "COSMOS_SDK_MODULE_SAFETY": (
+                "Cosmos-SDK / CometBFT framework detected in manifest "
+                "(mechanical). "
+            ),
+        }
+        if ibc:
+            rows_to_flip["COSMOS_IBC_SECURITY"] = (
+                "IBC / ibc-go cross-chain integration detected in manifest "
+                "(mechanical). "
+            )
+        tr = scratch / "template_recommendations.md"
+        if tr.exists():
+            head = _read_text(tr).split("\n", 1)[0]
+            if head == _PREPASS_MARKER:
+                body = _read_text(tr)
+                if body.startswith(_PREPASS_MARKER):
+                    body = body.split("\n", 1)[1] if "\n" in body else ""
+                new_lines = []
+                flipped = False
+                for line in body.splitlines():
+                    matched_skill = next(
+                        (
+                            s
+                            for s in rows_to_flip
+                            if s in line and line.lstrip().startswith("|")
+                        ),
+                        None,
+                    )
+                    if matched_skill is not None:
+                        cols = line.split("|")
+                        # Row shape: | | `SKILL` | trigger | Required | Rationale | |
+                        # Find the Required column (the cell whose stripped/upper
+                        # value is NO or YES) and flip it, set rationale.
+                        for ci, cell in enumerate(cols):
+                            cval = cell.strip().strip("`").strip("*").upper()
+                            if cval in ("NO", "YES"):
+                                cols[ci] = " YES "
+                                # Rationale is the next non-trailing cell.
+                                if ci + 1 < len(cols) and cols[ci + 1].strip() not in ("", "|"):
+                                    cols[ci + 1] = " " + rows_to_flip[matched_skill]
+                                flipped = True
+                                break
+                        line = "|".join(cols)
+                    new_lines.append(line)
+                if flipped:
+                    _force_overwrite_prepass(tr, "\n".join(new_lines) + "\n")
+
+        # 2) Emit flags into detected_patterns.md (create for L1 if absent).
+        dp = scratch / "detected_patterns.md"
+        flag_block = (
+            "\n## Flags (mechanical — Cosmos-SDK framework)\n"
+            + "".join(f"- `{f}`\n" for f in flags)
+            + "\nCosmos-SDK / CometBFT / Tendermint dependency detected in the "
+            "project manifest. Loads `cosmos-sdk-module-safety` into "
+            "depth-consensus-invariant and depth-state-trace.\n"
+        )
+        if dp.exists() and _read_text(dp).split("\n", 1)[0] == _PREPASS_MARKER:
+            _force_overwrite_prepass(dp, _read_text_unmarked(dp) + flag_block)
+        elif not dp.exists():
+            _write_text(
+                dp,
+                "# Detected Patterns\n\n[LLM TO ENRICH] Pre-pass stub.\n" + flag_block,
+            )
+
+        # 3) Append a subsystem-flags line to recon_summary.md so Phase 2
+        #    instantiation sees COSMOS_SDK (mirrors the DATA_AVAILABILITY pattern).
+        rs = scratch / "recon_summary.md"
+        if rs.exists() and _read_text(rs).split("\n", 1)[0] == _PREPASS_MARKER:
+            summary_line = (
+                "\n- **Subsystem Flags (mechanical)**: "
+                + ", ".join(flags)
+                + " (Cosmos-SDK / CometBFT framework detected in manifest)\n"
+            )
+            _force_overwrite_prepass(rs, _read_text_unmarked(rs) + summary_line)
+
+        return "DETECTED:" + ",".join(flags)
+    except Exception as e:
+        return f"FAILED:{e.__class__.__name__}"
+
+
+def _read_text_unmarked(p: Path) -> str:
+    """Read a pre-pass file, stripping the leading marker line if present."""
+    body = _read_text(p)
+    if body.startswith(_PREPASS_MARKER):
+        return body.split("\n", 1)[1] if "\n" in body else ""
+    return body
+
+
+def _force_overwrite_prepass(p: Path, content: str) -> bool:
+    """Overwrite a pre-pass-owned file, re-stamping the marker.
+
+    Caller MUST have already confirmed the file is pre-pass-owned (marker
+    present) or absent. Unlike `_write_text`, this does not re-check the marker,
+    because the new content already had its marker stripped by the caller.
+    """
+    try:
+        p.write_text(_PREPASS_MARKER + "\n" + content, encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
 # Main entry point
 def run_recon_prepass(config: dict) -> Dict[str, str]:
     """Write mechanical recon artifacts. Returns {artifact: status} dict."""
@@ -1734,6 +3044,8 @@ def run_recon_prepass(config: dict) -> Dict[str, str]:
         # [LLM TO ENRICH] stubs for every SC recon artifact so prepass-read
         # gates never fail; the recon LLM replaces them via damlc + grep.
         _safe("daml_prepass_noop.md",  lambda: _write_daml_prepass_noop(scratch, proj))
+        # F1 (recall): approximate DAML reference graph for the coverage gate.
+        _safe("_mechanical_graph.json", lambda: _bake_daml_graph(scratch, proj))
         _safe("contract_inventory.md", lambda: _write_sc_recon_stub(scratch, "contract_inventory.md",
               "# Contract Inventory\n\n[LLM TO ENRICH] No prepass for DAML (read-driven).\n\n"
               "| Template | Path | Choices | Signatories | Observers | Has Key | Implements |\n"
@@ -1771,7 +3083,22 @@ def run_recon_prepass(config: dict) -> Dict[str, str]:
         _safe("contract_inventory.md", lambda: _write_contract_inventory_sc(scratch, proj, lang))
         _safe("state_variables.md",    lambda: _write_table_artifact(scratch, proj, lang, "state"))
         _safe("function_list.md",      lambda: _write_table_artifact(scratch, proj, lang, "fn"))
-        _safe("build_status.md",       lambda: _write_build_status(scratch, proj, lang))
+        # F1 (recall): mechanical Solidity reference graph. Tiered: Slither
+        # (precise, needs a build) → compilation-free source parse (approximate,
+        # always available; same tier as Move/DAML). Never mocks the compiler.
+        # Rust/Go get theirs from the SCIP bake. On total FAIL the LLM-derived
+        # maps remain and the coverage gate no-ops.
+        # M2 (recall): interface-vs-implementation parity.
+        if lang == "evm":
+            _safe("_mechanical_graph.json",
+                  lambda: _bake_evm_graph(scratch, proj))
+            _safe("niche_interface_parity_findings.md",
+                  lambda: _write_interface_parity_findings(scratch, proj))
+        # Pass the mechanical-graph bake result so EVM can dedupe the redundant
+        # second compile: when Slither already compiled (source=slither), the
+        # standalone forge build probe is derived-skipped instead of recompiling.
+        _safe("build_status.md",       lambda: _write_build_status(
+            scratch, proj, lang, results.get("_mechanical_graph.json")))
         _safe("design_context.md",     lambda: _write_design_or_threat_stub(scratch, pipeline))
         # v2.8.6: stub the 4 artifacts the pre-pass previously skipped.
         # When Codex sub-agents partially fail, these stay at 0 bytes and
@@ -1796,13 +3123,26 @@ def run_recon_prepass(config: dict) -> Dict[str, str]:
         # RECON-2: deferred to the driver pre-breadth hook by default (it has an
         # unbounded Python conversion that can stall the silent startup window).
         if lang in ("solana", "soroban") and run_startup_scanners:
-            _safe("scip_bake", lambda: _bake_rust_scip(scratch, proj))
+            # Tiered: precise SCIP when available, else compilation-free source
+            # parse so the enumeration gate still gets a graph (never advisory-only).
+            _safe("scip_bake", lambda: _bake_rust_graph(scratch, proj))
+        # F1 (recall): approximate Move reference graph for the coverage gate
+        # (Aptos/Sui have no SCIP indexer wired). Best-effort, never halts.
+        if lang in ("aptos", "sui"):
+            _safe("_mechanical_graph.json", lambda: _bake_move_graph(scratch, proj))
 
     _safe("template_recommendations.md",
           lambda: _write_template_recommendations(scratch, skill_index, lang, pipeline))
     _safe("recon_summary.md",
           lambda: _write_recon_summary_stub(scratch, proj, lang))
     _safe("meta_buffer.md", lambda: _write_meta_buffer_stub(scratch))
+
+    # L1: mechanical Cosmos-SDK / CometBFT framework detection. Runs AFTER
+    # template_recommendations.md + recon_summary.md exist so it can flip the
+    # COSMOS_SDK_MODULE_SAFETY row to Required=YES and seed COSMOS_SDK / IBC
+    # flags. Manifest-priority, non-fatal.
+    if pipeline == "l1":
+        _safe("cosmos_flag", lambda: _seed_cosmos_flag(scratch, proj))
 
     # v2.5.0 P2: OpenGrep cross-ecosystem scanner (SC pipelines only).
     # Deferred to the driver pre-breadth hook by default (see run_startup_scanners

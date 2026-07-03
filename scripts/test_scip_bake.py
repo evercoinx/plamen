@@ -78,9 +78,8 @@ def test_bake_fail_no_index_produced(tmp_path):
     """rust-analyzer succeeds but produces no index.scip -> FAILED."""
     scratch = _mkscratch(tmp_path)
     proj = _mkproj(tmp_path)
-    fake_proc = mock.Mock(returncode=0, stdout="", stderr="")
     with mock.patch("shutil.which", return_value="/usr/bin/rust-analyzer"), \
-         mock.patch("subprocess.run", return_value=fake_proc):
+         mock.patch("recon_prepass._run_hardened", return_value=(0, "")):
         result = _bake_rust_scip(scratch, proj)
     assert result.startswith("FAILED:")
     assert "not produced" in result
@@ -88,11 +87,12 @@ def test_bake_fail_no_index_produced(tmp_path):
 
 def test_bake_fail_timeout(tmp_path):
     """rust-analyzer times out -> FAILED with timeout message."""
-    import subprocess as sp
     scratch = _mkscratch(tmp_path)
     proj = _mkproj(tmp_path)
+    # _run_hardened returns the 124 sentinel on a tree-killed timeout.
     with mock.patch("shutil.which", return_value="/usr/bin/rust-analyzer"), \
-         mock.patch("subprocess.run", side_effect=sp.TimeoutExpired("ra", 180)):
+         mock.patch("recon_prepass._run_hardened",
+                    return_value=(124, "[hardened: timed out after 180s, tree-killed]")):
         result = _bake_rust_scip(scratch, proj)
     assert result.startswith("FAILED:")
     assert "timeout" in result
@@ -284,7 +284,8 @@ def test_scip_fail_few_definitions(tmp_path):
 # ── run_recon_prepass integration ─────────────────────────────────────────
 
 def test_prepass_solana_triggers_scip_bake(tmp_path):
-    """run_recon_prepass with lang=solana should call _bake_rust_scip."""
+    """run_recon_prepass with lang=solana goes through the tiered `_bake_rust_graph`
+    wrapper, which attempts the precise SCIP tier (`_bake_rust_scip`) first."""
     scratch = _mkscratch(tmp_path)
     proj = _mkproj(tmp_path)
     config = {
@@ -296,12 +297,15 @@ def test_prepass_solana_triggers_scip_bake(tmp_path):
     }
     with mock.patch("recon_prepass._bake_rust_scip", return_value="SKIPPED:test") as m:
         results = run_recon_prepass(config)
-    m.assert_called_once_with(scratch, proj)
-    assert results.get("scip_bake") == "SKIPPED:test"
+    m.assert_called_once_with(scratch, proj)  # SCIP tier attempted
+    # tiered wrapper carries the SCIP status through; fixture has no .rs sources
+    # so the source fallback skips and the SCIP status is preserved in the result.
+    assert "SKIPPED:test" in results.get("scip_bake", "")
 
 
 def test_prepass_soroban_triggers_scip_bake(tmp_path):
-    """run_recon_prepass with lang=soroban should call _bake_rust_scip."""
+    """run_recon_prepass with lang=soroban goes through the tiered `_bake_rust_graph`
+    wrapper, which attempts the precise SCIP tier (`_bake_rust_scip`) first."""
     scratch = _mkscratch(tmp_path)
     proj = _mkproj(tmp_path)
     config = {
@@ -313,8 +317,8 @@ def test_prepass_soroban_triggers_scip_bake(tmp_path):
     }
     with mock.patch("recon_prepass._bake_rust_scip", return_value="SKIPPED:test") as m:
         results = run_recon_prepass(config)
-    m.assert_called_once_with(scratch, proj)
-    assert results.get("scip_bake") == "SKIPPED:test"
+    m.assert_called_once_with(scratch, proj)  # SCIP tier attempted
+    assert "SKIPPED:test" in results.get("scip_bake", "")
 
 
 def test_prepass_evm_does_not_trigger_scip_bake(tmp_path):
@@ -390,11 +394,9 @@ def test_bake_success_writes_artifacts_and_status(tmp_path):
     fake_index = proj / "index.scip"
     fake_index.write_bytes(b"x" * 500)
 
-    fake_proc = mock.Mock(returncode=0, stdout="", stderr="")
-
     with mock.patch("shutil.which", return_value="/usr/bin/rust-analyzer"), \
-         mock.patch("subprocess.run", return_value=fake_proc):
-        # After subprocess.run, the function moves index.scip -> scratchpad
+         mock.patch("recon_prepass._run_hardened", return_value=(0, "")):
+        # After the (hang-proof) build, the function moves index.scip -> scratchpad
         # Then calls _scip_to_graph_artifacts which needs ScipReader
         # Mock the ScipReader import path
         import types
@@ -424,8 +426,6 @@ def test_bake_moves_index_to_scratchpad(tmp_path):
     fake_index = proj / "index.scip"
     fake_index.write_bytes(b"x" * 500)
 
-    fake_proc = mock.Mock(returncode=0, stdout="", stderr="")
-
     import types
     fake_plamen_l1 = types.ModuleType("plamen_l1")
     fake_scip_mod = types.ModuleType("plamen_l1.scip_reader")
@@ -433,7 +433,7 @@ def test_bake_moves_index_to_scratchpad(tmp_path):
     fake_plamen_l1.scip_reader = fake_scip_mod
 
     with mock.patch("shutil.which", return_value="/usr/bin/rust-analyzer"), \
-         mock.patch("subprocess.run", return_value=fake_proc), \
+         mock.patch("recon_prepass._run_hardened", return_value=(0, "")), \
          mock.patch.dict("sys.modules", {
              "plamen_l1": fake_plamen_l1,
              "plamen_l1.scip_reader": fake_scip_mod,
@@ -479,9 +479,8 @@ def test_bake_go_fail_nonzero_exit(tmp_path):
     """scip-go returns nonzero -> FAILED."""
     scratch = _mkscratch(tmp_path)
     proj = _mkproj_go(tmp_path)
-    fake_proc = mock.Mock(returncode=1, stdout="", stderr="error")
     with mock.patch("shutil.which", return_value="/usr/bin/x"), \
-         mock.patch("subprocess.run", return_value=fake_proc):
+         mock.patch("recon_prepass._run_hardened", return_value=(1, "error")):
         result = _bake_go_scip(scratch, proj)
     assert result.startswith("FAILED:")
     assert "exit 1" in result
@@ -491,9 +490,8 @@ def test_bake_go_fail_no_index_produced(tmp_path):
     """scip-go exit 0 but no index file -> FAILED."""
     scratch = _mkscratch(tmp_path)
     proj = _mkproj_go(tmp_path)
-    fake_proc = mock.Mock(returncode=0, stdout="", stderr="")
     with mock.patch("shutil.which", return_value="/usr/bin/x"), \
-         mock.patch("subprocess.run", return_value=fake_proc):
+         mock.patch("recon_prepass._run_hardened", return_value=(0, "")):
         result = _bake_go_scip(scratch, proj)
     assert result.startswith("FAILED:")
     assert "not produced" in result
@@ -501,11 +499,12 @@ def test_bake_go_fail_no_index_produced(tmp_path):
 
 def test_bake_go_fail_timeout(tmp_path):
     """scip-go times out -> FAILED with timeout message."""
-    import subprocess as sp
     scratch = _mkscratch(tmp_path)
     proj = _mkproj_go(tmp_path)
+    # _run_hardened returns the 124 sentinel on a tree-killed timeout.
     with mock.patch("shutil.which", return_value="/usr/bin/x"), \
-         mock.patch("subprocess.run", side_effect=sp.TimeoutExpired("scip-go", 600)):
+         mock.patch("recon_prepass._run_hardened",
+                    return_value=(124, "[hardened: timed out after 600s, tree-killed]")):
         result = _bake_go_scip(scratch, proj)
     assert result.startswith("FAILED:")
     assert "timeout" in result

@@ -58,6 +58,41 @@ Findings that share the same root cause MUST be consolidated into a single findi
 
 ---
 
+## Material-Harm Body Floor (BODY vs APPENDIX) - MANDATORY
+
+The report **body** is reserved for findings with a real security consequence.
+Pure-quality findings are routed to **Appendix C: Quality & Hardening
+Observations** (a table), never deleted. This is **mechanically enforced** by
+the driver against `disposition.md`; the wording below is the authoritative
+policy.
+
+For every finding, classify BODY or APPENDIX:
+
+- A finding -> **APPENDIX** ONLY if it has ZERO security consequence — i.e. it
+  is pure quality/hardening/observability/style: missing events; missing
+  zero-address/range checks with no demonstrated loss; one-step ownership / no
+  two-step ownership / `renounceOwnership`; defense-in-depth ("add
+  `nonReentrant`" with no shown reentrancy loss); signature/EIP-712 binding
+  hardening with no shown exploit; missing asserts/gates ("does not validate
+  X") with no consequence; UX/allowance friction; naming; typos; error-message
+  wording; magic numbers; gas; docs; test-harness quality; interface-vs-impl
+  parity; `supportsInterface` omissions; latent/none-at-present hazards.
+- Otherwise -> **BODY.** ANY real security consequence keeps it in the body AT
+  ANY SEVERITY, even if trusted-actor-gated, self-inflicted-precondition, or
+  bounded/dust: direct fund loss/extraction; funds/assets locked or frozen;
+  privilege escalation; a liveness brick denying a core user action; accounting
+  corruption leading to loss.
+- **Recall-safe default: when in doubt, BODY.** Burying a real finding in the
+  appendix is the unacceptable error; an extra body finding is cheap.
+- This applies at EVERY severity. A Medium/High that is pure
+  observability/quality (e.g. "admin call emits no event", no
+  fund/liveness/privilege impact) -> APPENDIX. A Low/Info with a real
+  consequence -> BODY.
+- DROP/FALSE_POSITIVE (verifier-refuted) is unchanged and **separate** from
+  APPENDIX — those go to Appendix A (Excluded Findings), not Appendix C.
+
+---
+
 ## Finding Section Format - MANDATORY FOR EVERY FINDING
 
 **Every finding gets its own full section.** No catch-all tables, no grouped summaries, no "remaining findings" dumps. A finding that only appears in a table row is effectively invisible to the reader.
@@ -268,6 +303,22 @@ PoC-fail rules.
 |----------|-------|------------------|
 | Medium | [title] | FALSE_POSITIVE - verified not exploitable |
 | Low | [title] | Duplicate of M-03 |
+
+---
+
+## Appendix C: Quality & Hardening Observations (Optional)
+
+> Findings dispositioned **APPENDIX** by the material-harm body floor — real but
+> with ZERO security consequence (pure quality/hardening/observability/style).
+> This is **DISTINCT** from Appendix A (Excluded = false-positive/duplicate):
+> Appendix C findings are valid observations, just not body material. The driver
+> mechanically relocates any APPENDIX finding that still has a body `###`
+> section into this table — it is never dropped. One row per finding.
+
+| ID | Severity | Title | Location | Reason |
+|----|----------|-------|----------|--------|
+| M-04 | Medium | Admin setter emits no event | `src/Vault.sol:L40` | Observability / missing events |
+| L-07 | Low | Missing zero-address check in setter | `src/Vault.sol:L88` | Input hardening (no demonstrated loss) |
 ```
 
 ---
@@ -276,7 +327,8 @@ PoC-fail rules.
 
 Before the report is considered complete, verify:
 
-1. **Every finding has its own section** - no finding exists only in a table row (exception: findings routed to the Quality Observations megasection appear as table rows by design)
+1. **Every finding has its own section** - no finding exists only in a table row (exceptions: findings routed to the Quality Observations megasection, and APPENDIX-dispositioned findings routed to Appendix C by the material-harm body floor, appear as table rows by design)
+1a. **Material-harm body floor applied** - the body contains ONLY findings with a real security consequence; pure-quality/hardening/observability findings appear in Appendix C, not as body `###` sections. Driver-enforced against `disposition.md`.
 2. **No internal IDs anywhere in AUDIT_REPORT.md** - search the report for patterns like `[CS-`, `[AC-`, `[TF-`, `[BLIND-`, `[EN-`, `[SE-`, `[VS-`, `[DEPTH-`, `[SLITHER-`, `[RS-`, `[PC-`, `[SP-`, `[DST-`, `[DE-`, `[DX-`, `[DS-`, `[DT-`, `CH-`, and hypothesis `H-` followed by a number in brackets. NONE should appear in the delivered report.
 3. **Finding count matches summary** - the number of `###` sections per severity tier equals the count in the summary table
 4. **Cross-references valid** - every `see X-NN` reference points to a finding that exists in the report

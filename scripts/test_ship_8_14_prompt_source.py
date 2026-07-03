@@ -1,7 +1,7 @@
 """Ship 8.14 -- Prompt source selection: prefer V2 recon prompt, prove the
 RENDERED prompt is clean.
 
-Root cause (DODO post-mortem): the recon prompt resolver preferred the LEGACY
+Root cause (prior post-mortem): the recon prompt resolver preferred the LEGACY
 multi-agent orchestrator prompt over the V2 single-agent direct-execution
 prompt. Under the V2 foreground-Task contract the legacy "spawn Agent 1A/1B/2"
 directive ran SERIALLY (1A 4min -> 1B 6min -> Slither 32min) and blew the 3000s

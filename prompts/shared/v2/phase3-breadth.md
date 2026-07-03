@@ -68,7 +68,7 @@ Before exit, run this loop:
      `<!-- PLAMEN_STATUS: IN_PROGRESS -->` marker, so the file exists on
      disk before any Read tool calls. Do NOT substitute your own
      structure; the template is load-bearing against context-window
-     exhaustion (root cause of DODO 2026-05-21 attempt 1).
+     exhaustion (the root cause of an observed breadth failure).
    - Do not identify outputs by numeric agent id; `analysis_1.md` is invalid
      when the manifest expects `analysis_core_state.md`.
    - In Claude PTY, use background Task calls and keep the coordinator alive
@@ -95,7 +95,7 @@ row complete from Task UI text alone.
 Each `Task()` you spawn for a breadth agent MUST be constructed verbatim
 from the structure below. The previous "FIRST ACTION: write a one-line
 header" footnote was a soft label, not a numbered step; subagents ignored
-it and started with Read tool calls. In DODO 2026-05-21 attempt 1, six of
+it and started with Read tool calls. In an observed breadth failure, six of
 eight subagents exhausted their context window before reaching any
 `Write`, leaving no on-disk artifact. The template below makes `Write`
 structurally the first tool call so a crash-safety stub always lands on
@@ -220,8 +220,8 @@ read source files in one of these targeted ways:
         targeted line ranges across multiple files.
 
 DO NOT `Glob **/*.sol` and then `Read` every contract you find. That
-pattern exhausted six of eight subagent context windows in DODO
-2026-05-21 attempt 1. Targeted source reads keep enough budget for
+pattern exhausted six of eight subagent context windows in an observed
+breadth failure. Targeted source reads keep enough budget for
 analysis AND the final marker Edits.
 
 Step 4 -- Edit (not Write) to append findings.
@@ -294,7 +294,7 @@ The Subagent Prompt Template is the only sanctioned way to construct a
 breadth subagent prompt. Deviating from it (re-ordering steps, omitting
 the IN_PROGRESS Write, capping recon reads, glob-reading every source
 file, marking COMPLETE without findings + rationale) reintroduces the
-DODO 2026-05-21 failure class.
+observed breadth failure class.
 
 ---
 

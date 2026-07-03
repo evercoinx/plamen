@@ -99,6 +99,7 @@ __all__ = [
     "ensure_findings_inventory_floor",
     "_write_mechanical_report_index",
     "promote_niche_to_inventory",
+    "promote_blind_spot_to_inventory",
     "strip_codex_prepass_markers",
     "_write_mechanical_report_tier",
     "ensure_inventory_shard_plan",
@@ -501,7 +502,7 @@ def _synthesize_components_audited(scratchpad: Path) -> str:
             # D6 fix: compute Covered counts by matching inventory finding
             # locations to component (heading) prefixes. Pre-fix the table
             # had only Component + Source columns and no count — producing
-            # the all-zero Covered column observed in the Irys report.
+            # the all-zero Covered column observed in a prior report.
             covered_per_component: dict[str, int] = {h: 0 for h in headings}
             inv = scratchpad / "findings_inventory.md"
             if inv.exists():
@@ -632,7 +633,7 @@ def _extract_code_location_from_text(text: str) -> str:
          in narrative prose without the strict pattern.
 
     Returns empty string when the only candidates are test/mock paths.
-    Pre-fix (May-2026 DODO audit), the function fell through to
+    Pre-fix (observed in a prior audit), the function fell through to
     `candidates[0]` UNFILTERED when all candidates were test/mock — a
     STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION verify file that mentioned
     only the test harness produced `Location: VerifyCritHigh.t.sol` in
@@ -2020,6 +2021,70 @@ def _build_human_review_appendix(scratchpad: Path) -> str:
     return "\n\n".join(blocks)
 
 
+_TIER_LOC_FILE_RE = re.compile(
+    r"([A-Za-z0-9_][A-Za-z0-9_./\\-]*\.(?:sol|rs|go|move|vy|cairo))"
+)
+
+
+def _recover_tier_locations(
+    section: str, id_to_location: dict[str, str], project_root: str
+) -> tuple[str, int]:
+    """Repair tier-writer LOCATION corruption against the authoritative index.
+
+    Observed failure mode: a report tier writer overwrites a finding's
+    `**Location**` with a non-existent file (e.g. a path cribbed from a recon
+    "REMOVED files" table) — corrupting a REAL, verified finding's location. The
+    validated `report_index.md` Master Finding Index still holds the correct
+    location. For each `### [X-NN]` section whose `**Location**` cites ONLY files
+    that do not exist in the source tree, replace it with the index location
+    (when THAT one resolves). This RECOVERS the real finding — it never drops it.
+    Returns (patched_section, n_recovered)."""
+    if not id_to_location or not section:
+        return section, 0
+    try:
+        from plamen_parsers import _project_source_index
+    except Exception:
+        return section, 0
+    try:
+        src_index = _project_source_index(project_root)
+    except Exception:
+        return section, 0
+    root = Path(project_root)
+
+    def _all_files_missing(loc: str) -> bool:
+        files = _TIER_LOC_FILE_RE.findall(loc or "")
+        if not files:
+            return False  # no parseable file token -> not a recoverable corruption
+        for f in files:
+            f = f.strip().replace("\\", "/").lstrip("./")
+            if (root / f).is_file() or src_index.get(Path(f).name):
+                return False  # at least one cited file is real -> not corrupted
+        return True
+
+    n = 0
+    sec_re = re.compile(
+        r"(^###\s+\[([CHMLI]-\d+)\][^\n]*\n)(.*?)(?=^###\s+\[|\Z)", re.S | re.M
+    )
+
+    def _patch(m: "re.Match") -> str:
+        nonlocal n
+        head, rid, body = m.group(1), m.group(2), m.group(3)
+        idx_loc = id_to_location.get(rid)
+        if not idx_loc:
+            return m.group(0)
+        lm = re.search(r"(?im)^(\*\*Location\*\*:\s*)(.+)$", body)
+        if not lm:
+            return m.group(0)
+        body_loc = lm.group(2)
+        if _all_files_missing(body_loc) and not _all_files_missing(idx_loc):
+            new_body = body[: lm.start(2)] + idx_loc.strip() + body[lm.end(2):]
+            n += 1
+            return head + new_body
+        return m.group(0)
+
+    return sec_re.sub(_patch, section), n
+
+
 def _assemble_report_python(
     scratchpad: Path, project_root: str
 ) -> bool:
@@ -2145,6 +2210,25 @@ def _assemble_report_python(
     # ghost-reference filter below, so a tier heading can still be repaired from
     # its canonical title even if the remediation order will not cite it.
     id_to_title = {r["id"]: r["title"] for r in finding_rows}
+
+    # Canonical report-ID -> LOCATION map from the Master Finding Index, used to
+    # recover tier-writer location corruption (a real finding whose body
+    # `**Location**` was overwritten with a non-existent path). Column-drift
+    # tolerant: pick the first index cell that looks like a source location.
+    id_to_location: dict[str, str] = {}
+    for _line in index_scope.splitlines():
+        if not _line.strip().startswith("|"):
+            continue
+        _cells = [c.strip() for c in _line.strip().strip("|").split("|")]
+        if not _cells:
+            continue
+        _idm = re.match(r"\[?\*?\*?([CHMLI]-\d+)\*?\*?\]?$", _cells[0])
+        if not _idm:
+            continue
+        for _c in _cells[1:]:
+            if re.search(r"\.(?:sol|rs|go|move|vy|cairo)\b|:L\d", _c):
+                id_to_location[_idm.group(1)] = _c
+                break
 
     # --- Ghost-reference guard (assembler bug fix) ---------------------------
     # The Master Finding Index can list a report ID (e.g. M-18) that has NO
@@ -2288,6 +2372,21 @@ def _assemble_report_python(
     low_section = _finalize_report_tier_section(low_section, id_to_title)
     info_section = _finalize_report_tier_section(info_section, id_to_title)
 
+    # Recover tier-writer LOCATION corruption against the validated index (a real
+    # finding whose body location was overwritten with a non-existent path).
+    crit_section, _n1 = _recover_tier_locations(crit_section, id_to_location, project_root)
+    high_section, _n2 = _recover_tier_locations(high_section, id_to_location, project_root)
+    medium_clean, _n3 = _recover_tier_locations(medium_clean, id_to_location, project_root)
+    low_section, _n4 = _recover_tier_locations(low_section, id_to_location, project_root)
+    info_section, _n5 = _recover_tier_locations(info_section, id_to_location, project_root)
+    _loc_recovered = _n1 + _n2 + _n3 + _n4 + _n5
+    if _loc_recovered:
+        log.warning(
+            "[report_assemble] recovered %d body location(s) corrupted by the tier "
+            "writer — replaced with the validated report_index location",
+            _loc_recovered,
+        )
+
     # --- Assemble per ~/.claude/rules/report-template.md ---------------------
     auditor = header_info.get("auditor", "Automated Security Analysis (Plamen V2)")
     scope = header_info.get("scope", project_root)
@@ -2384,6 +2483,29 @@ def _assemble_report_python(
     # never leak into the client-facing report. Keep UNVERIFIED/CONTESTED prose.
     body = re.sub(r"\s*\[REPORT-BLOCKED[^\]]*\]\s*", " ", body, flags=re.IGNORECASE)
     body = re.sub(r"[ \t]{2,}", " ", body)
+
+    # --- Material-harm body floor: DELIBERATELY NOT APPLIED HERE -------------
+    # The floor must run AFTER the LLM `report_disposition` phase produces its
+    # (richer, recall-safe) disposition.md, executed by the Python `report_floor`
+    # phase. Previously this assembler called write_disposition_md() (the keyword
+    # classifier) + enforce_material_harm_floor() inline, which:
+    #   (1) pre-created disposition.md with the WEAK keyword classification
+    #       BEFORE the LLM phase ran, and
+    #   (2) physically relocated body sections at assemble time.
+    # Consequence: the LLM report_disposition phase's gate artifact already
+    # existed (>=100 bytes) so its gate passed even when the LLM produced
+    # nothing, the keyword floor's relocations were already applied, and the
+    # later report_floor pass was an idempotent no-op — so the keyword classifier
+    # won EVERY run and the LLM disposition was structurally dead. We now leave
+    # the assembled body un-floored; report_disposition (LLM) writes the
+    # disposition, then report_floor (Python) applies it. Recall-safe + haltless
+    # is preserved by report_floor's keyword fallback when the LLM phase is
+    # absent/empty.
+
+    # Reconcile the Executive Summary prose count to the `## Summary` table
+    # (idempotent no-op here since both derive from the same counts, but keeps
+    # the two in sync if any body pass above ever perturbs the table).
+    body = _reconcile_exec_summary_count(body)
 
     # --- Write outputs -------------------------------------------------------
     try:
@@ -2482,7 +2604,7 @@ _DEDUP_ANCHOR_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{3,})\b")
 # Antonym pairs that signal OPPOSITE fixes (e.g. inflow vs outflow accounting).
 # When the two fix texts each contain a different member of the same pair, the
 # same-fix gate is BLOCKED even at high lexical overlap — they touch the same
-# topic but require divergent code changes (the totalTitanXDistributed case).
+# topic but require divergent code changes (e.g. a missing-accumulator-update case).
 _DEDUP_FIX_ANTONYMS = (
     frozenset({"inflow", "outflow"}),
     frozenset({"deposit", "withdraw"}),
@@ -2562,6 +2684,15 @@ def _dedup_report_sections(body: str) -> list[dict]:
         section = (body or "")[hm.start():end]
         rid = _normalize_report_id(hm.group(2))
         locs = {m.group(0).strip("`") for m in _DEDUP_LOCATION_TOKEN_RE.finditer(section)}
+        # Source files named in the **Location** field (with OR without :Lnn),
+        # normalized to basename — the same-site signal for the title/root-cause
+        # merge path. Scoped to the Location field (not the whole section) so a
+        # contract merely referenced in passing in the Description does not
+        # create a spurious same-file link.
+        loc_field_m = re.search(
+            r"(?is)\*\*Location\*\*\s*:?(.*?)(?:\n\*\*[A-Z]|\Z)", section
+        )
+        files = _dedup_location_files(loc_field_m.group(1) if loc_field_m else "")
         pocs = set(_DEDUP_POC_FN_RE.findall(section))
         impacts = set()
         impact_block = re.search(
@@ -2601,6 +2732,7 @@ def _dedup_report_sections(body: str) -> list[dict]:
             "section": section,
             "title": title,
             "locations": locs,
+            "files": files,
             "pocs": pocs,
             "impacts": impacts,
             "fix_text": fix_text,
@@ -2672,25 +2804,242 @@ _DEDUP_AGGREGATE_SUPPRESS_THRESHOLD = 6
 _DEDUP_SAME_FIX_JACCARD = 0.5
 _DEDUP_SAME_FIX_MIN_TERMS = 3
 
+# Same-ROOT-CAUSE recall layer (the load-bearing fix for the real-report inert
+# bug). Two agents finding the SAME bug at the SAME code site write SUBSTANTIVE
+# but DIFFERENTLY-WORDED Recommendations, so Recommendation-text Jaccard is the
+# WRONG discriminator (it vetoes true dupes). The reliable "same bug" signal at
+# a shared site is the TITLE / root-cause text.
+#
+# A same-site pair MERGES (antonym-gated) when BOTH hold:
+#   1. it shares >= MIN_ANCHORS meaningful title identifiers (necessary — a
+#      single shared anchor, e.g. just the function name in "access control in
+#      pause()" vs "missing event in pause()", is two DIFFERENT bugs in one
+#      function and must stay separate), AND
+#   2. it carries a STRONG, fully-generic same-root-cause signal: a shared
+#      FUNCTION / method identifier in both titles (two findings naming the same
+#      function are almost always about the same bug).
+#
+# Why a function anchor and NOT a title-similarity threshold: real reports reuse
+# domain vocabulary heavily ("virtual", "tokens", "market", "creation"), so two
+# DIFFERENT bugs routinely share 2-3 generic topic anchors at the same site.
+# Requiring a shared FUNCTION identifier separates the true duplicate halves
+# (which name the same function) from those coincidental topic-word collisions.
+# The shared identifier must be a FUNCTION/method (camelCase lowerFirst,
+# underscore-bearing, or the method part of a dotted `Contract.method`) — NOT a
+# bare PascalCase CONTRACT name, because one contract hosts many distinct bugs
+# (two different findings naming the same contract is NOT a duplicate).
+#
+# NO-OVERFIT (Plamen Part-0): there is deliberately NO numeric title-Jaccard
+# fallback. Any such cut-off would have to be calibrated to a particular report's
+# pair overlaps (sit between that report's highest false-pair overlap and lowest
+# true-pair overlap) — i.e. fit to one codebase's findings, not a general method.
+# The function-anchor signal is a pure code-shape property with no tuned
+# constant. Same-site pairs that share no function anchor stay UNMERGED here
+# (recall-safe — never dropped); a lower-severity pure-quality / hardening twin
+# is relocated to the appendix by the material-harm body floor, so the body still
+# avoids duplicates without a fitted threshold.
+_DEDUP_SAME_ROOTCAUSE_MIN_ANCHORS = 2
+# Identifier tokens in a finding TITLE (>= 4 chars).
+_DEDUP_CODE_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{3,})\b")
+# Dotted member access `Identifier.method` in a title — the `method` part is a
+# function anchor even when it is plain-lowercase (e.g. `Hook.validate`).
+_DEDUP_DOTTED_METHOD_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]{2,})\b")
+# Source files referenced by a finding (with OR without a :Lnn suffix, so a
+# Location like "Foo.sol (constructor)" still yields a file). Matched against the
+# Location field only, normalized to basename, so two findings at the same file
+# are recognized even when their line ranges differ or one omits line numbers.
+_DEDUP_FILE_MENTION_RE = re.compile(
+    r"[\w./\\-]*\b\w+\.(?:sol|rs|move|go|vy|cairo|fc|tact|sw|huff)\b", re.I
+)
+
+
+def _dedup_location_files(field_text: str) -> set[str]:
+    """Basenames of source files named in a finding's Location field.
+
+    Tolerant of line-number-free mentions (``Foo.sol (constructor)``) so the
+    same-file site signal survives a Location written without ``:Lnn``.
+    """
+    out: set[str] = set()
+    for m in _DEDUP_FILE_MENTION_RE.finditer(field_text or ""):
+        base = re.split(r"[\\/]", m.group(0))[-1].strip().lower()
+        if base:
+            out.add(base)
+    return out
+
+
+def _dedup_parse_loc_ranges(locs: set[str]) -> dict[str, list[tuple[int, int]]]:
+    """Map basename -> list of (start,end) line ranges from location tokens.
+
+    Tokens look like ``core/Foo.sol:120-145`` or ``Foo.sol:L88``. A single-line
+    token yields ``(n, n)``. Unparseable tokens are skipped.
+    """
+    out: dict[str, list[tuple[int, int]]] = {}
+    for loc in locs or set():
+        m = re.search(r"([\w./\\-]+\.\w+):L?(\d+)(?:-L?(\d+))?", loc or "", re.I)
+        if not m:
+            continue
+        base = re.split(r"[\\/]", m.group(1))[-1].strip().lower()
+        start = int(m.group(2))
+        end = int(m.group(3)) if m.group(3) else start
+        if end < start:
+            start, end = end, start
+        out.setdefault(base, []).append((start, end))
+    return out
+
+
+def _dedup_locations_overlap(a_locs: set[str], b_locs: set[str]) -> bool:
+    """True iff any A range and any B range cover the SAME file and intersect.
+
+    Detects same-site duplicates whose line ranges OVERLAP but are not identical
+    (e.g. ``Foo.sol:100-120`` vs ``Foo.sol:100-133``) — the common shape when two
+    agents bound the same defect slightly differently.
+    """
+    ar = _dedup_parse_loc_ranges(a_locs)
+    br = _dedup_parse_loc_ranges(b_locs)
+    for base, a_ranges in ar.items():
+        for b_start, b_end in br.get(base, []):
+            for a_start, a_end in a_ranges:
+                if a_start <= b_end and b_start <= a_end:
+                    return True
+    return False
+
+
+def _dedup_same_site(a: dict, b: dict) -> bool:
+    """True when two finding records point at the SAME code site.
+
+    Same site = overlapping line ranges in a shared file, OR a shared source
+    file named in either Location field. This is the precondition for the
+    title/root-cause MERGE path so a cross-file pair that merely shares title
+    words is NOT merged (which could HIDE a distinct finding).
+    """
+    if _dedup_locations_overlap(a.get("locations", set()), b.get("locations", set())):
+        return True
+    a_files = a.get("files") or set()
+    b_files = b.get("files") or set()
+    if a_files & b_files:
+        return True
+    # Fall back to the location-token file parts (covers records built without a
+    # precomputed `files` set).
+    a_fp = {f for f in (_dedup_file_part(l) for l in a.get("locations", set())) if f}
+    b_fp = {f for f in (_dedup_file_part(l) for l in b.get("locations", set())) if f}
+    a_base = {re.split(r"[\\/]", f)[-1] for f in a_fp}
+    b_base = {re.split(r"[\\/]", f)[-1] for f in b_fp}
+    return bool(a_base & b_base)
+
+
+def _dedup_function_anchors(title: str) -> set[str]:
+    """FUNCTION / method identifiers named in a title.
+
+    A function anchor is a lowerFirst-camelCase or underscore-bearing identifier
+    (e.g. ``collectProtocolFees``, ``_getAmountIn``) OR the ``method`` part of a
+    dotted ``Contract.method`` access (e.g. ``validate`` in ``Hook.validate``).
+    A bare PascalCase CONTRACT/type name (e.g. ``ReclaimValidationHook``) is
+    DELIBERATELY excluded: one contract hosts many distinct bugs, so two findings
+    that merely both name the same contract are NOT a duplicate. Two findings
+    naming the same FUNCTION almost always describe the same defect.
+    """
+    out: set[str] = set()
+    for m in _DEDUP_CODE_IDENT_RE.finditer(title or ""):
+        w = m.group(1)
+        first_ok = w[0].islower() or w[0] == "_"   # NOT PascalCase
+        shaped = bool(re.search(r"[a-z][A-Z]", w)) or "_" in w  # camelCase/snake
+        if first_ok and shaped:
+            out.add(w.lower())
+    for m in _DEDUP_DOTTED_METHOD_RE.finditer(title or ""):
+        out.add(m.group(1).lower())
+    return out
+
+
+def _dedup_same_root_cause_ok(a: dict, b: dict) -> tuple[bool, str]:
+    """Title/root-cause same-bug signal for SAME-SITE pairs (antonym-gated upstream).
+
+    Returns (ok, reason). True ONLY when the two findings sit at the same site
+    AND their titles indicate the SAME root cause under BOTH:
+      1. >= MIN_ANCHORS shared meaningful title anchors (necessary — one shared
+         anchor is just a co-located function name, i.e. a different bug), AND
+      2. a STRONG, fully-generic signal: a shared FUNCTION / method identifier
+         in both titles (two findings naming the same function are almost always
+         the same defect). PascalCase contract/type names are excluded — one
+         contract hosts many distinct bugs.
+
+    The shared-function signal is a code-shape property, not a constant tuned to
+    any one codebase. There is no numeric title-similarity threshold: a tuned
+    title-Jaccard cut-off would be fit to a specific report's pair overlaps
+    (Plamen Part-0 no-overfit). Same-site pairs that share NO function anchor are
+    left UNMERGED here; they are kept separate (recall-safe — never dropped), and
+    a lower-severity pure-quality / hardening twin is relocated to the appendix by
+    the material-harm body floor, so the body still avoids duplicates without a
+    fitted constant.
+    """
+    if not _dedup_same_site(a, b):
+        return (False, "not-same-site")
+    shared_anchors = a.get("anchors", set()) & b.get("anchors", set())
+    if len(shared_anchors) < _DEDUP_SAME_ROOTCAUSE_MIN_ANCHORS:
+        return (False, f"weak-title (shared-anchors={len(shared_anchors)}<{_DEDUP_SAME_ROOTCAUSE_MIN_ANCHORS})")
+    shared_fn = _dedup_function_anchors(a.get("title", "")) & _dedup_function_anchors(b.get("title", ""))
+    if shared_fn:
+        return (True, f"same-root-cause (shared function={sorted(shared_fn)})")
+    return (False, f"weak-title (anchors={len(shared_anchors)}, no-shared-function)")
+
 
 def _dedup_same_fix_ok(a: dict, b: dict) -> tuple[bool, str]:
-    """Precision gate: do these two findings require the SAME code fix?
+    """Precision gate: do these two findings describe the SAME bug / same fix?
 
-    Returns (ok, reason). True ONLY when the Recommendation texts are
-    substantively present, overlap at/above the same-fix Jaccard, and carry no
-    antonym (opposite-direction) conflict. This is the adjudication layer that
-    authorizes a weak-signal cross-tier MERGE without an LLM call: a false
-    positive here HIDES a finding (worse than a duplicate), so the gate is
-    deliberately strict and defaults to NOT-OK on any ambiguity.
+    Returns (ok, reason). True when a same-site pair carries a same-root-cause
+    title signal OR a strongly-overlapping Recommendation, and carries NO
+    antonym (opposite-direction) conflict. A false positive here HIDES a finding
+    (worse than a duplicate), so the gate defaults to NOT-OK on ambiguity.
+
+    Ordering of acceptance paths (all under the hoisted antonym veto):
+      1. **Same-root-cause via TITLE** (`_dedup_same_root_cause_ok`) — the
+         load-bearing path for genuine duplicate halves found by two DIFFERENT
+         agents. Such halves write SUBSTANTIVE but DIFFERENTLY-WORDED
+         Recommendations, so Recommendation Jaccard < floor vetoes them; the
+         reliable signal is a shared FUNCTION identifier at a shared code site.
+         Requires same-site + >= MIN_ANCHORS shared title anchors + a shared
+         function/method name in both titles (a generic code-shape signal, no
+         tuned constant); a single shared anchor (just a function name) is NOT
+         enough, so two different bugs in one function stay separate.
+      2. **Identical-location + thin Recommendation** (legacy) — exact location
+         token overlap with a too-thin fix text to discriminate.
+      3. **Recommendation-text Jaccard** (legacy) — both fixes substantive and
+         lexically overlapping at/above the same-fix Jaccard.
     """
     fa, fb = a.get("fix_text", ""), b.get("fix_text", "")
+    # Hoisted antonym (opposite-direction) veto — applies to EVERY acceptance
+    # path. Falls back to Description prose when a fix text is absent so a
+    # same-site opposite-direction pair (e.g. increment-inflow vs
+    # decrement-outflow) is rejected before any same-bug path can fire.
+    ax = fa or a.get("desc_text", "")
+    bx = fb or b.get("desc_text", "")
+    if _dedup_fix_antonym_conflict(ax, bx):
+        return (False, "antonym-conflict (opposite-direction fix)")
+
+    # Path 1: same-root-cause via title at a shared code site. This is the fix
+    # for the real-report inert bug — true duplicate halves carry substantive
+    # but divergent Recommendation text, so the Recommendation-Jaccard gate below
+    # would (wrongly) veto them. Reading the root cause from the title + shared
+    # anchors recovers the merge while keeping different-bug pairs separate.
+    rc_ok, rc_reason = _dedup_same_root_cause_ok(a, b)
+    if rc_ok:
+        return (True, rc_reason)
+
+    # Path 2 (legacy): exact-location overlap with a thin/absent Recommendation,
+    # where the location overlap is itself the authoritative same-root-cause
+    # signal. (Substantive recs do NOT short-circuit here — they fall to Path 3.)
+    if a.get("locations") and b.get("locations") and (a["locations"] & b["locations"]):
+        ta0, tb0 = _dedup_fix_terms(fa), _dedup_fix_terms(fb)
+        thin = (len(ta0) < _DEDUP_SAME_FIX_MIN_TERMS
+                or len(tb0) < _DEDUP_SAME_FIX_MIN_TERMS)
+        if thin:
+            return (True, "same-fix (identical-location cross-tier)")
+
+    # Path 3 (legacy): Recommendation-text Jaccard.
     if not fa or not fb:
         return (False, "no-recommendation-text")
     ta, tb = _dedup_fix_terms(fa), _dedup_fix_terms(fb)
     if len(ta) < _DEDUP_SAME_FIX_MIN_TERMS or len(tb) < _DEDUP_SAME_FIX_MIN_TERMS:
         return (False, "fix-text-too-thin")
-    if _dedup_fix_antonym_conflict(fa, fb):
-        return (False, "antonym-conflict (opposite-direction fix)")
     jac = _dedup_fix_jaccard(fa, fb)
     if jac < _DEDUP_SAME_FIX_JACCARD:
         return (False, f"fix-jaccard={jac:.2f}<{_DEDUP_SAME_FIX_JACCARD}")
@@ -2762,7 +3111,9 @@ def _dedup_report_candidate_pairs(
             a_files = {f for f in (_dedup_file_part(l) for l in a["locations"]) if f}
             b_files = {f for f in (_dedup_file_part(l) for l in b["locations"]) if f}
             same_file = bool(a_files & b_files)
-            if (shared_loc or shared_anchor or same_file) and "source-id-subset" not in signals:
+            if ((shared_loc or shared_anchor or same_file)
+                    and "source-id-subset" not in signals
+                    and not agg):
                 ok, reason = _dedup_same_fix_ok(a, b)
                 if ok:
                     site = ("loc" if shared_loc
@@ -2785,14 +3136,46 @@ def _dedup_report_candidate_pairs(
     return pairs
 
 
-def _dedup_data_loss_gate(original: str, deduped: str) -> list[str]:
+def _impact_block_text(text: str) -> str:
+    """Concatenate just the `**Impact**` blocks of a report (the Impact line plus
+    its bullets, up to the next bold field / heading / horizontal rule). Used to
+    scope the data-loss bullet check to IMPACT bullets only — the bullets that
+    actually carry severity-relevant signal — when the candidate transform (the
+    QO retabulation) intentionally compacts a cosmetic finding's verbose
+    Recommendation/Evidence/Description bullets into a one-line table row."""
+    out: list[str] = []
+    capturing = False
+    for ln in text.splitlines():
+        if re.match(r"\s*\*\*Impact\*\*", ln, re.I):
+            capturing = True
+            out.append(ln)
+            continue
+        if capturing:
+            # stop at the next bold field, heading, or horizontal rule
+            if re.match(r"\s*(?:\*\*[A-Za-z][^*]*\*\*\s*:|#{1,6}\s|---)", ln):
+                capturing = False
+                continue
+            out.append(ln)
+    return "\n".join(out)
+
+
+def _dedup_data_loss_gate(original: str, deduped: str,
+                          impact_only: bool = False) -> list[str]:
     """Mechanical zero-data-loss gate. Returns a list of LOST items (empty=ok).
 
-    Every Location token, Impact bullet, PoC test-id, and report-ID heading in
-    the ORIGINAL must still appear somewhere in the DEDUPED output. Merged
-    findings renumber survivors, so we do NOT require the absorbed ID heading to
-    survive — only its CONTENT (locations/impacts/pocs). The report-ID dimension
-    is checked via the dedup mapping separately by the caller.
+    Every Location token, PoC test-id, and bullet in the ORIGINAL must still
+    appear somewhere in the DEDUPED output. Merged findings renumber survivors,
+    so we do NOT require the absorbed ID heading to survive — only its CONTENT
+    (locations/impacts/pocs). The report-ID dimension is checked via the dedup
+    mapping separately by the caller.
+
+    `impact_only=True` scopes the BULLET check to `**Impact**`-block bullets
+    only. The merge path couples ALL absorbed bullets into the survivor (no
+    legitimate loss), so it keeps the strict whole-document bullet check. The QO
+    retabulation, by design, drops a cosmetic finding's Recommendation/Evidence
+    prose into a one-line row — those bullets are not severity-bearing and must
+    not be counted as data loss (the security-signal guard, not this gate,
+    protects real Low findings from being retabulated).
     """
     lost: list[str] = []
     orig_locs = {m.group(0).strip("`") for m in _DEDUP_LOCATION_TOKEN_RE.finditer(original)}
@@ -2805,14 +3188,15 @@ def _dedup_data_loss_gate(original: str, deduped: str) -> list[str]:
     for poc in orig_pocs:
         if poc not in ded_pocs:
             lost.append(f"poc:{poc}")
-    # Impact bullets: compare normalized bullet text presence.
-    def _norm_bullets(text: str) -> set[str]:
-        return {
-            re.sub(r"\s+", " ", m.group(1)).strip().lower()
-            for m in _DEDUP_IMPACT_BULLET_RE.finditer(text)
-        }
-    orig_b = _norm_bullets(original)
-    ded_normalized = re.sub(r"\s+", " ", deduped).lower()
+    # Bullet presence: normalize whitespace + the retab's pipe-escape (`|`->`/`,
+    # applied identically to both sides so a literal `|` in an original bullet is
+    # not a phantom loss) before the containment check.
+    def _norm(s: str) -> str:
+        return re.sub(r"\s+", " ", s).strip().lower().replace("|", "/")
+
+    bullet_src = _impact_block_text(original) if impact_only else original
+    orig_b = {_norm(m.group(1)) for m in _DEDUP_IMPACT_BULLET_RE.finditer(bullet_src)}
+    ded_normalized = _norm(deduped)
     for bullet in orig_b:
         if bullet and bullet not in ded_normalized:
             lost.append(f"impact:{bullet[:60]}")
@@ -3048,6 +3432,488 @@ def _append_quality_observation_rows(
     return text.rstrip("\n") + section + "\n"
 
 
+# =========================================================================
+# Material-harm body floor — mechanical enforcement (the load-bearing part)
+# =========================================================================
+#
+# Policy + recall-safety contract live in plamen_parsers.classify_body_or_appendix
+# and ~/.plamen/rules/{report-template.md,phase6-report-prompts.md}. Here we:
+#   1. WRITE `disposition.md` (report-ID keyed) deterministically from the
+#      bounded ledgers report-index already uses.
+#   2. ENFORCE it on the assembled report: any APPENDIX id that still has a
+#      `### [X-NN]` body section is RELOCATED to an Appendix table row — never
+#      dropped. A missing/empty disposition is a no-op (degrade to body).
+#
+# Prior soft LLM rules were ignored, so the enforcement is driver-mechanical.
+
+_FLOOR_SEV_WORD = {
+    "C": "Critical", "H": "High", "M": "Medium", "L": "Low", "I": "Informational",
+}
+
+_FLOOR_APPENDIX_HEADING = "## Appendix C: Quality & Hardening Observations"
+
+
+def _report_id_title_map(scratchpad: Path) -> dict[str, str]:
+    """Map report-ID -> client title from report_index.md Master Finding Index."""
+    p = scratchpad / "report_index.md"
+    if not p.exists():
+        return {}
+    try:
+        txt = _llm_norm(p.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    scope = _extract_h2_section(txt, "Master Finding Index") or txt
+    out: dict[str, str] = {}
+    for m in re.finditer(
+        r"^\|\s*\[?\*?\*?([CHMLI]-\d+)\*?\*?\]?\s*\|\s*([^|]+?)\s*\|",
+        scope, re.MULTILINE,
+    ):
+        rid = m.group(1).upper()
+        if rid not in out:
+            out[rid] = _sanitize_client_title(m.group(2).strip())
+    return out
+
+
+def write_disposition_md(scratchpad: Path) -> int:
+    """Write `disposition.md` (report-ID keyed BODY/APPENDIX classification).
+
+    ALWAYS-RUN classification. Sources the ID set from the same bounded
+    ledgers report-index uses (report_index.md assignments, which are derived
+    from verification_queue.md / verify_*.md / finding_mapping.md), and the
+    per-finding harm/verdict from the mapped verify_*.md file(s). Each row:
+
+        | REPORT_ID | BODY|APPENDIX | <one-line reason> |
+
+    Returns the number of rows written. Defensive: returns 0 (and writes
+    nothing) when there are no report-ID assignments yet, so the caller
+    degrades to current behaviour. Never raises.
+    """
+    try:
+        assignments = parse_report_index_assignments(scratchpad)
+    except Exception:
+        assignments = []
+    if not assignments:
+        return 0
+    title_map = _report_id_title_map(scratchpad)
+    rows_out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for a in assignments:
+        rid = (a.get("report_id") or "").strip().upper()
+        if not rid or rid in seen:
+            continue
+        seen.add(rid)
+        internal = a.get("finding_id") or ""
+        vtxt = ""
+        for piece in re.split(r"[+,\s]+", internal):
+            piece = piece.strip()
+            if not piece:
+                continue
+            try:
+                vp = _verify_file_for_id(scratchpad, piece)
+                if vp.exists():
+                    vtxt += "\n" + _llm_norm(
+                        vp.read_text(encoding="utf-8", errors="replace")
+                    )
+            except Exception:
+                pass
+        title = title_map.get(rid) or _first_heading_title(vtxt) or "Finding"
+        harm = _field_from_markdown(
+            vtxt, ("Material Harm", "Impact", "Description")
+        ) or ""
+        try:
+            status = _verifier_status_from_text(vtxt)
+        except Exception:
+            status = ""
+        sev = _FLOOR_SEV_WORD.get(rid[0], "")
+        try:
+            disp, reason = classify_body_or_appendix(title, sev, harm, status)
+        except Exception:
+            disp, reason = ("BODY", "default (classifier error — recall-safe)")
+        rows_out.append((rid, disp, reason))
+
+    def _sort_key(r: tuple[str, str, str]) -> tuple[int, int]:
+        rid = r[0]
+        prio = {"C": 0, "H": 1, "M": 2, "L": 3, "I": 4}.get(rid[0], 9)
+        num = re.findall(r"\d+", rid)
+        return (prio, int(num[0]) if num else 0)
+
+    rows_out.sort(key=_sort_key)
+    n_appendix = sum(1 for _r, d, _x in rows_out if d == "APPENDIX")
+    lines = [
+        "# Finding Disposition (BODY / APPENDIX)",
+        "",
+        "Driver-computed material-harm body floor. APPENDIX = ZERO security "
+        "consequence (pure quality / hardening / observability / style). BODY = "
+        "any real security consequence, at any severity. Recall-safe default: "
+        "BODY. This is mechanically enforced on the assembled report.",
+        "",
+        f"- Total: {len(rows_out)} | BODY: {len(rows_out) - n_appendix} | "
+        f"APPENDIX: {n_appendix}",
+        "",
+        "| Report ID | Disposition | Reason |",
+        "|-----------|-------------|--------|",
+    ]
+    for rid, disp, reason in rows_out:
+        reason_cell = re.sub(r"\s+", " ", reason).replace("|", "/").strip()
+        lines.append(f"| {rid} | {disp} | {reason_cell} |")
+    try:
+        (scratchpad / "disposition.md").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+    except Exception as exc:
+        log.warning(f"[disposition] write failed: {exc!r}")
+        return 0
+    log.info(
+        f"[disposition] wrote disposition.md ({len(rows_out)} finding(s), "
+        f"{n_appendix} APPENDIX)"
+    )
+    return len(rows_out)
+
+
+def _strip_floor_id_references(text: str, moved_ids: set[str]) -> str:
+    """Remove dangling references to relocated IDs from summary-style sections.
+
+    Drops Executive-Summary bullet lines (`- **X-NN** — …`) and Priority
+    Remediation Order numbered lines (`N. **X-NN** — …`) that cite a relocated
+    finding, then renumbers the remediation list. Leaves everything else intact.
+    """
+    if not moved_ids:
+        return text
+    out_lines: list[str] = []
+    rem_counter = 0
+    in_remediation = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("## "):
+            in_remediation = bool(
+                re.match(r"##\s+Priority Remediation Order", s, re.IGNORECASE)
+            )
+        # Executive-summary / generic bullet citing a moved id.
+        bm = re.match(r"^\s*[-*]\s+\*\*([CHMLI]-\d+)\*\*", line)
+        if bm and bm.group(1).upper() in moved_ids:
+            continue
+        # Priority Remediation Order numbered line citing a moved id.
+        nm = re.match(r"^\s*\d+\.\s+\*\*([CHMLI]-\d+)\*\*\s*(.*)$", line)
+        if in_remediation and nm:
+            if nm.group(1).upper() in moved_ids:
+                continue
+            rem_counter += 1
+            out_lines.append(f"{rem_counter}. **{nm.group(1)}** {nm.group(2)}".rstrip())
+            continue
+        out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+def _decrement_summary_counts(text: str, moved_by_sev: dict[str, int]) -> str:
+    """Decrement the report's `## Summary` counts table for relocated findings.
+
+    `moved_by_sev` maps a severity word (``Critical`` / ``High`` / ``Medium`` /
+    ``Low`` / ``Informational``) to the number of findings relocated out of the
+    body at that severity. Each matching `| Severity | N |` row in the FIRST
+    `## Summary` table has its count reduced by that many (floored at 0). The
+    delivered report's Summary then matches its remaining body sections.
+
+    Recall-safe + idempotent: a second floor pass relocates nothing, so
+    `moved_by_sev` is empty and this is a no-op. Never raises — on any anomaly it
+    returns the input unchanged.
+    """
+    if not moved_by_sev:
+        return text
+    try:
+        norm = {
+            re.sub(r"[^a-z]", "", k.lower()): v
+            for k, v in moved_by_sev.items()
+            if v
+        }
+        if not norm:
+            return text
+
+        # The `Total` row is decremented by the SUM of all per-severity moves so
+        # the table stays internally consistent (its parts keep summing to the
+        # total). Without this the per-severity rows drop but `**Total**` stays
+        # stale, producing a self-contradictory Summary in the delivered report.
+        total_dec = sum(norm.values())
+
+        # Tolerate optional markdown emphasis (`**Total**`, `**92**`) around both
+        # the label and the count cell so the Total/bolded rows are matched too.
+        row_re = re.compile(
+            r"^(\s*\|\s*)(\**)([A-Za-z]+)(\**)(\s*\|\s*)(\**)(\d+)(\**)(\s*\|.*)$"
+        )
+        out: list[str] = []
+        in_summary = False
+        for line in text.splitlines():
+            s = line.strip()
+            if re.match(r"^##+\s+Summary\b", s, re.IGNORECASE):
+                in_summary = True
+                out.append(line)
+                continue
+            if in_summary and s.startswith("## "):
+                in_summary = False  # left the Summary section
+            if in_summary:
+                m = row_re.match(line)
+                if m:
+                    key = re.sub(r"[^a-z]", "", m.group(3).lower())
+                    dec = total_dec if key == "total" else norm.get(key, 0)
+                    if dec:
+                        newcount = max(0, int(m.group(7)) - dec)
+                        line = (
+                            f"{m.group(1)}{m.group(2)}{m.group(3)}{m.group(4)}"
+                            f"{m.group(5)}{m.group(6)}{newcount}{m.group(8)}"
+                            f"{m.group(9)}"
+                        )
+            out.append(line)
+        return "\n".join(out)
+    except Exception:
+        return text
+
+
+def _reconcile_exec_summary_count(text: str) -> str:
+    """Rewrite the Executive Summary's prose finding count to match the delivered
+    ``## Summary`` counts table.
+
+    The mechanical ``## Summary`` table is the authoritative delivered count (its
+    per-tier rows equal the body ``### [X-NN]`` sections). The Executive Summary
+    prose count (``identified **N findings**: A Critical, B High, C Medium,
+    D Low, E Informational.``) is generated ONCE at assembly time from the
+    (pre-floor) report_index counts and is never revised. The material-harm
+    floor then relocates pure-quality body findings into Appendix C and
+    decrements the ``## Summary`` table (see ``_decrement_summary_counts``),
+    leaving the prose count stale and contradicting the delivered table.
+
+    This reconciles the prose count to the current ``## Summary`` table so the
+    two agree. It does NOT touch the (mechanically-correct) ``## Summary`` table.
+
+    Deterministic, idempotent (a second pass finds matching numbers and is a
+    no-op), and unparseable-safe: if the ``## Summary`` table or the
+    exec-summary count line cannot be fully parsed, the text is returned
+    unchanged.
+    """
+    if not text:
+        return text
+    try:
+        # 1. Locate the FIRST `## Summary` (or `## Summary Counts`) table. The
+        #    `\bSummary` anchor deliberately does NOT match `## Executive
+        #    Summary` (word after `## ` there is `Executive`).
+        sm = re.search(r"(?im)^##+[ \t]+Summary(?:[ \t]+Counts)?\b", text)
+        if not sm:
+            return text
+        after = sm.end()
+        nxt = re.search(r"(?m)^##[ \t]+", text[after:])
+        summary_region = text[after: after + nxt.start()] if nxt else text[after:]
+
+        counts: dict[str, int] = {}
+        for sev in ("Critical", "High", "Medium", "Low", "Informational"):
+            rm = re.search(
+                rf"(?im)^\s*\|\s*\**{sev}\**\s*\|\s*\**(\d+)\**\s*\|",
+                summary_region,
+            )
+            if rm:
+                counts[sev] = int(rm.group(1))
+        if len(counts) < 5:
+            # Incomplete table — do not risk a partial rewrite.
+            return text
+        total = sum(counts.values())
+
+        # 2. Rewrite the exec-summary count line. Matches the assembler-generated
+        #    prose exactly, tolerating optional bold markers and singular
+        #    "finding".
+        pat = re.compile(
+            r"(identified\s+\**)(\d+)(\s+findings?\**\s*:\s*)"
+            r"(\d+)(\s+Critical\s*,\s*)"
+            r"(\d+)(\s+High\s*,\s*)"
+            r"(\d+)(\s+Medium\s*,\s*)"
+            r"(\d+)(\s+Low\s*,\s*)"
+            r"(\d+)(\s+Informational)",
+            re.IGNORECASE,
+        )
+
+        def _sub(m: "re.Match[str]") -> str:
+            return (
+                f"{m.group(1)}{total}{m.group(3)}"
+                f"{counts['Critical']}{m.group(5)}"
+                f"{counts['High']}{m.group(7)}"
+                f"{counts['Medium']}{m.group(9)}"
+                f"{counts['Low']}{m.group(11)}"
+                f"{counts['Informational']}{m.group(13)}"
+            )
+
+        new_text, n = pat.subn(_sub, text, count=1)
+        return new_text if n else text
+    except Exception:
+        return text
+
+
+def enforce_material_harm_floor(
+    audit_text: str, disposition: dict[str, tuple[str, str]]
+) -> tuple[str, list[tuple[str, str, str, str, str]]]:
+    """Relocate APPENDIX-dispositioned body sections to an Appendix table.
+
+    The load-bearing backstop. For every report ID dispositioned APPENDIX that
+    STILL has a `### [X-NN]` (or `## [X-NN]`) finding section in the report
+    BODY (the region before the first `## Appendix` heading):
+      - remove the standalone section, and
+      - add one row to `## Appendix C: Quality & Hardening Observations`.
+
+    GUARANTEES (recall-safe):
+      (a) after the move the body contains ONLY BODY ids;
+      (b) every APPENDIX id with a body section appears as exactly one Appendix
+          table row — never dropped;
+      (c) a body section for an APPENDIX id is moved (stripped from body, added
+          as a row).
+
+    Degrades to a no-op (returns the input unchanged) when `audit_text` is
+    empty, `disposition` is empty, or no APPENDIX id has a body section.
+    Idempotent: a second pass finds no APPENDIX `###` sections and is a no-op.
+
+    Returns ``(new_text, moved_rows)`` where each moved row is
+    ``(report_id, severity, title, location, reason)``.
+    """
+    if not audit_text or not disposition:
+        return audit_text, []
+    appendix = {
+        rid: reason
+        for rid, (disp, reason) in disposition.items()
+        if disp == "APPENDIX"
+    }
+    if not appendix:
+        return audit_text, []
+
+    # Operate only on the BODY region (before the first appendix heading) so we
+    # never touch existing appendix tables (A/B/C) or their rows.
+    am = re.search(r"(?im)^##\s+Appendix\b", audit_text)
+    if am:
+        head, tail = audit_text[: am.start()], audit_text[am.start():]
+    else:
+        head, tail = audit_text, ""
+
+    records = _dedup_report_sections(head)
+    moved_rows: list[tuple[str, str, str, str, str]] = []
+    blocks_to_remove: list[str] = []
+    moved_ids: set[str] = set()
+    for rec in records:
+        rid = (rec["id"] or "").upper()
+        if rid not in appendix:
+            continue
+        own = _finding_own_block(rec["section"])
+        sev = _field_from_markdown(own, ("Severity",)) or _FLOOR_SEV_WORD.get(
+            rid[0], ""
+        )
+        sev = re.sub(r"[^A-Za-z].*$", "", sev.strip()) or _FLOOR_SEV_WORD.get(
+            rid[0], ""
+        )
+        title = re.sub(r"\s+", " ", rec.get("title") or "Finding").strip()
+        locs = sorted(rec.get("locations") or [])
+        loc_cell = ", ".join(f"`{l}`" for l in locs) if locs else ""
+        reason = appendix.get(rid) or "pure quality/hardening (no demonstrated harm)"
+        moved_rows.append((rid, sev, title, loc_cell, reason))
+        blocks_to_remove.append(own)
+        moved_ids.add(rid)
+
+    if not moved_rows:
+        return audit_text, []
+
+    for own in sorted(blocks_to_remove, key=lambda s: -len(s)):
+        idx = head.find(own)
+        if idx < 0:
+            continue
+        head = head[:idx] + head[idx + len(own):]
+
+    head = _strip_floor_id_references(head, moved_ids)
+    # Decrement the `## Summary` counts table so the delivered report's summary
+    # matches its remaining body sections (recall-safe: moved findings are still
+    # accounted for in Appendix C below; idempotent on re-run).
+    moved_by_sev: dict[str, int] = {}
+    for _rid, _sev, _t, _l, _r in moved_rows:
+        key = (_sev or "").strip() or _FLOOR_SEV_WORD.get(_rid[0], "")
+        if key:
+            moved_by_sev[key] = moved_by_sev.get(key, 0) + 1
+    head = _decrement_summary_counts(head, moved_by_sev)
+    head = re.sub(r"\n{4,}", "\n\n\n", head).rstrip("\n")
+
+    # Build / extend the Appendix C table.
+    appendix_header = (
+        "| ID | Severity | Title | Location | Reason |\n"
+        "|----|----------|-------|----------|--------|\n"
+    )
+
+    def _fmt(r: tuple[str, str, str, str, str]) -> str:
+        rid, sev, title, loc, reason = r
+        title = re.sub(r"\s+", " ", title).replace("|", "/").strip()
+        reason = re.sub(r"\s+", " ", reason).replace("|", "/").strip()
+        loc = (loc or "").replace("|", "/").strip()
+        return f"| {rid} | {sev} | {title} | {loc} | {reason} |"
+
+    body_rows = "\n".join(_fmt(r) for r in moved_rows)
+    intro = (
+        "_The items below are quality / hardening / observability observations "
+        "with no demonstrated security consequence. They were routed out of the "
+        "client body to keep it focused on findings with material harm; none was "
+        "dropped._"
+    )
+
+    if _FLOOR_APPENDIX_HEADING.split(":", 1)[0] in tail or "Quality & Hardening Observations" in tail:
+        # Extend an existing Appendix C table (idempotent re-runs / merges).
+        pattern = re.compile(
+            r"(?ims)^##\s+Appendix C:[^\n]*\n(?:.*?)(?=^##\s|\Z)"
+        )
+        m = pattern.search(tail)
+        if m:
+            sect = m.group(0).rstrip("\n")
+            if "| ID | Severity |" not in sect:
+                sect = sect + "\n\n" + appendix_header.rstrip("\n")
+            sect = sect + "\n" + body_rows + "\n"
+            tail = tail[: m.start()] + sect + tail[m.end():]
+        else:
+            tail = tail.rstrip("\n") + "\n\n" + _FLOOR_APPENDIX_HEADING + "\n\n" + intro + "\n\n" + appendix_header + body_rows + "\n"
+    else:
+        tail = tail.rstrip("\n") + "\n\n---\n\n" + _FLOOR_APPENDIX_HEADING + "\n\n" + intro + "\n\n" + appendix_header + body_rows + "\n"
+
+    new_text = head.rstrip("\n") + "\n\n" + tail.lstrip("\n")
+    new_text = re.sub(r"\n{4,}", "\n\n\n", new_text)
+    # Sync the Executive Summary prose count to the just-decremented `## Summary`
+    # table so the delivered report's headline finding count matches its body.
+    new_text = _reconcile_exec_summary_count(new_text)
+    if not new_text.endswith("\n"):
+        new_text += "\n"
+    return new_text, moved_rows
+
+
+def apply_material_harm_floor(scratchpad: Path, project_root: str) -> dict:
+    """Read disposition.md + AUDIT_REPORT.md, enforce the floor, rewrite report.
+
+    Thin file-IO wrapper around `enforce_material_harm_floor`. Haltless: any
+    missing file or parse failure is a no-op. Returns
+    ``{"moved": N, "ids": [...]}``.
+    """
+    pr = Path(project_root) / "AUDIT_REPORT.md"
+    if not pr.exists():
+        return {"moved": 0, "ids": []}
+    try:
+        disposition = parse_disposition_md(scratchpad)
+    except Exception:
+        disposition = {}
+    if not disposition:
+        return {"moved": 0, "ids": []}
+    try:
+        text = pr.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {"moved": 0, "ids": []}
+    new_text, moved = enforce_material_harm_floor(text, disposition)
+    if not moved:
+        return {"moved": 0, "ids": []}
+    try:
+        pr.write_text(new_text, encoding="utf-8")
+    except Exception as exc:
+        log.warning(f"[material-harm-floor] rewrite failed: {exc!r}")
+        return {"moved": 0, "ids": []}
+    ids = [r[0] for r in moved]
+    log.info(
+        f"[material-harm-floor] relocated {len(moved)} pure-quality finding(s) "
+        f"to {_FLOOR_APPENDIX_HEADING.split(':',1)[0]}: {', '.join(ids[:10])}"
+    )
+    return {"moved": len(moved), "ids": ids}
+
+
 _REPORT_DEDUP_AGENT_ID_RE = re.compile(r"\b([CHMLI]-\d{1,3})\b")
 
 
@@ -3222,7 +4088,12 @@ def _dedup_report_python(scratchpad: Path, project_root: str) -> bool:
             # finding whose impact sub-bullets don't fit the compact QO row) would
             # otherwise VETO every good merge too. Decouple: if the QO retab loses
             # data, drop QO and keep the original as the merge base — merges still land.
-            lost_qo = _dedup_data_loss_gate(original, retab)
+            # impact_only: the QO retab intentionally compacts cosmetic
+            # Recommendation/Evidence/Description bullets into a one-line row.
+            # Only IMPACT bullets (+ locations/PoCs, always checked) are
+            # severity-bearing and must survive; the security-signal guard in
+            # _reclassify_cosmetic_low_info_to_qo already protects real findings.
+            lost_qo = _dedup_data_loss_gate(original, retab, impact_only=True)
             if lost_qo:
                 log.warning(
                     f"[report_dedup] QO retabulation is lossy ({len(lost_qo)} item(s)) — "
@@ -4083,10 +4954,16 @@ def ensure_findings_inventory_floor(scratchpad: Path) -> tuple[int, int]:
         n_sources += 1
         entries.extend(_parse_inventory_chunk(p))
 
-    # (2) Breadth analysis passes (analysis_*.md, incl. rescan/percontract) and
-    # (3) depth agent findings (depth_*_findings.md). Both use the standard
-    # `### Finding [ID]: Title` heading format parsed by _parse_depth_finding_blocks.
-    feeder_globs = ("analysis_*.md", "depth_*_findings.md")
+    # (2) Breadth analysis passes (analysis_*.md, incl. rescan/percontract),
+    # (3) depth agent findings (depth_*_findings.md), and (4) blind-spot scanner +
+    # niche findings (blind_spot_*_findings.md / niche_*_findings.md) — these last
+    # two were absent from the floor feeders, so a degraded inventory could not
+    # recover a blind-spot/niche finding (the BLIND-B3 recall leak). All use the
+    # standard `### Finding [ID]: Title` heading parsed by _parse_depth_finding_blocks.
+    feeder_globs = (
+        "analysis_*.md", "depth_*_findings.md",
+        "blind_spot_*_findings.md", "niche_*_findings.md",
+    )
     for pattern in feeder_globs:
         for p in sorted(scratchpad.glob(pattern)):
             n_sources += 1
@@ -4400,6 +5277,193 @@ def promote_niche_to_inventory(scratchpad: Path) -> tuple[int, int]:
     except Exception:
         pass
     return len(parsed), len(new_entries)
+
+
+# Blind-spot scanner finding IDs: BLIND-A1, BLIND-B3, BLIND-C5 (per-scanner
+# letter + running number), or BLIND-1. NOTE: the niche regex requires
+# digits-immediately-after-dash and would MISS the letter+digit suffix form.
+_BLIND_SPOT_HEADING_RE = re.compile(
+    r"^#{2,4}\s*Finding\s*\[\s*(?P<id>BLIND-[A-Z]?\d+)\s*\]\s*:\s*(?P<title>.+?)\s*$",
+    re.MULTILINE,
+)
+
+
+def _parse_blind_spot_findings(scratchpad: Path) -> list[dict[str, str]]:
+    """Parse blind_spot_*_findings.md into structured finding entries. Mirrors
+    `_parse_niche_findings` (same required-field guard + field extraction) but
+    matches the BLIND-* id form. Conservative: requires the standard fields near
+    the heading so methodology preambles are not mistaken for findings."""
+    entries: list[dict[str, str]] = []
+    for p in sorted(scratchpad.glob("blind_spot_*_findings.md")):
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        matches = list(_BLIND_SPOT_HEADING_RE.finditer(text))
+        for i, m in enumerate(matches):
+            start = m.start()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            block = text[start:end]
+            if not all(f"**{field}**" in block for field in _NICHE_REQUIRED_FIELDS):
+                continue
+            fid = m.group("id").strip()
+            title = m.group("title").strip()
+            sev_match = re.search(r"\*\*Severity\*\*\s*:\s*([A-Za-z]+)", block, re.IGNORECASE)
+            loc_match = re.search(
+                r"\*\*Location\*\*\s*:\s*(.+?)(?=\n\*\*|\n\n|$)", block,
+                re.IGNORECASE | re.DOTALL)
+            tag_match = re.search(
+                r"\*\*Preferred\s*Tag\*\*\s*:\s*(\[[A-Z\-]+\])", block, re.IGNORECASE)
+            desc_match = re.search(
+                r"\*\*Description\*\*\s*:\s*(.+?)(?=\n\*\*[A-Z]|\n##|\Z)", block,
+                re.IGNORECASE | re.DOTALL)
+            impact_match = re.search(
+                r"\*\*Impact\*\*\s*:\s*(.+?)(?=\n\*\*[A-Z]|\n##|\Z)", block,
+                re.IGNORECASE | re.DOTALL)
+            entries.append({
+                "source_file": p.name,
+                "source_id": fid,
+                "title": title,
+                "severity": (sev_match.group(1).strip() if sev_match else "Medium"),
+                "location": (_norm_loc(loc_match.group(1).strip()) if loc_match else "UNKNOWN"),
+                "preferred_tag": (tag_match.group(1).strip() if tag_match else "[CODE-TRACE]"),
+                "description": (_strip_md(desc_match.group(1).strip())[:1500] if desc_match else title),
+                "impact": (_strip_md(impact_match.group(1).strip())[:800]
+                           if impact_match else "Impact requires verifier confirmation."),
+                "raw_block": block,
+            })
+    return entries
+
+
+def promote_blind_spot_to_inventory(scratchpad: Path) -> tuple[int, int]:
+    """Recover LEAKED blind-spot scanner findings into findings_inventory.md.
+
+    Unlike niche findings (which never reach the inventory by design), blind-spot
+    findings (BLIND-*) normally DO reach it via the LLM inventory merge. But that
+    merge has been observed to SILENTLY DROP a scored blind-spot finding whose
+    siblings were promoted (e.g. BLIND-B3 scored 0.47, siblings B1/B2 promoted,
+    B3 vanished) — so it never reached verify/report. This is a recall leak.
+
+    This promotes ONLY the leaked ones: any BLIND-* id that is ABSENT from
+    findings_inventory.md is appended as an INV-* entry (present ones are left
+    untouched — no duplication). Idempotent via a receipt. Recall-safe:
+    append-only, never drops, never overwrites a present finding.
+
+    Call site: post-depth, alongside `promote_niche_to_inventory`.
+    Returns (parsed_count, recovered_count).
+    """
+    inventory_path = scratchpad / "findings_inventory.md"
+    if not inventory_path.exists():
+        return 0, 0
+    try:
+        inv_text = inventory_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return 0, 0
+
+    parsed = _parse_blind_spot_findings(scratchpad)
+    if not parsed:
+        return 0, 0
+
+    receipt_path = scratchpad / "blind_spot_promotion_receipt.md"
+    already_promoted: set[str] = set()
+    if receipt_path.exists():
+        try:
+            for line in receipt_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                mm = re.search(r"\b(BLIND-[A-Z]?\d+)\s*->\s*INV-\d+", line)
+                if mm:
+                    already_promoted.add(mm.group(1))
+        except Exception:
+            pass
+
+    def _already_in_inventory(bid: str) -> bool:
+        return re.search(rf"\b{re.escape(bid)}\b", inv_text) is not None
+
+    # LEAKED = a parsed BLIND id that is NOT already accounted in the inventory
+    # (as a Source ID / heading) AND not already recovered on a prior attempt.
+    missing = [
+        e for e in parsed
+        if not _already_in_inventory(e["source_id"])
+        and e["source_id"] not in already_promoted
+    ]
+    if not missing:
+        return len(parsed), 0
+
+    max_inv = 0
+    for m in re.finditer(r"\bINV-(\d+)\b", inv_text):
+        try:
+            max_inv = max(max_inv, int(m.group(1)))
+        except ValueError:
+            continue
+
+    appended_lines: list[str] = []
+    mapping_lines: list[str] = []
+    for idx, entry in enumerate(missing, start=1):
+        inv_n = max_inv + idx
+        title = entry["title"] or "Untitled blind-spot finding"
+        inv_id = _allocate_inventory_ledger_id(
+            scratchpad, preferred_id=f"INV-{inv_n:03d}",
+            owner_phase="blind_spot_promotion",
+            owning_artifact="findings_inventory.md", title=title)
+        try:
+            from plamen_parsers import id_ledger_register
+            id_ledger_register(
+                scratchpad, finding_id=inv_id, owner_phase="blind_spot_promotion",
+                owner_attempt=1, owning_artifact="findings_inventory.md", title=title)
+        except Exception as e:
+            log.debug(f"[blind_spot] ledger register skipped for {inv_id}: {e}")
+        sev = _severity_name_from_text("", {"severity": entry["severity"]})
+        appended_lines.extend([
+            f"### Finding [{inv_id}]: {title}",
+            f"**Severity**: {sev}",
+            f"**Location**: {entry['location']}",
+            f"**Preferred Tag**: {entry['preferred_tag']}",
+            f"**Source IDs**: {entry['source_id']} "
+            f"(blind-spot-recovered; LEAKED from {entry['source_file']} — "
+            "scored but dropped by the inventory merge)",
+            "**Verdict**: NEEDS_VERIFICATION",
+            f"**Root Cause**: {title}",
+            f"**Description**: {entry['description'] or title}",
+            f"**Impact**: {entry['impact']}",
+            "",
+        ])
+        mapping_lines.append(
+            f"- {entry['source_id']} -> {inv_id} ({entry['source_file']}: {title[:80]})")
+
+    section_header = (
+        "\n\n## Blind-Spot-Recovered Findings\n\n"
+        "Blind-spot scanner findings that were SCORED but silently dropped by the "
+        "inventory merge (a recall leak). Mechanically recovered so they reach the "
+        "verification queue with first-class status. Recall-safe: append-only.\n\n"
+    )
+    inventory_path.write_text(
+        inv_text.rstrip() + section_header + "\n".join(appended_lines) + "\n",
+        encoding="utf-8")
+
+    receipt_lines = [
+        "# Blind-Spot Promotion Receipt", "",
+        f"Parsed blind-spot findings: {len(parsed)}",
+        f"Already recovered (prior attempt): {len(already_promoted)}",
+        f"Newly recovered this run (LEAKED): {len(missing)}", "",
+        "## Source-to-Inventory ID Mapping", "",
+    ]
+    receipt_lines.extend(mapping_lines)
+    receipt_lines.append("")
+    if receipt_path.exists():
+        try:
+            prior = receipt_path.read_text(encoding="utf-8", errors="replace")
+            receipt_path.write_text(
+                prior.rstrip() + "\n\n## Re-Run\n\n" + "\n".join(receipt_lines),
+                encoding="utf-8")
+        except Exception:
+            receipt_path.write_text("\n".join(receipt_lines), encoding="utf-8")
+    else:
+        receipt_path.write_text("\n".join(receipt_lines), encoding="utf-8")
+
+    try:
+        _write_finding_records_from_inventory(scratchpad)
+    except Exception:
+        pass
+    return len(parsed), len(missing)
 
 
 _ATTENTION_REPAIR_MAX_ITEMS = 32

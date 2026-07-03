@@ -7,7 +7,7 @@ Light manifest. Core/Thorough keep the floor unchanged.
 
 FIX 2 — CROSS_VM_SERIALIZATION_CONFORMANCE is an EVM-SIDE skill (it audits
 Solidity that serializes OUTBOUND for a non-EVM VM, e.g. an AccountEncoder/Borsh
-packer in a bridge — the DODO gap it was built for). It must fire on an EXPLICIT
+packer in a bridge — an observed gap it was built for). It must fire on an EXPLICIT
 EVM audit (language='evm') that has non-EVM-target evidence, and must NOT fire on
 a NATIVE non-EVM audit (solana/aptos/sui/soroban) — no EVM-side serialization
 there — nor on legacy/unknown ('') runs we cannot confirm are EVM. The
@@ -136,7 +136,7 @@ def _flag_yes(sp: Path) -> None:
 
 def test_evm_with_nonevm_target_fires_cross_vm(tmp_path):
     """language='evm' + non-EVM-target evidence -> CROSS_VM DOES fire. This is the
-    EVM->non-EVM serializer case the skill exists for (the DODO AccountEncoder
+    EVM->non-EVM serializer case the skill exists for (an account-encoder
     gap it was created to close)."""
     _nonevm_manifest(tmp_path)
     _write_heuristic_evidence(tmp_path)
@@ -194,7 +194,7 @@ def test_detected_patterns_non_evm_no_overrides_heuristic_false_positive(tmp_pat
 
 def test_template_recommendations_not_a_heuristic_source(tmp_path):
     """The CROSS_VM trigger documented in template_recommendations.md must NOT
-    by itself trigger recovery (the DODO false-positive source)."""
+    by itself trigger recovery (an observed false-positive source)."""
     _nonevm_manifest(tmp_path)
     # Only template_recommendations.md carries the trigger words; no real
     # recon evidence anywhere else.
@@ -216,7 +216,7 @@ def test_template_recommendations_not_a_heuristic_source(tmp_path):
 
 def test_genuine_evm_recovery_still_happens(tmp_path):
     """detected_patterns NON_EVM_TARGET=YES + EVM audit -> recovery fires (the
-    genuine EVM->non-EVM serializer case, e.g. the DODO AccountEncoder)."""
+    genuine EVM->non-EVM serializer case, e.g. an account-encoder)."""
     _nonevm_manifest(tmp_path)
     (tmp_path / "detected_patterns.md").write_text(
         "## Detected Patterns\n\nNON_EVM_TARGET: YES\n", encoding="utf-8"

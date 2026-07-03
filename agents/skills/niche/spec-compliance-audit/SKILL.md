@@ -113,7 +113,7 @@ High when violation is silently profitable for the actor (e.g., validator
 gets block reward without performing the claimed work); Medium when it
 degrades service quality without direct economic gain.
 
-This step exists because the Irys L1 class of bug — where a validator
+This step exists because the DA-commitment class of bug — where a validator
 commits to data availability but nothing downstream samples / verifies /
 challenges the commitment — is invisible to STEP 2 (the spec says X, the
 code says X, both agree X is the contract; neither enforces X).

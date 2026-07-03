@@ -1483,7 +1483,7 @@ def _canonicalize_depth_iter_filenames(scratchpad: Path) -> list[str]:
     # new orderings), DECOMPOSE each `depth_*.md` filename: locate the
     # iteration token, lift N, treat everything else as the role, rebuild
     # canonically. A false "no iter2 artifacts" retry re-spends the whole
-    # opus depth phase (~$4 observed on the DODO audit) — same class as
+    # opus depth phase (~$4 observed on a prior audit) — same class as
     # v2.3.4's perturbation_findings canonicalization.
     #
     # `depth_da_*` / `depth_da3_*` are a SEPARATE recognized Devil's-Advocate
@@ -1540,7 +1540,7 @@ _EVIDENCE_TAG_SCORE = {
 _DEPTH_EVIDENCE_TAG_RE = DEPTH_EVIDENCE_TAG_RE
 # F2.0: permissive bracket-content capture. The old `[A-Z]{1,8}-\d+[A-Z\d-]*`
 # rejected blind-spot IDs of shape `BLIND-A-1` (the `\d+` immediately after
-# the first hyphen rejects the `A-` letter segment) — in DODO this matched
+# the first hyphen rejects the `A-` letter segment) — in a prior run this matched
 # 0/14 blind-spot findings, silently under-scoring real findings in
 # confidence. The `## Finding [...]` syntax is itself the source-of-truth
 # contract: whatever the agent put in the brackets is the ID.
@@ -2306,6 +2306,10 @@ def _phase_content_gate_issues(
         # Soft, additive phase: validator only ever returns [], so this is
         # always content-valid on resume — prevents a false resume-halt.
         return list(_validate_exploration_skeptic(scratchpad, mode))
+    if phase.name == "enumgap_exploration":
+        # Soft, additive phase (validator always returns []) — content-valid on
+        # resume so it never causes a false resume-halt.
+        return list(_validate_enumgap_exploration(scratchpad, mode))
     if phase.name == "report_assemble":
         # RESUME-3: the FC4 content re-check must be SIDE-EFFECT-FREE and
         # content-only. Do NOT run _run_report_quality_gate here (it writes
@@ -2978,7 +2982,7 @@ def _slugify_cwd_for_transcript(project_root: str) -> str:
     JSONL files at `~/.claude/projects/{slug}/{session_id}.jsonl` where
     the slug replaces path separators, the drive colon, AND spaces with
     dashes (verified empirically against
-    `~/.claude/projects/D--Programming-Web3-Contests-DODO-Crosschain-Dex-...`).
+    `~/.claude/projects/D--Programming-Web3-Contests-Example-Protocol-...`).
 
     Example: ``D:\\Programming\\X Audit\\repo`` →
     ``D--Programming-X-Audit-repo``.
@@ -3426,6 +3430,34 @@ def _is_semantic_dedup_passthrough_failure(missing: list[Any]) -> bool:
     )
 
 
+# FIX (#5): phases whose disk gate can pass on a driver pre-written
+# scaffold/placeholder rather than real completed work. The zombie-phase
+# early-complete (in `_pty_poll`) must NEVER fire for these — the existing
+# continuation-budget / timeout path owns them. chain_agent2 / chain_iter2 are
+# deliberately NOT here: they write real synthesis artifacts with no scaffold,
+# so they are exactly the idle-zombie case the recovery is meant to rescue
+# (chain_agent2 once blocked the full ~90-min LOC-scaled timeout after writing
+# all three of its artifacts).
+_ZOMBIE_SCAFFOLD_EXCLUDED_NAMES = frozenset({
+    "sc_semantic_dedup", "semantic_dedup",   # PASSTHROUGH scaffold
+    "chain",                                  # chain Agent 1 — MECHANICAL_BASELINE
+})
+_ZOMBIE_SCAFFOLD_EXCLUDED_PREFIXES = (
+    "report_critical_high", "report_medium", "report_low_info",  # placeholder pre-writes
+)
+
+
+def _zombie_phase_is_scaffold_excluded(phase: Any) -> bool:
+    """True when `phase` may pass its gate on a pre-written scaffold/placeholder
+    and therefore must not be early-completed by zombie-phase recovery."""
+    name = getattr(phase, "name", "") or ""
+    if name in _ZOMBIE_SCAFFOLD_EXCLUDED_NAMES:
+        return True
+    if getattr(phase, "appends_existing_artifact", False):
+        return True
+    return any(name.startswith(pfx) for pfx in _ZOMBIE_SCAFFOLD_EXCLUDED_PREFIXES)
+
+
 def _dedup_passthrough_should_continue(
     phase_name: str, attempt: int, budget: int, scratchpad: Path
 ) -> bool:
@@ -3733,7 +3765,7 @@ def _write_report_index_coverage_seed(scratchpad: Path) -> int:
 
     # R3/R4 (TASK C): tier-shard the coverage seed so the report_index LLM can
     # process one tier-batch at a time and NEVER hold the whole working set in
-    # a single turn (the context-collapse trigger that froze DODO ~27min).
+    # a single turn (the context-collapse trigger that froze a prior run ~27min).
     # Completeness stays guaranteed mechanically because every seed row lands in
     # exactly one tier shard (full seed == union of shards, zero drops) and the
     # post-phase reconciliation gate (_check_index_completeness) validates the
@@ -4327,8 +4359,8 @@ def _claude_project_dir_name(path) -> str:
     """Encode an absolute cwd the way Claude Code names its
     ``~/.claude/projects/<dir>`` session directory.
 
-    Verified against on-disk dirs: ``D:\\Programming\\...\\irys`` ->
-    ``D--Programming-...-irys``. Every non-alphanumeric char maps to a single
+    Verified against on-disk dirs: ``D:\\Programming\\...\\repo`` ->
+    ``D--Programming-...-repo``. Every non-alphanumeric char maps to a single
     ``-`` WITHOUT collapsing runs (``D:\\`` -> ``D--``).
     """
     return re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(str(path)))
@@ -4694,6 +4726,104 @@ def _wait_with_heartbeat(
                 display.print_phase_heartbeat(phase_name, elapsed)
                 log.info(f"[{phase_name}] {mins}:{secs:02d} | waiting")
             last_display_time = now
+
+
+class _PhaseHeartbeatThread:
+    """Context manager that pulses a live terminal heartbeat while a long
+    *synchronous, in-process* step runs — e.g. the recon mechanical prepass
+    (Slither/graph bake, build/dep-install) which can block 1-3+ minutes with
+    zero output and look like a dead launch (the chronic 0-byte-stdio class).
+
+    It reuses ``display.print_phase_heartbeat`` so the pulse line matches the
+    worker-phase loops, and mirrors their new-artifact computation (set diff of
+    files in ``scratchpad`` since start).
+
+    A daemon thread does the pulsing; ``__exit__`` always sets the stop Event
+    and joins with a small timeout in a ``finally``-equivalent path, so the
+    thread can never leak. Degrades to a complete no-op when ``display`` is
+    None / lacks ``print_phase_heartbeat`` — it never raises into the caller.
+    """
+
+    def __init__(self, display_mod, phase_name, scratchpad, interval=12):
+        self._display = display_mod
+        self._phase_name = phase_name
+        try:
+            self._scratch = Path(scratchpad) if scratchpad else None
+        except Exception:
+            self._scratch = None
+        try:
+            self._interval = max(1, int(interval or 12))
+        except Exception:
+            self._interval = 12
+        self._stop = threading.Event()
+        self._thread = None
+        self._start_mono = None
+        self._baseline: set[str] = set()
+        # Only pulse when there is a usable display sink. The module-level
+        # display already degrades to stderr when Rich is unavailable, but a
+        # caller may pass None (non-interactive / no display) — then no-op.
+        self._enabled = bool(
+            self._display is not None
+            and hasattr(self._display, "print_phase_heartbeat")
+        )
+
+    def _snapshot(self) -> set[str]:
+        if self._scratch is None:
+            return set()
+        try:
+            return {p.name for p in self._scratch.iterdir() if p.is_file()}
+        except Exception:
+            return set()
+
+    def _run(self):
+        # wait() returns True only when the stop Event is set; on timeout it
+        # returns False. So this pulses every `interval` seconds (NOT at t=0 —
+        # the up-front status line covers the immediate notice) until stopped.
+        while not self._stop.wait(self._interval):
+            try:
+                elapsed = int(time.monotonic() - (self._start_mono or time.monotonic()))
+                new = sorted(self._snapshot() - self._baseline)
+                if new:
+                    self._display.print_phase_heartbeat(
+                        self._phase_name, elapsed, new_artifacts=new)
+                else:
+                    self._display.print_phase_heartbeat(self._phase_name, elapsed)
+            except Exception:
+                # The heartbeat is pure UX; never let it crash the run.
+                pass
+
+    def __enter__(self):
+        if not self._enabled:
+            return self
+        try:
+            self._start_mono = time.monotonic()
+            self._baseline = self._snapshot()
+            self._thread = threading.Thread(
+                target=self._run,
+                name=f"heartbeat-{self._phase_name}",
+                daemon=True,
+            )
+            self._thread.start()
+        except Exception:
+            self._thread = None
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            self._stop.set()
+            t = self._thread
+            if t is not None and t.is_alive():
+                t.join(timeout=2.0)
+        except Exception:
+            pass
+        # Never suppress an exception raised inside the wrapped step.
+        return False
+
+
+def _phase_heartbeat_thread(display_mod, phase_name, scratchpad, interval=12):
+    """Return a context manager that pulses a live heartbeat around a long
+    synchronous in-process step. See :class:`_PhaseHeartbeatThread`."""
+    return _PhaseHeartbeatThread(display_mod, phase_name, scratchpad, interval)
 
 
 # ===========================================================================
@@ -5596,7 +5726,7 @@ def _run_supervised_pty_loop(
         # Ship 8.13: DONE-then-gate-miss telemetry. When the turn reached
         # end_turn (state.complete -> the coordinator emitted DONE) yet the
         # disk gate REJECTED it, and the transcript shows an auto-compaction
-        # fingerprint, this is the verified DODO premature-DONE signature.
+        # fingerprint, this is the verified premature-DONE signature from a prior run.
         # Diagnostic ONLY -- it never gates the phase and never alters
         # control flow (the missing-only / live / resume continuation below
         # handles recovery regardless). Emitted at most once per phase run.
@@ -5894,6 +6024,8 @@ def _build_recon_worker_prompt(
             ".delegatecall — or write 'none found' with what was checked."
         ),
     }.get(role, focus)
+    # Payable-impact propagation (BB mode only — gated on impact_map.md presence).
+    impact_map_block = _impact_map_block(project_root, kind="recon")
     return f"""# RECON WORKER
 
 You are one recon worker launched directly by the Python Plamen driver.
@@ -5947,7 +6079,8 @@ Driver-provided recon inputs you may read when present:
 - `{scratchpad.as_posix()}/contract_inventory.md`
 - `{scratchpad.as_posix()}/state_variables.md`
 - `{scratchpad.as_posix()}/function_list.md`
-
+- `{project_root}/impact_map.md` (when present — payable-impact ranking)
+{impact_map_block}
 ## Command Boundary
 
 For roles other than `build_static` and `context_static`: do not run shell
@@ -6674,6 +6807,12 @@ _L1_BREADTH_LAYERS: tuple[dict[str, Any], ...] = (
         "skills": "consensus-safety-invariants for fixed-point / parameter audit",
         "difficulty": "MEDIUM",
     },
+    {
+        "layer": "cosmos",
+        "flags": ("COSMOS_SDK",),
+        "skills": "cosmos-sdk-module-safety, cosmos-ibc-security",
+        "difficulty": "HIGH",
+    },
 )
 
 
@@ -6860,6 +6999,97 @@ def _should_use_breadth_worker_pool(config: dict, scratchpad: Path) -> bool:
         return False
 
 
+# FIX (recall #1): condensed Rule-13 anti-normalization + a mandate to
+# PROMOTE matrix-cell divergences to findings. Surfaced to every SC breadth
+# worker (the rule otherwise lives only in generic-security-rules.md, which the
+# breadth prompt never reads). Kept short on purpose — the 5-Question core +
+# the promotion mandate, not the full 38-line rule block — so it sharpens
+# recall without diluting attention.
+_BREADTH_ANTI_NORMALIZATION_DIRECTIVE = """
+## Anti-Normalization & Divergence Promotion (MANDATORY — Rule 13)
+
+Do NOT close a real divergence with "intended" / "by design" / "correct
+architecture" inside a self-check or interaction matrix. A matrix/checklist cell
+that identifies a divergence from a documented invariant (effective value !=
+documented value; unbounded user input; retroactive/stale parameter; asymmetric
+deposit/withdraw or create/consume path; a fee/rate that stacks or exceeds its
+documented cap) MUST be promoted to a `## Finding [` block. A divergence left in
+a matrix cell is a recall failure. "intended"/"by design" describes a MECHANISM,
+not a disposition — it is acceptable ONLY with cited intent evidence
+(spec/test/comment).
+
+Before marking any behavior a non-issue because it looks intentional, answer the
+5-Question Test: (1) Who is harmed (specific user class)? (2) Can affected users
+avoid the harm through their own actions, or is it imposed? (3) Is the harm
+documented (informed consent)? (4) Could the protocol achieve the same goal
+without the harm? (5) Does the function fulfill its stated purpose completely (no
+missing case/asset/state)? Verdict: harmed AND unavoidable AND undocumented ->
+FINDING; harmed AND (documented OR avoidable) -> INFO finding; no one harmed ->
+genuine non-issue. Also model PASSIVE attacks (timing normal operations at a
+favorable state), not only active front-running.
+"""
+
+
+# Per-program PAYABLE-IMPACT steering. Generic, names no protocol — the program
+# specifics live ONLY in the generated `impact_map.md` DATA artifact (rendered by
+# the gitignored bounty bracket into the harness/PROJECT_ROOT). This block is
+# surfaced to recon/breadth/depth ONLY when that file is present, so paid audits
+# (no impact_map.md) are entirely unaffected: it STEERS the finite attention an
+# agent already has toward terminal payable impacts WITHOUT cutting coverage.
+_IMPACT_MAP_DIRECTIVE = """
+## Payable-Impact Steering (impact_map.md present)
+
+`impact_map.md` is present in PROJECT_ROOT. Read it. It is the authoritative
+PAYABLE-IMPACT ranking for this engagement: per the program's own severity rules
+and declared in-scope impacts, it lists which concrete consequences are payable
+and at what tier. For every candidate you investigate, answer: "which payable
+row in impact_map.md does this candidate's TERMINAL impact realize, and at what
+tier?" — and trace the candidate to that impact first. Spend depth on the
+highest-payable rows first.
+
+This STEERS where your finite attention goes; it does NOT narrow what you may
+report and does NOT cut coverage. `impact_map.md` lists IMPACTS that matter, NOT
+vulnerabilities that exist — it is not a checklist of bugs to confirm; you must
+still discover the mechanism that produces the impact. A finding that realizes
+no payable row is out of payout scope: record it, but do not spend depth budget
+prioritizing it. If impact_map.md declares primacy-of-impact, an unlisted impact
+still pays at its universal VSC baseline — do not de-prioritize a real impact
+merely because it is unlisted.
+"""
+
+
+# Recon variant: recon's job is to PROPAGATE the map into design_context.md so
+# every downstream phase inherits the steering even where impact_map.md isn't
+# surfaced directly. Generic, names no protocol.
+_IMPACT_MAP_RECON_NOTE = """
+## Payable-Impact Map (impact_map.md present)
+
+`impact_map.md` is present in PROJECT_ROOT — the program's PAYABLE-IMPACT ranking
+(payable consequences and tiers from its own severity rules). Read it, copy its
+"Payable impacts" table verbatim into `design_context.md` under a
+`## Payable Impact Map` heading, and derive Operational Implications from the
+payable rows (what the protocol must guarantee so each payable impact cannot
+occur). This propagates the payable focus to every downstream phase. It steers
+attention; it does not narrow scope.
+"""
+
+
+def _impact_map_block(project_root: str, kind: str = "analysis") -> str:
+    """Return the payable-impact steering directive iff `impact_map.md` exists in
+    PROJECT_ROOT (BB harness root). Empty for paid audits — clean unconditional
+    injection at the splice point. File-presence-gated so the committed driver
+    carries only this generic seam; all program specifics live in the artifact.
+
+    `kind="recon"` returns the propagate-into-design_context note; otherwise the
+    candidate-prioritization directive for breadth/depth."""
+    try:
+        if project_root and (Path(project_root) / "impact_map.md").is_file():
+            return _IMPACT_MAP_RECON_NOTE if kind == "recon" else _IMPACT_MAP_DIRECTIVE
+    except Exception:
+        pass
+    return ""
+
+
 def _build_breadth_worker_prompt(
     *,
     job: dict[str, str],
@@ -6928,6 +7158,17 @@ applicable, and write the mandatory Chain Summary table.
             )
         except Exception as exc:  # never block prompt assembly on this
             log.debug(f"[breadth] skill-injection skipped for {focus}: {exc!r}")
+    # FIX (recall #1): Rule-13 anti-normalization + divergence-promotion.
+    # R13 lives only in generic-security-rules.md and was never surfaced to the
+    # breadth worker — so a real divergence observed inside a self-check matrix
+    # row ("...combined effective rate > sum, intended") was closed by the word
+    # "intended" and never became a finding. Inject the condensed 5-Question
+    # test + a mandate that a matrix-cell divergence MUST be promoted to a
+    # `## Finding` block. SC only (L1 carries its own anti-normalization).
+    r13_block = "" if pipeline == "l1" else _BREADTH_ANTI_NORMALIZATION_DIRECTIVE
+    # Payable-impact steering (BB mode only — gated on impact_map.md presence in
+    # PROJECT_ROOT; inert for paid audits). Applies to L1 and SC bounty lanes.
+    impact_map_block = _impact_map_block(project_root)
     return f"""# BREADTH ROW WORKER
 
 You are a single breadth worker launched directly by the Python Plamen driver.
@@ -6969,7 +7210,7 @@ Task/Agent subagents and do not follow any coordinator instructions.
 
 Read `{finding_format}` for finding format. Use recon artifacts in the
 scratchpad as needed. Use the assigned opengrep shard when present.
-{sc_skill_block}
+{sc_skill_block}{r13_block}{impact_map_block}
 ## Required File Contract
 
 The output file must:
@@ -8443,7 +8684,7 @@ def _parse_sc_skill_bindings(
         flag do we fall back to the substring heuristic, and that heuristic
         excludes template_recommendations.md — that file DOCUMENTS the
         CROSS_VM trigger pattern verbatim (the false-positive source that made
-        pure-EVM audits like DODO spuriously recover the binding)."""
+        pure-EVM audits spuriously recover the binding)."""
         dp = scratchpad / "detected_patterns.md"
         try:
             if dp.exists():
@@ -8476,7 +8717,7 @@ def _parse_sc_skill_bindings(
         if not hay:
             return False
         positive = re.search(
-            r"\b(AccountEncoder|Solana|SOLANA_|Bitcoin|BITCOIN_|BTC|"
+            r"\b(Solana|SOLANA_|Bitcoin|BITCOIN_|BTC|"
             r"Pubkey|programId|ed25519|bech32|base58|Borsh)\b",
             hay,
             re.IGNORECASE,
@@ -8538,8 +8779,8 @@ def _parse_sc_skill_bindings(
                     _add(breadth, f, skill)
     # CROSS_VM_SERIALIZATION_CONFORMANCE is an EVM-SIDE skill: it audits Solidity
     # code that SERIALIZES outbound for a non-EVM VM (EVM -> Solana/BTC/Move) --
-    # e.g. an AccountEncoder / Borsh packer in a bridge (this skill was added for
-    # exactly the DODO AccountEncoder gap). It fires on an EXPLICIT EVM audit that
+    # e.g. an outbound account/pubkey serializer or Borsh packer in a bridge (this skill was added for
+    # exactly an outbound-encoder gap observed in a prior run). It fires on an EXPLICIT EVM audit that
     # has non-EVM-target evidence, and must NOT fire on NATIVE non-EVM audits
     # (solana/aptos/sui/soroban) — there is no EVM-side serialization there — nor
     # on legacy/unknown ('') runs we cannot confirm are EVM. The
@@ -8643,13 +8884,11 @@ def _sc_skill_injection_block(
     return "\n".join(lines)
 
 
-def _required_niche_worker_jobs(scratchpad: Path) -> list[dict[str, str]]:
-    """Derive niche depth workers from instantiate's manifest.
-
-    The manifest is the producer boundary: if it declares required niche
-    workers, the PTY worker pool must launch those exact output files rather
-    than rely on a hardcoded subset. Falls back to no rows when the manifest is
-    absent or unparseable so older/resume runs keep their existing behavior.
+def _niche_jobs_from_spawn_manifest(scratchpad: Path) -> list[dict[str, str]]:
+    """PRIMARY niche source: instantiate's ``spawn_manifest.md`` ``### Niche
+    Agents`` table (>=5 columns: Niche Agent | Focus | Required | Agent ID |
+    Output). Returns no rows when the manifest is absent or unparseable so
+    older/resume runs keep their existing behavior.
     """
     manifest = scratchpad / "spawn_manifest.md"
     if not manifest.exists():
@@ -8692,6 +8931,118 @@ def _required_niche_worker_jobs(scratchpad: Path) -> list[dict[str, str]]:
             "focus": f"{skill}: standalone flag-triggered niche methodology",
         })
     return jobs
+
+
+def _niche_rec_row_is_stub(cells: list[str]) -> bool:
+    """True iff a template_recommendations niche row is the empty placeholder
+    stub (``| _(none extracted)_ | - | - | - |``) or an all-dash/empty row.
+    Recon writes such a stub for its FIRST (empty) ``### Niche Agents`` section
+    before the real determinations table; it must never spawn an agent.
+    """
+    low = " ".join(c.strip().lower() for c in cells)
+    if "none extracted" in low or "_(none" in low:
+        return True
+    return all(c.strip() in ("", "-", "—", "–", "n/a") for c in cells)
+
+
+def _niche_jobs_from_template_recommendations(scratchpad: Path) -> list[dict[str, str]]:
+    """DETERMINISTIC FALLBACK niche source: recon's ``template_recommendations.md``
+    ``### Niche Agents`` table(s).
+
+    Root cause this repairs: recon flags niche agents ``Required=YES`` in
+    ``template_recommendations.md``, but instantiate sometimes writes NO niche
+    rows into ``spawn_manifest.md`` — so the primary consumer sees an empty
+    table and the recon-required lanes silently never spawn. This reads recon's
+    authoritative determinations directly.
+
+    The recon table is 4-column (``| Skill | Trigger | Required | Rationale |``)
+    and there are usually TWO ``### Niche Agents`` sections: an empty
+    ``_(none extracted)_`` stub first and the real table second — both are read;
+    stub rows are skipped. HARD CONSTRAINT: only rows recon affirmatively marked
+    ``Required=YES`` (``_niche_required_cell_yes``) that resolve to a real
+    ``agents/skills/niche/<slug>/SKILL.md`` are spawned — never a lane recon did
+    not flag for this codebase, never a non-existent agent.
+    """
+    rec = scratchpad / "template_recommendations.md"
+    if not rec.exists():
+        return []
+    try:
+        text = rec.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    jobs: list[dict[str, str]] = []
+    seen: set[str] = set()
+    in_niche = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        # A niche heading (re)opens a niche section; a NON-niche heading closes
+        # the current one. Do NOT break — a second `### Niche Agents` section
+        # (the real one after the empty stub) must still be read.
+        if _niche_heading_match(line):
+            in_niche = True
+            continue
+        if in_niche and re.match(r"^#{1,6}\s+", line):
+            in_niche = False
+            continue
+        if not in_niche or not line.startswith("|") or _is_separator_row(line):
+            continue
+        cells = [c.strip().strip("`") for c in line.strip("|").split("|")]
+        # Recon table is 4-column (Skill | Trigger | Required | Rationale); read
+        # cells[0]=skill and cells[2]=Required. Require >=3 to index cells[2].
+        if len(cells) < 3:
+            continue
+        skill = cells[0]
+        low0 = skill.lower()
+        if not skill or low0 == "skill" or low0.startswith("niche agent"):
+            continue  # header row
+        if _niche_rec_row_is_stub(cells):
+            continue  # empty `_(none extracted)_` placeholder section
+        # HARD CONSTRAINT: recon Required=YES only.
+        if not _niche_required_cell_yes(cells[2]):
+            continue
+        slug = _niche_slug_from_name(skill)
+        # The semantic-gap lane is spawned via the dedicated `_semantic_gap_required`
+        # path in `_depth_worker_jobs`; never double-spawn it from here.
+        if slug == "semantic-gap-investigator":
+            continue
+        # Must resolve to a real niche SKILL.md, else there is no agent to run.
+        if not _niche_skill_path_for_role(skill).exists():
+            continue
+        agent_id = f"niche-{slug}"
+        output = f"niche_{slug.replace('-', '_')}_findings.md"
+        if agent_id in seen or output in seen:
+            continue  # dedupe within the fallback rows
+        seen.add(agent_id)
+        seen.add(output)
+        jobs.append({
+            "agent_id": agent_id,
+            "role": slug.replace("-", "_"),
+            "output": output,
+            "category": "niche",
+            "focus": f"{skill}: standalone flag-triggered niche methodology",
+        })
+    return jobs
+
+
+def _required_niche_worker_jobs(scratchpad: Path) -> list[dict[str, str]]:
+    """Derive niche depth workers, spawn_manifest.md PRIMARY.
+
+    The manifest is the producer boundary: if it declares required niche
+    workers, the PTY worker pool launches those exact output files. When the
+    manifest EXISTS but declared no niche rows (an instantiate propagation gap),
+    fall back to recon's authoritative ``Required=YES`` determinations in
+    ``template_recommendations.md`` so recon-flagged lanes actually spawn.
+
+    Manifest-absent preserves the historical ``[]`` (resume-before-instantiate
+    safety); the fallback fires only when instantiate ran but declared none.
+    """
+    manifest_jobs = _niche_jobs_from_spawn_manifest(scratchpad)
+    if manifest_jobs:
+        return manifest_jobs
+    # Only fall back when the manifest EXISTS but declared no niche rows.
+    if not (scratchpad / "spawn_manifest.md").exists():
+        return []
+    return _niche_jobs_from_template_recommendations(scratchpad)
 
 
 def _depth_worker_jobs(scratchpad: Path, config: dict) -> list[dict[str, str]]:
@@ -8738,6 +9089,15 @@ def _depth_worker_jobs(scratchpad: Path, config: dict) -> list[dict[str, str]]:
                         })
             except Exception:
                 pass
+            # Roster the (already-authored) Sibling Propagation Agent as an
+            # ADDITIVE, best-effort depth job. Not in sc_never_cut_groups; a
+            # missing/empty output degrades-and-continues (see
+            # _stub_missing_sibling_outputs_on_exhaustion), never halts depth.
+            seen_sibling = {str(job.get("output", "")) for job in jobs}
+            for sib_job in _sibling_propagation_jobs_if_required(scratchpad, config):
+                if sib_job["output"] not in seen_sibling:
+                    jobs.append(sib_job)
+                    seen_sibling.add(sib_job["output"])
         if mode == "thorough":
             jobs.extend(dict(job) for job in _DEPTH_THOROUGH_SIDE_JOBS)
             # Thorough-only conditional fuzz sidecar worker(s). Additive and
@@ -9133,6 +9493,26 @@ that the skill file was unavailable in the output.
 Do not spawn subagents. Do not inspect other niche workers' outputs. Do not
 advance to chain analysis, verification, or reporting.
 """
+    elif category == "sibling":
+        scanner_templates = (
+            plamen_home() / "prompts" / language / "phase4b-scanner-templates.md"
+        ).as_posix()
+        standard_block = f"""
+This is the Sibling Propagation depth worker. Read the
+`## Sibling Propagation Agent` section of
+`{scanner_templates}` and apply ONLY that methodology: for each Medium+
+CONFIRMED/PARTIAL finding in `{scratchpad.as_posix()}/findings_inventory.md`
+(fall back to the depth `depth_*_findings.md` outputs if inventory is absent),
+search the codebase for sibling functions/paths exhibiting the SAME root cause
+pattern and report each as a new finding.
+
+This is a best-effort, additive pass. If there are no Medium+ findings to
+propagate, or no sibling instances exist, write a substantive `## No Findings`
+rationale naming the findings you checked — that is a valid, complete artifact.
+
+Do not spawn subagents. Do not inspect or write other workers' outputs. Do not
+advance to chain analysis, verification, or reporting.
+"""
     else:
         standard_block = f"""
 This is a depth-owned `{category}` artifact. Use `{methodology}` as the source
@@ -9142,6 +9522,8 @@ substantive `## No Findings` / `## Not Applicable` rationale with the concrete
 files and signals you checked.
 """
 
+    # Payable-impact steering (BB mode only — gated on impact_map.md presence).
+    impact_map_block = _impact_map_block(project_root)
     return f"""# DEPTH ROW WORKER
 
 You are a single depth worker launched directly by the Python Plamen driver.
@@ -9192,7 +9574,7 @@ disposing an obligation, emit a receipt:
 `[OBLIG:security_obligations.md:<SO-ID>] STATUS:R|D|C KEY:<summary> -> <finding_id|reason|phase>`.
 
 {standard_block}
-
+{impact_map_block}
 ## Required File Contract
 
 The output file must:
@@ -9428,7 +9810,7 @@ def _depth_worker_pool_progress_status(
 
 # v2.8.8: the perturbation depth worker mutates EVERY depth finding, so it is
 # legitimately the slowest worker (observed ~80% of the depth timeout ceiling on
-# DODO). On a larger codebase it could hit the uniform ceiling and be killed —
+# a prior run). On a larger codebase it could hit the uniform ceiling and be killed —
 # silently losing perturbation coverage (it is a sidecar, not a core artifact,
 # so the pool degrades cleanly without a halt). Grant it extra ceiling headroom;
 # this only prevents a premature kill — the worker still finishes via quiescence
@@ -9684,6 +10066,101 @@ def _depth_fuzz_jobs_if_required(
     return jobs
 
 
+def _sibling_propagation_jobs_if_required(
+    scratchpad: Path, config: dict
+) -> list[dict[str, str]]:
+    """SC-only, best-effort Sibling Propagation depth sidecar job plan.
+
+    The Sibling Propagation Agent is DEFINED in every SC tree's
+    `phase4b-scanner-templates.md` (`## Sibling Propagation Agent`, output
+    `sibling_propagation_findings.md`) but was never spawned by the driver.
+    This rosters it as an ADDITIVE depth worker job.
+
+    Best-effort by construction (safety-critical): the output is NOT in
+    `sc_never_cut_groups` / `l1_never_cut_groups`, so the never-cut gate cannot
+    fail on its absence, and `category=='sibling'` is stubbed degrade-continue
+    by `_stub_missing_sibling_outputs_on_exhaustion` if the worker never
+    produces output. A missing/empty `sibling_propagation_findings.md` therefore
+    degrades and continues; it never halts the depth phase.
+
+    Gating (matches where the SC scanner/validation secondaries run):
+      - pipeline == 'l1'            -> [] (no SC scanner-template section)
+      - mode not in core/thorough   -> [] (Light skips the re-scan/scanner lane)
+    """
+    if str(config.get("pipeline", "sc")).lower() == "l1":
+        return []
+    if str(config.get("mode", "core")).lower() not in ("core", "thorough"):
+        return []
+    return [{
+        "agent_id": "sibling-propagation",
+        "role": "sibling_propagation",
+        "output": "sibling_propagation_findings.md",
+        "category": "sibling",
+        "focus": (
+            "Sibling propagation: for each Medium+ CONFIRMED/PARTIAL finding, "
+            "search the codebase for sibling functions/paths with the SAME root "
+            "cause pattern and report each as a new finding"
+        ),
+    }]
+
+
+def _stub_missing_sibling_outputs_on_exhaustion(
+    scratchpad: Path,
+    phase: Phase,
+    jobs: list[dict[str, str]],
+) -> bool:
+    """Write a degrade-continue stub for any incomplete sibling job after retries.
+
+    Mirrors `_stub_missing_fuzz_outputs_on_exhaustion`. Sibling propagation is
+    additive and non-blocking; a worker that crashed before writing its output
+    must not be allowed to halt depth. Writes a minimal `## No Findings`
+    artifact (with the COMPLETE marker) for each still-incomplete
+    category=='sibling' job. Returns True when at least one stub was written.
+    Standard/scanner/sidecar/niche/fuzz jobs are untouched.
+    """
+    wrote = False
+    for job in jobs:
+        if job.get("category") != "sibling":
+            continue
+        if _depth_worker_output_complete(scratchpad, phase, job):
+            continue
+        output = str(job["output"])
+        agent_id = str(job.get("agent_id", "sibling-propagation"))
+        path = scratchpad / output
+        reason = "sibling-propagation worker produced no output after all retry attempts"
+        body = (
+            f"<!-- PLAMEN_ARTIFACT: {output} -->\n"
+            f"<!-- PLAMEN_OWNER: {agent_id} -->\n"
+            f"<!-- PLAMEN_STATUS: IN_PROGRESS -->\n"
+            f"<!-- PLAMEN_PHASE: depth -->\n"
+            f"<!-- PLAMEN_VERSION: 1 -->\n"
+            f"<!-- AGENT_ROW: {agent_id} -->\n"
+            f"<!-- EXPECTED_OUTPUT: {output} -->\n\n"
+            f"# Sibling Propagation Findings ({agent_id})\n\n"
+            f"## No Findings\n"
+            f"Reason: {reason}.\n\n"
+            f"The sibling-propagation pass did not execute, so no sibling "
+            f"findings were produced. This is a non-blocking degrade-continue "
+            f"artifact: sibling propagation is additive only and never gates "
+            f"the depth phase.\n\n"
+            f"<!-- PLAMEN_STATUS: COMPLETE -->\n"
+        )
+        try:
+            path.write_text(body, encoding="utf-8")
+            wrote = True
+            log.warning(
+                "[depth] sibling-propagation job %s exhausted retries — wrote "
+                "degrade-continue stub (%s)",
+                agent_id, output,
+            )
+        except OSError as exc:
+            log.warning(
+                "[depth] could not write sibling degrade stub %s: %s",
+                output, exc,
+            )
+    return wrote
+
+
 def _depth_da_job_if_required(scratchpad: Path, config: dict) -> list[dict[str, str]]:
     if str(config.get("mode", "core")).lower() != "thorough":
         return []
@@ -9892,6 +10369,10 @@ def _run_depth_worker_pool_pty(
     # artifact and re-check. Scoped to category=='fuzz' ONLY — standard depth
     # jobs keep their strict completion.
     stubbed_any = _stub_missing_fuzz_outputs_on_exhaustion(scratchpad, phase, jobs)
+    # Same class as fuzz: sibling propagation is additive/non-blocking. Stub any
+    # still-missing sibling output so a crashed sibling worker cannot halt depth.
+    if _stub_missing_sibling_outputs_on_exhaustion(scratchpad, phase, jobs):
+        stubbed_any = True
     if stubbed_any:
         rc = _finalize_depth_worker_pool_if_complete(
             scratchpad=scratchpad,
@@ -9980,7 +10461,7 @@ def _stub_missing_fuzz_outputs_on_exhaustion(
 # from the historical ~12% (full opengrep_findings.md is 100+ rows; one
 # subagent realistically receipts ~10-30 of them) toward 100% per shard.
 #
-# Routing policy is generic -- no DODO-specific filenames, counts, or
+# Routing policy is generic -- no protocol-specific filenames, counts, or
 # rules. The mapping is driven by spawn_manifest.md focus-area names and
 # the file paths embedded in opengrep_findings.md row Locations:
 #
@@ -10159,7 +10640,7 @@ def _focus_area_tokens(focus: str) -> set[str]:
 # catching camelCase identifiers ("onlyOwner" -> {only, owner}
 # matches the "owner" keyword).
 #
-# No DODO-specific rules: buckets are named by generic security
+# No protocol-specific rules: buckets are named by generic security
 # concerns and the agent->bucket correspondence is by focus-area name
 # token overlap, so any audit whose breadth focus areas use these
 # common names benefits automatically. Audits with bespoke focus
@@ -10182,7 +10663,7 @@ _OPENGREP_SEMANTIC_BUCKETS: dict[str, tuple[str, ...]] = {
     ),
     "cross_chain_msg": (
         "gateway", "oncall", "onrevert", "payload", "message", "sender",
-        "receiver", "cross-chain", "crosschain", "zeta",
+        "receiver", "cross-chain", "crosschain",
     ),
     "cross_chain_timing": (
         "deadline", "timestamp", "expiry", "stale", "replay", "nonce",
@@ -10310,7 +10791,7 @@ def _identify_core_state_agent(
 ) -> Optional[dict[str, str]]:
     """Identify the fallback agent for unassigned opengrep rows.
 
-    Preference order (no DODO-specific names; matches common
+    Preference order (no protocol-specific names; matches common
     plamen-audit conventions):
 
       1. ``focus_area`` lowercased == ``"core_state"``
@@ -10375,7 +10856,7 @@ def _write_opengrep_shard_file(
     # lifecycle markers (STATUS / FINDINGS_COUNT / ARTIFACT) that the gate
     # reads. A breadth agent that reads its shard (per the Subagent Prompt
     # Template) previously copied PLAMEN_SHARD_OWNER/FOCUS into its own
-    # analysis header (observed: storage_layout/B6 on DODO 2026-05-22),
+    # analysis header (observed: storage_layout/B6 in a prior run),
     # contaminating the lifecycle namespace. Keeping shard metadata out of
     # PLAMEN_* removes that contamination vector.
     lines.append(f"<!-- OPENGREP_SHARD_OWNER: {owner_id} -->")
@@ -11238,9 +11719,9 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
                     phase.name, 0, status="optional graph bake: SCIP",
                 )
                 sys.path.insert(0, str(Path(__file__).parent))
-                from recon_prepass import _bake_rust_scip
-                status = _bake_rust_scip(scratchpad, _proj)
-                log.info(f"[{phase.name}] SCIP pre-breadth bake: {status}")
+                from recon_prepass import _bake_rust_graph
+                status = _bake_rust_graph(scratchpad, _proj)
+                log.info(f"[{phase.name}] Rust graph pre-breadth bake: {status}")
             if (
                 config.get("pipeline") == "l1"
                 and _lang == "go"
@@ -11251,9 +11732,22 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
                     phase.name, 0, status="optional graph bake: SCIP (Go)",
                 )
                 sys.path.insert(0, str(Path(__file__).parent))
-                from recon_prepass import _bake_go_scip
-                status = _bake_go_scip(scratchpad, _proj)
-                log.info(f"[{phase.name}] SCIP-Go pre-breadth bake: {status}")
+                from recon_prepass import _bake_go_graph
+                status = _bake_go_graph(scratchpad, _proj)
+                log.info(f"[{phase.name}] Go graph pre-breadth bake: {status}")
+            if (
+                config.get("pipeline") == "l1"
+                and _lang in ("rust", "mixed")
+                and not (scratchpad / "caller_map.md").exists()
+                and os.environ.get("PLAMEN_DISABLE_SCIP") != "1"
+            ):
+                display.print_phase_heartbeat(
+                    phase.name, 0, status="optional graph bake: SCIP (Rust)",
+                )
+                sys.path.insert(0, str(Path(__file__).parent))
+                from recon_prepass import _bake_rust_graph
+                status = _bake_rust_graph(scratchpad, _proj)
+                log.info(f"[{phase.name}] Rust graph pre-breadth bake: {status}")
             if (
                 config.get("pipeline") != "l1"
                 and _lang == "solana"
@@ -11553,7 +12047,7 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
         # analyzer), Pre/PostToolUse hooks, auto-update checks, etc. Any
         # one of these can block indefinitely (network call, slow disk,
         # heavy compile). The driver observed two production halts on a
-        # single audit (Irys L1 inventory: MCP class; AwesomeX SC
+        # single audit (an L1 inventory: MCP class; an SC
         # inventory: plugin class) — 0 stdio + 0 tokens billed because
         # the subprocess never reached the API.
         #
@@ -11652,7 +12146,7 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
     # ~/.claude/hooks/.active_audit pointing at the current scratchpad.
     # Subsequent claude -p subprocesses spawned by this driver inherit that
     # watchdog, which blocks them on phases that don't write
-    # `analysis_*.md` (caused A1/A7/A8 in the Irys L1 run). V2 has its own
+    # `analysis_*.md` (caused A1/A7/A8 in a prior L1 run). V2 has its own
     # Python gate; the V1 watchdog is harmful for V2 subprocesses.
     #
     # CRITICAL: phase_gate.py already recognizes V2 scratchpads via the
@@ -12077,10 +12571,30 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
             phase.name,
             config.get("_active_phase_names"),
         )
+        # FIX (#5): zombie-phase early-complete tracking. A phase-LLM worker that
+        # writes all its expected artifacts (gate passes) and then idles —
+        # emitting only spinner / "checking for updates" churn, no new transcript
+        # events, no new artifact writes — used to block the full LOC-scaled
+        # timeout (chain_agent2 once waited ~90 min). Track when an EXPECTED
+        # artifact last changed; when the gate passes AND both artifacts and the
+        # transcript have been quiescent for the thrash window, complete the
+        # phase early (rc=0). Scaffold phases (gate passes on a placeholder) are
+        # excluded so their continuation-budget/timeout path is unchanged.
+        _zombie_expected_globs = list(
+            getattr(phase, "expected_artifacts", None) or []
+        )
+        _zombie_excluded = _zombie_phase_is_scaffold_excluded(phase)
+        _zombie_window = max(
+            _CONTEXT_THRASH_LOOP_S,
+            3.0 * float(config.get("claude_pty_quiescence_s", 8)),
+        )
+        last_expected_change_at = start
+        last_zombie_check = 0.0
 
         def _pty_poll(now: float, _state: Any) -> None:
             nonlocal last_scan_time, last_status_time
             nonlocal last_compaction_check_time, compaction_notified
+            nonlocal last_expected_change_at, last_zombie_check
             elapsed = int(now - start)
             display.spin(elapsed)
             if display.graceful_stop.requested:
@@ -12182,6 +12696,46 @@ def run_phase(phase: Phase, config: dict, attempt: int) -> int:
                     f"(pty transcript lines={getattr(_state, 'line_count', 0)})"
                 )
                 last_status_time = now
+
+            # FIX (#5): zombie-phase early-complete. Refresh the
+            # last-expected-artifact-change clock when any expected artifact was
+            # created/updated this scan, then — only when the worker is NOT a
+            # scaffold phase and has been fully quiescent (no expected-artifact
+            # write AND no transcript event) for the thrash window — confirm the
+            # gate and complete early instead of waiting the full timeout. The
+            # gate check is throttled to once / 30s and only runs after the
+            # quiescence window, so it costs nothing on the productive path.
+            if _zombie_expected_globs:
+                _changed = pending + updated
+                if any(
+                    _matches_any_pattern(nm, _zombie_expected_globs)
+                    for nm in _changed
+                ):
+                    last_expected_change_at = now
+            if (
+                not _zombie_excluded
+                and (now - last_expected_change_at) >= _zombie_window
+                and (now - last_zombie_check) >= 30.0
+                and getattr(_state, "last_event_time", None) is not None
+                and (now - _state.last_event_time) >= _zombie_window
+            ):
+                last_zombie_check = now
+                try:
+                    _gp, _gm = gate_passes(
+                        scratchpad, config["project_root"], phase
+                    )
+                except Exception:
+                    _gp = False
+                if _gp:
+                    display._clear_spinner()
+                    log.warning(
+                        f"[{phase.name}] gate satisfied + artifact/transcript-"
+                        f"quiescent for >={int(_zombie_window)}s while the "
+                        f"worker emits only idle churn; completing the phase "
+                        f"early instead of waiting the full {int(timeout)}s "
+                        f"timeout (zombie-phase recovery)."
+                    )
+                    raise _PtyStop(0)
 
         with log_path.open("w", encoding="utf-8", errors="replace") as out:
             session = ClaudePtySession(
@@ -12756,7 +13310,7 @@ def _reemit_percontract_self_exclusions(
         )
         src = (cand.get("source") or "").strip()
         own = (cand.get("own_id") or "").strip()
-        # ROOT FIX (DODO M-14/M-15): a content-LESS re-emit (no concrete
+        # ROOT FIX (from a prior run): a content-LESS re-emit (no concrete
         # location AND no mechanism/harm signal) is an unfalsifiable stub. It
         # must NOT default to Medium and reach the report body — it routes to a
         # LOW-confidence appendix disposition. A content-BEARING re-emit keeps
@@ -12838,6 +13392,121 @@ def _reemit_percontract_self_exclusions(
     log.warning(
         "[rescan] re-emitted %d self-excluded per-contract candidate(s) to "
         "analysis_percontract_reemit.md (declared into rescan_manifest.md)",
+        len(recovered),
+    )
+    return out
+
+
+def _reemit_depth_self_exclusions(
+    scratchpad: Path, recovered: list[dict]
+) -> Optional[Path]:
+    """Write driver-owned re-emit artifact for depth candidates self-dropped
+    WITHOUT an in-scope referent or on an unverified external assumption (F3).
+
+    The depth analogue of ``_reemit_percontract_self_exclusions``. Each
+    recovered candidate becomes a standard ``### Finding [DXRE-k]`` block tagged
+    ``[RE-EMITTED: depth self-exclusion without in-scope referent]`` so the
+    standard finding parser (and downstream inventory/chain/verify) consume it
+    like any normal depth finding. The output file
+    (``depth_selfexcl_reemit_findings.md``) matches the ``depth_*_findings.md``
+    glob so existing consumers pick it up; the validator explicitly excludes it
+    from re-scanning so re-emits are never re-flagged.
+
+    Counterplan disposition:
+    - content-bearing (own concrete location + harm) → its own severity, but at
+      LOW confidence (CONTESTED verdict) so it must be dedup'd/resolved, not
+      trusted as proven;
+    - content-less (no concrete location or harm) → Informational + an explicit
+      ``[CONTENT-LESS: APPENDIX_ONLY]`` marker so report_index routes it to an
+      appendix disposition instead of flooding the client body.
+
+    Returns the written path, or None if nothing was written. IDEMPOTENT: the
+    validator skips lines already tagged ``[RE-EMITTED`` upstream, and a re-run
+    overwrites the artifact with the current recovered set. Side-effect only;
+    never raises into the caller's gate result.
+    """
+    if not recovered:
+        return None
+    out = scratchpad / "depth_selfexcl_reemit_findings.md"
+    lines: list[str] = [
+        "# Depth Self-Exclusion Re-Emit",
+        "",
+        "Driver-recovered candidates that a depth agent parked under a",
+        "Non-Reportable / Absorbed / self-dropped section WITHOUT citing an",
+        "in-scope refutation (a real finding ID or file:line), or that rested on",
+        "an unverified EXTERNAL assumption ('reverts on ...', 'atomic', 'out of",
+        "scope', 'assume ...', 'guaranteed by ...') to justify the drop.",
+        "Re-emitted here so the suppressed candidate reaches inventory/verify",
+        "instead of vanishing; verification adjudicates it downstream.",
+        "",
+    ]
+    for k, cand in enumerate(recovered, start=1):
+        loc = (cand.get("location") or "").strip()
+        title = (cand.get("title") or "").strip() or (
+            "Self-excluded depth candidate without in-scope referent"
+        )
+        src = (cand.get("source") or "").strip()
+        own = (cand.get("own_id") or "").strip()
+        ext = bool(cand.get("external_assumption"))
+        content_bearing = bool(cand.get("content_bearing"))
+        drop_basis = (
+            "an unverified external assumption"
+            if ext
+            else "no in-scope referent"
+        )
+        if content_bearing:
+            sev = (cand.get("severity") or "").strip() or "Medium"
+            disposition = ""
+            if not loc:
+                loc = "unspecified (in-scope referent missing)"
+            description = (
+                "This candidate was self-dropped by a depth agent based on "
+                f"{drop_basis}, so the drop's basis is unverified. It carries "
+                "its own concrete location and mechanism, so dedup it against "
+                "existing findings or resolve it into a concrete finding "
+                "[RE-EMITTED: depth self-exclusion without in-scope referent]."
+            )
+        else:
+            sev = "Informational"
+            disposition = (
+                " [CONTENT-LESS: APPENDIX_ONLY — no concrete location or harm]"
+            )
+            if not loc:
+                loc = "unspecified (content-less self-exclusion stub)"
+            description = (
+                "This candidate was self-dropped by a depth agent based on "
+                f"{drop_basis} AND carries no concrete location or harm of its "
+                "own — an unfalsifiable stub. It is re-emitted at Informational "
+                "for appendix-only human review so the suppressed candidate is "
+                "not silently dropped; it must NOT be promoted to a body finding "
+                "[RE-EMITTED: depth self-exclusion without in-scope referent]"
+                "[CONTENT-LESS: APPENDIX_ONLY]."
+            )
+        lines.extend(
+            [
+                f"### Finding [DXRE-{k}]: {title}{disposition}",
+                "",
+                "**Verdict**: CONTESTED",
+                f"**Severity**: {sev}",
+                "**Confidence**: LOW",
+                f"**Location**: {loc}",
+                f"**Description**: {description}",
+                "**Impact**: If the underlying bug is real, suppressing it via a "
+                "belief-based self-exclusion would cause a true positive to be "
+                "missed.",
+                "**Evidence**: "
+                + (f"original entry in {src}" if src else "see source")
+                + (f" (agent id {own})" if own else "")
+                + f": {cand.get('line_text', '').strip()}",
+                "",
+            ]
+        )
+    lines.append("<!-- PLAMEN_STATUS: COMPLETE -->")
+    lines.append("")
+    out.write_text("\n".join(lines), encoding="utf-8")
+    log.warning(
+        "[depth] re-emitted %d self-excluded depth candidate(s) to "
+        "depth_selfexcl_reemit_findings.md",
         len(recovered),
     )
     return out
@@ -13110,7 +13779,7 @@ def _run_phase_validators(
     if phase.name == "report_index" and passed:
         # A2 (upstream root fix): reconcile the Index Agent `## Summary` counts
         # with the Master Finding Index distinct report-ID set BEFORE the tier
-        # writers dispatch. The DODO shape (Summary=45 vs Master=74 distinct IDs)
+        # writers dispatch. The observed shape (Summary=45 vs Master=74 distinct IDs)
         # caused tier writers to hallucinate ghost IDs filling the gap. Master is
         # the cardinality contract; this self-heals the Summary in place. It is a
         # NO-OP when consistent and never alters Master rows — so it is a repair,
@@ -13429,6 +14098,33 @@ def _run_phase_validators(
     if phase.name == "exploration_skeptic" and passed and not recovery_preflight:
         _validate_exploration_skeptic(scratchpad, config.get("mode", "core"))
 
+    # --- enumgap_exploration (Phase 4b.7) -------------------------------
+    # Recall-positive / additive soft phase. The depth-exploration agent TRACED
+    # each enumeration obligation into a real finding or a reasoned clear; now
+    # promote those findings into findings_inventory.md so they flow through the
+    # SAME inventory -> chain -> verify path as every other finding (the
+    # obligation is EXPLORED before verify, not handed to verify raw). The
+    # validator is soft (always []) and the promotion never raises — if the
+    # phase degraded, no findings are promoted and the pre-existing ENUMGAP
+    # candidates remain as the candidate->verify fallback.
+    if phase.name == "enumgap_exploration" and passed and not recovery_preflight:
+        _validate_enumgap_exploration(scratchpad, config.get("mode", "core"))
+        try:
+            import enumeration_gate as _eg
+            _pr = _eg.promote_enumgap_exploration_to_inventory(scratchpad)
+            if _pr.get("emitted"):
+                log.info(
+                    f"[{phase.name}] promoted {_pr['emitted']} depth-explored "
+                    f"obligation finding(s) into findings_inventory.md "
+                    f"(parsed {_pr['parsed']}; see "
+                    "enumgap_exploration_promotion_receipt.md)"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] enumgap exploration promotion skipped "
+                f"(non-blocking): {exc}"
+            )
+
     # --- chain (Phase 4c Agent 1) anti-absorption hard gate -------------
     # v2.x Fix 2: enforce phase4c-chain-prompt rule 6 mechanically.
     # Chain Agent 1 absorbs distinct findings into super-groups (e.g. 4
@@ -13450,7 +14146,7 @@ def _run_phase_validators(
     # unconditionally on every chain / chain_agent2 attempt (not gated on
     # `passed`) — we MUST register IDs even when other gates failed,
     # otherwise attempt-1-failed → attempt-2-collision is invisible
-    # (the DODO 2026-05-21 root cause).
+    # (a root cause observed in a prior run).
     if phase.name in ("chain", "chain_agent2"):
         try:
             attempt_n = 2 if _read_retry_hint(scratchpad, phase.name) else 1
@@ -13480,7 +14176,7 @@ def _run_phase_validators(
             if hint:
                 _write_retry_hint(scratchpad, phase.name, hint)
 
-    # AccountEncoder bugs collapsed into one Medium hypothesis), which then
+    # N distinct same-file bugs collapsed into one Medium hypothesis), which then
     # cascade into mass exclusion when the verifier's single PoC fails.
     # On violation, emit a retry hint and fail the gate; existing retry
     # machinery re-spawns Chain Agent 1 with the hint. Hard cap = 1 retry:
@@ -13608,7 +14304,7 @@ def _run_phase_validators(
 
     # --- chain self-restatement (UNDER-merge) hard gate ----------------------
     # Mirror of anti-absorption: flags a chain hypothesis that merely RESTATES
-    # a single constituent at a higher tier (DODO-class High-tier inflation).
+    # a single constituent at a higher tier (a High-tier inflation class).
     # On violation: emit a retry hint and fail the gate (hard cap 1 retry); if
     # it persists, proceed — STEP 3 collapse + STEP 4 report carve-out are the
     # safety nets. Fires on whichever chain phase wrote chain_hypotheses.md
@@ -14228,6 +14924,39 @@ def _run_phase_validators(
             log.warning(
                 f"[{phase.name}] niche promotion skipped (non-blocking): {exc}"
             )
+        # M1 (recall): recover blind-spot scanner findings the inventory merge
+        # SCORED but silently dropped (e.g. one sibling promoted, another lost).
+        # Append-only / idempotent — a pure recall leak plug.
+        try:
+            bs_parsed, bs_recovered = promote_blind_spot_to_inventory(scratchpad)
+            if bs_recovered:
+                log.info(
+                    f"[{phase.name}] recovered {bs_recovered} LEAKED blind-spot "
+                    f"finding(s) into findings_inventory.md (parsed {bs_parsed}; "
+                    f"see blind_spot_promotion_receipt.md)"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] blind-spot recovery skipped (non-blocking): {exc}"
+            )
+        # G1/G2 (recall): mechanical enumeration-coverage gate. From the static-
+        # analysis graph, derive each finding's co-referencing functions and emit
+        # an ENUMGAP candidate for any the finding's analysis didn't address — the
+        # verify filter then adjudicates. No-op without a mechanical graph; never
+        # halts. (Reuses the inventory-append + verify path; recall-safe.)
+        try:
+            import enumeration_gate as _eg
+            _eg_res = _eg.run_enumeration_gate(scratchpad)
+            if _eg_res.get("emitted"):
+                log.info(
+                    f"[{phase.name}] enumeration gate: {_eg_res['obligations']} "
+                    f"obligation(s), emitted {_eg_res['emitted']} ENUMGAP candidate(s) "
+                    "for verification (see enumeration_obligations.md)"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] enumeration gate skipped (non-blocking): {exc}"
+            )
 
     # --- depth (SC): full validator suite ---
     elif phase.name == "depth" and config["pipeline"] == "sc":
@@ -14299,6 +15028,7 @@ def _run_phase_validators(
         sc_cov_issues = _validate_sc_subsystem_coverage(
             scratchpad, config.get("mode", "core"),
             scope_file=config.get("scope_file"),
+            project_root=config.get("project_root"),
         )
         if sc_cov_issues:
             passed = False
@@ -14420,6 +15150,39 @@ def _run_phase_validators(
             log.warning(
                 f"[{phase.name}] niche promotion skipped (non-blocking): {exc}"
             )
+        # M1 (recall): recover blind-spot scanner findings the inventory merge
+        # SCORED but silently dropped (e.g. one sibling promoted, another lost).
+        # Append-only / idempotent — a pure recall leak plug.
+        try:
+            bs_parsed, bs_recovered = promote_blind_spot_to_inventory(scratchpad)
+            if bs_recovered:
+                log.info(
+                    f"[{phase.name}] recovered {bs_recovered} LEAKED blind-spot "
+                    f"finding(s) into findings_inventory.md (parsed {bs_parsed}; "
+                    f"see blind_spot_promotion_receipt.md)"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] blind-spot recovery skipped (non-blocking): {exc}"
+            )
+        # G1/G2 (recall): mechanical enumeration-coverage gate. From the static-
+        # analysis graph, derive each finding's co-referencing functions and emit
+        # an ENUMGAP candidate for any the finding's analysis didn't address — the
+        # verify filter then adjudicates. No-op without a mechanical graph; never
+        # halts. (Reuses the inventory-append + verify path; recall-safe.)
+        try:
+            import enumeration_gate as _eg
+            _eg_res = _eg.run_enumeration_gate(scratchpad)
+            if _eg_res.get("emitted"):
+                log.info(
+                    f"[{phase.name}] enumeration gate: {_eg_res['obligations']} "
+                    f"obligation(s), emitted {_eg_res['emitted']} ENUMGAP candidate(s) "
+                    "for verification (see enumeration_obligations.md)"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] enumeration gate skipped (non-blocking): {exc}"
+            )
 
     # --- late containment check removed (v2.6.2) ---
     # The early containment check (line ~1694) already detects all LLM-written
@@ -14467,6 +15230,35 @@ def _run_phase_validators(
                 "[depth] PDE niche (non-blocking): %s",
                 "; ".join(pde_issues),
             )
+        # F3: detect belief-based depth self-exclusion and re-emit any candidate
+        # dropped without an in-scope referent OR on an unverified external
+        # assumption. Depth analogue of the Phase 3c per-contract net. SOFT
+        # diagnostic (never hard-fails); the re-emit side effect fires whenever a
+        # referent-less/external-assumption drop is found so a real bug can never
+        # vanish via a self-invented exclusion. Best-effort / degrade-not-halt.
+        try:
+            dsx_warnings, dsx_recovered = _validate_depth_self_exclusion(
+                scratchpad
+            )
+        except Exception as exc:  # never let a parse bug block a clean run
+            dsx_warnings, dsx_recovered = [], []
+            log.warning(
+                "[depth] depth self-exclusion check skipped "
+                f"(non-blocking): {exc}"
+            )
+        if dsx_warnings:
+            log.warning(
+                "[depth] depth self-exclusion (non-blocking): %s",
+                "; ".join(dsx_warnings),
+            )
+        if dsx_recovered:
+            try:
+                _reemit_depth_self_exclusions(scratchpad, dsx_recovered)
+            except Exception as exc:
+                log.warning(
+                    "[depth] depth self-exclusion re-emit skipped "
+                    f"(non-blocking): {exc}"
+                )
 
     if phase.name == "rescan":
         # BUG 2 / M-04: detect belief-based per-contract self-exclusion and
@@ -15252,7 +16044,7 @@ def _language_correction(configured, detected, conf, pipeline):
     # MEDIUM = suffix-only fallback. It CANNOT tell apart same-suffix families
     # (.rs: solana vs soroban vs rust-L1; .move: sui vs aptos) and just returns
     # the family DEFAULT (e.g. .rs -> solana). It must NOT clobber an EXPLICITLY
-    # configured language (the Irys rust->solana bug, and the symmetric
+    # configured language (a prior rust->solana bug, and the symmetric
     # soroban->solana / aptos<->sui risks). Only fill an UNSET config.
     if conf == "medium" and not configured:
         return detected
@@ -15456,12 +16248,26 @@ def _ensure_claude_folder_trusted(*paths: str) -> list[str]:
                 entry = projects.get(key)
                 if not isinstance(entry, dict):
                     entry = {}
-                if entry.get("hasTrustDialogAccepted") is not True:
-                    entry["hasTrustDialogAccepted"] = True
-                    entry.setdefault("projectOnboardingSeenCount", 1)
-                    projects[key] = entry
-                    changed = True
-                    trusted.append(key)
+                # Gate B (folder trust) AND Gate D (CLAUDE.md external @imports).
+                # A worker whose cwd is inside the audited project loads the
+                # GLOBAL ~/.claude/CLAUDE.md, which @imports ~/.plamen/rules/*.md
+                # — files OUTSIDE the project tree. Claude Code then shows the
+                # interactive "allow external imports" dialog (keys:
+                # hasClaudeMdExternalIncludesApproved /
+                # hasClaudeMdExternalIncludesWarningShown), a SEPARATE gate from
+                # hasTrustDialogAccepted. A PTY worker has no stdin to answer it,
+                # so it hangs to the phase budget (observed: a 128-min recon hang
+                # on a Soroban audit). Set all three together; setting trust
+                # alone leaves the import dialog live.
+                for ek in ("hasTrustDialogAccepted",
+                           "hasClaudeMdExternalIncludesApproved",
+                           "hasClaudeMdExternalIncludesWarningShown"):
+                    if entry.get(ek) is not True:
+                        entry[ek] = True
+                        entry.setdefault("projectOnboardingSeenCount", 1)
+                        projects[key] = entry
+                        changed = True
+                        trusted.append(key)
         # ── Global first-run interactive gates ────────────────────────────
         # Per-folder trust is only the SECOND of three first-run gates a fresh
         # `claude` install puts in front of a PTY worker; all three are
@@ -15695,7 +16501,7 @@ def main():
     _pipeline = str(config.get("pipeline", "")).strip().lower()
 
     # L1 GUARD (see _language_correction): for pipeline=l1 the SC ecosystem
-    # detector would wrongly correct a Rust L1 codebase (.rs files, e.g. Irys)
+    # detector would wrongly correct a Rust L1 codebase (.rs files)
     # to solana. _language_correction returns None for L1 so the configured
     # rust/go is kept and L1 skills inject correctly. For SC it returns the
     # detected language only on a high/medium-confidence genuine mismatch.
@@ -15864,7 +16670,32 @@ def main():
         try:
             sys.path.insert(0, str(Path(__file__).parent))
             from recon_prepass import run_recon_prepass
-            status = run_recon_prepass(config)
+            # The mechanical prepass runs SYNCHRONOUSLY in-process and includes
+            # the build/dep-install path plus (for EVM) the Slither type-resolved
+            # graph bake — the longest silent step, 1-3+ min on a real project.
+            # Without a pulse the terminal looks frozen. Print one up-front
+            # status line saying WHAT the wait is, then wrap the whole block in a
+            # live daemon-thread heartbeat so the user sees it's alive.
+            _pp_lang = str(config.get("language") or "evm").lower()
+            try:
+                if _pp_lang == "evm":
+                    display.print_phase_heartbeat(
+                        "recon", 0,
+                        status="⬡ baking type-resolved graph (Slither) "
+                               "— large projects take 1-3 min …",
+                        status_style="info",
+                    )
+                else:
+                    display.print_phase_heartbeat(
+                        "recon", 0,
+                        status="⬡ baking mechanical recon graph "
+                               "— large projects take 1-3 min …",
+                        status_style="info",
+                    )
+            except Exception:
+                pass
+            with _phase_heartbeat_thread(display, "recon", scratchpad):
+                status = run_recon_prepass(config)
             log.info(f"[pre-pass] {status}")
         except Exception as e:
             log.warning(f"[pre-pass] failed: {e} -- LLM recon will write all artifacts")
@@ -17105,6 +17936,44 @@ def main():
                 )
                 continue
 
+        # Phase 4b.7 pre-spawn skip. If the enumeration gate produced no
+        # obligations, the depth-exploration agent has nothing to trace — skip
+        # the LLM spawn, write a deterministic note, mark complete. This is the
+        # haltless degrade-to-fallback path: with no obligations there is
+        # nothing to lose, and any ENUMGAP candidates already appended by the
+        # gate remain on the candidate->verify route.
+        if phase.name == "enumgap_exploration":
+            if _enumgap_exploration_has_no_obligations(scratchpad):
+                try:
+                    (scratchpad / "enumgap_exploration_findings.md").write_text(
+                        "# Enumeration-Obligation Exploration\n\n"
+                        "_No enumeration obligations were produced by the "
+                        "post-depth enumeration gate (no mechanical reference "
+                        "graph, or zero flagged obligations). There is nothing "
+                        "to explore; the pipeline degrades to its prior "
+                        "candidate->verify behavior. Any ENUMGAP candidates "
+                        "emitted by the gate remain in the inventory._\n\n"
+                        "## Coverage Record\n\n"
+                        "| Obligation | Relationship | Disposition | Evidence |\n"
+                        "|------------|--------------|-------------|----------|\n"
+                        "| (none) | (none) | CLEAR | no obligations produced |\n",
+                        encoding="utf-8",
+                    )
+                except OSError:
+                    pass
+                checkpoint.mark_completed(phase.name)
+                checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
+                checkpoint.save(scratchpad)
+                log.info(
+                    f"[{phase.name}] N/A — no enumeration obligations produced; "
+                    "skipping spawn (degrades to candidate->verify fallback)"
+                )
+                display.print_phase_skipped(
+                    phase_idx + 1, total_active, phase.name,
+                    "N/A (no enumeration obligations)",
+                )
+                continue
+
         # v2.8.8: chain_iter2 pre-spawn skip. If composition_coverage.md
         # reports zero unexplored cross-class Medium+ pairs, the
         # iteration-2 agent has nothing to do — skip the LLM spawn
@@ -17628,6 +18497,68 @@ def main():
             display.print_phase_skipped(
                 phase_idx + 1, total_active, phase.name,
                 "mechanical (cross-tier dedup)" if ok else "dedup degraded (original retained)",
+            )
+            continue
+
+        # report_floor is Python-native and critical=False. It is the FINAL
+        # report mutation: it reads disposition.md (BODY/APPENDIX per finding,
+        # produced by the preceding report_disposition LLM phase) and relocates
+        # every APPENDIX finding out of the body into Appendix C, then decrements
+        # the Summary counts table. If the LLM disposition phase produced no
+        # usable disposition.md, it falls back to the keyword classifier
+        # (write_disposition_md). Haltless by construction: any missing/malformed
+        # input or exception is a no-op and the original report stands.
+        if phase.name == "report_floor":
+            moved = 0
+            try:
+                from plamen_mechanical import (
+                    apply_material_harm_floor as _apply_floor,
+                    write_disposition_md as gen_disposition_fallback,
+                )
+                # Ensure disposition.md exists: keyword-classifier fallback when
+                # the LLM phase produced nothing usable (haltless).
+                try:
+                    _disp = parse_disposition_md(scratchpad)
+                except Exception:
+                    _disp = {}
+                if not _disp:
+                    try:
+                        _n = gen_disposition_fallback(scratchpad)
+                        if _n:
+                            log.info(
+                                f"[report_floor] LLM disposition absent/empty; "
+                                f"wrote keyword-classifier fallback ({_n} row(s))"
+                            )
+                    except Exception as _exc:
+                        log.warning(
+                            f"[report_floor] keyword fallback failed: {_exc!r}"
+                        )
+                res = _apply_floor(scratchpad, config["project_root"])
+                moved = int(res.get("moved", 0))
+                log.info(
+                    f"[report_floor] material-harm floor relocated {moved} "
+                    f"pure-quality finding(s) to Appendix C"
+                )
+            except Exception as exc:
+                log.warning(f"[report_floor] non-fatal failure: {exc!r}")
+            # Always-written marker = the gate artifact (the floor itself is a
+            # no-op when there is nothing to move; that is success, not failure).
+            try:
+                (scratchpad / "material_harm_floor.md").write_text(
+                    f"# Material-Harm Body Floor\n\n"
+                    f"Relocated {moved} pure-quality finding(s) out of the "
+                    f"client body into Appendix C (recall-safe: none dropped).\n"
+                    f"Timestamp: {time.strftime('%Y-%m-%dT%H:%M:%S')}\n",
+                    encoding="utf-8",
+                )
+            except Exception as exc:
+                log.warning(f"[report_floor] marker write failed: {exc!r}")
+            checkpoint.mark_completed(phase.name)
+            checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
+            checkpoint.save(scratchpad)
+            display.print_phase_skipped(
+                phase_idx + 1, total_active, phase.name,
+                f"mechanical (material-harm floor: {moved} relocated)",
             )
             continue
 
@@ -19505,7 +20436,7 @@ def main():
         _hard_exit_after_user_stop(0)
 
     # v2.1.6: reconcile on-disk `.degraded` sentinels into the checkpoint
-    # JSON. Fixes the Irys L1 observation where `_v2_checkpoint.json.degraded
+    # JSON. Fixes a prior L1 observation where `_v2_checkpoint.json.degraded
     # == []` misleadingly disagreed with 3 `.degraded` files on disk, so a
     # reader of only the JSON saw a falsely-clean run.
     newly_synced = _sync_degraded_sentinels_to_checkpoint(scratchpad, checkpoint)

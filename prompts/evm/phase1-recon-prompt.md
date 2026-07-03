@@ -436,7 +436,7 @@ Grep for these patterns (exclude lib/, test/, mocks/):
 | `IUniswapV2Router\|IUniswapV3Pool\|IUniswapV4Pool\|IBalancerVault\|IWeightedPool\|IAToken\|ILendingPool\|IPool\(aave\)\|ICToken\|IComptroller\|ICurvePool\|IStableSwap\|IChainlinkAggregator\|AggregatorV3Interface\|IStETH\|IWstETH` (EXCLUDE: @openzeppelin generic utilities, solmate, solady — only flag when calling protocol-specific functions) | NAMED_EXTERNAL_PROTOCOL |
 | `.call{value\|.call(\|.delegatecall(` targeting non-hardcoded address after state change | OUTCOME_CALLBACK_LOW_LEVEL |
 | `deadline\|claimPeriod\|default.*selection\|fallback.*assign\|getDefault\|expir` AND time-gated with fallback path | OUTCOME_DELAY |
-| `AccountEncoder\|encodeAccount\|decompressAccount\|compressAccount\|isWritable\|isSigner\|base58\|bech32\|[Bb]orsh\|toBytes32\|fromBytes32\|abi.encodePacked.*\(targetChain\|destChain\|destinationChain\|chainId\)` (EVM contract SERIALIZING a payload for a NON-EVM VM — Solana/Bitcoin/Move/Cosmos: account-byte / pubkey-width (20↔32) / Borsh / base58 / bech32 encoders, or outbound cross-chain message bytes destined for a foreign VM) | NON_EVM_TARGET |
+| `encodeAccount\|decompressAccount\|compressAccount\|isWritable\|isSigner\|base58\|bech32\|[Bb]orsh\|toBytes32\|fromBytes32\|abi.encodePacked.*\(targetChain\|destChain\|destinationChain\|chainId\)` (EVM contract SERIALIZING a payload for a NON-EVM VM — Solana/Bitcoin/Move/Cosmos: account-byte / pubkey-width (20↔32) / Borsh / base58 / bech32 encoders, or outbound cross-chain message bytes destined for a foreign VM) | NON_EVM_TARGET |
 
 Write detected flags to {SCRATCHPAD}/detected_patterns.md
 
@@ -543,7 +543,7 @@ After listing all recommended templates, output this binding manifest:
 | STORAGE_LAYOUT_SAFETY | STORAGE_LAYOUT flag | {YES/NO} | {if YES: proxy/delegatecall/assembly patterns found} |
 | CROSS_CHAIN_MESSAGE_INTEGRITY | CROSS_CHAIN_MSG flag | {YES/NO} | {if YES: lzReceive/ccipReceive/setPeer patterns found} |
 | INTEGRATION_HAZARD_RESEARCH | NAMED_EXTERNAL_PROTOCOL flag | {YES/NO} | {if YES: list detected protocols — e.g., "Uniswap V3, Chainlink"} |
-| CROSS_VM_SERIALIZATION_CONFORMANCE | NON_EVM_TARGET flag | {YES/NO} | {if YES: target non-EVM VM + encoder — e.g., "Solana / AccountEncoder, Borsh, 32-byte pubkey"} |
+| CROSS_VM_SERIALIZATION_CONFORMANCE | NON_EVM_TARGET flag | {YES/NO} | {if YES: target non-EVM VM + encoder — e.g., "Solana / Borsh, 32-byte pubkey encoder"} |
 
 ### Binding Rules
 - SEMI_TRUSTED_ROLE flag detected → SEMI_TRUSTED_ROLES **REQUIRED**

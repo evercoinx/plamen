@@ -98,7 +98,7 @@ def test_non_evm_target_evidence_mechanically_recovers_cross_vm_binding():
         encoding="utf-8",
     )
     # CROSS_VM is an EVM-SIDE skill: recovery fires on an EXPLICIT EVM audit that
-    # serializes outbound for a non-EVM VM (e.g. DODO's AccountEncoder). Native
+    # serializes outbound for a non-EVM VM (e.g. an AccountEncoder). Native
     # non-EVM (solana/aptos/sui/soroban) and legacy/unknown ('') runs must NOT recover.
     breadth, depth = D._parse_sc_skill_bindings(sp, "evm")
     assert "CROSS_VM_SERIALIZATION_CONFORMANCE" in breadth.get(

@@ -425,7 +425,7 @@ def test_PROMPT_breadth_excludes_rescan_outputs(tmp_path: Path):
     hits = _find_prompt_phase_boundary_violations(prompt, "breadth")
     # Ship-C breadth PTY hotfix: the default render is now the PTY transport,
     # which spawns ALL open rows at once as BACKGROUND Task calls (no foreground
-    # "bounded batches of 6" — that serialized the live DODO breadth attempt).
+    # "bounded batches of 6" — that serialized a live breadth attempt).
     # The headless foreground-batched wording is asserted in
     # test_breadth_pty_background_hotfix.py::test_headless_breadth_keeps_foreground_batches.
     check(

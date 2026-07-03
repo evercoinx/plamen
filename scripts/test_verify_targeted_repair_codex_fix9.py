@@ -91,8 +91,8 @@ def test_codex_mixed_attempted_yes_and_mandatory_both_selected():
 
 
 # ---------------------------------------------------------------------------
-# Backend-AGNOSTIC (post-Claude-DODO fix): the mandatory-not-attempted class is
-# now eligible on ALL backends. A Claude DODO run degraded shards because the
+# Backend-AGNOSTIC (post-Claude fix): the mandatory-not-attempted class is
+# now eligible on ALL backends. A Claude run degraded shards because the
 # verifier non-silently reclassified findings (exactly as the prompt asks) and
 # got only generic whole-shard retries with no precise per-finding hint -> could
 # never converge. The repair EXECUTION path is backend-agnostic, so the hint is

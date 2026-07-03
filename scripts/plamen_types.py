@@ -444,8 +444,8 @@ def l1_never_cut_groups(mode: str) -> list:
 # depth agents run in every SC mode (Light/Core/Thorough) per the AUDIT
 # MODES table; validation sweep + 2-axis confidence scoring run in
 # Core/Thorough; design stress + perturbation + skill execution +
-# 4-axis confidence run only in Thorough. The Light set is the dHEDGE-
-# class floor — catches the "orchestrator merged depth agents to save
+# 4-axis confidence run only in Thorough. The Light set is the recall-
+# floor — catches the "orchestrator merged depth agents to save
 # context" failure mode mechanically.
 SC_NEVER_CUT_BASE = [
     ["depth_token_flow_findings.md"],
@@ -706,12 +706,47 @@ def phase_model(phase: Phase, mode: str, config: Optional[dict] = None) -> str:
             (config.get("pipeline") if config else None) == "sc"
             and name == "sc_semantic_dedup"
         )
+        # SC Thorough chain analysis (Phase 4c: chain agent 1, chain agent 2,
+        # chain iter2) → Opus. Chain matching reasons over the full hypothesis /
+        # composition / candidate-pair set and reads large compact ledgers;
+        # Sonnet's smaller context window autocompact-thrashes on big bounties
+        # (observed: chain_agent2 thrash → idle-prompt zombie hang on a
+        # ~99-finding bounty). Opus 4.8's larger budget absorbs the bounded
+        # ledgers and improves match precision. SC-only (L1 has no chain phase —
+        # Phase 4c is removed for L1). Core/Light stay sonnet.
+        is_sc_chain = (
+            (config.get("pipeline") if config else None) == "sc"
+            and name in ("chain", "chain_agent2", "chain_iter2")
+        )
+        # SC Thorough inventory synthesis (chunks + merge) → Opus (bloat fix #3).
+        # The inventory merge ingests ~all breadth+depth findings (100KB+) and
+        # decides what survives consolidation; Sonnet-at-volume preserves-rather-
+        # than-judges (the master inventory can come out LARGER than its chunks —
+        # barely dedup'd), and that bloated inventory is inherited by every
+        # downstream phase. SC-only; Core/Light stay sonnet.
+        is_sc_inventory = (
+            (config.get("pipeline") if config else None) == "sc"
+            and name in ("inventory", "inventory_chunk_a",
+                         "inventory_chunk_b", "inventory_chunk_c")
+        )
+        # SC Thorough report body-writers (the shard-expanded report_body_writer_*
+        # tier authors) → Opus (bloat fix #3). They bulk-read the full inventory
+        # and author the client-facing sections — the precision/bloat decision
+        # point where most non-GT findings get written into the body. Prefix-
+        # match the sentinel AND every expanded shard. SC-only.
+        is_sc_tier_writer = (
+            (config.get("pipeline") if config else None) == "sc"
+            and name.startswith("report_body_writer_")
+        )
         promote = (
             name in ("breadth", "skeptic")
             or is_sc_verify_shard
             or is_l1_verify_shard
             or is_sc_report_index
             or is_sc_semantic_dedup
+            or is_sc_chain
+            or is_sc_inventory
+            or is_sc_tier_writer
         )
         tier = "opus" if promote else (phase.model or "sonnet").strip()
         if tier == "opus":
@@ -1172,6 +1207,23 @@ SC_PHASES = [
           ["exploration_skeptic_findings.md"],
           base_timeout_s=3600, modes={"thorough"}, critical=False,
           model="sonnet"),
+    # Phase 4b.7: Enumeration-Obligation Exploration. The post-depth enumeration
+    # gate flags mechanical OBLIGATIONS (shared-symbol co-refs, asset-mover,
+    # array-uniqueness, unbounded-input). Previously those went STRAIGHT TO
+    # VERIFY as raw low-confidence candidates and were dismissed wholesale —
+    # verify refutes a stated claim, it does not investigate a hint. This phase
+    # routes each obligation to a depth EXPLORATION agent that TRACES it
+    # (boundary/variation/trace) and writes a real finding OR a reasoned clear;
+    # the driver then promotes those findings into the inventory so they flow
+    # through dedup -> chain -> verify normally. Soft (critical=False) + skipped
+    # when there are no obligations, so it always degrades to the prior
+    # candidate->verify fallback — never halts, never loses an obligation.
+    # Placed AFTER the depth post-hook (where the gate fires) and BEFORE
+    # sc_semantic_dedup so its findings are deduped + chained + verified.
+    Phase("enumgap_exploration", ["Phase 4b.7: Enumeration-Obligation Exploration"],
+          ["enumgap_exploration_findings.md"],
+          base_timeout_s=3600, modes={"core", "thorough"}, critical=False,
+          model="sonnet"),
     Phase("sc_semantic_dedup", ["Phase 4e: Semantic Dedup"],
           ["dedup_decisions.md", "findings_inventory_deduped.md"],
           base_timeout_s=1200, model="sonnet", critical=True),
@@ -1327,7 +1379,7 @@ SC_PHASES = [
     Phase("crossbatch", ["Phase 5.2: Cross-Batch Consistency"],
           ["cross_batch_consistency.md"],
           # v2.3.14: upgraded from haiku to sonnet. Haiku fails to
-          # enumerate all verify IDs on large audits (7/124 on Irys L1).
+          # enumerate all verify IDs on large audits (7/124 on a large L1 run).
           base_timeout_s=900, model="sonnet",
           modes={"core", "thorough"},
           critical=False),
@@ -1384,6 +1436,22 @@ SC_PHASES = [
     Phase("report_dedup", ["Step 6d: Report Dedup"],
           ["report_dedup_mapping.md"],
           base_timeout_s=900, model="sonnet", critical=False),
+    # Phase 6e LLM material-harm disposition PROPOSER. Reads the final deduped
+    # AUDIT_REPORT.md and writes disposition.md (BODY/APPENDIX per finding) using
+    # the recall-safe material-harm rule. PROPOSES ONLY; the Python report_floor
+    # phase below executes relocation. critical=False is LOAD-BEARING: a
+    # crash/timeout/degrade MUST NOT halt the run — report_floor falls back to
+    # the keyword classifier when disposition.md is absent/unusable.
+    Phase("report_disposition", ["Step 6e: Material-Harm Disposition"],
+          ["disposition.md"],
+          base_timeout_s=900, model="sonnet", critical=False),
+    # Phase 6e Python-native material-harm FLOOR. FINAL report mutation: reads
+    # disposition.md (keyword fallback if missing) and relocates APPENDIX
+    # findings to Appendix C + decrements the Summary table. critical=False is
+    # LOAD-BEARING: never halts; degrades to current behaviour on any problem.
+    Phase("report_floor", ["Step 6e: Material-Harm Floor"],
+          ["material_harm_floor.md"],
+          base_timeout_s=120, model="sonnet", critical=False),
 ]
 
 L1_PHASES = [
@@ -1451,6 +1519,17 @@ L1_PHASES = [
           ["rag_validation.md"],
           base_timeout_s=2400, needs_mcp=True, model="sonnet", critical=True,
           modes={"core", "thorough"}),
+    # Step 4b.7: Enumeration-Obligation Exploration (L1 parity with SC). The
+    # post-depth enumeration gate fires for L1 too; this routes each flagged
+    # obligation to a depth EXPLORATION agent that TRACES it before verify
+    # instead of dismissing it as a raw candidate. Soft + skipped when there are
+    # no obligations (degrades to the prior candidate->verify fallback). Placed
+    # AFTER rag_sweep and BEFORE verify_queue so its promoted findings are in the
+    # inventory when the verification queue is built. (L1 has no chain phase.)
+    Phase("enumgap_exploration", ["Step 4b.7: Enumeration-Obligation Exploration"],
+          ["enumgap_exploration_findings.md"],
+          base_timeout_s=3600, modes={"core", "thorough"}, critical=False,
+          model="sonnet"),
     Phase("verify_queue", ["Step 4d: Verification Queue Manifest"],
           ["verification_queue.md"],
           base_timeout_s=600, critical=True, model="haiku"),
@@ -1588,4 +1667,17 @@ L1_PHASES = [
     Phase("report_dedup", ["6d. Report Dedup"],
           ["report_dedup_mapping.md"],
           base_timeout_s=900, model="sonnet", critical=False),
+    # Phase 6e LLM material-harm disposition PROPOSER (L1 parity). Reads the
+    # final deduped AUDIT_REPORT.md and writes disposition.md (BODY/APPENDIX per
+    # finding). PROPOSES ONLY. critical=False: degrade never halts; report_floor
+    # falls back to the keyword classifier when disposition.md is absent.
+    Phase("report_disposition", ["6e. Material-Harm Disposition"],
+          ["disposition.md"],
+          base_timeout_s=900, model="sonnet", critical=False),
+    # Phase 6e Python-native material-harm FLOOR (L1 parity). FINAL report
+    # mutation: relocates APPENDIX findings to Appendix C + decrements Summary.
+    # critical=False is LOAD-BEARING: never halts.
+    Phase("report_floor", ["6e. Material-Harm Floor"],
+          ["material_harm_floor.md"],
+          base_timeout_s=120, model="sonnet", critical=False),
 ]

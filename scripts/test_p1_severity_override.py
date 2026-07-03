@@ -9,9 +9,9 @@ Covers:
   P1.4  Authenticity gate splits UNRESOLVED (Skeptic-Judge backing) from
         SEVERITY_OVERRIDE (driver-ledger backing) — neither cross-validates.
 
-The DODO 2026-05-21 driver self-contradiction (one driver function wrote
+The observed driver self-contradiction (one driver function wrote
 UNRESOLVED that another driver function then rejected) is the canonical
-case. All fixtures are synthetic; no DODO scratchpad copies.
+case. All fixtures are synthetic; no past-audit scratchpad copies.
 """
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ def test_p12_read_rejects_wrong_schema(tmp_path):
 
 
 def test_p11_repair_function_no_longer_writes_unresolved_token(tmp_path):
-    """Codex Point 3 / DODO root cause: the repair function must NEVER
+    """Codex Point 3 / observed root cause: the repair function must NEVER
     write `UNRESOLVED(...)` (Skeptic-Judge-only token). It writes the
     distinct `SEVERITY_OVERRIDE(...)` instead.
 

@@ -7,10 +7,10 @@ Covers:
   P2.4  Post-phase collision gate (BLOCKING for chain / chain_agent2)
   P2.5  Consumer backstop gate (WARNING-only at first ship)
 
-The DODO 2026-05-21 root cause was chain attempt 1 minting GRP-01 for
+The observed root cause was chain attempt 1 minting GRP-01 for
 title-A (Critical public-withdraw), then chain attempt 2 re-minting
 GRP-01 for title-B (Medium reinitializer). All P2 fixtures here are
-synthetic — never DODO-scratchpad copies — to prevent overfitting.
+synthetic — never past-audit scratchpad copies — to prevent overfitting.
 """
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def test_fix2_title_hash_backtick_and_emphasis_ignored():
 
 
 def test_fix2_titles_collide_false_on_dash_reword():
-    """The exact DODO cascade: em-dash reword is NOT a collision (FIX 2)."""
+    """The exact observed cascade: em-dash reword is NOT a collision (FIX 2)."""
     from plamen_parsers import _titles_collide
     a = "GCC trusts inbound externalId verbatim — no provenance check"
     b = "GCC trusts inbound externalId verbatim - no provenance check"
@@ -200,7 +200,7 @@ def test_p21_register_reuse_when_title_unchanged(tmp_path):
 
 
 def test_p21_register_collision_when_title_differs(tmp_path):
-    """The DODO root cause: same ID, different title → COLLISION."""
+    """The observed root cause: same ID, different title → COLLISION."""
     id_ledger_register(
         tmp_path, finding_id="GRP-01", owner_phase="chain_agent1",
         owner_attempt=1, owning_artifact="hypotheses.md",

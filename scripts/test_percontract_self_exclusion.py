@@ -258,7 +258,7 @@ def test_gate_acceptance_after_reemit_non_fresh(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# TASK E ROOT FIX (DODO M-14/M-15): content-less re-emit must NOT reach the
+# TASK E ROOT FIX (observed finding-pair flaw): content-less re-emit must NOT reach the
 # Medium body — it routes to a LOW-confidence appendix disposition. A
 # content-bearing re-emit keeps its severity for dedup/resolution. Both are
 # KEPT (re-emitted); neither is dropped.
@@ -267,7 +267,7 @@ def test_gate_acceptance_after_reemit_non_fresh(tmp_path):
 def test_e_flaw_resolved_contentless_reemit_routes_to_appendix_not_medium(tmp_path):
     """FP/flaw-now-resolved: a content-LESS self-exclusion stub (no concrete
     location, no harm) must re-emit at Informational with an APPENDIX_ONLY
-    marker — NOT default to a Medium body finding (the DODO M-14/M-15 flaw)."""
+    marker — NOT default to a Medium body finding (an observed finding-pair flaw)."""
     _write(tmp_path, "analysis_1.md", PROVIDED_BREADTH)
     # Bare "already known" assertion: no concrete file:line, no mechanism/harm.
     _write(

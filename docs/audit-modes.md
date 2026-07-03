@@ -1,6 +1,6 @@
 # Audit Modes
 
-> Plamen v2.1.4. All modes run through the PTY-supervised V2 driver
+> Plamen v2.2.0. All modes run through the PTY-supervised V2 driver
 > (`plamen_driver.py`) on Windows, macOS, and Linux, with either the Claude Code
 > or OpenAI Codex CLI backend.
 

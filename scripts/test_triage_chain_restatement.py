@@ -90,7 +90,7 @@ def _write_report_index(sp: Path, excluded_rows: list[tuple[str, str, str, str]]
 
 def test_chain_restatement_no_upgrade_is_clean(tmp_path):
     """NO-upgrade chain absorbed into a body constituent and recorded as
-    CHAIN-RESTATEMENT must NOT be flagged (the live DODO false positive)."""
+    CHAIN-RESTATEMENT must NOT be flagged (a live false positive class)."""
     pv = _pv()
     _write_chain(
         tmp_path,

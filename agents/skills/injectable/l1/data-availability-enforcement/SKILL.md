@@ -1,6 +1,6 @@
 ---
 name: "data-availability-enforcement"
-description: "L1 supplement - audits storage / data-availability chains (Arweave, Filecoin, Irys, Crust, Celestia, EigenDA) for unenforced data commitments: producer commits to data inclusion but the validator never verifies the data was actually published / gossiped / sampled."
+description: "L1 supplement - audits storage / data-availability chains (Arweave / Celestia-class) for unenforced data commitments: producer commits to data inclusion but the validator never verifies the data was actually published / gossiped / sampled."
 ---
 
 # Injectable Skill: Data Availability Enforcement
@@ -9,11 +9,11 @@ description: "L1 supplement - audits storage / data-availability chains (Arweave
 > **Inject Into**: `depth-consensus-invariant`, `depth-state-trace`
 > **Language**: Go and Rust
 > **Finding prefix**: `[DA-N]`
-> **Status**: v0.1 — derived from Run 7 Irys post-mortem
+> **Status**: v0.1 — derived from a prior DA-chain audit post-mortem
 
 ## When This Skill Activates
 
-Data availability chains are L1s whose primary function is to commit to and serve user data, not just to settle transactions. Examples: Arweave (permanent storage), Filecoin (negotiated storage), Irys (DA + L2 settlement), Celestia (rollup blob DA), EigenDA. The trust model is fundamentally different from settlement L1s: validators must enforce that **committed data is actually available**, not just that the commitment is well-formed.
+Data availability chains are L1s whose primary function is to commit to and serve user data, not just to settle transactions. Examples: Arweave (permanent storage), Celestia (rollup blob DA). The trust model is fundamentally different from settlement L1s: validators must enforce that **committed data is actually available**, not just that the commitment is well-formed.
 
 The single most common DA-chain bug class is: **the block header carries a commitment to data X, the producer is paid for committing to X, but nothing in the protocol forces the producer to actually publish X.** Honest miners assigned to store X cannot, get penalized, and the chain becomes unreliable.
 
@@ -155,7 +155,7 @@ Tag: `[DA-SLASHING-MISSING]`
 
 3. **Celestia / EigenDA DAS sample size selection** — academic papers show that DA sampling parameters (K samples, M-of-N threshold) must be calibrated against the target Byzantine fraction; under-sampled DAS gives a false sense of availability.
 
-4. **Irys Run 7 post-mortem (this skill's origin)** — `Publish` ledger commitments had NO validator-side enforcement that gossiped chunks reached the assigned partition holders. A producer could include a `data_root` and never broadcast; assigned miners received partitions they could not reconstruct.
+4. **A prior DA-chain audit post-mortem (this skill's origin)** — `Publish` ledger commitments had NO validator-side enforcement that gossiped chunks reached the assigned partition holders. A producer could include a `data_root` and never broadcast; assigned miners received partitions they could not reconstruct.
 
 ## Cross-references
 

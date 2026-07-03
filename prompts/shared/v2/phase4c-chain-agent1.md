@@ -24,7 +24,7 @@ files instead.
 ## Your Inputs
 
 Read:
-- `{SCRATCHPAD}/findings_inventory.md` (breadth summary + Chain Summary table)
+- `{SCRATCHPAD}/findings_inventory.md` — use the **breadth summary + Chain Summary table** for grouping; open an individual finding's block **on-demand** for a specific detail. **Do NOT bulk-read the full finding prose** — on large audits it is 100K+ and pulling it into one turn triggers context-collapse / autocompact-thrash. Group from the summary table + `chain_summaries_compact.md`.
 - `{SCRATCHPAD}/chain_summaries_compact.md` (extracted chain summaries from depth/scanner agents)
 - `{SCRATCHPAD}/confidence_scores.md` (for prioritization)
 - `{SCRATCHPAD}/attack_surface.md` (for enabler enumeration)

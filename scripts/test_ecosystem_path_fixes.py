@@ -290,7 +290,7 @@ def test_autocorrect_conflict_keeps_configured(tmp_path: Path):
 # ---- L1 guard: SC ecosystem detector must NOT override L1 rust/go language ----
 
 def test_language_correction_l1_keeps_configured_rust():
-    """L1 GUARD regression: a Rust L1 codebase (e.g. Irys) has .rs files so the
+    """L1 GUARD regression: a Rust L1 codebase has .rs files so the
     SC ecosystem detector returns 'solana'; for pipeline=l1 we MUST keep the
     configured rust/go and never inject Solana-SC skills."""
     import plamen_driver as D

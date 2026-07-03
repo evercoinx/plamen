@@ -31,7 +31,7 @@ from plamen_validators import _check_dedup_decision_coverage  # noqa: E402
 
 
 def test_p42_breadth_has_output_allowlist_block():
-    """The DODO percontract leak class is the canonical target. Breadth's
+    """An observed percontract leak class is the canonical target. Breadth's
     forbidden-output block now explicitly names the rescan/percontract
     files (so the LLM can't 'helpfully' write them during breadth)."""
     block = _render_forbidden_output_block("breadth")

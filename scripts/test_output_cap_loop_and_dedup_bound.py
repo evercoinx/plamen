@@ -1,4 +1,4 @@
-"""Two regressions from the live Irys-L1 semantic_dedup hang (2026-06).
+"""Two regressions from a live L1 semantic_dedup hang (2026-06).
 
 1. Dedup overflow: the live cap was raised to 250 (split into 80-pair "rounds"),
    but semantic_dedup runs as ONE subprocess in ONE turn and the multi-round
@@ -70,7 +70,7 @@ def _simulate_wait(events, quiescence_s=8.0):
 
 
 _CAP = "API Error: Claude's response exceeded the 32000 output token maximum"
-_WORK = "Writing test file DODORouteProxyMock.sol ... tool_use bash forge build"
+_WORK = "Writing test file RouteProxyMock.sol ... tool_use bash forge build"
 
 
 def test_cap_loop_trips_when_events_stay_fresh():

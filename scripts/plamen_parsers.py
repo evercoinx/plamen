@@ -32,6 +32,10 @@ from plamen_types import (
 __all__ = [
     "DedupSignature",
     "classify_quality_observation",
+    "classify_body_or_appendix",
+    "parse_disposition_md",
+    "_appendix_disposition_report_ids",
+    "_DISPOSITION_CLASS_TITLES",
     "_manifest_row_from_cells",
     "_manifest_row_is_spawned_breadth_agent",
     "_normalize_manifest_header",
@@ -162,6 +166,7 @@ __all__ = [
     "_dedup_block_max",
     "_extract_chain_summaries_compact",
     "_chain_iter2_has_no_unexplored_pairs",
+    "_enumgap_exploration_has_no_obligations",
     "_line_ranges_overlap",
     "_parse_line_range",
     "_shared_anchor_tokens",
@@ -226,6 +231,8 @@ __all__ = [
     "compute_report_medium_shards",  # backward compat wrapper
     "compute_report_tier_shards",
     "classify_poc_testability",
+    "RESOURCE_EXHAUSTION_PATTERNS",
+    "_matches_resource_exhaustion",
     "VERIFY_TARGET_PER_SHARD",
     "compute_sc_verify_shards",
     "compute_verify_shards",
@@ -278,7 +285,7 @@ _ID_NICHE_ALTS = (
 )
 
 # Hypothesis/chain/structural IDs (used in report index mapping).
-# F1 (post-DODO hardening): the SC chain phase emits grouped-by-severity
+# F1 (hardening from a prior run): the SC chain phase emits grouped-by-severity
 # hypothesis IDs `HC-NN` (Critical), `HH-NN` (High), `HM-NN` (Medium),
 # `HL-NN` (Low), `HI-NN` (Informational), plus multi-finding-group `GRP-NN`.
 # Without these, `_normalize_finding_id` returns "" for every grouped queue
@@ -374,7 +381,7 @@ def _breadth_roster_text(text: str) -> str:
     """Ship B: bound breadth-manifest parsing to the `## Breadth Agents`
     section so a later table (e.g. `## Required Template Coverage`, whose header
     also matches the template+required heuristic) cannot bleed into the roster.
-    This was the DODO instantiate HALT (count=16/outputs=None on a VALID
+    This was an instantiate HALT observed in a prior run (count=16/outputs=None on a VALID
     manifest). Uses section-scoped Markdown AST (plamen_markdown.section_text);
     falls back to the full text when no `## Breadth Agents` heading exists
     (legacy manifests that put the roster table directly under `# Spawn
@@ -925,7 +932,7 @@ def parse_report_index_counts(scratchpad: Path) -> dict[str, int]:
       grouped subsections, tier-assignment lists, mixed) — counting all
       first-column IDs in the body is correct regardless of layout.
 
-    The AwesomeX double-count bug (Appendix A internal hypothesis IDs
+    The double-count bug (Appendix A internal hypothesis IDs
     leaking into the count) is still fixed because the cut happens BEFORE
     appendix content. Anti-regression test in tests/ would compare both
     layouts.
@@ -937,7 +944,7 @@ def parse_report_index_counts(scratchpad: Path) -> dict[str, int]:
     }
     # v2.3.3 — single source of truth: derive counts from `get_tier_assignments`.
     # Pre-v2.3.3 this function had its own table-only regex parser that returned
-    # 0 when the Index Agent emitted bullet-list narrative (Irys L1 v2.3.x). The
+    # 0 when the Index Agent emitted bullet-list narrative (a prior L1 run). The
     # silent-zero contributed to the empty-AUDIT_REPORT failure: tier writers
     # were dispatched with 0 expected findings → emitted placeholders. Reusing
     # `get_tier_assignments` ensures counts and assignments are NEVER out of
@@ -1197,9 +1204,9 @@ def compute_verify_shards(scratchpad: Path) -> dict[str, list[dict[str, str]]]:
     # findings were silently dropped from verification — verify_queue
     # produced shards for crithigh/medium only. CLAUDE.md Thorough Mode
     # table mandates "ALL severities (with fuzz)"; pre-v2.2.2 behavior
-    # contradicted methodology. Live impact (Irys L1 v2.2.0 first run):
+    # contradicted methodology. Live impact (a prior L1 run):
     # 7 H-L01..H-L07 hypotheses never verified; H-L01 was a confirmed
-    # human-GT match (High 4 - Invalid blocks not removed). Recall lost.
+    # human-GT match (a High-severity finding). Recall lost.
     low_info = [
         r for r in rows
         if _severity_bucket(r.get("severity", "")) in {"low", "info"}
@@ -1414,7 +1421,7 @@ def _id_ledger_path(scratchpad: Path) -> Path:
 # Dash family: em-dash, en-dash, figure-dash, horizontal-bar, minus-sign,
 # non-breaking-hyphen, and the small/full-width variants. Cosmetic reword
 # (`—` → `-`) across retries must NOT change identity (FIX 2, validated on
-# the DODO GatewayCrossChain rewording cascade).
+# a cross-chain-contract rewording cascade in a prior run).
 _DASH_VARIANTS = "‒–—―−‑﹘﹣－"
 _DASH_TRANS = {ord(c): "-" for c in _DASH_VARIANTS}
 
@@ -2057,6 +2064,42 @@ def _poc_kw_present(pattern: str, *texts: str) -> bool:
     return False
 
 
+# Resource-exhaustion / executable-harm vocabulary (GENERIC words only — no
+# protocol/contract/function names). A finding describing unbounded input, a
+# gas bomb / gas griefing, an out-of-gas / unbounded-loop DoS, storage bloat, or
+# balance double-counting HAS a concrete executable harm assertion (gas /
+# iteration explosion, accounting drift). Such a finding must NOT fall through
+# to a structural / CODE-TRACE "no executable harm" no-PoC disposition: that is
+# the exact escape that let a deriver-injected gas-bomb finding be refuted with
+# no PoC. Matching is negation-aware via `_poc_kw_present` so "no unbounded loop
+# exists" does NOT trigger.
+RESOURCE_EXHAUSTION_PATTERNS = [
+    "unbounded",
+    "no length bound", "no size limit", "no length limit",
+    "no size or length limit",
+    "gas bomb", "gas griefing",
+    "out of gas", "oog",
+    "unbounded loop", "iterates over",
+    "unbounded array", "unbounded string", "unbounded bytes", "unbounded storage",
+    "storage bloat",
+    "dos via", "denial of service",
+    "exhaust gas", "exhaust memory",
+    "balance drain", "double-count", "double count",
+]
+
+
+def _matches_resource_exhaustion(*texts: str) -> bool:
+    """True iff any *text* asserts a resource-exhaustion / executable-harm
+    mechanism from `RESOURCE_EXHAUSTION_PATTERNS`.
+
+    Negation-aware via the shared `_poc_kw_present` guard (so a negated mention
+    like "no unbounded loop exists" does NOT match). Recall-direction: a match
+    only ever routes a finding TOWARD a testable class / keeps it in the body,
+    never drops it.
+    """
+    return any(_poc_kw_present(p, *texts) for p in RESOURCE_EXHAUSTION_PATTERNS)
+
+
 def classify_poc_testability(bug_class: str, preferred_tag: str, title: str, severity: str) -> str:
     """Classify a finding's testability for PoC routing.
 
@@ -2132,6 +2175,14 @@ def classify_poc_testability(bug_class: str, preferred_tag: str, title: str, sev
         return "unit"
 
     if property_hit:
+        return "property"
+
+    # Resource-exhaustion / unbounded-input findings carry a concrete executable
+    # harm (gas / iteration explosion, accounting drift) and must be testable as
+    # a property — NEVER allowed to fall through to the structural / CODE-TRACE
+    # no-PoC default below. Narrow-unit signals already returned above, so this
+    # preserves narrow-unit precedence. Negation-aware via the shared guard.
+    if _matches_resource_exhaustion(bc, title_lc):
         return "property"
 
     if "fuzz" in tag or "non-det" in tag:
@@ -2307,12 +2358,19 @@ _HYPO_HEADING_RE = re.compile(
 )
 
 
-def _parse_hypothesis_constituents(scratchpad: Path) -> dict[str, list[str]]:
+def _parse_hypothesis_constituents(
+    scratchpad: Path, standalone_severities: dict[str, str] | None = None
+) -> dict[str, list[str]]:
     """Parse hypothesis → constituent finding ID mapping.
 
     Tries finding_mapping.md first (table: constituent → hypothesis).
     Falls back to hypotheses.md (section headings + body scan for INV-* IDs).
     Returns {hypothesis_id: [constituent_id, ...]}.
+
+    ``standalone_severities`` ({finding ID: severity} for findings that appear as
+    their own rows) is forwarded to ``_parse_chain_constituents`` so a "justified"
+    chain that double-counts standalone constituents (without genuinely elevating
+    severity) is still linked for collapse (precision fix #2).
     """
     mapping: dict[str, list[str]] = {}
 
@@ -2350,7 +2408,7 @@ def _parse_hypothesis_constituents(scratchpad: Path) -> dict[str, list[str]]:
     # Justified compound chains are excluded by _parse_chain_constituents.
     def _merge_chain_links() -> None:
         try:
-            chain_links = _parse_chain_constituents(scratchpad)
+            chain_links = _parse_chain_constituents(scratchpad, standalone_severities)
         except Exception:
             return
         for chain_id, constituents in chain_links.items():
@@ -2473,14 +2531,31 @@ def _chain_severity_upgrade_justified(section: str) -> bool:
     return True
 
 
-def _parse_chain_constituents(scratchpad: Path) -> dict[str, list[str]]:
+def _parse_chain_constituents(
+    scratchpad: Path, standalone_severities: dict[str, str] | None = None
+) -> dict[str, list[str]]:
     """Parse chain_hypotheses.md → {chain_id: [Finding A id, Finding B id]}.
 
     Uses the 'Blocked Finding (A)' / 'Enabler Finding (B)' prose anchors from
     phase4c-chain-prompt.md "Chain Hypothesis Format". A chain whose
     machine-parseable line shows a justified severity upgrade with a non-empty
-    Combined-Impact is EXCLUDED from the map (genuine compound finding — kept
-    separate, never collapsed into a constituent).
+    Combined-Impact is normally EXCLUDED from the map (genuine compound finding
+    — kept separate, never collapsed into a constituent).
+
+    FIX (precision #2): the `Severity-Upgrade-Justified: YES` flag is
+    LLM-self-asserted and syntactic — a chain merely writing YES used to be
+    exempted from collapse, letting it double-count its constituents (a CH-*
+    chain row emitted beside the SAME constituents that ALSO stand alone as
+    their own findings). So when ``standalone_severities`` ({id:
+    severity}) is supplied and EVERY constituent of a "justified" chain also
+    appears as its own standalone finding AND the chain does NOT genuinely
+    elevate severity above its constituents (chain tier ≤ max constituent
+    tier), the chain is treated as a double-count and LINKED for collapse
+    regardless of the YES flag (research-confirmed Case-1 default: both parts
+    valid alone ⇒ note the chaining, don't mint a separate entry). A TRUE
+    elevation (chain tier strictly above every constituent) is preserved.
+    Recall-safe: when any severity is unknown the chain is kept separate.
+    Without ``standalone_severities`` the legacy exempt-on-YES behavior holds.
 
     Empty/unparseable file → {} (no merge = status quo, which is recall-safe).
     """
@@ -2500,10 +2575,7 @@ def _parse_chain_constituents(scratchpad: Path) -> dict[str, list[str]]:
         end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
         section = text[start:end]
 
-        # Genuine compound finding → do not link (keep separate).
-        if _chain_severity_upgrade_justified(section):
-            continue
-
+        # Extract constituents FIRST (needed by the double-count override below).
         constituents: list[str] = []
 
         # Prefer the explicit Blocked/Enabler anchors (most precise).
@@ -2529,6 +2601,30 @@ def _parse_chain_constituents(scratchpad: Path) -> dict[str, list[str]]:
                         if tok != chain_id and tok not in constituents:
                             constituents.append(tok)
 
+        # Genuine compound finding (justified severity upgrade) → keep separate
+        # (do not link) UNLESS it is a pure double-count: every constituent also
+        # stands alone AND the chain does NOT actually elevate severity above its
+        # constituents (see docstring). A genuine elevation (chain tier strictly
+        # above every constituent) is preserved; unknown severities → keep
+        # separate (recall-safe).
+        if _chain_severity_upgrade_justified(section):
+            collapse_double_count = False
+            if (standalone_severities and constituents and all(
+                    c.upper() in standalone_severities for c in constituents)):
+                _sm = re.search(
+                    r"Chain\s+Severity\s*:\s*([A-Za-z]+)", section, re.IGNORECASE
+                )
+                chain_rank = _severity_rank(_sm.group(1)) if _sm else -1
+                con_ranks = [
+                    _severity_rank(standalone_severities[c.upper()])
+                    for c in constituents
+                ]
+                if (chain_rank >= 0 and all(r >= 0 for r in con_ranks)
+                        and chain_rank <= max(con_ranks)):
+                    collapse_double_count = True
+            if not collapse_double_count:
+                continue
+
         if constituents:
             out[chain_id] = constituents
 
@@ -2538,6 +2634,53 @@ def _parse_chain_constituents(scratchpad: Path) -> dict[str, list[str]]:
 _CHAIN_SUMMARY_HEADING_RE = re.compile(
     r"^##\s+Chain\s+Summary\b", re.MULTILINE | re.IGNORECASE
 )
+
+
+def _enumgap_exploration_has_no_obligations(scratchpad: Path) -> bool:
+    """Pre-spawn early-exit signal for phase `enumgap_exploration`.
+
+    Returns True when there is nothing to explore — i.e. the enumeration gate
+    produced no obligations (the structured `_enumeration_obligations.json` is
+    missing or its `obligations` list is empty AND the human-readable
+    `enumeration_obligations.md` has no obligation rows). In that case the phase
+    is skipped and the pipeline degrades to its prior candidate->verify
+    behavior (the gate's ENUMGAP candidates, if any, already sit in the
+    inventory).
+
+    Conservative on parse failure: returns False (do NOT skip) so a real
+    obligation set is never silently dropped — recall over cost. The phase is
+    soft, so a spurious spawn only wastes one sonnet turn.
+    """
+    try:
+        scratchpad = Path(scratchpad)
+        jp = scratchpad / "_enumeration_obligations.json"
+        if jp.exists():
+            try:
+                import json as _json
+                data = _json.loads(jp.read_text(encoding="utf-8", errors="replace"))
+                obl = data.get("obligations") if isinstance(data, dict) else None
+                if obl:
+                    return False  # have obligations -> run
+            except Exception:
+                return False  # unparseable -> be safe, run
+        md = scratchpad / "enumeration_obligations.md"
+        if md.exists():
+            try:
+                text = md.read_text(encoding="utf-8", errors="replace")
+                # an obligation table row is a markdown row that is not the
+                # header/separator and names a function in backticks.
+                for ln in text.splitlines():
+                    s = ln.strip()
+                    if (s.startswith("|") and "`" in s
+                            and "Function" not in s and "---" not in s):
+                        return False
+            except Exception:
+                return False
+        # Neither source shows obligations -> nothing to explore.
+        # If NEITHER artifact exists at all, there were no obligations either.
+        return True
+    except Exception:
+        return False
 
 
 def _chain_iter2_has_no_unexplored_pairs(scratchpad: Path) -> bool:
@@ -2630,6 +2773,7 @@ def _extract_chain_summaries_compact(scratchpad: Path) -> int:
         "niche_*_findings.md",
         "design_stress_findings.md",
         "sibling_propagation_findings.md",
+        "enumgap_exploration_findings.md",
     ]
     sections: list[str] = []
     contributors = 0
@@ -2683,7 +2827,20 @@ def _dedup_queue_by_hypothesis(scratchpad: Path) -> int:
     if not queue_path.exists():
         return 0
 
-    mapping = _parse_hypothesis_constituents(scratchpad)
+    # Read queue rows FIRST so we know which finding IDs stand alone. A
+    # "justified" chain whose constituents are ALL standalone rows is a
+    # double-count and must still be collapsed (precision fix #2), so the
+    # standalone-ID set is threaded into the chain-constituent parse below.
+    rows = parse_verification_queue_rows(scratchpad)
+    if not rows:
+        return 0
+    standalone_severities = {
+        (row.get("finding id") or "").upper(): (row.get("severity") or "")
+        for row in rows
+        if (row.get("finding id") or "").strip()
+    }
+
+    mapping = _parse_hypothesis_constituents(scratchpad, standalone_severities)
     if not mapping:
         return 0
 
@@ -2699,11 +2856,6 @@ def _dedup_queue_by_hypothesis(scratchpad: Path) -> int:
             # First mapping wins (a finding shouldn't be in two hypotheses)
             if cid not in constituent_to_hypo:
                 constituent_to_hypo[cid] = hypo_id
-
-    # Read current queue rows
-    rows = parse_verification_queue_rows(scratchpad)
-    if not rows:
-        return 0
 
     # Group rows by hypothesis (unmapped rows stay solo)
     groups: dict[str, list[dict[str, str]]] = {}
@@ -2869,7 +3021,7 @@ def _report_index_reportable_text(text: str) -> str:
 def _parse_report_index_bullets(text: str) -> list[dict[str, str]]:
     """Format 2: bullet form `- C-01: Title (L1-C-01)` / `- C-01: Title (L1-C-01, downgraded ...)`.
 
-    The Index Agent's narrative form observed in Irys L1 v2.3.x. Recovers
+    The Index Agent's narrative form observed in a prior L1 run. Recovers
     per-finding mappings where the LLM emitted them; range bullets like
     `- H-01 through H-20: ...` are intentionally NOT parsed (no per-finding
     mapping) and drop to the mechanical fallback.
@@ -2911,7 +3063,7 @@ def parse_report_index_assignments(scratchpad: Path) -> list[dict[str, str]]:
     Tries two formats in priority order, returning whichever yields rows:
       1. Canonical Markdown table:
          ``| C-01 | Title | Critical | ... | L1-C-01 | ...``
-      2. Bullet form (Index Agent narrative observed Irys L1 v2.3.x):
+      2. Bullet form (Index Agent narrative observed in a prior L1 run):
          ``- C-01: Title (L1-C-01)`` / ``- C-01: Title (L1-C-01, downgraded ...)``
 
     Range form (``- H-01 through H-20: ...``) is intentionally NOT parsed —
@@ -2920,7 +3072,7 @@ def parse_report_index_assignments(scratchpad: Path) -> list[dict[str, str]]:
     `verification_queue.md` (structured, driver-owned).
 
     v2.1.9 — Permissive prefix markers in table form.
-    v2.3.3 — Bullet-form fallback added after Irys L1 run produced an
+    v2.3.3 — Bullet-form fallback added after a prior L1 run produced an
     empty AUDIT_REPORT.md when the Index Agent emitted bullet narrative
     instead of the canonical table. The empty deliverable was caused by
     silent-zero assignment dispatch.
@@ -3094,7 +3246,7 @@ def get_tier_assignments(
     Both signals contribute, neither alone is load-bearing.
 
     Pre-v2.3.3 the dispatch read `parse_report_index_assignments` directly.
-    On Irys L1 v2.3.x the parser returned 3 rows (Crit bullets only — the
+    On a prior L1 run the parser returned 3 rows (Crit bullets only — the
     Index Agent had collapsed High/Medium/Low to range shorthand). Those 3
     flowed straight to dispatch, the 55 unenumerated findings were silently
     dropped → empty `AUDIT_REPORT.md`. The merge prevents this entire class.
@@ -3114,7 +3266,7 @@ def get_tier_assignments(
     # append verify-queue rows: the queue is pre-report and may include refuted,
     # excluded, downgraded, or consolidated items that the Index Agent
     # deliberately removed from the reportable body. This exact false merge
-    # inflated Irys L1 C/H from 61 to 76 and triggered an unnecessary Opus
+    # inflated a prior L1 run's C/H from 61 to 76 and triggered an unnecessary Opus
     # retry after the tier writer had correctly completed all assignments.
     summary_counts = _parse_report_index_summary_counts(scratchpad)
     if summary_counts:
@@ -4535,7 +4687,7 @@ def _dedup_live_pair_cap() -> int:
     (and gated by the mechanical survivor-superset rule). Raising it only widens
     how many genuine candidates reach the LLM; it never auto-merges.
 
-    Default 250 covers the observed 205-pair Irys L1 case in one pass. Env
+    Default 250 covers the observed 205-pair L1 case in one pass. Env
     override ``PLAMEN_DEDUP_LIVE_PAIR_CAP`` lets ops dial it down without code
     change if a future inventory is pathologically large.
     """
@@ -4589,8 +4741,8 @@ _DEDUP_ROUND_CHUNK = 50
 # subset and PERT-lineage signals MISFIRE (a single shared source ID makes the
 # subset signal fire even though the defects differ), so those two signals are
 # SUPPRESSED as candidate-generation hints. The pair may still surface on
-# location / title / function-name signals. Heuristic from the Irys L1
-# post-mortem (INV-125/127 carried 15-element source sets).
+# location / title / function-name signals. Heuristic from a prior L1
+# post-mortem (two inventory findings carried 15-element source sets).
 _DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD = 4
 
 # Back-compat alias. Historically a hard live limit of 24; retained as a name
@@ -4831,8 +4983,8 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
             # exceeds the threshold, suppress those two false-merge-prone
             # signals for this pair. The pair can still surface on
             # location/title/function-name. This is the worst false-merge
-            # class per the Irys L1 post-mortem (e.g. INV-125/127 carrying
-            # 15-element source sets).
+            # class per a prior L1 post-mortem (e.g. two inventory findings
+            # carrying 15-element source sets).
             aggregate_suppressed = (
                 len(sa) > _DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD
                 or len(sb) > _DEDUP_AGGREGATE_SOURCE_ID_THRESHOLD
@@ -5521,7 +5673,7 @@ _PROMOTABLE_FEEDER_ID_PATTERN = (
     # (v2.8.9: these prefixes were ABSENT, so the depth-promotion bridge and its
     # receipt gate parsed 0 findings from depth_state_trace / depth_edge_case /
     # depth_token_flow / blind_spot_* and silently dropped depth-only findings —
-    # incl. a CONFIRMED High on the DODO run. DST-=design_stress and DEC-/DX- are
+    # incl. a CONFIRMED High on a prior run. DST-=design_stress and DEC-/DX- are
     # distinct; DS-/DE-/DT- require a digit so they cannot match inside DST-/DEC-/DX-N.)
     r"DS-\d+|DE-\d+|DT-\d+|BLIND-[A-Z]?-?\d+|"
     # SC scanner/fuzz/tool outputs
@@ -5677,6 +5829,137 @@ def _parse_depth_finding_blocks(path: Path) -> list[dict[str, str]]:
             "_referenced_ids": sorted(_ref_ids),
             **_extract_optional_finding_metadata(block),
         })
+
+    # ------------------------------------------------------------------
+    # F2 (v2.8.x): strictly-additive Chain-Summary table-row fallback.
+    #
+    # Depth/scanner artifacts sometimes list a finding ONLY as a row in a
+    # Chain-Summary / catalog table (e.g. `| DE-1 | file:Lnn | mechanism |
+    # verdict | severity |`) and never give it an `## [DE-1]` heading. The
+    # heading-only harvest above cannot see those rows, so the finding is lost
+    # before inventory. Recover such rows, but ONLY when the ID has ZERO
+    # heading coverage anywhere in this file (zero-coverage-only). That makes
+    # this a pure recall add: it can never alter a currently-working heading
+    # parse, and the row-only candidate is emitted LOW-CONFIDENCE so downstream
+    # dedup / promotion consume it exactly like a heading-parsed dict.
+    #
+    # Detection is header-NAME based (never positional): a table qualifies only
+    # when its header row carries at least one location / severity / verdict
+    # column, which distinguishes a finding catalog from a step-execution or
+    # rules-applied table.
+    # ------------------------------------------------------------------
+    heading_ids = {d["id"] for d in out}
+    row_id_re = re.compile(
+        r"^\s*[\*`_ ]*\[?(" + _PROMOTABLE_FEEDER_ID_PATTERN + r")\]?[\*`_ ]*$",
+        re.IGNORECASE,
+    )
+
+    def _norm_header(cell: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", cell.lower())
+
+    def _sep_row(cells: list[str]) -> bool:
+        return bool(cells) and all(c and set(c) <= {"-", ":"} for c in cells)
+
+    seen_row_ids: set[str] = set()
+    n = len(lines)
+    i = 0
+    while i < n - 1:
+        header_line = lines[i].strip()
+        sep_line = lines[i + 1].strip()
+        if not (header_line.startswith("|") and sep_line.startswith("|")):
+            i += 1
+            continue
+        sep_cells = [c.strip() for c in sep_line.strip("|").split("|")]
+        if not _sep_row(sep_cells):
+            i += 1
+            continue
+        headers = [c.strip() for c in header_line.strip("|").split("|")]
+        norm = [_norm_header(h) for h in headers]
+
+        def _find(*keys: str) -> int | None:
+            for idx_h, h in enumerate(norm):
+                if any(k in h for k in keys):
+                    return idx_h
+            return None
+
+        loc_idx = _find("location", "file")
+        sev_idx = _find("severity")
+        # "status" is accepted for VALUE mapping (some catalogs use it as a
+        # verdict synonym) but NOT for qualification: a step-execution ledger
+        # commonly has a "Status" column yet is not a finding catalog. Only a
+        # proper location / severity / "verdict" column qualifies a table.
+        verd_idx = _find("verdict", "status")
+        qual_verd_idx = _find("verdict")
+        desc_idx = _find(
+            "mechanism", "description", "desc", "rootcause", "summary",
+            "issue", "impact", "title",
+        )
+        # Only a Chain-Summary-style finding catalog qualifies.
+        if loc_idx is None and sev_idx is None and qual_verd_idx is None:
+            i += 1
+            continue
+
+        j = i + 2
+        while j < n:
+            row = lines[j].strip()
+            if not row.startswith("|"):
+                break
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            if _sep_row(cells) or not any(cells):
+                j += 1
+                continue
+            m_id = row_id_re.match(cells[0]) if cells else None
+            if m_id:
+                rid = m_id.group(1).upper()
+                if rid not in heading_ids and rid not in seen_row_ids:
+                    seen_row_ids.add(rid)
+
+                    def _cell(idx: int | None) -> str:
+                        if idx is not None and 0 <= idx < len(cells):
+                            return cells[idx].strip()
+                        return ""
+
+                    r_loc = _cell(loc_idx)
+                    r_sev = _cell(sev_idx) or "Medium"
+                    r_verd = _cell(verd_idx)
+                    r_desc = _cell(desc_idx)
+                    r_sev_clean = _strip_md(r_sev)
+                    r_verd_clean = _strip_md(r_verd)
+                    if _non_reportable_marker(r_sev_clean) or _non_reportable_marker(r_verd_clean):
+                        r_sev_clean = "Informational"
+                        if not r_verd_clean:
+                            r_verd_clean = "REFUTED"
+                    elif _ambiguous_na_marker(r_sev_clean):
+                        r_sev_clean = "Informational"
+                        if not r_verd_clean:
+                            r_verd_clean = "UNRESOLVED"
+                    r_title = _strip_md(r_desc) or rid
+                    if not r_loc:
+                        lm = re.search(
+                            r"\b([A-Za-z0-9_./\\-]+\.(?:rs|go|sol|move|py|c|cpp|cc|h|hpp|java|ts|js):L?\d+)\b",
+                            row,
+                        )
+                        r_loc = lm.group(1) if lm else "unknown"
+                    r_ref_ids = set(
+                        re.findall(r"\b" + _PROMOTABLE_FEEDER_ID_PATTERN + r"\b", row)
+                    )
+                    r_ref_ids.discard(rid)
+                    out.append({
+                        "id": rid,
+                        "title": r_title[:200] or rid,
+                        "severity": r_sev_clean.capitalize(),
+                        "location": _norm_loc(r_loc),
+                        # Row-only candidate: no execution/analysis section
+                        # exists, so it is deliberately LOW-CONFIDENCE.
+                        "preferred_tag": "CODE-TRACE",
+                        "verdict": r_verd_clean,
+                        "description": _strip_md(r_desc) or "Chain-Summary table-row finding recovered for verification.",
+                        "source_file": path.name,
+                        "_referenced_ids": sorted(r_ref_ids),
+                        "_low_confidence_rowonly": "true",
+                    })
+            j += 1
+        i = j if j > i + 1 else i + 1
     return out
 
 
@@ -5685,7 +5968,7 @@ def _parse_depth_finding_blocks(path: Path) -> list[dict[str, str]]:
 # Two driver-side gates exercising the existing SCIP prebake artifacts to
 # address two of the three RC buckets identified in the v2.2.2 post-mortem:
 #
-#   Bucket A — subsystem coverage gaps (~20 misses on Irys L1 v2.2.2):
+#   Bucket A — subsystem coverage gaps (~20 misses on a prior L1 run):
 #     Recon-flagged in-scope source files received zero depth-agent
 #     citations. Driver enumerates source files via the SCIP repo_map,
 #     diffs against citation set, surfaces uncited Medium+ files for iter2.
@@ -5756,7 +6039,7 @@ def _extract_gap_paths_from_markdown(text: str) -> list[str]:
 
 # --- v2.2.0 A.1: skill-step execution trace gate ---------------------------
 #
-# Failure mode (post-mortem RC-AGENT class, ~22 of 46 misses on Irys L1):
+# Failure mode (post-mortem RC-AGENT class, ~22 of 46 misses on a prior L1 run):
 # depth agents inherit 6-12 skills and produce 7-15 findings, but the
 # findings concentrate on 2-3 skills per agent. Other inherited skills get
 # zero attention and entire numbered sections (e.g. RPC_SURFACE_AUDIT §1-6,
@@ -5885,7 +6168,7 @@ def _expected_depth_agent_roles(scratchpad: Path) -> list[str]:
         # `iteration2` does NOT contain the substring `iter2`, so an
         # un-canonicalized `depth_edge_case_iteration2_findings.md` would
         # otherwise be mis-parsed as a phantom role `edge_case_iteration2`
-        # (observed on the DODO audit graph-consumption warning).
+        # (observed on a prior audit's graph-consumption warning).
         if any(
             tok in name for tok in (
                 "iter2", "iter3", "iteration2", "iteration3",
@@ -5917,7 +6200,7 @@ _DEPTH_EVIDENCE_TAG_RE = DEPTH_EVIDENCE_TAG_RE
 #   STUB     — subsystem noted, internals not read
 #   NOTREAD  — not opened (these are depth-agent priorities by construction)
 #
-# Failure mode observed in Irys L1 v2.1.7: 13 NOTREAD priority files, only ~7
+# Failure mode observed in a prior L1 run: 13 NOTREAD priority files, only ~7
 # received any depth coverage. The other 6 silently went unaudited (a class of
 # RC-SCOPE misses per post-mortem). v2.2.0 fix: after iter1 depth, identify
 # any NOTREAD file with zero citations across all depth/breadth/scanner
@@ -5973,7 +6256,7 @@ def _parse_notread_files(scope_leftover_text: str) -> list[str]:
       Schema 3 (variants):       NOT_READ / UNREAD / UNCOVERED / MISSED in any cell
 
     v2.2.3 widening — pre-v2.2.3 only matched literal "NOTREAD" string.
-    Live failure mode (Irys L1 v2.2.0): the recon-prompt template schema
+    Live failure mode (a prior L1 run): the recon-prompt template schema
     (Schema 2) doesn't use NOTREAD at all; rows without ACKNOWLEDGED are
     the uncovered ones. Parser missed them entirely.
 
@@ -6091,8 +6374,8 @@ def _parse_uncovered_from_ledger(ledger_text: str) -> list[str]:
 # --- v2.1.2: end-silent-degradation helpers ---------------------------------
 # Foundry / npm library paths that are always out-of-scope by convention.
 # scope_leftover entries under these paths are auto-acknowledged without
-# requiring a human/LLM-authored ACK string. Prevents the AwesomeX-class
-# false recon degradation where forge-std / v2-periphery / v3-core entries
+# requiring a human/LLM-authored ACK string. Prevents the
+# false recon degradation class where forge-std / v2-periphery / v3-core entries
 # triggered the coverage gate despite being obvious out-of-scope deps.
 _SCOPE_LEFTOVER_LIB_WHITELIST = (
     # Generic non-production/test-support paths.
@@ -6183,6 +6466,34 @@ _INTERNAL_FINDING_ID_RE = _INTERNAL_ID_RE
 
 
 def _verifier_status_from_text(text: str) -> str:
+    """Best-effort verifier status extraction, with a resource-exhaustion
+    safety net layered on top of the raw status resolver.
+
+    SAFETY NET (MODE A, recall-safe): a resource-exhaustion / executable-harm
+    finding must not be silently dropped via a STRUCTURAL "no executable harm"
+    refutation that produced no PoC. When the raw verdict is a refutation
+    (REFUTED / FALSE_POSITIVE) but its ONLY justification is a
+    STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION skip (no executed PoC, no
+    `[POC-FAIL]`) AND the text asserts a resource-exhaustion mechanism, demote
+    the refutation to UNRESOLVED so the finding stays in the report BODY (one
+    tier down, flagged for human review) instead of becoming an excluded
+    one-liner. This can only KEEP a grounded finding, never drop one. A genuine
+    `[POC-FAIL]` (the verifier actually ran a PoC that disproved the harm) is
+    NOT touched — that refutation is mechanically backed.
+    """
+    status = _verifier_status_from_text_impl(text)
+    if status in {"REFUTED", "FALSE_POSITIVE"} and _matches_resource_exhaustion(text):
+        norm = _llm_norm(text or "")
+        has_poc_fail = bool(re.search(r"\[\s*POC-?FAIL\s*\]", norm, re.IGNORECASE))
+        structural_skip = bool(
+            re.search(r"STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION", norm, re.IGNORECASE)
+        )
+        if structural_skip and not has_poc_fail:
+            return "UNRESOLVED"
+    return status
+
+
+def _verifier_status_from_text_impl(text: str) -> str:
     """Best-effort verifier status extraction for report-index recovery.
 
     Closes F-VRF-01: an empty/whitespace verifier file used to default to
@@ -6456,7 +6767,7 @@ _MATRIX_LIKELIHOOD_RE = re.compile(
 )
 
 
-# DODO May-2026 fix: the original `fully[-\s]?trusted` pattern matched
+# Fix from a prior audit: the original `fully[-\s]?trusted` pattern matched
 # explanatory PROSE that REJECTS applying the modifier (e.g., verifier
 # wrote "the severity discount for fully-trusted actors applies only
 # when… [we don't apply it here]"). This caused a false-positive -1 tier
@@ -6594,7 +6905,7 @@ def _extract_verifier_severity_with_adjustment(raw: str) -> str:
     the POST-adjustment value. If no adjustment is found, returns the
     field verbatim for downstream `normalize_severity` to handle.
 
-    Added in response to the DODO May-2026 audit halt where
+    Added in response to a prior audit halt where
     `verify_H-20.md` wrote `Severity: High (adjusted to Medium —
     external precondition required; see below)` — verifier intent was
     Medium, driver computed High, LLM correctly wrote Medium per the
@@ -6619,7 +6930,7 @@ def _extract_verifier_severity_with_adjustment(raw: str) -> str:
 def _enforce_severity_matrix(verify_text: str, queue_row: dict[str, str]) -> str:
     """Compute expected severity from verify text and queue row.
 
-    Priority (post-DODO refinement, asymmetric and intentional):
+    Priority (refinement from a prior run, asymmetric and intentional):
 
     1. Matrix (Impact × Likelihood + modifiers) when both axes are present.
     2. Verifier's explicit `**Severity**:` field when LOWER than the matrix
@@ -6633,8 +6944,8 @@ def _enforce_severity_matrix(verify_text: str, queue_row: dict[str, str]) -> str
     4. Queue-row severity as final fallback with E7 conservative
        downgrade.
 
-    **Why NOT symmetric (verifier wins both directions)?** The DODO
-    May-2026 audit's H-9 case looked like a symmetric-rule problem
+    **Why NOT symmetric (verifier wins both directions)?** A prior
+    audit's H-9 case looked like a symmetric-rule problem
     (verifier said High, matrix said Medium due to a prose match on
     `fully-trusted`). The real fix was in
     `_MATRIX_TRUST_FULLY_RE` — tightening the trust-modifier detector
@@ -6643,7 +6954,7 @@ def _enforce_severity_matrix(verify_text: str, queue_row: dict[str, str]) -> str
     narrative no longer false-triggers the demotion. The asymmetric
     contract (matrix corrects LLM over-rating) is preserved, which
     catches the more common failure mode of verifier severity
-    inflation seen in the DODO grader output (6/7 FOUND verdicts
+    inflation seen in a prior grader output (6/7 FOUND verdicts
     over-rated severity vs ground truth).
     """
     inputs = _extract_severity_inputs(verify_text)
@@ -6666,7 +6977,7 @@ def _enforce_severity_matrix(verify_text: str, queue_row: dict[str, str]) -> str
         # -1 modifier applies ONLY when impact is CONFINED to on-chain state
         # (report-template.md). Impact:High is defined as "direct fund loss /
         # permanent lock" -- that is NOT confined, so the modifier must not pull a
-        # High-impact finding down (later DODO runs lost their Critical to exactly
+        # High-impact finding down (later runs lost their Critical to exactly
         # this spurious on-chain demotion of a verified High x High theft). This
         # only PREVENTS a demotion of an already-High-impact finding; it never
         # promotes, so it cannot re-inflate the verifier-over-rating class the
@@ -6874,6 +7185,300 @@ def _classify_keyword(text: str, vocab: list[tuple[str, str]]) -> str:
         if needle in tl:
             return canon
     return ""
+
+
+# =========================================================================
+# Material-harm body floor (disposition: BODY vs APPENDIX)
+# =========================================================================
+#
+# Policy (recall-safe — see ~/.plamen/rules/report-template.md and
+# phase6-report-prompts.md Step 1.25):
+#
+# A finding is APPENDIX *only* when it has ZERO security consequence — i.e. it
+# is pure quality / hardening / observability / style (missing events; missing
+# zero-address / range checks with no demonstrated loss; one-step ownership /
+# missing two-step / renounceOwnership; defense-in-depth such as "add
+# nonReentrant" with no shown reentrancy loss; signature / EIP-712 binding
+# hardening with no shown exploit; missing asserts / gates with no consequence;
+# UX / allowance friction; naming; typos; error-message wording; magic numbers;
+# gas; docs; test-harness quality; interface-vs-impl parity; supportsInterface
+# omissions; latent / none-at-present hazards).
+#
+# Otherwise → BODY, at ANY severity. ANY real security consequence keeps a
+# finding in the body even when trusted-actor-gated, self-inflicted, or
+# bounded/dust: direct fund loss / extraction, funds locked or frozen,
+# privilege escalation, a liveness brick denying a core user action, or
+# accounting corruption leading to loss.
+#
+# Recall-safe default: when in doubt, BODY. Burying a real finding in the
+# appendix is the unacceptable error; an extra body finding is cheap. The
+# consequence signal therefore wins over the quality signal, and an unmatched
+# finding defaults to BODY.
+#
+# This is a deliberately GENERIC classifier — no protocol / token / contract /
+# function names (Plamen Part-0 no-overfit rule).
+
+# Concrete security-consequence vocabulary. A finding whose title or harm text
+# matches any of these stays in the BODY regardless of any quality match. Kept
+# GENEROUS on purpose: firing here is the recall-safe direction.
+_HARM_CONSEQUENCE_RE = re.compile(
+    r"(?i)\b("
+    # direct value loss / extraction
+    r"fund(?:s)?\s+(?:loss|are\s+lost|can\s+be\s+lost)|loss\s+of\s+fund|"
+    r"lose\s+(?:funds|their|tokens|assets|value|shares|collateral|deposit)|"
+    r"drain\w*|steal\w*|stolen|theft|siphon\w*|exfiltrat\w*|"
+    r"extract(?:s|ed|ion)?\s+(?:value|funds|more)|over[-\s]?pay|over[-\s]?charg|"
+    r"under[-\s]?pay|mint\s+(?:unlimited|free|extra)|inflat(?:e|ed|ion)\s+|"
+    # locked / frozen liveness on value
+    r"locked|frozen|freeze|stuck|trapped|"
+    r"cannot\s+(?:withdraw|redeem|claim|exit|unstake)|"
+    r"unable\s+to\s+(?:withdraw|redeem|claim|exit|unstake)|"
+    r"withdraw(?:al)?s?\s+(?:revert|blocked|disabled|fail)|"
+    r"permanent(?:ly)?\s+(?:lock|disabl|halt|brick)|"
+    # privilege / access
+    r"privilege\s+escalat|escalat\w*\s+privilege|"
+    r"unauthoriz\w*\s+(?:access|mint|burn|withdraw|transfer|call)|"
+    r"takeover|take\s+over|seize\s+control|gain\s+(?:admin|owner|control)|"
+    r"bypass\w*\s+(?:access|auth|permission|the\s+(?:check|guard))|"
+    r"arbitrary\s+(?:call|external\s+call|code|transfer)|"
+    # liveness / DoS on a core action
+    r"brick|denial[-\s]?of[-\s]?service|\bdos\b|"
+    r"permanently\s+halt|halt\s+(?:block|the\s+protocol|production)|"
+    r"deny\w*\s+(?:a\s+core|users?|service)|"
+    # accounting / solvency leading to loss
+    r"insolven|bad\s+debt|under[-\s]?collateraliz|"
+    r"accounting\s+(?:corrupt|error)\w*\s+(?:caus|lead|result)|"
+    r"incorrect\s+(?:share|payout|reward|balance|accounting)\s+(?:caus|lead|result|so\s+that|allowing)|"
+    r"share\s+(?:inflat|dilut)|first\s+depositor|donation\s+attack|"
+    r"price\s+manipulat|oracle\s+manipulat|reentran\w*\s+(?:drain|steal|allow|so)|"
+    r"griefing\s+(?:that|to|users)"
+    r")\b"
+)
+
+# Pure-quality / hardening / observability vocabulary. A finding that matches
+# ONLY this set (and NOT the consequence set) is APPENDIX. Kept SPECIFIC on
+# purpose so it rarely fires on a real finding.
+_PURE_QUALITY_VOCAB: list[tuple[str, str]] = [
+    # observability
+    ("missing event", "observability"),
+    ("no event", "observability"),
+    ("does not emit", "observability"),
+    ("lacks event", "observability"),
+    ("event emission", "observability"),
+    ("emit an event", "observability"),
+    ("event not emitted", "observability"),
+    # input-hardening with no shown loss
+    ("missing zero-address check", "input_hardening"),
+    ("missing zero address check", "input_hardening"),
+    ("zero-address check", "input_hardening"),
+    ("zero address validation", "input_hardening"),
+    ("address(0) check", "input_hardening"),
+    ("missing address(0)", "input_hardening"),
+    ("missing range check", "input_hardening"),
+    ("missing bounds check", "input_hardening"),
+    ("missing sanity check", "input_hardening"),
+    ("missing input validation", "input_hardening"),
+    ("missing validation", "input_hardening"),
+    ("does not validate", "input_hardening"),
+    ("lacks validation", "input_hardening"),
+    ("no input validation", "input_hardening"),
+    ("missing require", "input_hardening"),
+    # ownership hygiene
+    ("two-step ownership", "ownership_hygiene"),
+    ("two step ownership", "ownership_hygiene"),
+    ("single-step ownership", "ownership_hygiene"),
+    ("one-step ownership", "ownership_hygiene"),
+    ("ownable2step", "ownership_hygiene"),
+    ("ownable 2 step", "ownership_hygiene"),
+    ("renounceownership", "ownership_hygiene"),
+    ("renounce ownership", "ownership_hygiene"),
+    # defense-in-depth
+    ("defense in depth", "defense_in_depth"),
+    ("defense-in-depth", "defense_in_depth"),
+    ("defence in depth", "defense_in_depth"),
+    ("add nonreentrant", "defense_in_depth"),
+    ("missing nonreentrant", "defense_in_depth"),
+    ("missing reentrancy guard", "defense_in_depth"),
+    ("as a precaution", "defense_in_depth"),
+    # signature / EIP-712 binding hardening
+    ("eip-712", "signature_hardening"),
+    ("eip712", "signature_hardening"),
+    ("domain separator", "signature_hardening"),
+    ("signature binding", "signature_hardening"),
+    ("typed data hardening", "signature_hardening"),
+    # UX / allowance friction
+    ("allowance", "ux_friction"),
+    ("approval friction", "ux_friction"),
+    ("user experience", "ux_friction"),
+    ("ux friction", "ux_friction"),
+    ("usability", "ux_friction"),
+    # interface parity
+    ("interface parity", "interface_parity"),
+    ("interface vs impl", "interface_parity"),
+    ("interface mismatch with impl", "interface_parity"),
+    ("supportsinterface", "interface_parity"),
+    ("supports interface", "interface_parity"),
+    ("erc165", "interface_parity"),
+    ("erc-165", "interface_parity"),
+    # latent / no-present-impact
+    ("none at present", "latent"),
+    ("no current impact", "latent"),
+    ("not currently exploitable", "latent"),
+    ("no present impact", "latent"),
+    ("latent hazard", "latent"),
+    ("theoretical only", "latent"),
+    # cosmetic (subset of QO vocab, kept so the floor catches them too)
+    ("dead code", "cosmetic"),
+    ("unused import", "cosmetic"),
+    ("unused variable", "cosmetic"),
+    ("naming inconsistenc", "cosmetic"),
+    ("naming convention", "cosmetic"),
+    ("typo", "cosmetic"),
+    ("spelling", "cosmetic"),
+    ("error message", "cosmetic"),
+    ("error-message", "cosmetic"),
+    ("revert message", "cosmetic"),
+    ("revert string", "cosmetic"),
+    ("magic number", "cosmetic"),
+    ("hardcoded constant", "cosmetic"),
+    ("missing natspec", "cosmetic"),
+    ("missing documentation", "cosmetic"),
+    ("missing comment", "cosmetic"),
+    ("code style", "cosmetic"),
+    ("gas optimization", "cosmetic"),
+    ("gas efficiency", "cosmetic"),
+    ("gas saving", "cosmetic"),
+    ("redundant check", "cosmetic"),
+    ("shadow", "cosmetic"),
+]
+
+_DISPOSITION_CLASS_TITLES: dict[str, str] = {
+    "observability": "Observability / missing events",
+    "input_hardening": "Input hardening (no demonstrated loss)",
+    "ownership_hygiene": "Ownership hygiene",
+    "defense_in_depth": "Defense-in-depth (no demonstrated exploit)",
+    "signature_hardening": "Signature / EIP-712 hardening",
+    "ux_friction": "UX / allowance friction",
+    "interface_parity": "Interface parity",
+    "latent": "Latent / no present impact",
+    "cosmetic": "Code quality / cosmetic",
+}
+
+
+# F5: concrete-harm phrases used ONLY to make an `[EXTERNAL-ASSUMPTION` finding
+# load-bearing. An [EXTERNAL-ASSUMPTION] tag marks an in-scope-CONFIRMED
+# mechanism whose severity assumes the worst realistic external condition
+# (R10) — it is a verification obligation, NOT a severity discount. When such a
+# finding ALSO states a concrete harm, a quality keyword (e.g. "defense-in-depth")
+# must NOT be allowed to misroute it into the appendix. This list is
+# intentionally simpler/broader than _HARM_CONSEQUENCE_RE so it catches harm
+# phrasings the main RE does not (e.g. "receive fewer", "less than their fair
+# share"). It is gated behind the tag, so over-matching only ever pushes toward
+# BODY (recall-safe). GENERIC — no protocol/token/function names.
+_F5_CONCRETE_HARM_RE = re.compile(
+    r"(?i)\b("
+    r"los(?:e|es|ing)|lost|"
+    r"short(?:ed|s|fall)?|"
+    r"steal\w*|stole|stolen|"
+    r"drain\w*|"
+    r"lock(?:ed|s|ing)?|frozen|freeze|"
+    r"insolven\w*|"
+    r"receive\s+fewer|"
+    r"less\s+than"
+    r")\b"
+)
+
+_F5_EXTERNAL_ASSUMPTION_TAG = "[external-assumption"
+
+
+def classify_body_or_appendix(
+    title: str,
+    severity: str = "",
+    harm_text: str = "",
+    verdict: str = "",
+) -> tuple[str, str]:
+    """Classify a finding as ``"BODY"`` or ``"APPENDIX"`` (recall-safe).
+
+    Returns ``(disposition, reason)``. The consequence signal wins over the
+    quality signal, and an unmatched finding defaults to BODY — burying a real
+    finding in the appendix is the unacceptable error.
+
+    ``severity`` is accepted for symmetry / future use but does NOT change the
+    decision: a Medium / High pure-observability finding still routes to the
+    appendix, and a Low / Info finding with a real consequence stays in the
+    body. This is exactly the validated policy.
+    """
+    title = title or ""
+    harm_text = harm_text or ""
+    blob = f"{title}\n{harm_text}"
+    if _HARM_CONSEQUENCE_RE.search(blob):
+        return ("BODY", "real security consequence")
+    cls = _classify_keyword(blob, _PURE_QUALITY_VOCAB)
+    if cls:
+        # F5: an [EXTERNAL-ASSUMPTION]-tagged finding that ALSO states a
+        # concrete harm is a confirmed mechanism pending external verification
+        # (R10), not a hardening note. Override the quality-KEYWORD appendix
+        # misroute and keep it in the body. Precedence is explicit: the bare
+        # tag WITHOUT a concrete harm falls through to the normal pure-quality
+        # APPENDIX path below (prevents hardening-note bloat), so the
+        # zero-consequence → appendix floor still wins for pure quality.
+        if (
+            _F5_EXTERNAL_ASSUMPTION_TAG in blob.lower()
+            and _F5_CONCRETE_HARM_RE.search(blob)
+        ):
+            return ("BODY", "external-assumption with concrete harm (R10)")
+        label = _DISPOSITION_CLASS_TITLES.get(cls, cls)
+        return ("APPENDIX", f"pure quality/hardening — {label}")
+    return ("BODY", "default (recall-safe: no quality-only match)")
+
+
+_DISPOSITION_ROW_RE = re.compile(
+    r"^\|\s*([CHMLI]-\d+)\s*\|\s*(BODY|APPENDIX)\s*\|\s*(.*?)\s*\|?\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_disposition_md(scratchpad: Path) -> dict[str, tuple[str, str]]:
+    """Parse ``disposition.md`` into ``{REPORT_ID: (disposition, reason)}``.
+
+    Defensive by construction: a missing or malformed file returns ``{}`` so
+    every consumer degrades to current behaviour (everything stays in the
+    body). Keys are upper-cased report IDs (``C-01`` …). Disposition is
+    normalised to ``BODY`` / ``APPENDIX``; any unrecognised token is treated as
+    ``BODY`` (recall-safe).
+    """
+    p = scratchpad / "disposition.md"
+    if not p.exists():
+        return {}
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {}
+    out: dict[str, tuple[str, str]] = {}
+    for line in text.splitlines():
+        m = _DISPOSITION_ROW_RE.match(line.strip())
+        if not m:
+            continue
+        rid = m.group(1).upper()
+        disp = m.group(2).upper()
+        if disp not in ("BODY", "APPENDIX"):
+            disp = "BODY"
+        reason = re.sub(r"\s+", " ", m.group(3) or "").strip()
+        out[rid] = (disp, reason)
+    return out
+
+
+def _appendix_disposition_report_ids(scratchpad: Path) -> set[str]:
+    """Return the set of report IDs dispositioned APPENDIX (upper-cased).
+
+    Empty when ``disposition.md`` is absent/malformed → callers behave exactly
+    as before the material-harm floor existed.
+    """
+    return {
+        rid
+        for rid, (disp, _reason) in parse_disposition_md(scratchpad).items()
+        if disp == "APPENDIX"
+    }
 
 
 _DEDUP_GENERIC_STOP = {
@@ -7935,7 +8540,7 @@ def is_artifact_legacy_unmarked(path: Path) -> bool:
     ``PLAMEN_FINDINGS_COUNT``, agent-improvised ``PLAMEN_AGENT`` /
     ``PLAMEN_FOCUS``) but happen to omit ``PLAMEN_ARTIFACT`` -- on a
     fresh audit those were wrongly routed to IN_PROGRESS and halted the
-    breadth phase (DODO 2026-05-22). A file with any PLAMEN marker is a
+    breadth phase (observed in a prior run). A file with any PLAMEN marker is a
     fresh-format file; its completion is judged by status + structure,
     not by legacy detection.
 
@@ -7995,7 +8600,7 @@ def _structural_completeness_ok(
       informational metadata; the findings decision uses block detection,
       not the count. Passing True changes nothing. (Removing the hard
       requirement eliminates the attempt-1 wasted retry the canonical
-      DODO files hit when they omitted the count.)
+      worker files hit when they omitted the count.)
     - require_obligation_receipts_if_shard_exists: receipt coverage is
       owned solely by `_check_opengrep_obligation_coverage` (warning-only,
       non-blocking). A missing `## Obligation Receipts` section MUST NOT
@@ -8025,8 +8630,30 @@ def _structural_completeness_ok(
         if not pattern.search(text):
             reasons.append(f"missing required heading: ## {heading}")
 
+    # Placeholder check distinguishes an LLM-LEFT-BLANK from a CITATION of the
+    # audited source. Word-markers like TODO/FIXME/XXX/TBD appear legitimately in
+    # real code comments (`// TODO: make configurable`) and in finding prose that
+    # quotes or discusses them — that is good analysis, not an unfilled blank.
+    # (A multi-hour run stalled because a worker correctly cited a Solidity
+    # `// TODO:` source comment as evidence.) So: (1) strip fenced + inline code
+    # spans (source citations) before matching, and (2) for word-markers, only
+    # flag a LEFT-BLANK shape — the marker at the start of a line or as a field
+    # value (`**Field**: TODO`) — never a mid-sentence mention. Unambiguous
+    # markers (FILL_ME / <placeholder> / [LLM TO ENRICH]) stay a plain substring.
+    _prose = re.sub(r"`[^`\n]*`", " ",
+                    re.sub(r"```.*?```", " ", text, flags=re.S))
+    _word_markers = {"TODO", "FIXME", "XXX", "TBD"}
     for placeholder in placeholder_strings:
-        if placeholder and placeholder in text:
+        if not placeholder:
+            continue
+        norm = placeholder.rstrip(":").strip()
+        if norm.upper() in _word_markers:
+            hit = bool(re.search(
+                r"(?:^|\n)[ \t>*\-]*(?:\*\*[^*\n]+\*\*\s*:?\s*)?"
+                + re.escape(norm) + r"\b", _prose, re.IGNORECASE))
+        else:
+            hit = placeholder in _prose
+        if hit:
             reasons.append(f"unresolved placeholder string present: {placeholder!r}")
 
     # Findings rule: has findings OR an explicit no-findings rationale.

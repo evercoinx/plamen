@@ -1,7 +1,7 @@
 """Regression: coverage-ledger parser must not treat prose containing the word
 "candidate" as a table header.
 
-Live failure (DODO Opus rerun): the LLM coverage ledger had data rows whose
+Live failure (a prior Opus rerun): the LLM coverage ledger had data rows whose
 Reason column said e.g. "auto-mapped depth candidate, no verifier verdict".
 _collect_report_coverage_acknowledged_ids detected "candidate" anywhere in a
 row and treated that DATA row as a header, flipping id_col to the reason

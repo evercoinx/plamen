@@ -3,7 +3,7 @@ be classified as a rate-limit (auto-wait + preserve state via
 checkpoint.rate_limited_at), NOT a generic phase failure that burns the retry
 budget and HALTS.
 
-Fixture = the verbatim message from a live dHEDGE SC Thorough Codex halt
+Fixture = the verbatim message from a live SC Thorough Codex halt
 (account out of credits, reset 5:46 PM). Before the fix the regex looked only
 for structured tokens (usage_limit_reached / 429 / "type":"usage_limit") and
 missed this, so the run halted instead of auto-waiting.
