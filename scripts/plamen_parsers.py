@@ -266,6 +266,10 @@ _ID_DEPTH_ALTS = (
     r"DEPTH-[A-Z]+-\d+|DEPTH-CI-\d+|DEPTH-NS-\d+|DEPTH-ST-\d+|DEPTH-EC-\d+|"
     r"DEPTH-DA[0-9]*-\d+|"
     r"BLIND-\d+|VS-\d+|EN-\d+|SE-\d+|"
+    # CI-\d+ = committed-invariant block IDs emitted by the skeptic/depth phases
+    # (M1). Cataloged explicitly so completeness gates never silently zero the
+    # committed-invariant provenance carried on INVARIANT-sourced candidates.
+    r"CI-\d+|"
     r"INV-\d+|DCI-\d+|DEC-\d+|DX-\d+|DN-\d+|DNS-\d+|"
     r"DA-[A-Z0-9_-]+-\d+|DA\d+-[A-Z0-9_-]+-\d+|DCOV\d*-\d+|"
     r"DST-(?:[A-Z0-9_-]+-)?\d+|PERT-\d+|PAIR-\d+|ATT-\d+|"
@@ -346,6 +350,12 @@ _FID_ALLOWED_PREFIXES: frozenset = frozenset({
     "DCOV", "DST", "DT", "DS", "DCG", "DPI", "PERT", "PAIR", "ATT", "PANIC",
     "TF", "EC", "ST", "NS", "CI",
     "SLITHER", "FUZZ", "MEDUSA", "RSW", "SP", "SCANNER",
+    # M1/M2 Source-ID tags stamped on deriver candidates (the candidates carry
+    # INV-NNN finding IDs; these are the `**Source IDs**:` provenance tags).
+    # Cataloged so completeness/coverage gates recognize them and never zero
+    # INVARIANT/AXISGAP-sourced findings (per the "ID regex must catalog all
+    # formats" rule).
+    "INVARIANT", "AXISGAP",
 }) | frozenset(re.findall(r"[A-Z][A-Z0-9]+", _ID_NICHE_ALTS))
 
 _SEVERITY_RE = re.compile(

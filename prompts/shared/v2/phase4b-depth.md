@@ -140,6 +140,30 @@ not emit it as a live finding block. Put that decision in a separate
 with the canonical severity cell set to `Informational` if a severity cell is
 required. The Python verifier treats disposition-as-severity as contract drift.
 
+### Committed-Invariant Emission (OPTIONAL — value-bearing CLEAR/REFUTED)
+
+When you reach a `CLEAR`/REFUTED verdict for a value-bearing path (value
+movement, supply/shares, accounting, authorization, or a funds/liveness-gating
+boundary), you MAY additionally emit a `committed-invariant [CI-n]` block naming
+the local guard that makes the path safe, as exactly ONE of the six generic
+SHAPES — `CONSERVATION`, `REQUESTED_EQ_DELIVERED`, `APPROVE_EQ_SPEND`,
+`NO_REVERT_AT_BOUNDARY`, `ROUNDTRIP`, `FRESHNESS` — with symbols resolved at the
+locus but no protocol constant baked as "the answer":
+
+```
+committed-invariant [CI-n]
+Locus: <file>:L<nn>  (fn: <enclosing function>)
+Shape: <one of the six shapes>
+Assertion: <the falsifiable relation, symbols resolved>
+Falsify Class: <property | boundary | roundtrip | conservation>
+Provenance: depth CLEAR @ <candidate>
+```
+
+This is OPTIONAL at depth (the skeptic phases are the primary CI emitters; depth
+keeps its context lean) and strictly additive — it changes no verdict, severity,
+or prior finding. Emitted blocks are mechanically harvested downstream into
+falsifiable candidates for the fuzz/PoC gates.
+
 ### Language-Specific Depth Template Binding (MANDATORY)
 
 Before spawning any of the 4 standard depth agents, read:

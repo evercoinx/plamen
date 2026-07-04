@@ -72,6 +72,28 @@ Decision: KEEP / DOWNGRADE / UNRESOLVED
 ### Defense Identified
 [What defense, constraint, or precondition blocks exploitation, or "None found"]
 
+When you name a defense/precondition as blocking exploitation (i.e. a DOWNGRADE
+or refute of a value-bearing finding), do NOT stop at "the defense holds". Commit
+that defense as a falsifiable assertion and hand it to the falsifier. Emit a
+`committed-invariant [CI-n]` block encoding the named defense as exactly ONE of
+the six generic SHAPES — `CONSERVATION`, `REQUESTED_EQ_DELIVERED`,
+`APPROVE_EQ_SPEND`, `NO_REVERT_AT_BOUNDARY`, `ROUNDTRIP`, `FRESHNESS` — with
+symbols resolved at the locus but no protocol constant baked as "the answer":
+
+```
+committed-invariant [CI-n]
+Locus: <file>:L<nn>  (fn: <enclosing function>)
+Shape: <one of the six shapes>
+Assertion: <the falsifiable defense relation, symbols resolved>
+Falsify Class: <property | boundary | roundtrip | conservation>
+Provenance: skeptic DOWNGRADE @ <finding_id>
+```
+
+This is strictly additive: it does not change your Decision, severity, or any
+prior finding. The block is mechanically harvested downstream into a falsifiable
+candidate — a survived assertion confirms the defense; a triggered one is a real
+bug the downgrade would otherwise have hidden.
+
 ### Evidence
 [Code references, deployment context, economic analysis]
 

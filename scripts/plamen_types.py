@@ -1224,6 +1224,21 @@ SC_PHASES = [
           ["enumgap_exploration_findings.md"],
           base_timeout_s=3600, modes={"core", "thorough"}, critical=False,
           model="sonnet"),
+    # Phase 4b.8: Multi-Axis Coverage Meta-Pass (M2). Thorough only. Builds a
+    # driver-owned, DETERMINISTIC `function × axis` completeness matrix over the
+    # mechanically-hot functions and spawns a targeted deriver-worker ONLY for
+    # orthogonal risk axes that were never examined (axis-EXAMINED read from the
+    # CLOSED depth-evidence tag vocabulary; ambiguous ⇒ GAP, recall-safe). The
+    # driver computes the matrix FIRST and skips the LLM spawn when no GAP cells
+    # exist; the worker is strictly ADDITIVE. Placed AFTER exploration_skeptic
+    # (4b.6) and enumgap_exploration (4b.7) so THEIR findings count as coverage
+    # (shrinking the worklist), and BEFORE sc_semantic_dedup/chain so an added
+    # axis finding is deduped + chained + verified. Soft (critical=False):
+    # degrade-and-continue, never halts. Sonnet (not in the opus-promotion set).
+    Phase("axis_coverage", ["Phase 4b.8: Multi-Axis Coverage Meta-Pass"],
+          ["axis_coverage_findings.md"],
+          base_timeout_s=3600, modes={"thorough"}, critical=False,
+          model="sonnet"),
     Phase("sc_semantic_dedup", ["Phase 4e: Semantic Dedup"],
           ["dedup_decisions.md", "findings_inventory_deduped.md"],
           base_timeout_s=1200, model="sonnet", critical=True),

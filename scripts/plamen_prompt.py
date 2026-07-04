@@ -914,6 +914,9 @@ _STANDALONE_PROMPT_MAP: dict[str, str] = {
     "rag_sweep": "phase4b5-rag-sweep.md",
     "exploration_skeptic": "phase4b6-exploration-skeptic.md",
     "enumgap_exploration": "phase4b7-enumgap-exploration.md",
+    # Phase 4b.8 Multi-Axis Coverage Meta-Pass (M2). Deriver-worker prompt handed
+    # ONLY the GAP rows the driver mechanically computed; strictly additive.
+    "axis_coverage": "phase4b8-axis-coverage.md",
     # sc_semantic_dedup and semantic_dedup: NOT mapped here.
     # Their cost directives point the agent to read phase4e-semantic-dedup.md
     # directly. Loading it as body would leak cross-pipeline artifacts.
@@ -1802,6 +1805,13 @@ _LEGITIMATE_SUBPRODUCER_PATTERNS = {
     "primitive_correctness_findings.md",
     "network_amplification_findings.md",
     "lifecycle_replay_findings.md",
+
+    # --- M2 multi-axis coverage meta-pass (4b.8): driver-written matrix the
+    #     axis-coverage worker reads; findings artifact is the phase's own
+    #     expected_artifact and is allowlisted per-phase, but the matrix support
+    #     files are referenced in the prompt and must not warn. ---
+    "hot_function_axes.md",
+    "axis_coverage_findings.md",
 
     # --- Scratchpad: orchestrator-produced coordination artifacts ---
     "rag_validation.md",

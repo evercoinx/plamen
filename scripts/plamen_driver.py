@@ -2305,11 +2305,18 @@ def _phase_content_gate_issues(
     if phase.name == "exploration_skeptic":
         # Soft, additive phase: validator only ever returns [], so this is
         # always content-valid on resume — prevents a false resume-halt.
+        # M1: the committed-invariant soft validator runs alongside (also
+        # always returns []); it only writes a `.ci_gap` sentinel for visibility.
+        _validate_invariant_commitment(scratchpad, mode)
         return list(_validate_exploration_skeptic(scratchpad, mode))
     if phase.name == "enumgap_exploration":
         # Soft, additive phase (validator always returns []) — content-valid on
         # resume so it never causes a false resume-halt.
         return list(_validate_enumgap_exploration(scratchpad, mode))
+    if phase.name == "axis_coverage":
+        # Soft, additive phase (M2 validator always returns []) — content-valid on
+        # resume so it never causes a false resume-halt.
+        return list(_validate_axis_coverage(scratchpad, mode))
     if phase.name == "report_assemble":
         # RESUME-3: the FC4 content re-check must be SIDE-EFFECT-FREE and
         # content-only. Do NOT run _run_report_quality_gate here (it writes
@@ -11617,6 +11624,29 @@ def _run_depth_codex_fanout(
     return 0
 
 
+def _axis_coverage_has_no_gaps(scratchpad: Path) -> bool:
+    """Pre-spawn skip-when-clean signal for phase `axis_coverage` (M2, Phase 4b.8).
+
+    Runs the mechanical hot-function ranking + `function × axis` matrix build
+    FIRST (persisting hot_function_axes.md + _hot_function_axes.json for
+    visibility), then reports whether ANY GAP cell exists. Returns True (skip the
+    LLM spawn) ONLY when the matrix has zero GAP cells — every hot function was
+    already examined on every in-scope axis, or the axis is a provable N/A.
+
+    Conservative on failure: returns False (do NOT skip) so a real gap set is
+    never silently dropped — recall over cost. The phase is soft, so a spurious
+    spawn only wastes one sonnet turn. The ambiguous-⇒-GAP default inside
+    compute_axis_coverage_gaps means the matrix over-reports gaps rather than
+    under-reporting them, so a True return is a genuine all-clear.
+    """
+    try:
+        import enumeration_gate as _eg
+        gaps = _eg.compute_axis_coverage_gaps(Path(scratchpad))
+        return not gaps
+    except Exception:
+        return False
+
+
 # --- Core ---
 def run_phase(phase: Phase, config: dict, attempt: int) -> int:
     """Spawn the configured CLI backend for one phase.
@@ -14097,6 +14127,16 @@ def _run_phase_validators(
     # output. Same soft-dispatch idiom as invariants_p2/chain_iter2.
     if phase.name == "exploration_skeptic" and passed and not recovery_preflight:
         _validate_exploration_skeptic(scratchpad, config.get("mode", "core"))
+        # M1: committed-invariant soft validator (always []; sentinel-only).
+        _validate_invariant_commitment(scratchpad, config.get("mode", "core"))
+
+    # --- skeptic (Phase 5.1) — M1 committed-invariant soft validator ----
+    # Recall-positive / additive. The skeptic emits [CI-n] blocks on value-
+    # bearing DOWNGRADE/refute; the enumeration gate later harvests them. This
+    # soft validator only writes a `.ci_gap` sentinel when clears carry no CI
+    # block; it always returns [] and never halts.
+    if phase.name == "skeptic" and passed and not recovery_preflight:
+        _validate_invariant_commitment(scratchpad, config.get("mode", "core"))
 
     # --- enumgap_exploration (Phase 4b.7) -------------------------------
     # Recall-positive / additive soft phase. The depth-exploration agent TRACED
@@ -14122,6 +14162,32 @@ def _run_phase_validators(
         except Exception as exc:
             log.warning(
                 f"[{phase.name}] enumgap exploration promotion skipped "
+                f"(non-blocking): {exc}"
+            )
+
+    # --- axis_coverage (Phase 4b.8, M2) ---------------------------------
+    # Recall-positive / additive soft phase. The deriver-worker interrogated each
+    # GAP cell (a mechanically-hot function on a previously-unexamined risk axis)
+    # and wrote a real finding or a reasoned clear; now promote those findings into
+    # findings_inventory.md as AXISGAP-sourced INV-* blocks so they flow through the
+    # SAME inventory -> dedup -> chain -> verify path as every other finding. The
+    # validator is soft (always []) and the promotion never raises — if the phase
+    # degraded, no findings are promoted and no prior finding is lost.
+    if phase.name == "axis_coverage" and passed and not recovery_preflight:
+        _validate_axis_coverage(scratchpad, config.get("mode", "core"))
+        try:
+            import enumeration_gate as _eg
+            _pr = _eg.promote_axis_findings_to_inventory(scratchpad)
+            if _pr.get("emitted"):
+                log.info(
+                    f"[{phase.name}] promoted {_pr['emitted']} multi-axis "
+                    f"coverage finding(s) into findings_inventory.md "
+                    f"(parsed {_pr['parsed']}; see "
+                    "axis_coverage_promotion_receipt.md)"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] axis coverage promotion skipped "
                 f"(non-blocking): {exc}"
             )
 
@@ -18056,6 +18122,45 @@ def main():
                 display.print_phase_skipped(
                     phase_idx + 1, total_active, phase.name,
                     "N/A (no enumeration obligations)",
+                )
+                continue
+
+        # Phase 4b.8 (M2) pre-spawn skip-when-clean. The driver computes the
+        # hot-function × axis matrix MECHANICALLY FIRST (writing hot_function_axes.md
+        # + _hot_function_axes.json), and ONLY spawns the deriver-worker if GAP
+        # cells exist. With no GAP cells there is nothing to interrogate: write a
+        # deterministic stub, mark complete, skip the LLM. Recall-safe: the matrix
+        # is always persisted for visibility; the ambiguous-⇒-GAP default in
+        # compute_axis_coverage_gaps means a spurious skip cannot hide a true gap.
+        if phase.name == "axis_coverage":
+            if _axis_coverage_has_no_gaps(scratchpad):
+                try:
+                    (scratchpad / "axis_coverage_findings.md").write_text(
+                        "# Multi-Axis Coverage Meta-Pass\n\n"
+                        "_The mechanically-computed hot-function × axis matrix "
+                        "(see hot_function_axes.md) has no GAP cells — every "
+                        "mechanically-hot function was already examined on every "
+                        "in-scope risk axis (or the axis is a provable N/A). There "
+                        "is nothing to interrogate; this additive phase is skipped. "
+                        "No prior finding is lost._\n\n"
+                        "## Coverage Record\n\n"
+                        "| Function | Axis | Disposition | Evidence |\n"
+                        "|----------|------|-------------|----------|\n"
+                        "| (none) | (none) | CLEAR | no GAP cells in the matrix |\n",
+                        encoding="utf-8",
+                    )
+                except OSError:
+                    pass
+                checkpoint.mark_completed(phase.name)
+                checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
+                checkpoint.save(scratchpad)
+                log.info(
+                    f"[{phase.name}] N/A — hot-function × axis matrix has no GAP "
+                    "cells; skipping spawn (matrix persisted for visibility)"
+                )
+                display.print_phase_skipped(
+                    phase_idx + 1, total_active, phase.name,
+                    "N/A (no unexamined axes)",
                 )
                 continue
 

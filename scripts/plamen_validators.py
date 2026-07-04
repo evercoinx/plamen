@@ -182,6 +182,8 @@ __all__ = [
     "_validate_chain_iter2",
     "_validate_exploration_skeptic",
     "_validate_enumgap_exploration",
+    "_validate_invariant_commitment",
+    "_validate_axis_coverage",
     "_validate_chain_anti_absorption",
     "_declared_depth_findings",
     "_validate_chain_baseline_not_regrouped",
@@ -3036,6 +3038,14 @@ def _owned_artifact_patterns(pipeline: str, scratchpad: Optional[Path] = None) -
         # inventory in the post-hook (mirroring the enumeration gate's own
         # inventory append, which depth already performs).
         "enumgap_exploration": ["enumgap_exploration_findings.md"],
+        # Phase 4b.8 (M2): multi-axis coverage meta-pass. Writes its additive
+        # findings artifact plus the driver-owned hot-function/axis matrix; the
+        # driver promotes gap findings into the inventory in the post-hook
+        # (mirroring enumgap_exploration).
+        "axis_coverage": [
+            "axis_coverage_findings.md", "hot_function_axes.md",
+            "_hot_function_axes.json", "axis_coverage_promotion_receipt.md",
+        ],
         "sc_semantic_dedup": ["dedup_decisions.md", "findings_inventory_deduped.md"],
         "attention_repair": ["attention_repair_summary.md", "attention_repair_findings.md"],
         "chain": ["hypotheses.md", "finding_mapping.md", "enabler_results.md"],
@@ -6772,6 +6782,124 @@ def _validate_enumgap_exploration(scratchpad: Path, mode: str) -> list[str]:
                 "[enumgap_exploration] enumgap_exploration_findings.md missing/empty "
                 "— sentinel written, pipeline continues (obligations fall back to "
                 "the verify candidates)"
+            )
+    except Exception:
+        pass
+    return []
+
+
+# M1 committed-invariant commitment ------------------------------------------
+#
+# The skeptic phases (4b.6 exploration-skeptic, 5.1 skeptic) are told that every
+# time they clear a value-bearing instance as NO-GAP or DOWNGRADE a value-bearing
+# finding, they must ALSO emit a `committed-invariant [CI-n]` block encoding the
+# tacit local guard as a falsifiable assertion. This SOFT validator confirms the
+# habit: it counts NO-GAP/DOWNGRADE signals in the skeptic artifacts and the
+# `[CI-n]` blocks present, and if there are value-bearing clears but zero
+# committed invariants it writes a `.ci_gap` sentinel + warning for visibility.
+# WARNING-only: never returns a hard issue, never sets passed=False, never halts.
+# The habit is recall-positive (more falsifiable candidates); its absence loses
+# no prior finding, so a gap is advisory, not fatal.
+
+_CI_BLOCK_PRESENCE_RE = re.compile(r"committed-invariant\s*\[\s*CI-\d+\s*\]", re.IGNORECASE)
+_CI_CLEAR_SIGNAL_RE = re.compile(r"\bNO-?GAP\b|\bDOWNGRADE\b", re.IGNORECASE)
+
+
+def _validate_invariant_commitment(scratchpad: Path, mode: str) -> list[str]:
+    """SOFT validator for M1 committed-invariant emission (skeptic phases).
+
+    Recall-positive / additive. Like _validate_exploration_skeptic, it returns []
+    in every branch — it can never set passed=False and can never halt. When a
+    skeptic artifact records value-bearing clears (NO-GAP / DOWNGRADE) but carries
+    NO `committed-invariant [CI-n]` block, it writes a `.ci_gap` sentinel and a
+    warning so the missing falsifiable assertions are visible. Never raises.
+    """
+    if mode != "thorough":
+        return []
+    try:
+        scratchpad = Path(scratchpad)
+    except Exception:
+        return []
+    arts = []
+    for name in ("exploration_skeptic_findings.md", "skeptic_findings.md"):
+        try:
+            p = scratchpad / name
+            if p.exists() and p.stat().st_size > 30:
+                arts.append(p)
+        except OSError:
+            continue
+    if not arts:
+        return []
+    clears = 0
+    ci_blocks = 0
+    for p in arts:
+        try:
+            body = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        clears += len(_CI_CLEAR_SIGNAL_RE.findall(body))
+        ci_blocks += len(_CI_BLOCK_PRESENCE_RE.findall(body))
+    if clears > 0 and ci_blocks == 0:
+        import logging as _logging
+        _logging.getLogger("plamen.validators").warning(
+            "[invariant_commitment] %d NO-GAP/DOWNGRADE clear(s) recorded across "
+            "skeptic artifacts but 0 committed-invariant [CI-n] blocks emitted — "
+            "each value-bearing clear should commit its tacit local guard as a "
+            "falsifiable assertion. WARNING-only; sentinel written, pipeline "
+            "continues (no prior finding is lost).",
+            clears,
+        )
+        try:
+            (scratchpad / "invariant_commitment.ci_gap").write_text(
+                "[INVARIANT_COMMITMENT_CI_GAP] The skeptic artifacts recorded "
+                f"{clears} value-bearing clear(s) (NO-GAP/DOWNGRADE) but emitted "
+                "0 committed-invariant [CI-n] block(s). Per M1, each value-bearing "
+                "clear should commit its tacit local guard as a falsifiable "
+                "assertion for the falsifier. This is WARNING-only and "
+                "recall-positive: nothing is dropped or downgraded; the missing "
+                "assertions should be surfaced as committed invariants.\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    return []
+
+
+def _validate_axis_coverage(scratchpad: Path, mode: str) -> list[str]:
+    """SOFT validator for Phase 4b.8 (M2 multi-axis coverage meta-pass).
+
+    Recall-positive / additive phase. Like _validate_enumgap_exploration /
+    _validate_exploration_skeptic, it returns [] in EVERY branch — it can never
+    set passed=False and can never halt. The phase only ADDS axis-coverage
+    findings (or reasoned clears over GAP cells); its absence loses no prior
+    finding because the mechanical matrix (hot_function_axes.md) is always
+    persisted and the phase is skipped-when-clean.
+
+    On missing/near-empty output it writes an `.axis_gap` degraded sentinel and
+    a warning, then lets the pipeline proceed. Never raises.
+    """
+    if mode != "thorough":
+        return []
+    try:
+        scratchpad = Path(scratchpad)
+        out_path = scratchpad / "axis_coverage_findings.md"
+        if not (out_path.exists() and out_path.stat().st_size > 30):
+            try:
+                (scratchpad / "axis_coverage.degraded").write_text(
+                    "[AXIS_COVERAGE_DEGRADED] axis_coverage_findings.md missing or "
+                    "<30 bytes. Pipeline continues; this phase is additive-only — "
+                    "the mechanical hot-function × axis matrix (hot_function_axes.md) "
+                    "is persisted regardless, so no prior finding is lost by its "
+                    "absence.\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+            import logging as _logging
+            _logging.getLogger("plamen.validators").warning(
+                "[axis_coverage] axis_coverage_findings.md missing/empty — sentinel "
+                "written, pipeline continues (the mechanical axis matrix remains "
+                "available for human review)"
             )
     except Exception:
         pass

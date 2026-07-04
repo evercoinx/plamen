@@ -41,6 +41,27 @@ _MAX_COREFS_PER_VAR = 6       # cap co-referencers enumerated per symbol
 _SKIP_VAR_REF_THRESHOLD = 25  # a symbol referenced by >25 fns is too common to gate on
 _MAX_ENUMGAP_PER_RUN = 40     # global cap on emitted candidates
 
+# The six generic committed-invariant SHAPES (M1). Each is a relational form
+# (HOW to interrogate a locus), never a protocol constant; symbols resolve at the
+# locus at runtime. Kept as a frozenset so an unknown/garbled Shape degrades to
+# an un-shaped (still-emitted) candidate rather than being dropped.
+_CI_SHAPES: frozenset = frozenset({
+    "CONSERVATION", "REQUESTED_EQ_DELIVERED", "APPROVE_EQ_SPEND",
+    "NO_REVERT_AT_BOUNDARY", "ROUNDTRIP", "FRESHNESS",
+})
+
+# Falsify Class → generic postcondition/precondition class tags for chain
+# metadata. Generic (relational), no protocol names. A boundary/conservation
+# assertion CREATES/needs a STATE/BALANCE relation; freshness is EXTERNAL/TIMING.
+_CI_SHAPE_CHAIN: dict = {
+    "CONSERVATION": ("BALANCE: value-conservation relation asserted at the locus", "BALANCE"),
+    "REQUESTED_EQ_DELIVERED": ("BALANCE: requested==delivered relation asserted at the locus", "BALANCE"),
+    "APPROVE_EQ_SPEND": ("ACCESS: approve==spend relation asserted at the locus", "ACCESS"),
+    "NO_REVERT_AT_BOUNDARY": ("STATE: no-revert-at-boundary relation asserted at the locus", "STATE"),
+    "ROUNDTRIP": ("STATE: decode∘encode==id roundtrip relation asserted at the locus", "STATE"),
+    "FRESHNESS": ("EXTERNAL: input-freshness/source relation asserted at the locus", "EXTERNAL"),
+}
+
 
 def _chain_metadata_lines(postcondition: str = "", postcondition_type: str = "",
                           missing_precondition: str = "", precondition_type: str = "") -> list[str]:
@@ -462,11 +483,17 @@ def _iter_functions(root: Path):
                     continue
 
 
-def _emit_candidates(scratchpad: Path, candidates: list, cap: int) -> int:
+def _emit_candidates(scratchpad: Path, candidates: list, cap: int,
+                     source_id: str = "ENUMGAP") -> int:
     """Shared ENUMGAP emitter for every deriver. `candidates` are dicts with:
     key, title, location, source_note, root_cause, description, impact.
     Append-only to findings_inventory.md, idempotent via the SHARED receipt,
-    honours `cap` new emissions (shared run budget). Returns count emitted."""
+    honours `cap` new emissions (per-deriver run budget). Returns count emitted.
+
+    `source_id` stamps the `**Source IDs**:` field (default `ENUMGAP` for the
+    co-reference derivers). M1 passes `INVARIANT` so committed-invariant
+    candidates stay traceable and distinct for dedup/coverage accounting; the
+    stamped tag never changes the `INV-NNN` finding ID (always cataloged)."""
     if not candidates or cap <= 0:
         return 0
     inv = scratchpad / "findings_inventory.md"
@@ -507,7 +534,7 @@ def _emit_candidates(scratchpad: Path, candidates: list, cap: int) -> int:
             "**Severity**: Low",
             f"**Location**: {c['location']}",
             "**Preferred Tag**: [CODE-TRACE]",
-            f"**Source IDs**: ENUMGAP ({c['source_note']})",
+            f"**Source IDs**: {source_id} ({c['source_note']})",
             "**Verdict**: NEEDS_VERIFICATION",
             f"**Root Cause**: {c['root_cause']}",
             f"**Description**: {c['description']}",
@@ -772,6 +799,613 @@ def compute_unbounded_input_candidates(scratchpad: Path) -> list:
         return []
 
 
+# ── MECHANISM 1 — committed-invariant assertion deriver ──────────────────────
+# The skeptic/depth phases, whenever they rule a value-bearing path SAFE or refute
+# a value-bearing finding, commit the tacit LOCAL GUARD behind that verdict as an
+# executable `committed-invariant [CI-n]` block (one of six generic SHAPES). This
+# deriver harvests those blocks mechanically and turns each into a low-confidence
+# falsifiable inventory candidate (Source IDs: INVARIANT, NEEDS_VERIFICATION) so
+# the existing invariant-fuzz / verify / chain path FALSIFIES it. Generation is
+# recall-biased (emit on doubt); the verify-the-positives filter is precision-
+# preserving. Generic: names no protocol; symbols resolve at the locus.
+
+# One `committed-invariant [CI-n]` block, tolerant of the emitters' formatting.
+# Anchored on the `committed-invariant [CI-n]` header line; fields are matched
+# case-insensitively anywhere in the block. Emitters live in
+# phase4b6-exploration-skeptic.md, phase5-skeptic.md, phase4b-depth.md.
+_CI_BLOCK_RE = re.compile(
+    r"committed-invariant\s*\[\s*(?P<id>CI-\d+)\s*\]\s*\n(?P<body>.*?)"
+    r"(?=\n\s*committed-invariant\s*\[|\n#{1,6}\s|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Artifacts that may carry [CI-n] blocks (skeptic phases primary, depth optional).
+_CI_SOURCE_GLOBS = (
+    "exploration_skeptic_findings.md",
+    "skeptic_findings.md",
+    "depth_*_findings.md",
+)
+
+
+def _ci_field(body: str, name: str) -> str:
+    m = re.search(r"(?im)^\s*" + re.escape(name) + r"\s*:\s*(.+?)\s*$", body)
+    return m.group(1).strip() if m else ""
+
+
+def compute_invariant_assertion_candidates(scratchpad: Path) -> list:
+    """M1. Scan skeptic/depth artifacts for `committed-invariant [CI-n]` blocks
+    and turn each into a falsifiable inventory candidate. Each candidate carries
+    the assertion text, a Falsify Class, and generic chain pre/post metadata so it
+    is a STEP-0a-LC enabler for free. Locus is resolved to its enclosing function
+    via `_fn_at_location` over `_load_graph` when the graph is present; a missing
+    graph or unresolved locus degrades to a file-scope candidate (still emitted,
+    still verifiable). Never raises; empty on any failure."""
+    try:
+        scratchpad = Path(scratchpad)
+        graph = _load_graph(scratchpad)   # may be None → degrade, never halt
+        out: list = []
+        seen_ids: set = set()
+        globs: list[Path] = []
+        for pat in _CI_SOURCE_GLOBS:
+            try:
+                globs.extend(sorted(scratchpad.glob(pat)))
+            except Exception:
+                continue
+        for art in globs:
+            try:
+                text = art.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            for m in _CI_BLOCK_RE.finditer(text):
+                cid = m.group("id").strip().upper()
+                body = m.group("body")
+                locus = _ci_field(body, "Locus")
+                shape_raw = _ci_field(body, "Shape").strip()
+                shape = shape_raw.split()[0].upper() if shape_raw else ""
+                assertion = _ci_field(body, "Assertion")
+                fclass = (_ci_field(body, "Falsify Class") or "property").split()[0].lower()
+                provenance = _ci_field(body, "Provenance")
+                if not (locus or assertion):
+                    continue   # an empty stub carries nothing falsifiable
+                # Dedup on CI id + source artifact so the same block in two files
+                # (or a re-emitted block) yields one candidate. Key also embeds the
+                # id so the shared receipt makes cross-run emission idempotent.
+                dkey = f"{art.name}:{cid}"
+                if dkey in seen_ids:
+                    continue
+                seen_ids.add(dkey)
+                fn = _fn_at_location(graph, locus) if graph else None
+                # A recognized shape gets a shape-typed chain relation; an
+                # unknown/garbled shape still emits (recall-safe) with a generic
+                # STATE relation so it remains a chain enabler.
+                is_known = shape in _CI_SHAPES
+                post, post_t = _CI_SHAPE_CHAIN.get(
+                    shape, ("STATE: local guard asserted at the locus", "STATE"))
+                shape_label = shape if is_known else (shape_raw or "UNSPECIFIED")
+                loc_disp = locus or "file-scope (locus unresolved)"
+                fn_disp = f" (fn: `{fn}`)" if fn else ""
+                assert_disp = assertion or "assert the committed local guard holds at this locus"
+                out.append({
+                    "key": f"INVARIANT:{dkey}",
+                    "title": (f"Committed invariant {cid} ({shape_label}) at "
+                              f"`{loc_disp}`{fn_disp} — falsify"),
+                    "location": f"{loc_disp}{fn_disp}",
+                    "source_note": (f"{cid}; committed-invariant assertion; Falsify Class: "
+                                    f"{fclass}"
+                                    + (f"; {provenance}" if provenance else "")
+                                    + "; mechanically harvested — falsifier to confirm or refute"),
+                    "root_cause": (f"A prior verdict ruled this locus safe on the tacit local "
+                                   f"guard committed as {shape_label}: {assert_disp}. The guard "
+                                   f"is asserted but not falsified."),
+                    "description": (f"Falsify the committed invariant {cid} ({shape_label}) at "
+                                    f"{loc_disp}: {assert_disp}. Survived → sharpened spec; "
+                                    f"triggered → real bug the SAFE/REFUTE verdict hid. "
+                                    f"Falsify Class: {fclass}."),
+                    "impact": ("If the committed local guard does not hold at a boundary or "
+                               "reachable path, the value-bearing verdict that relied on it is "
+                               "wrong (falsifier to confirm the concrete harm)."),
+                    "postcondition": post,
+                    "postcondition_type": post_t,
+                })
+        return out
+    except Exception:
+        return []
+
+
+# ── MECHANISM 2 — multi-axis coverage meta-pass ──────────────────────────────
+# M1 closes gaps WITHIN a verdict (commit-then-falsify the tacit local guard).
+# M2 closes gaps ACROSS functions: it ranks the mechanically-hot functions, builds
+# a `function × axis` completeness matrix, and — for orthogonal risk axes that were
+# never examined at a hot function's locus — spawns a targeted deriver-worker.
+# Axis-EXAMINED is read ONLY from the CLOSED depth-evidence tag vocabulary (never
+# prose-attested); an AMBIGUOUS cell defaults to GAP (recall-safe). The hot set is
+# DRIVER-OWNED and DETERMINISTIC so the LLM cannot clobber the target set — the
+# property that makes the gate load-bearing. Generic: axes + hotness predicate are
+# question-shapes, never a protocol/token/function signature.
+
+_MAX_HOT_FUNCTIONS = 40          # mirrors _MAX_ENUMGAP_PER_RUN; budget lands on core
+_CALLER_THRESHOLD = 2            # "hot" caller count floor (a fn ≥2 callers is core)
+
+# The five orthogonal risk axes (HOW-shaped question per function). Order is
+# stable so the matrix columns are deterministic.
+_AXES: tuple = ("theft", "liveness", "accounting", "provenance", "boundary")
+
+# Per-language value-effect / mover regex reused to decide a function CAN move
+# value (⇒ theft axis is IN-scope, not N/A). Built from the existing _LANG specs
+# (effect ∪ mover) so no new vocabulary is invented.
+def _value_effect_res(lang: str) -> list:
+    spec = _LANG.get(lang, {})
+    res = []
+    for k in ("effect", "mover"):
+        r = spec.get(k)
+        if r is not None:
+            res.append(r)
+    return res
+
+
+# CLOSED depth-evidence tag detectors (finding-output-format.md vocabulary only).
+# A cell is EXAMINED iff one of these mechanically-detectable signals is present
+# at the finding block whose locus maps to the function. Ambiguous ⇒ GAP.
+_TAG_TRACE = re.compile(r"\[\s*TRACE\s*:", re.IGNORECASE)
+_TAG_BOUNDARY = re.compile(r"\[\s*BOUNDARY\s*:", re.IGNORECASE)
+_TAG_VARIATION = re.compile(r"\[\s*VARIATION\s*:", re.IGNORECASE)
+_TAG_REGRESS = re.compile(r"\[\s*REGRESS\s*:", re.IGNORECASE)
+_TAG_EXT_ASSUMPTION = re.compile(r"\[\s*EXTERNAL-ASSUMPTION\s*:", re.IGNORECASE)
+_TAG_CROSS_DOMAIN_EXT = re.compile(r"\[\s*CROSS-DOMAIN-DEP\s*:\s*external", re.IGNORECASE)
+# Terminal-mechanism / material-harm word cues (still mechanical substrings, NOT
+# free-text attestation — they only STRENGTHEN an EXAMINED signal that a closed
+# tag already anchors, or refine an axis N/A determination).
+_TRACE_TO_MOVE = re.compile(r"\[\s*TRACE\s*:[^\]]*(?:transfer|mint|withdraw|burn|deposit|payout)", re.IGNORECASE)
+_TRACE_TO_REVERT = re.compile(r"\[\s*TRACE\s*:[^\]]*(?:revert|lock|brick|freeze|abort)", re.IGNORECASE)
+_BOUNDARY_ZERO_ETC = re.compile(r"\[\s*BOUNDARY\s*:[^\]]*(?:=\s*0\b|=\s*1\b|MAX|min|empty)", re.IGNORECASE)
+_POST_TYPE_BAL_ACC = re.compile(r"(?im)^\s*\*{0,2}Postcondition\s*Types?\*{0,2}\s*:.*\b(?:BALANCE|ACCESS)\b")
+_MH_LIVENESS = re.compile(r"(?i)\b(?:liveness|permanently\s+revert|permanently\s+lock|denial[- ]of[- ]service|halt|brick|freeze|stuck)\b")
+_STALENESS_CUE = re.compile(r"(?i)\b(?:stale|staleness|freshness|oracle|price\s+feed|last\s*Updat|provenance|source\s+of)\b")
+
+
+def _load_function_summary(scratchpad: Path) -> dict:
+    """Parse `function_summary.md` into {bare_name_lower: {callers:int}}.
+    Best-effort; empty dict on absence/parse-failure so the hot-set degrades to
+    the graph + all-external fallback rather than halting. The summary's Function
+    column may be a qualified path; we key on the BARE name (last dotted/`::`
+    segment)."""
+    out: dict = {}
+    p = scratchpad / "function_summary.md"
+    if not p.exists():
+        return out
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return out
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s.startswith("|") or "---" in s or "Function" in s:
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if not cells:
+            continue
+        fn_cell = cells[0].strip("` ").strip()
+        if not fn_cell:
+            continue
+        bare = re.split(r"[.:]{1,2}", fn_cell)[-1].strip("` ").lower()
+        if not bare:
+            continue
+        callers = 0
+        # SCIP layout: | Function | File | Line | Kind | Callers | Callees |
+        for c in cells[1:]:
+            if re.fullmatch(r"\d+", c):
+                # first integer-only cell after the name is not necessarily
+                # callers; the SCIP Callers column is index 4. Prefer it when the
+                # row has the SCIP shape, else fall back to the first int seen.
+                pass
+        if len(cells) >= 5 and re.fullmatch(r"\d+", cells[4]):
+            try:
+                callers = int(cells[4])
+            except ValueError:
+                callers = 0
+        out[bare] = {"callers": callers}
+    return out
+
+
+def compute_hot_function_set(scratchpad: Path) -> list:
+    """M2. Rank the mechanically-hot production functions deterministically off
+    `_mechanical_graph.json` (+ `function_summary.md` when present). Writes
+    nothing itself (the matrix builder writes the artifacts); returns a ranked,
+    capped list of dicts: {function, loc, callers, writes, elevate, value_effect,
+    score, lang}. Driver-owned + deterministic — the LLM cannot clobber the target
+    set. Fallback: 'all external state-mutating functions' when the graph is
+    absent. Never raises; empty on total failure."""
+    try:
+        scratchpad = Path(scratchpad)
+        graph = _load_graph(scratchpad)
+        root = _locate_project_root(scratchpad)
+        summ = _load_function_summary(scratchpad)
+
+        # ELEVATE tags (optional recon signal in attack_surface.md). A function
+        # named on a line carrying [ELEVATE] is treated as hot. Best-effort.
+        elevate_names: set = set()
+        try:
+            asf = scratchpad / "attack_surface.md"
+            if asf.exists():
+                atext = asf.read_text(encoding="utf-8", errors="replace")
+                for ln in atext.splitlines():
+                    if "[ELEVATE]" in ln.upper() or "ELEVATE" in ln.upper():
+                        for nm in re.findall(r"`([A-Za-z_]\w*)`", ln):
+                            elevate_names.add(nm.lower())
+        except Exception:
+            elevate_names = set()
+
+        # writer set: bare fn names that reference (read/write) any state symbol.
+        fn_writes: set = set()
+        if graph is not None:
+            for _vk, vd in graph.get("var_refs", {}).items():
+                for d in vd.get("refs", []):
+                    fn_writes.add(_bare_from_descriptor(d).lower())
+
+        # value-effect scan over production function bodies (per language present).
+        # Maps bare-name(lower) -> (lang, has_value_effect). Deterministic source
+        # parse. `disp_by_fn` preserves the ORIGINAL-cased name so the fallback
+        # hot set reports the source name, matching the graph path's `bare`.
+        effect_by_fn: dict = {}
+        loc_by_fn: dict = {}
+        disp_by_fn: dict = {}
+        if root is not None:
+            for lang, rel, name, _params, body, line in _iter_functions(root):
+                bare = name.lower()
+                res = _value_effect_res(lang)
+                has_eff = any(r.search(body) for r in res) if res else False
+                # last write wins is fine; a bare name colliding across files still
+                # yields a stable deterministic result (sorted iteration below).
+                prev = effect_by_fn.get(bare)
+                effect_by_fn[bare] = (lang, has_eff or (prev[1] if prev else False))
+                loc_by_fn.setdefault(bare, f"{rel}:L{line}")
+                disp_by_fn.setdefault(bare, name)
+
+        # ── FALLBACK: no graph → 'all external state-mutating functions' ──
+        # Without the graph we cannot count callers; use the source-parsed
+        # value-effect set (a value effect ⇒ state-mutating) as the hot set.
+        if graph is None:
+            hot: list = []
+            for bare, (lang, has_eff) in sorted(effect_by_fn.items()):
+                if not has_eff:
+                    continue
+                hot.append({
+                    "function": disp_by_fn.get(bare, bare),
+                    "loc": loc_by_fn.get(bare, "?"),
+                    "callers": 0,
+                    "writes": False,
+                    "elevate": bare in elevate_names,
+                    "value_effect": True,
+                    "lang": lang,
+                    "score": 1 + (1 if bare in elevate_names else 0),
+                })
+            hot.sort(key=lambda h: (-h["score"], h["function"]))
+            return hot[:_MAX_HOT_FUNCTIONS]
+
+        # ── PRIMARY: rank off the graph ──
+        hot = []
+        for fk, info in graph.get("functions", {}).items():
+            bare = info.get("bare", fk.split(".")[-1]).lower()
+            callers = len(info.get("callers", []) or [])
+            summ_callers = int(summ.get(bare, {}).get("callers", 0)) if summ else 0
+            n_callers = max(callers, summ_callers)
+            writes = bare in fn_writes
+            elevate = bare in elevate_names
+            lang, has_eff = effect_by_fn.get(bare, ("", False))
+            # Hotness predicate: at least ONE hot signal (callers≥threshold, a
+            # state write, an ELEVATE tag, or a value-effect regex match).
+            is_hot = (n_callers >= _CALLER_THRESHOLD or writes or elevate or has_eff)
+            if not is_hot:
+                continue
+            score = (n_callers
+                     + (2 if writes else 0)
+                     + (2 if elevate else 0)
+                     + (2 if has_eff else 0))
+            hot.append({
+                "function": info.get("bare", fk),
+                "loc": info.get("loc", loc_by_fn.get(bare, "?")),
+                "callers": n_callers,
+                "writes": writes,
+                "elevate": elevate,
+                "value_effect": has_eff,
+                "lang": lang,
+                "score": score,
+            })
+        # Deterministic ranking: score desc, then name asc (tie-break stable).
+        hot.sort(key=lambda h: (-h["score"], str(h["function"]).lower()))
+        return hot[:_MAX_HOT_FUNCTIONS]
+    except Exception:
+        return []
+
+
+def _axis_examined_signals(block: str, axis: str) -> bool:
+    """Return True iff the finding `block` carries a CLOSED depth-evidence signal
+    that this `axis` was examined at the block's locus. Reads only the closed tag
+    vocabulary + mechanical substring cues that STRENGTHEN a tag anchor. Ambiguous
+    ⇒ False (caller defaults the cell to GAP — recall-safe)."""
+    b = block or ""
+    if axis == "theft":
+        return bool(_TRACE_TO_MOVE.search(b) or _POST_TYPE_BAL_ACC.search(b))
+    if axis == "liveness":
+        return bool(_TRACE_TO_REVERT.search(b)
+                    or (_TAG_BOUNDARY.search(b) and (_TRACE_TO_REVERT.search(b) or _MH_LIVENESS.search(b))))
+    if axis == "accounting":
+        return bool(_TAG_VARIATION.search(b) or _TAG_REGRESS.search(b)
+                    or (_TAG_BOUNDARY.search(b) and _POST_TYPE_BAL_ACC.search(b)))
+    if axis == "provenance":
+        return bool(_TAG_EXT_ASSUMPTION.search(b) or _TAG_CROSS_DOMAIN_EXT.search(b)
+                    or (_STALENESS_CUE.search(b) and _TAG_TRACE.search(b)))
+    if axis == "boundary":
+        return bool(_TAG_BOUNDARY.search(b) and _BOUNDARY_ZERO_ETC.search(b))
+    return False
+
+
+def _axis_na(hf: dict, axis: str) -> bool:
+    """Mechanically-provable N/A: a cell is N/A only when the function CANNOT be
+    exposed to the axis. Conservative — returns True ONLY on a provable exclusion,
+    else False (⇒ the cell falls through to EXAMINED-or-GAP). The only provable
+    exclusion we assert: a function with NO value-effect (mechanically) cannot be
+    a theft target."""
+    if axis == "theft":
+        # No value effect AND no state write ⇒ nothing to steal at this locus.
+        return not (hf.get("value_effect") or hf.get("writes"))
+    return False
+
+
+def compute_axis_coverage_gaps(scratchpad: Path) -> list:
+    """M2. Build the `function × axis` matrix over the hot set. For each hot
+    function, map every value-bearing finding block whose locus resolves to that
+    function, and mark each axis EXAMINED / N/A / GAP from the CLOSED depth-evidence
+    tag vocabulary (ambiguous ⇒ GAP). Writes `hot_function_axes.md` +
+    `_hot_function_axes.json`. Returns the GAP rows: list of
+    {function, loc, axis, lang}. Never raises; empty on failure."""
+    try:
+        scratchpad = Path(scratchpad)
+        hot = compute_hot_function_set(scratchpad)
+        if not hot:
+            # Still write empty artifacts so the phase/validator sees authentic
+            # empty state (no hot functions => no gaps => skip-when-clean).
+            try:
+                (scratchpad / "_hot_function_axes.json").write_text(
+                    json.dumps({"hot": [], "matrix": [], "gaps": []}, indent=1),
+                    encoding="utf-8")
+                (scratchpad / "hot_function_axes.md").write_text(
+                    "# Hot-Function × Axis Coverage Matrix\n\n"
+                    "> No mechanically-hot functions were ranked (absent graph and "
+                    "no value-effect functions). Nothing to gate.\n", encoding="utf-8")
+            except Exception:
+                pass
+            return []
+
+        graph = _load_graph(scratchpad)
+
+        # Collect value-bearing finding blocks keyed by enclosing bare-fn name.
+        # Sources: the aggregated inventory + per-agent depth outputs (the closed
+        # depth-evidence tags live in the depth findings).
+        block_by_fn: dict = {}
+        art_names = ["findings_inventory.md"]
+        try:
+            art_names += [p.name for p in sorted(scratchpad.glob("depth_*_findings.md"))]
+        except Exception:
+            pass
+        try:
+            art_names += [p.name for p in sorted(scratchpad.glob("*_findings.md"))]
+        except Exception:
+            pass
+        seen_art: set = set()
+        for an in art_names:
+            if an in seen_art:
+                continue
+            seen_art.add(an)
+            ap = scratchpad / an
+            if not ap.exists():
+                continue
+            try:
+                text = ap.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            # Split into finding blocks on '### Finding' / '## Finding' headers.
+            headers = list(re.finditer(r"(?m)^#{2,4}\s*Finding\b.*$", text))
+            spans = []
+            if headers:
+                for i, m in enumerate(headers):
+                    end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+                    spans.append(text[m.start():end])
+            else:
+                spans = [text]
+            for block in spans:
+                loc_m = re.search(r"(?im)^\s*\*{0,2}Location\*{0,2}\s*:\s*(.+)$", block)
+                loc = loc_m.group(1).strip() if loc_m else ""
+                fn = _fn_at_location(graph, loc) if (graph and loc) else None
+                bare = None
+                if fn and graph:
+                    bare = graph["functions"][fn].get("bare", fn.split(".")[-1]).lower()
+                if not bare:
+                    # Fallback: any hot-fn bare name mentioned in the Location line.
+                    for hf in hot:
+                        hn = str(hf["function"]).lower()
+                        if hn and re.search(r"\b" + re.escape(hn) + r"\b", loc.lower()):
+                            bare = hn
+                            break
+                if not bare:
+                    continue
+                block_by_fn.setdefault(bare, []).append(block)
+
+        matrix: list = []
+        gaps: list = []
+        for hf in hot:
+            bare = str(hf["function"]).lower()
+            blocks = block_by_fn.get(bare, [])
+            joined = "\n".join(blocks)
+            cells: dict = {}
+            for axis in _AXES:
+                if _axis_na(hf, axis):
+                    cells[axis] = "N/A"
+                elif blocks and _axis_examined_signals(joined, axis):
+                    cells[axis] = "EXAMINED"
+                else:
+                    # No block, or a block with no closed-tag signal for this axis
+                    # ⇒ ambiguous ⇒ GAP (recall-safe default).
+                    cells[axis] = "GAP"
+                    gaps.append({
+                        "function": hf["function"],
+                        "loc": hf.get("loc", "?"),
+                        "axis": axis,
+                        "lang": hf.get("lang", ""),
+                    })
+            matrix.append({"function": hf["function"], "loc": hf.get("loc", "?"),
+                           "score": hf.get("score", 0), "cells": cells})
+
+        try:
+            (scratchpad / "_hot_function_axes.json").write_text(
+                json.dumps({"hot": hot, "matrix": matrix, "gaps": gaps}, indent=1),
+                encoding="utf-8")
+        except Exception:
+            pass
+        try:
+            lines = ["# Hot-Function × Axis Coverage Matrix", "",
+                     f"> {len(hot)} hot function(s) ranked mechanically; {len(gaps)} "
+                     "GAP cell(s). Axis-EXAMINED is read from the CLOSED depth-evidence "
+                     "tag vocabulary only; an ambiguous cell defaults to GAP "
+                     "(recall-safe). N/A is a mechanically-provable exclusion.", "",
+                     "| Function | Location | " + " | ".join(a for a in _AXES) + " |",
+                     "|----------|----------|" + "|".join("---" for _ in _AXES) + "|"]
+            for row in matrix:
+                cells = row["cells"]
+                lines.append(f"| `{row['function']}` | {row['loc']} | "
+                             + " | ".join(cells[a] for a in _AXES) + " |")
+            (scratchpad / "hot_function_axes.md").write_text("\n".join(lines) + "\n",
+                                                             encoding="utf-8")
+        except Exception:
+            pass
+        return gaps
+    except Exception:
+        return []
+
+
+def promote_axis_findings_to_inventory(scratchpad: Path) -> dict:
+    """M2. Append the axis-deriver worker's findings to findings_inventory.md as
+    fresh INV-* blocks, `Source IDs: AXISGAP`, `Verdict: NEEDS_VERIFICATION`.
+    Idempotent via a dedicated receipt keyed on the source finding id. Chain
+    metadata is inferred generically from the finding's own type cues. Clone of
+    `promote_enumgap_exploration_to_inventory`. Returns {parsed, emitted}. Never
+    raises, never halts."""
+    scratchpad = Path(scratchpad)
+    try:
+        art = scratchpad / "axis_coverage_findings.md"
+        inv = scratchpad / "findings_inventory.md"
+        if not art.exists() or not inv.exists():
+            return {"parsed": 0, "emitted": 0}
+        text = art.read_text(encoding="utf-8", errors="replace")
+        inv_text = inv.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {"parsed": 0, "emitted": 0}
+
+    matches = list(_EXPL_HEADING_RE.finditer(text))
+    parsed: list[dict] = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block = text[start:end]
+        if not all(f"**{f}**" in block for f in _EXPL_REQUIRED_FIELDS):
+            continue
+        parsed.append({"id": m.group("id").strip(),
+                       "title": m.group("title").strip(),
+                       "block": block})
+    if not parsed:
+        return {"parsed": 0, "emitted": 0}
+
+    receipt = scratchpad / "axis_coverage_promotion_receipt.md"
+    promoted: set = set()
+    if receipt.exists():
+        try:
+            promoted = set(re.findall(r"\b([A-Za-z]{2,6}-\d+)\s*->\s*INV-\d+",
+                                      receipt.read_text(encoding="utf-8", errors="replace")))
+        except Exception:
+            promoted = set()
+
+    new = [p for p in parsed if p["id"] not in promoted]
+    if not new:
+        return {"parsed": len(parsed), "emitted": 0}
+
+    max_inv = 0
+    for mm in re.finditer(r"\bINV-(\d+)\b", inv_text):
+        try:
+            max_inv = max(max_inv, int(mm.group(1)))
+        except ValueError:
+            pass
+
+    def _field(block: str, name: str) -> str:
+        mo = re.search(r"\*\*" + name + r"\*\*\s*:\s*(.+?)(?=\n\*\*|\n##|\n#{2,4}\s|\Z)",
+                       block, re.IGNORECASE | re.DOTALL)
+        return (mo.group(1).strip() if mo else "").replace("\n", " ").strip()
+
+    appended: list[str] = []
+    rec_lines: list[str] = []
+    for n, p in enumerate(new, 1):
+        inv_id = f"INV-{max_inv + n:03d}"
+        sev = _field(p["block"], "Severity") or "Low"
+        loc = _field(p["block"], "Location") or "UNKNOWN"
+        desc = _field(p["block"], "Description") or p["title"]
+        impact = _field(p["block"], "Impact") or "Verifier to confirm the concrete harm."
+        rc = _field(p["block"], "Root Cause")
+        tag = _field(p["block"], "Preferred Tag") or "[CODE-TRACE]"
+        # Generic chain metadata from the finding's own Postcondition type cue when
+        # present; a freshness/provenance axis finding is naturally EXTERNAL/TIMING.
+        post = _field(p["block"], "Postconditions Created")
+        post_t = _field(p["block"], "Postcondition Types")
+        appended.extend([
+            f"### Finding [{inv_id}]: {p['title']}",
+            f"**Severity**: {sev.split()[0] if sev else 'Low'}",
+            f"**Location**: {loc}",
+            f"**Preferred Tag**: {tag}",
+            f"**Source IDs**: {p['id']} (multi-axis coverage meta-pass; a "
+            "mechanically-hot function was interrogated on a previously-unexamined "
+            "risk axis — verifier to confirm or refute)",
+            "**Verdict**: NEEDS_VERIFICATION",
+        ])
+        if rc:
+            appended.append(f"**Root Cause**: {rc}")
+        appended.extend([
+            f"**Description**: {desc}",
+            f"**Impact**: {impact}",
+        ])
+        appended.extend(_chain_metadata_lines(
+            postcondition=post, postcondition_type=(post_t.split()[0] if post_t else ""),
+        ))
+        appended.append("")
+        rec_lines.append(f"{p['id']} -> {inv_id}")
+
+    header = ("\n\n## Multi-Axis Coverage Findings (AXISGAP)\n\n"
+              "Findings produced by the Phase 4b.8 multi-axis coverage meta-pass: "
+              "a mechanically-hot function interrogated on a risk axis its owning "
+              "domain lens never examined. Low-confidence by construction — the "
+              "verify phase confirms or refutes each. Recall-safe: append-only.\n\n")
+    hdr = "" if "Multi-Axis Coverage Findings (AXISGAP)" in inv_text else header
+    try:
+        inv.write_text(_append_inventory_blocks(inv_text, hdr, appended), encoding="utf-8")
+    except Exception:
+        return {"parsed": len(parsed), "emitted": 0}
+
+    try:
+        prior = []
+        if receipt.exists():
+            prior = [ln for ln in receipt.read_text(encoding="utf-8", errors="replace").splitlines()
+                     if "->" in ln]
+        out = ["# Multi-Axis Coverage Promotion Receipt", ""]
+        out += [ln.strip() for ln in prior] + rec_lines
+        receipt.write_text("\n".join(out) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    try:
+        from plamen_mechanical import _write_finding_records_from_inventory
+        _write_finding_records_from_inventory(scratchpad)
+    except Exception:
+        pass
+    return {"parsed": len(parsed), "emitted": len(rec_lines)}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 4b.7 handoff: promote the depth-exploration agent's findings into the
 # inventory so they flow through the SAME inventory -> chain -> verify path as
@@ -938,4 +1572,24 @@ def run_enumeration_gate(scratchpad: Path) -> dict:
             emitted += _emit_candidates(scratchpad, cands, _MAX_PER_DERIVER)
         except Exception:
             continue
-    return {"obligations": n_obl, "gaps": res.get("gaps", 0), "emitted": emitted}
+    # M1 committed-invariant deriver: its OWN `_MAX_PER_DERIVER` (15) pool,
+    # INDEPENDENT of the co-ref `_MAX_ENUMGAP_PER_RUN` (40) pool and of the three
+    # derivers above (each gets its own cap in its own `_emit_candidates` call).
+    # Stamps `Source IDs: INVARIANT` so candidates stay distinct for dedup/
+    # coverage while still flowing the standard ENUMGAP inventory->verify path.
+    ci_emitted = 0
+    try:
+        ci_cands = compute_invariant_assertion_candidates(scratchpad)
+        ci_emitted = _emit_candidates(scratchpad, ci_cands, _MAX_PER_DERIVER,
+                                      source_id="INVARIANT")
+        emitted += ci_emitted
+    except Exception:
+        ci_emitted = 0
+    # Base return contract (obligations/gaps/emitted) is unchanged for backward
+    # compat; the M1 count is folded into `emitted` AND surfaced as an additive
+    # `invariant_emitted` key only when nonzero, so a clean no-graph/no-CI run
+    # still returns the exact 3-key dict prior callers assert on.
+    result = {"obligations": n_obl, "gaps": res.get("gaps", 0), "emitted": emitted}
+    if ci_emitted:
+        result["invariant_emitted"] = ci_emitted
+    return result

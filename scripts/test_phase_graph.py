@@ -358,6 +358,48 @@ def test_MX_thorough_strict_superset_of_core():
     check("MX.thorough strict-superset of core (sc + l1)", True, "")
 
 
+def test_MX_axis_coverage_registered_thorough_soft_ordered():
+    """M2 (recall-build-plan §5.3): axis_coverage is registered Thorough-only,
+    critical=False, ordered AFTER exploration_skeptic (4b.6) + enumgap_exploration
+    (4b.7) and BEFORE sc_semantic_dedup (4e) / chain (4c), with the correct
+    expected artifact."""
+    names = [p.name for p in D.SC_PHASES]
+    by_name = {p.name: p for p in D.SC_PHASES}
+    if "axis_coverage" not in by_name:
+        check("MX.axis_coverage registered in SC_PHASES", False, f"names={names}")
+        return
+    ax = by_name["axis_coverage"]
+    # Thorough-only
+    check(
+        "MX.axis_coverage Thorough-only",
+        ax.modes == {"thorough"},
+        f"modes={ax.modes}",
+    )
+    # Soft (degrade-and-continue, never halts)
+    check(
+        "MX.axis_coverage critical=False",
+        ax.critical is False,
+        f"critical={ax.critical}",
+    )
+    # Correct expected artifact
+    check(
+        "MX.axis_coverage expected artifact",
+        ax.expected_artifacts == ["axis_coverage_findings.md"],
+        f"expected_artifacts={ax.expected_artifacts}",
+    )
+    # Ordering: after 4b.6 + 4b.7, before 4e + chain
+    idx = names.index("axis_coverage")
+    ordered_after = ["exploration_skeptic", "enumgap_exploration"]
+    ordered_before = ["sc_semantic_dedup", "chain"]
+    after_ok = all(n in names and names.index(n) < idx for n in ordered_after)
+    before_ok = all(n in names and names.index(n) > idx for n in ordered_before)
+    check(
+        "MX.axis_coverage ordered after 4b.6/4b.7, before 4e/chain",
+        after_ok and before_ok,
+        f"idx={idx} after_ok={after_ok} before_ok={before_ok} names={names}",
+    )
+
+
 def test_MX_critical_phases_have_artifacts_or_any_of():
     """Every phase marked `critical=True` declares artifacts or any_of OR is
     a verify shard (manifest-driven)."""
@@ -413,6 +455,7 @@ TESTS = [
     test_MX_l1_medium_report_uses_shard_sentinel_only,
     test_MX_expand_medium_report_shards_has_no_duplicates,
     test_MX_thorough_strict_superset_of_core,
+    test_MX_axis_coverage_registered_thorough_soft_ordered,
     test_MX_critical_phases_have_artifacts_or_any_of,
 ]
 
