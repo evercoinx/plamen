@@ -15508,6 +15508,74 @@ def _purge_scratchpad(scratchpad: Path, config: dict) -> None:
             pass
 
 
+# Plamen-OWNED prior-run artifacts that must NOT survive a --fresh restart:
+# prior audit reports + RCA notes are literal answer keys, and Plamen-generated
+# fuzz-harness dirs (`.medusa-tests`) hand-encode known bugs with buggy/fixed
+# toggles. Either one primes a "fresh" discovery run if recon ingests it (recon
+# compiles/Slithers the whole project tree, which pulls harness contracts into
+# the inventory). `--fresh` wipes only the scratchpad, so without this these
+# survive in project_root across every "fresh" run.
+_FRESH_ARCHIVE_FILE_GLOBS = (
+    "AUDIT_REPORT*.md",
+    "*_RCA.md",
+    "*-RCA.md",
+    "CONSOLIDATION-FIX-NOTES.md",
+)
+_FRESH_ARCHIVE_DIR_NAMES = (".medusa-tests",)
+
+
+def _archive_prior_audit_artifacts(project_root: Path) -> "Optional[Path]":
+    """On --fresh, MOVE Plamen-owned prior-run outputs (audit reports, RCA
+    notes, generated fuzz harnesses) out of project_root into a DOT-prefixed
+    sibling archive dir, so a fresh audit is a genuine clean slate and recon
+    cannot ingest a prior report or a pre-authored harness that encodes the
+    answers. Moves — never deletes — so nothing is lost (recall-safe).
+
+    The archive is dot-prefixed (`.plamen_archive_<ts>`) one level up: every
+    build/Slither/recon-inventory walk skips dot-dirs, so it can never be
+    re-ingested even when project_root's parent IS the Foundry build root.
+
+    Best-effort: never raises into the caller. Returns the archive dir if
+    anything was moved, else None."""
+    import shutil
+
+    try:
+        proj = Path(project_root)
+        if not proj.is_dir():
+            return None
+        targets: list[Path] = []
+        for pat in _FRESH_ARCHIVE_FILE_GLOBS:
+            targets.extend(p for p in proj.glob(pat) if p.is_file())
+        for name in _FRESH_ARCHIVE_DIR_NAMES:
+            d = proj / name
+            if d.is_dir():
+                targets.append(d)
+        if not targets:
+            return None
+        archive = proj.parent / f".plamen_archive_{int(time.time())}"
+        archive.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+
+    moved = 0
+    for src in targets:
+        try:
+            dst = archive / src.name
+            if dst.exists():
+                dst = archive / f"{src.stem}_{moved}{src.suffix}"
+            shutil.move(str(src), str(dst))
+            moved += 1
+        except Exception:
+            continue
+    if moved == 0:
+        try:
+            archive.rmdir()
+        except Exception:
+            pass
+        return None
+    return archive
+
+
 def _archive_stale_mismatched_checkpoint(
     scratchpad: Path,
     checkpoint: "Checkpoint",
@@ -16583,6 +16651,23 @@ def main():
         )
         log.addHandler(_file_handler)
         log.info("[fresh] scratchpad purged, starting from phase 1")
+        # Also evict prior-run answer-key artifacts (reports, RCA notes,
+        # generated fuzz harnesses) from project_root so a fresh audit cannot
+        # ingest them. Moves them to a dot-prefixed sibling archive (never
+        # deletes). Without this, --fresh wipes only the scratchpad and these
+        # survive to prime discovery.
+        try:
+            _archived = _archive_prior_audit_artifacts(
+                Path(config["project_root"])
+            )
+            if _archived is not None:
+                log.info(
+                    "[fresh] archived prior-run answer-key artifacts "
+                    "(reports/RCA/fuzz harnesses) to %s — moved, not deleted",
+                    _archived,
+                )
+        except Exception as _e:
+            log.info("[fresh] prior-artifact archive skipped: %s", _e)
 
     repaired_rules = _ensure_rule_files_materialized()
     if repaired_rules:
@@ -18296,11 +18381,17 @@ def main():
                 import sys as _sys
                 _sys.path.insert(0, str(Path(__file__).parent))
                 _mv = importlib.import_module("mechanical_verify")
-                summary = _mv.run_phase5b_mechanical_verify(
-                    scratchpad,
-                    Path(config["project_root"]),
-                    config.get("language", ""),
-                )
+                # This runs the finding PoC tests (forge/cargo/go) synchronously
+                # in-process — MANY minutes on a real project, with no terminal
+                # heartbeat. Wrap in the live heartbeat so the silent window isn't
+                # mistaken for a hang. No double-heartbeat: this is a Python-native
+                # phase, not a PTY-supervised run_phase worker wait.
+                with _phase_heartbeat_thread(display, phase.name, scratchpad):
+                    summary = _mv.run_phase5b_mechanical_verify(
+                        scratchpad,
+                        Path(config["project_root"]),
+                        config.get("language", ""),
+                    )
                 ok = summary.get("status") in ("ok", "no_verify_files",
                                                 "toolchain_unavailable")
                 log.info(
@@ -18475,7 +18566,12 @@ def main():
         # report. A False return (or exception) is treated as a non-fatal degrade.
         if phase.name == "report_dedup":
             try:
-                ok = _dedup_report_python(scratchpad, config["project_root"])
+                # Cross-tier same-bug consolidation over the whole assembled
+                # report — O(n²) pair work that can run for a while on a large
+                # finding set, Python-native and silent. Heartbeat so a long run
+                # isn't mistaken for a hang. Fast runs (< interval) emit nothing.
+                with _phase_heartbeat_thread(display, phase.name, scratchpad):
+                    ok = _dedup_report_python(scratchpad, config["project_root"])
             except Exception as exc:
                 ok = False
                 log.warning(f"[report_dedup] non-fatal failure: {exc!r}")
@@ -18702,7 +18798,18 @@ def main():
                         f"[{phase.name}] {len(missing)} verify file(s) missing "
                         f"from shard output — attempting recovery shard"
                     )
-                    still_missing = _run_verify_recovery_shard(config, missing)
+                    # The recovery shard spawns its OWN verify worker subprocess
+                    # and blocks on proc.wait() for MANY minutes with no terminal
+                    # heartbeat (it is not the PTY-supervised run_phase loop). From
+                    # the terminal this silent window is indistinguishable from a
+                    # hang. Pulse a live heartbeat so it can't be mistaken for one.
+                    # (No double-heartbeat risk: run_phase's worker loop is NOT
+                    # active here — this is inter-phase mechanical inside the
+                    # verify_aggregate dispatch.)
+                    with _phase_heartbeat_thread(
+                        display, f"{phase.name}:verify-recovery", scratchpad
+                    ):
+                        still_missing = _run_verify_recovery_shard(config, missing)
                     if still_missing:
                         stubbed = stub_missing_verify_files(
                             scratchpad, config["pipeline"],

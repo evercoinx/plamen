@@ -44,6 +44,22 @@ SKIP_DIR_NAMES = {
     "lib", "forge-cache", ".foundry", ".anchor", ".aptos", ".sui",
 }
 
+# Dirs that never hold source a WHOLE-PROJECT compiler will build (build
+# output / VCS / tooling caches). Deliberately does NOT skip dependency dirs
+# (`lib/`, `node_modules/`): a whole-project `forge build` / `hardhat compile`
+# compiles imported library sources, so they MUST be counted when sizing a
+# build-timeout ceiling. Sizing off `_production_source_files` (which skips
+# `lib/` via SKIP_DIR_NAMES) undercounts the compiler's real load by ~10x on
+# dependency-heavy repos and caused cold-cache builds to time out (a 652s
+# budget sized from 13 in-scope files for a real 188-file compile). Over-
+# counting is safe: the hardened runner returns as soon as the build finishes,
+# so the scaled value is only a CEILING, never a fixed wait.
+COMPILE_UNIT_SKIP_DIR_NAMES = {
+    ".git", "out", "artifacts", "cache", "forge-cache", "target", "build",
+    "dist", ".venv", "venv", "__pycache__", ".next", ".idea", ".vscode",
+    ".foundry", ".anchor", ".aptos", ".sui",
+}
+
 PRODUCTION_SOURCE_SKIP_PARTS = {
     "test", "tests", "fuzz", "fuzzing", "script", "scripts", "fixture",
     "fixtures", "mock", "mocks", "spec", "specs", "benchmark", "benchmarks",
@@ -86,6 +102,31 @@ def _production_source_files(root: Path, suffixes: Tuple[str, ...]) -> List[Path
         p for p in _iter_files(root, suffixes)
         if _is_production_source_path(p, root)
     ]
+
+def _compile_unit_files(root: Path, suffixes: Tuple[str, ...]) -> List[Path]:
+    """Source files a WHOLE-PROJECT compiler actually builds under `root`,
+    INCLUDING dependency dirs (`lib/`, `node_modules/`) that `forge build` /
+    `hardhat compile` compile via imports. Only build-output / VCS / tooling-
+    cache dirs are skipped (COMPILE_UNIT_SKIP_DIR_NAMES).
+
+    Distinct from `_production_source_files`, which skips `lib/` and every
+    test/mock/script dir — correct for "what to audit", but a large undercount
+    of "what the compiler builds". Use ONLY to size whole-project build
+    timeouts. Never raises; over-counting is safe (the value is a ceiling)."""
+    out: List[Path] = []
+    try:
+        root = root.resolve()
+    except Exception:
+        return out
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in COMPILE_UNIT_SKIP_DIR_NAMES and not d.startswith(".")
+        ]
+        for name in filenames:
+            if name.endswith(suffixes):
+                out.append(Path(dirpath) / name)
+    return out
 
 def _lines_and_bytes(p: Path) -> Tuple[int, int]:
     try:
@@ -243,7 +284,16 @@ def _gather_files(proj: Path, lang: str) -> List[Path]:
     cfg = LANG_DISPATCH.get(lang)
     if not cfg:
         return []
-    files = _iter_files(proj, cfg["suffix"])
+    # Discovery inventory = the AUDIT SURFACE (production contracts). Use the
+    # production filter, NOT a bare `_iter_files`: the latter skips only
+    # SKIP_DIR_NAMES + dot-dirs, so it still ingests `test/`, `mock/`, `fuzz/`,
+    # `script/` contracts. Those are not audit targets, and — critically — a
+    # project's own test/fuzz harnesses (invariant assertions, buggy/fixed
+    # reproductions) encode the answers and PRIME discovery. This flows into
+    # contract_inventory / function_list / state_variables and, via
+    # _materialize_sc_slither_flat_files, into slither/*.md. `.medusa-tests`
+    # (a dot-dir) was already skipped; this adds the non-dot harness dirs.
+    files = _production_source_files(proj, cfg["suffix"])
     if cfg["marker"]:
         files = [f for f in files if any(m in _read_text(f) for m in _CONTRACT_MARKERS)]
     return files
@@ -1180,10 +1230,14 @@ def _write_build_status(scratch: Path, proj: Path, lang: str,
                 cmd = ["forge", "build"]
                 # Size-scale: whole-project build of a large repo (e.g. ~176
                 # .sol + optimizer, cold cache) blows past a fixed budget.
-                _nf = len(_production_source_files(root, (".sol",)))
+                # Count the FULL compile-unit tree incl `lib/` deps — the
+                # production-source count excludes `lib/` and undercounts the
+                # solc load ~10x, which timed out cold-cache dep-heavy repos.
+                _nf = len(_compile_unit_files(root, (".sol",)))
                 timeout = _scale_build_timeout(600, _nf)
                 log.info("[recon] evm_forge whole-project build at %s: timeout "
-                         "scaled to %ss for %d .sol files", root, timeout, _nf)
+                         "scaled to %ss for %d compile-unit .sol files",
+                         root, timeout, _nf)
             else:
                 source_files = sorted(_production_source_files(proj, (".sol",)), key=lambda p: _rel(p, proj))
                 if not source_files:
@@ -1215,11 +1269,23 @@ def _write_build_status(scratch: Path, proj: Path, lang: str,
                 # build to recon/verification.
                 if sum(len(a) + 1 for a in cmd) > 7000:
                     cmd = ["forge", "build", "--threads", "1", "--no-auto-detect"]
-                # Size-scale the scoped compile too (still bounded by the file
-                # cap above, but the optimizer makes per-file cost nonlinear).
-                timeout = _scale_build_timeout(timeout, len(source_files))
-                log.info("[recon] evm_forge scoped build: timeout scaled to %ss "
-                         "for %d .sol files", timeout, len(source_files))
+                    # Argv too long → this is now a WHOLE-PROJECT compile. Size
+                    # its timeout on the full compile-unit tree (incl deps), not
+                    # the scoped production count, or the dependency compile
+                    # blows the budget (same root cause as the foundry-root path
+                    # above).
+                    _nf = len(_compile_unit_files(proj, (".sol",)))
+                    timeout = _scale_build_timeout(600, _nf)
+                    log.info("[recon] evm_forge whole-project fallback build: "
+                             "timeout scaled to %ss for %d compile-unit .sol "
+                             "files", timeout, _nf)
+                else:
+                    # Size-scale the scoped compile too (still bounded by the
+                    # file cap above, but the optimizer makes per-file cost
+                    # nonlinear).
+                    timeout = _scale_build_timeout(timeout, len(source_files))
+                    log.info("[recon] evm_forge scoped build: timeout scaled to "
+                             "%ss for %d .sol files", timeout, len(source_files))
 
         # STEP 2C: non-EVM build parity. Give the non-EVM branches the same
         # guards EVM has: (1) a per-language source-file presence check, and
@@ -1301,10 +1367,13 @@ def _write_build_status(scratch: Path, proj: Path, lang: str,
         # Hardhat probe: size-scale by .sol count too (no foundry; the EVM
         # dedupe still suppresses this entirely when Slither already compiled).
         if key == "evm_hardhat":
-            _nf = len(_production_source_files(build_cwd, (".sol",)))
+            # `hardhat compile` is a whole-project compile (imports pull in
+            # node_modules deps), so size on the full compile-unit tree, not
+            # the production-only count.
+            _nf = len(_compile_unit_files(build_cwd, (".sol",)))
             timeout = _scale_build_timeout(timeout, _nf)
             log.info("[recon] evm_hardhat build: timeout scaled to %ss for %d "
-                     ".sol files", timeout, _nf)
+                     "compile-unit .sol files", timeout, _nf)
         # Hang-proof: temp-file drain + tree-kill (a forge→solc / cargo→cc
         # grandchild holding the build pipe can no longer wedge the driver).
         rc, combined = _run_hardened(cmd, build_cwd, timeout, env=build_env)

@@ -176,3 +176,135 @@ def test_detect_import_libs_dedup_and_order(tmp_path):
     assert "solady" in dirs
     # de-dup: openzeppelin only appears once even though multiple prefixes match
     assert dirs.count("openzeppelin-contracts") == 1
+
+
+# ── Whole-project build timeout sizing (compile-unit vs production count) ──────
+#
+# Regression: sizing the whole-project `forge build` timeout off
+# `_production_source_files` — which skips `lib/` via SKIP_DIR_NAMES —
+# undercounts the compiler's real load ~10x on dependency-heavy repos. A cold
+# 188-file compile got a 652s budget sized from 13 in-scope files and was
+# tree-killed at the timeout, degrading build_status=TIMEOUT and failing
+# Slither. `_compile_unit_files` counts the tree the compiler actually builds
+# (incl `lib/`), so the timeout scales to a realistic ceiling.
+
+def _mk_sol(p: Path) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("pragma solidity ^0.8.0;\ncontract C {}\n", encoding="utf-8")
+
+
+def _dep_heavy_root(tmp_path: Path):
+    """A Foundry-root layout: a few in-scope contracts + a large `lib/` dep
+    tree + build-output dirs that must NOT be counted. Returns (root, n_lib)."""
+    root = tmp_path
+    (root / "foundry.toml").write_text("[profile.default]\n", encoding="utf-8")
+    # In-scope production sources.
+    for n in ("GatewayCrossChain", "GatewaySend", "GatewayTransferNative"):
+        _mk_sol(root / f"{n}.sol")
+    _mk_sol(root / "interfaces" / "IGateway.sol")
+    _mk_sol(root / "libraries" / "Encoder.sol")
+    # A mock (excluded from BOTH counts by name/dir rules).
+    _mk_sol(root / "mocks" / "GatewayEVMMock.sol")
+    # Heavy dependency tree under lib/ — compiled by `forge build`, skipped by
+    # the production filter.
+    n_lib = 200
+    for i in range(n_lib):
+        _mk_sol(root / "lib" / "openzeppelin-contracts" / "contracts" / f"Dep{i}.sol")
+    # Build output — must be skipped by BOTH counters.
+    _mk_sol(root / "out" / "Stale.sol")
+    _mk_sol(root / "cache" / "Stale.sol")
+    return root, n_lib
+
+
+def test_compile_unit_count_includes_lib_deps(tmp_path):
+    root, n_lib = _dep_heavy_root(tmp_path)
+    prod = RP._production_source_files(root, (".sol",))
+    comp = RP._compile_unit_files(root, (".sol",))
+    prod_names = {p.name for p in prod}
+    comp_rel = {p.relative_to(root).as_posix() for p in comp}
+
+    # Production count excludes lib/ + mocks entirely (the undercount source).
+    assert len(prod) == 5, sorted(prod_names)
+    assert not any("lib/" in p.relative_to(root).as_posix() for p in prod)
+    assert "GatewayEVMMock.sol" not in prod_names
+
+    # Compile-unit count INCLUDES the whole lib/ dep tree (what solc builds)...
+    assert len(comp) >= n_lib + 5
+    assert any(rp.startswith("lib/") for rp in comp_rel)
+    # ...but still excludes build-output dirs.
+    assert not any(rp.startswith("out/") for rp in comp_rel)
+    assert not any(rp.startswith("cache/") for rp in comp_rel)
+
+
+def test_compile_unit_sizing_beats_undercount_timeout(tmp_path):
+    root, _ = _dep_heavy_root(tmp_path)
+    n_prod = len(RP._production_source_files(root, (".sol",)))
+    n_comp = len(RP._compile_unit_files(root, (".sol",)))
+    old = RP._scale_build_timeout(600, n_prod)
+    new = RP._scale_build_timeout(600, n_comp)
+    # The fix must produce a materially larger ceiling for a dep-heavy repo.
+    assert new > old
+    # 200+ dep files → at or near the hard ceiling, not the ~620s undercount.
+    assert new >= 1400
+    assert new <= RP._BUILD_TIMEOUT_CEILING_S
+
+
+def test_compile_unit_skip_dirs_keep_deps_drop_output():
+    # Deps are NOT skipped (must be counted); build output IS skipped.
+    assert "lib" not in RP.COMPILE_UNIT_SKIP_DIR_NAMES
+    assert "node_modules" not in RP.COMPILE_UNIT_SKIP_DIR_NAMES
+    for d in ("out", "cache", "artifacts", "target", "build", ".git"):
+        assert d in RP.COMPILE_UNIT_SKIP_DIR_NAMES
+
+
+def test_compile_unit_files_never_raises_on_bad_root(tmp_path):
+    missing = tmp_path / "does_not_exist"
+    assert RP._compile_unit_files(missing, (".sol",)) == []
+
+
+# ── Discovery inventory excludes test/fuzz/mock harness dirs (anti-priming) ────
+#
+# `_gather_files` feeds contract_inventory / function_list / state_variables
+# (and, via _materialize_sc_slither_flat_files, slither/*.md). It must reflect
+# the AUDIT SURFACE (production contracts) — never the project's own
+# test/fuzz/mock harnesses, which encode answers and prime discovery. Regression
+# for the DODO contamination where `.medusa-tests`/`test/invariant` harnesses
+# leaked into the recon inventory.
+
+def test_gather_files_excludes_test_fuzz_mock_harnesses(tmp_path):
+    proj = tmp_path
+    # production (in-scope) contracts
+    _mk_sol(proj / "GatewayCrossChain.sol")
+    _mk_sol(proj / "interfaces" / "IGateway.sol")
+    # harness dirs that must NOT be inventoried
+    _mk_sol(proj / "test" / "invariant" / "InvariantFuzz.t.sol")
+    _mk_sol(proj / "mocks" / "GatewayEVMMock.sol")
+    _mk_sol(proj / "fuzz" / "Handler.sol")
+    _mk_sol(proj / "script" / "Deploy.s.sol")
+    _mk_sol(proj / ".medusa-tests" / "MedusaCampaignV6.sol")
+
+    got = {p.name for p in RP._gather_files(proj, "evm")}
+
+    assert "GatewayCrossChain.sol" in got
+    assert "IGateway.sol" in got
+    # none of the harness/test files
+    for bad in ("InvariantFuzz.t.sol", "GatewayEVMMock.sol", "Handler.sol",
+                "Deploy.s.sol", "MedusaCampaignV6.sol"):
+        assert bad not in got, f"{bad} leaked into the discovery inventory"
+
+
+def test_contract_inventory_sc_omits_harness_dirs(tmp_path):
+    proj = tmp_path
+    _mk_sol(proj / "Real.sol")
+    _mk_sol(proj / "test" / "InvariantFuzz.t.sol")
+    _mk_sol(proj / ".medusa-tests" / "Model.sol")
+    scratch = tmp_path / "_scratch"
+    scratch.mkdir()
+
+    RP._write_contract_inventory_sc(scratch, proj, "evm")
+    inv = (scratch / "contract_inventory.md").read_text(encoding="utf-8")
+
+    assert "Real.sol" in inv
+    assert "InvariantFuzz.t.sol" not in inv
+    assert "MedusaCampaign" not in inv and "Model.sol" not in inv
+    assert ".medusa-tests" not in inv and "test/" not in inv

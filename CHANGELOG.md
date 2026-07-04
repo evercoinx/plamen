@@ -5,6 +5,19 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-07-04
+
+### Fixed
+- **Recon pre-pass whole-project build no longer times out on cold, dependency-heavy repos.** The `forge build` / `hardhat compile` timeout is now sized off the full compile-unit tree (including the `lib/` dependency sources the compiler actually builds), not the in-scope production-source count — which under-counted the real solc load ~10x and tree-killed cold-cache builds (e.g. a 652s budget for a 188-file compile), degrading `build_status` to TIMEOUT and starving Slither/Medusa. The scaled value is a ceiling, so healthy builds still return immediately.
+- **Recon discovery inventory no longer ingests the project's own test/fuzz/mock harnesses.** `contract_inventory` / `function_list` / `state_variables` (and the derived `slither/*` flat files) now apply the production-source filter, excluding `test/` / `mock/` / `fuzz/` / `script/` (and `.medusa-tests/`) directories. A project's own harnesses — which can encode expected-failure assertions or bug reproductions — no longer leak into the discovery surface and prime analysis.
+
+### Added
+- **`--fresh` now archives prior-run answer-key artifacts out of the project root.** Before phase 1, a `--fresh` restart MOVES prior `AUDIT_REPORT*.md`, `*_RCA.md`, hardening notes, and generated fuzz-harness dirs (`.medusa-tests/`) into a dot-prefixed sibling archive (`.plamen_archive_<ts>/`) — moved, never deleted (recall-safe), and dot-prefixed so no build/Slither/recon walk can re-ingest them. Previously `--fresh` wiped only the scratchpad, leaving prior reports and harnesses in the tree where recon could ingest them and prime a supposedly-fresh discovery run.
+- **Live heartbeat for long silent mechanical phases.** Long synchronous inter-phase steps (verify recovery/backfill, mechanical PoC verify, cross-tier report dedup) now emit the existing phase heartbeat, so a multi-minute silent window is no longer indistinguishable from a hang. Interval-gated (no pulse for sub-interval steps) and never overlaps a worker-phase heartbeat.
+
+### Testing
+- New `test_fresh_archive.py` and `test_mechanical_heartbeat.py`; extended recon build-env tests. Full test suite green: 4117 passed, 7 skipped, 1 xfailed.
+
 ## [2.2.0] - 2026-07-03
 
 ### Fixed
