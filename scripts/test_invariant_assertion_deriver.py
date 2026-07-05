@@ -268,3 +268,77 @@ def test_id_catalog_recognizes_ci_and_invariant():
     assert "AXISGAP" in P._FID_ALLOWED_PREFIXES
     # CI-n must be stripped from client-body output (never client-facing).
     assert P._CLIENT_BODY_INTERNAL_ID_RE.search("see CI-3 for context")
+
+
+# ── Fix 2: depth + verify are now PRIMARY CI emitters (mandatory CI block on any
+#    value-bearing CLEAR/REFUTED verdict). The deriver must scan depth_*_findings.md
+#    AND verify_*.md, not just the skeptic artifacts. ──
+
+def _write_depth(sp: Path, *blocks: str):
+    """A depth artifact carrying a REFUTED value-bearing finding + its committed
+    invariant block(s) — the primary M1 reservoir after Fix 2."""
+    finding = (
+        "## Finding [DTF-1]: Withdraw conservation holds\n"
+        "**Verdict**: REFUTED\n"
+        "**Severity**: High\n"
+        "**Location**: src/Pricing.sol:L142\n"
+        "**Material Harm**: none — value-conservation guard holds; no depositor loss\n"
+        "**Impact**: value-movement path is safe\n\n"
+    )
+    body = "# Depth Token-Flow Findings\n\n" + finding + "\n\n".join(blocks) + "\n"
+    (sp / "depth_token_flow_findings.md").write_text(body, encoding="utf-8")
+
+
+def _write_verify(sp: Path, *blocks: str):
+    """A verify artifact with a value-bearing FALSE_POSITIVE verdict + CI block(s)."""
+    body = ("# Verify H-3\n\n"
+            "**Final Verdict**: FALSE_POSITIVE\n"
+            "**Location**: src/Pricing.sol:L142\n\n"
+            + "\n\n".join(blocks) + "\n")
+    (sp / "verify_H-3.md").write_text(body, encoding="utf-8")
+
+
+def test_ci_source_globs_include_depth_and_verify():
+    """Deriver scan set must cover depth + verify (Fix 2 widening), not skeptic-only."""
+    eg = _eg()
+    assert "depth_*_findings.md" in eg._CI_SOURCE_GLOBS
+    assert "verify_*.md" in eg._CI_SOURCE_GLOBS
+
+
+def test_refuted_value_bearing_depth_finding_emits_invariant(tmp_path: Path):
+    """A REFUTED value-bearing depth finding carrying a CI block → the deriver
+    emits an INVARIANT candidate, stamped INVARIANT:CI-n + NEEDS_VERIFICATION."""
+    eg = _eg()
+    _root, sp = _proj(tmp_path)
+    _write_depth(sp, _ci_block(1, "CONSERVATION", "conservation"))
+    out = eg.compute_invariant_assertion_candidates(sp)
+    assert len(out) == 1, out
+    c = out[0]
+    assert c["key"].startswith("INVARIANT:")
+    assert c["source_tag"] == "INVARIANT:CI-1", c["source_tag"]
+    n = eg._emit_candidates(sp, out, eg._MAX_PER_DERIVER, source_id="INVARIANT")
+    assert n == 1
+    inv = (sp / "findings_inventory.md").read_text(encoding="utf-8")
+    assert "**Source IDs**: INVARIANT:CI-1" in inv
+    assert "**Verdict**: NEEDS_VERIFICATION" in inv
+
+
+def test_verify_ci_block_harvested(tmp_path: Path):
+    """A verify_*.md artifact with a CI block is scanned + harvested (Fix 2)."""
+    eg = _eg()
+    _root, sp = _proj(tmp_path)
+    _write_verify(sp, _ci_block(2, "FRESHNESS", "property"))
+    out = eg.compute_invariant_assertion_candidates(sp)
+    assert len(out) == 1
+    assert out[0]["source_tag"] == "INVARIANT:CI-2"
+
+
+def test_depth_and_verify_both_scanned(tmp_path: Path):
+    """Both new source classes contribute candidates in one pass."""
+    eg = _eg()
+    _root, sp = _proj(tmp_path)
+    _write_depth(sp, _ci_block(1, "CONSERVATION", "conservation"))
+    _write_verify(sp, _ci_block(2, "ROUNDTRIP", "roundtrip"))
+    out = eg.compute_invariant_assertion_candidates(sp)
+    tags = {c["source_tag"] for c in out}
+    assert tags == {"INVARIANT:CI-1", "INVARIANT:CI-2"}, tags

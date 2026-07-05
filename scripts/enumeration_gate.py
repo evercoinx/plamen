@@ -395,8 +395,11 @@ _LANG = {
         "fn_re": _c(r"\bfn\s+(\w+)\s*(?:<[^>]*>)?\s*\(([^)]*)\)"),
         "array_param": _c(r"\b(?P<name>\w+)\s*:\s*&?(?:mut\s+)?(?:Vec\s*<|\[(?![^\]\n]*;))"),
         "loop": _c(r"\bfor\b|\.iter(?:_mut)?\(\)|\.into_iter\(\)|\bwhile\b"),
-        "effect": _c(r"\.transfer|transfer_from|\bmint\b|\bburn\b|\+=|\.push\("
-                     r"|\bdeposit\b|\bwithdraw\b|\.set\("),
+        # Token-MOVEMENT only (Fix 3c): bare `+=`/`.push(`/`.set(`/deposit/
+        # withdraw over-matched non-value Rust code and diluted the Soroban
+        # hot-set, inflating false GAP cells. Keep only actual asset movement.
+        "effect": _c(r"\btransfer_from\b|\btransfer\b|\bmint\b|\bburn\b"
+                     r"|token::transfer|\bTokenClient\b"),
         "uniq_guard": _c(r"(?i)\b(?:seen|unique|dedup|duplicat|sort|hashset|btreeset)\b"),
         "str_param": _c(r"\b(?P<name>\w+)\s*:\s*&?(?:mut\s+)?"
                         r"(?P<typ>String|str|Vec\s*<\s*u8|\[\s*u8\s*\])"),
@@ -493,7 +496,11 @@ def _emit_candidates(scratchpad: Path, candidates: list, cap: int,
     `source_id` stamps the `**Source IDs**:` field (default `ENUMGAP` for the
     co-reference derivers). M1 passes `INVARIANT` so committed-invariant
     candidates stay traceable and distinct for dedup/coverage accounting; the
-    stamped tag never changes the `INV-NNN` finding ID (always cataloged)."""
+    stamped tag never changes the `INV-NNN` finding ID (always cataloged).
+    A candidate may carry an optional per-candidate `source_tag` (e.g.
+    `INVARIANT:CI-3`) — a clean, greppable generator class token that overrides
+    `source_id` for that block, so attribution stays machine-recoverable even
+    after a downstream provenance-preserving dedup merge."""
     if not candidates or cap <= 0:
         return 0
     inv = scratchpad / "findings_inventory.md"
@@ -534,7 +541,7 @@ def _emit_candidates(scratchpad: Path, candidates: list, cap: int,
             "**Severity**: Low",
             f"**Location**: {c['location']}",
             "**Preferred Tag**: [CODE-TRACE]",
-            f"**Source IDs**: {source_id} ({c['source_note']})",
+            f"**Source IDs**: {c.get('source_tag') or source_id} ({c['source_note']})",
             "**Verdict**: NEEDS_VERIFICATION",
             f"**Root Cause**: {c['root_cause']}",
             f"**Description**: {c['description']}",
@@ -819,11 +826,14 @@ _CI_BLOCK_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-# Artifacts that may carry [CI-n] blocks (skeptic phases primary, depth optional).
+# Artifacts that may carry [CI-n] blocks. Depth + verify are now the PRIMARY
+# emitters (mandatory CI on any value-bearing CLEAR/REFUTED verdict — the richest
+# reservoirs of concluded-safe judgments); the skeptic phases remain secondary.
 _CI_SOURCE_GLOBS = (
     "exploration_skeptic_findings.md",
     "skeptic_findings.md",
     "depth_*_findings.md",
+    "verify_*.md",
 )
 
 
@@ -887,6 +897,10 @@ def compute_invariant_assertion_candidates(scratchpad: Path) -> list:
                 assert_disp = assertion or "assert the committed local guard holds at this locus"
                 out.append({
                     "key": f"INVARIANT:{dkey}",
+                    # Clean, greppable generator class token stamped on the
+                    # emitted `**Source IDs**:` line so the committed-invariant
+                    # (M1) provenance survives dedup as `INVARIANT:CI-n`.
+                    "source_tag": f"INVARIANT:{cid}",
                     "title": (f"Committed invariant {cid} ({shape_label}) at "
                               f"`{loc_disp}`{fn_disp} — falsify"),
                     "location": f"{loc_disp}{fn_disp}",
@@ -1140,6 +1154,41 @@ def _axis_examined_signals(block: str, axis: str) -> bool:
     return False
 
 
+def _axis_field(block: str, name: str) -> str:
+    """Extract a finding field's prose (`**Name**: ...` up to the next bold field
+    / heading / end). Bold-marker- and case-tolerant; multi-line joined to one
+    line for substring cue matching. Empty when the field is absent."""
+    m = re.search(r"\*{0,2}" + re.escape(name) + r"\*{0,2}\s*:\s*(.+?)"
+                  r"(?=\n\s*\*{2}\w|\n#{2,4}\s|\Z)",
+                  block or "", re.IGNORECASE | re.DOTALL)
+    return (m.group(1).strip() if m else "").replace("\n", " ")
+
+
+def _axis_examined_secondary(block: str, axis: str) -> bool:
+    """SECONDARY EXAMINED signal (Fix 3b — ecosystem-parity, prose-grounded).
+
+    The primary signal reads ONLY the closed bracketed depth-evidence tags. On
+    less tag-dense ecosystems (e.g. Soroban) a finding often addresses an axis
+    CONCRETELY in its Description/Impact prose without stamping the exact tag,
+    inflating false GAP cells. When the block resolves to the function AND its
+    Description/Impact (or a stated BALANCE/ACCESS postcondition) concretely
+    speaks to the axis via the already-defined mechanical cues, count the axis
+    EXAMINED even without a bracketed tag. This is a SECONDARY signal only — the
+    caller keeps `ambiguous ⇒ GAP` as the floor for every axis with no cue.
+    Generic: reuses existing cue regexes; names no protocol."""
+    b = block or ""
+    prose = " ".join(_axis_field(b, f) for f in ("Description", "Impact"))
+    if axis == "liveness":
+        return bool(_MH_LIVENESS.search(prose))
+    if axis == "provenance":
+        return bool(_STALENESS_CUE.search(prose))
+    if axis == "accounting":
+        # A stated BALANCE/ACCESS postcondition type concretely addresses the
+        # accounting axis (value/authorization relation examined at the locus).
+        return bool(_POST_TYPE_BAL_ACC.search(b))
+    return False
+
+
 def _axis_na(hf: dict, axis: str) -> bool:
     """Mechanically-provable N/A: a cell is N/A only when the function CANNOT be
     exposed to the axis. Conservative — returns True ONLY on a provable exclusion,
@@ -1241,11 +1290,15 @@ def compute_axis_coverage_gaps(scratchpad: Path) -> list:
             for axis in _AXES:
                 if _axis_na(hf, axis):
                     cells[axis] = "N/A"
-                elif blocks and _axis_examined_signals(joined, axis):
+                elif blocks and (_axis_examined_signals(joined, axis)
+                                 or _axis_examined_secondary(joined, axis)):
+                    # Primary = closed bracketed depth-evidence tag; secondary =
+                    # concrete axis prose in Description/Impact (Fix 3b parity).
                     cells[axis] = "EXAMINED"
                 else:
-                    # No block, or a block with no closed-tag signal for this axis
-                    # ⇒ ambiguous ⇒ GAP (recall-safe default).
+                    # No block, or a block with neither a closed-tag signal nor a
+                    # concrete prose cue for this axis ⇒ ambiguous ⇒ GAP
+                    # (recall-safe default / floor).
                     cells[axis] = "GAP"
                     gaps.append({
                         "function": hf["function"],
@@ -1359,7 +1412,7 @@ def promote_axis_findings_to_inventory(scratchpad: Path) -> dict:
             f"**Severity**: {sev.split()[0] if sev else 'Low'}",
             f"**Location**: {loc}",
             f"**Preferred Tag**: {tag}",
-            f"**Source IDs**: {p['id']} (multi-axis coverage meta-pass; a "
+            f"**Source IDs**: AXISGAP:{p['id']} (multi-axis coverage meta-pass; a "
             "mechanically-hot function was interrogated on a previously-unexamined "
             "risk axis — verifier to confirm or refute)",
             "**Verdict**: NEEDS_VERIFICATION",

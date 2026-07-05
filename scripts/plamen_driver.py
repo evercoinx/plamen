@@ -14561,6 +14561,53 @@ def _run_phase_validators(
                 f"(non-blocking): {exc!r}"
             )
 
+        # Attribution ledger: map each surviving inventory finding to its
+        # contributing Source tokens (normal + generator class tokens
+        # AXISGAP:/INVARIANT:). Runs AFTER all absorptions so a merged
+        # survivor's ledger row reflects the provenance-preserving merge —
+        # makes "did M1/M2 co-find this" a mechanical grep. Non-blocking.
+        try:
+            _attr = write_mechanism_attribution_ledger(scratchpad)
+            if _attr.get("rows"):
+                log.info(
+                    f"[{phase.name}] wrote mechanism_attribution.md: "
+                    f"{_attr['rows']} finding(s), {_attr.get('axisgap', 0)} "
+                    f"AXISGAP-sourced, {_attr.get('invariant', 0)} "
+                    "INVARIANT-sourced"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] mechanism attribution ledger failed "
+                f"(non-blocking): {exc!r}"
+            )
+
+        # Fix 4: transitive-closure clustering over the surviving inventory.
+        # Pairwise dedup leaves N co-referent survivors (fragmentation); this
+        # collapses each same-file+function+fix-pattern, same-tier connected
+        # component to ONE report finding and writes dedup_cluster_map.md — a
+        # consolidation HINT the report-index STEP-1.5 reads so the writer emits
+        # a single finding with a location table. Runs AFTER all absorptions so
+        # it clusters the final survivor set. SC-only, non-blocking.
+        if phase.name == "sc_semantic_dedup":
+            try:
+                n_cl = build_dedup_cluster_map(scratchpad)
+                if n_cl > 0:
+                    log.info(
+                        f"[{phase.name}] wrote dedup_cluster_map.md: {n_cl} "
+                        "co-referent cluster(s) for report-index STEP-1.5 "
+                        "consolidation (location-table findings)"
+                    )
+                else:
+                    log.info(
+                        f"[{phase.name}] no co-referent clusters detected; "
+                        "dedup_cluster_map.md is empty"
+                    )
+            except Exception as exc:
+                log.warning(
+                    f"[{phase.name}] cluster-map build failed "
+                    f"(non-blocking): {exc!r}"
+                )
+
     # --- recon: Slither materialization + coverage + scope_leftover ---
     if phase.name == "recon":
         # Codex apply_patch enriches recon artifact bodies without replacing

@@ -464,6 +464,36 @@ NOT covered by any existing hypothesis - document it under:
 
 These will be reviewed by the orchestrator for possible inclusion as new findings.
 
+## COMMITTED-INVARIANT EMISSION (MANDATORY — value-bearing REFUTED/CLEAR)
+
+Whenever your verdict REFUTES or CLEARS a value-bearing path (value movement,
+supply/shares, accounting, authorization, or a funds/liveness-gating boundary) —
+i.e. a FALSE_POSITIVE or otherwise-safe judgment on a value-bearing finding — you
+MUST additionally emit a `committed-invariant [CI-n]` block naming the local guard
+that makes the path safe. This is the Code-Augur "commit the invariant behind
+every safe judgment" locus: verify is a rich reservoir of concluded-safe verdicts,
+so it is now a PRIMARY CI emitter alongside depth. Emit exactly ONE of the six
+generic SHAPES — `CONSERVATION`, `REQUESTED_EQ_DELIVERED`, `APPROVE_EQ_SPEND`,
+`NO_REVERT_AT_BOUNDARY`, `ROUNDTRIP`, `FRESHNESS` — with symbols resolved at the
+locus but no protocol constant baked as "the answer":
+
+```
+committed-invariant [CI-n]
+Locus: <file>:L<nn>  (fn: <enclosing function>)
+Shape: <one of the six shapes>
+Assertion: <the falsifiable relation, symbols resolved>
+Falsify Class: <property | boundary | roundtrip | conservation>
+Provenance: verify REFUTED/CLEAR @ <hypothesis id>
+```
+
+This is MANDATORY for every value-bearing REFUTED/CLEAR verdict and strictly
+additive — it changes no verdict, severity, or prior finding. A non-value-bearing
+CLEAR (pure view, no funds/liveness/accounting/authorization stake) does not
+require a block. Emitted blocks are written into `verify_{hypothesis_id}.md` and
+mechanically harvested downstream into falsifiable candidates for the fuzz/PoC
+gates. The six shapes are generic relational forms; NEVER encode a specific
+protocol/token/function as "the answer" — symbols resolve at the locus at runtime.
+
 ## FIX GENERATION (POC-PASS only)
 If your PoC PASSES (verdict = CONFIRMED with [POC-PASS]):
 1. Write a minimal diff-style fix (smallest change that eliminates the bug)

@@ -121,6 +121,21 @@ def test_hot_set_fallback_when_graph_absent(tmp_path):
     assert all(h["value_effect"] for h in hot)
 
 
+def test_rust_plusequals_no_token_move_not_hot(tmp_path):
+    # Fix 3c: the Rust `effect` regex no longer treats bare `+=` / `.push(` as a
+    # value effect. Graph-absent fallback hot set = token-movement functions only.
+    eg = _eg()
+    root, sp = _proj(tmp_path)
+    (root / "lib.rs").write_text(
+        "pub fn accumulate(x: i128) { total += x; }\n"
+        "pub fn pay(to: Address, a: i128) { token.transfer(&to, a); }\n",
+        encoding="utf-8")
+    hot = eg.compute_hot_function_set(sp)
+    names = [h["function"] for h in hot]
+    assert "accumulate" not in names   # bare `+=` is no longer a value effect
+    assert "pay" in names              # `token.transfer(...)` still counts
+
+
 # ── compute_axis_coverage_gaps ───────────────────────────────────────────────
 
 def _hot_graph(sp: Path, root: Path):
@@ -220,6 +235,28 @@ def test_pure_view_theft_is_na(tmp_path):
                    for g in matrix["gaps"])
 
 
+def test_prose_liveness_examined_without_trace_tag(tmp_path):
+    # Fix 3b: a finding that addresses the liveness axis CONCRETELY in its
+    # Description/Impact prose but stamps NO [TRACE:->revert]/[BOUNDARY] tag must
+    # count liveness EXAMINED (secondary signal), not a false GAP.
+    eg = _eg()
+    root, sp = _proj(tmp_path)
+    _hot_graph(sp, root)
+    _write_inv_finding(
+        sp, "C.sol:L10",
+        "**Description**: If the guard is mis-set the withdraw path can "
+        "permanently lock user funds, a denial-of-service on every depositor.\n"
+        "**Impact**: users cannot withdraw; funds frozen.\n")
+    gaps = eg.compute_axis_coverage_gaps(sp)
+    gapped = {g["axis"] for g in gaps}
+    assert "liveness" not in gapped
+    matrix = json.loads((sp / "_hot_function_axes.json").read_text(encoding="utf-8"))
+    cells = matrix["matrix"][0]["cells"]
+    assert cells["liveness"] == "EXAMINED"
+    # Floor preserved: an axis with neither tag nor prose cue is still GAP.
+    assert "accounting" in gapped and "boundary" in gapped
+
+
 # ── skip-when-clean ──────────────────────────────────────────────────────────
 
 def test_skip_when_no_gaps_true(tmp_path, monkeypatch):
@@ -292,7 +329,9 @@ def test_promotion_appends_axisgap_and_is_idempotent(tmp_path):
     assert res["emitted"] == 1
     inv = (sp / "findings_inventory.md").read_text(encoding="utf-8")
     assert "INV-002" in inv
-    assert "Source IDs**: AXIS-1" in inv or "Source IDs: AXIS-1" in inv.replace("**", "")
+    # Fix 1a: clean greppable class token `AXISGAP:AXIS-1`, not bare `AXIS-1`.
+    assert "Source IDs**: AXISGAP:AXIS-1" in inv or \
+        "Source IDs: AXISGAP:AXIS-1" in inv.replace("**", "")
     assert "AXISGAP" in inv  # section header stamp
     assert "theft on a hot function" in inv
     # chain metadata preserved so it's a STEP-0a-LC enabler
