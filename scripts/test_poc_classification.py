@@ -82,7 +82,7 @@ def test_classify_structural_patterns():
     check("cross-client", classify_poc_testability("cross-client divergence", "", "EVM diff", "High") == "structural")
     check("byzantine", classify_poc_testability("byzantine tolerance", "", "2/3 threshold", "Critical") == "structural")
     check("network partition", classify_poc_testability("network partition", "", "Split brain", "High") == "structural")
-    check("missing setter beats approve keyword", classify_poc_testability("", "CODE-TRACE", "GatewaySend.DODOApprove Has No Admin Setter", "Low") == "structural")
+    check("missing setter beats approve keyword", classify_poc_testability("", "CODE-TRACE", "GatewaySend.Approve Has No Admin Setter", "Low") == "structural")
     check("missing event beats setter/withdraw keywords", classify_poc_testability("", "CODE-TRACE", "Event Emission Missing on setBot, superWithdraw, setGasLimit, and setSlippage", "Low") == "structural")
 
 

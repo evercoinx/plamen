@@ -120,7 +120,7 @@ def test_assembled_appendix_uses_traceability_records_not_master_index_paste(tmp
 def test_empty_tier_auth_token_with_findings_in_queue_fails(tmp_path: Path):
     """v2.8.7 deliberately relaxed `_empty_tier_sidecar_valid` so the
     body-file's `PLAMEN-DRIVER-AUTHENTIC-EMPTY-TIER` marker can stand
-    in for a missing JSON sidecar (the DODO May-2026 audit halted on
+    in for a missing JSON sidecar (a prior audit halted on
     this exact case — the body marker was authentic but the sidecar
     write failed silently). The RELAXATION is gated by
     `_expected_tier_assignment_count == 0` — i.e. the upstream queue
@@ -164,7 +164,7 @@ def test_empty_tier_body_marker_accepted_when_queue_truly_empty(tmp_path: Path):
     """Positive companion to the impostor-protection test: when the
     queue has 0 findings for this tier AND the body has the auth
     marker, the validator should pass. This is the v2.8.7 fallback
-    that prevents the DODO halt class from recurring."""
+    that prevents the halt class from recurring."""
     (tmp_path / "report_critical_high.md").write_text(
         "# Critical and High Findings\n\n"
         "_No findings of this severity tier were produced by the "

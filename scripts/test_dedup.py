@@ -460,7 +460,7 @@ def test_promotion_tags_location_overlap(tmp_path):
 # ─── End-to-end scoring matrix ───────────────────────────────────
 
 def test_scoring_matrix():
-    """Print full scoring matrix for all Irys cluster pairs — no assertions, observational."""
+    """Print full scoring matrix for all cluster pairs — no assertions, observational."""
     clusters = {
         "RwLock": [
             "RwLock poisoning cascades through all guard types via .unwrap()",
@@ -693,13 +693,13 @@ def test_promotion_all_blocked_writes_receipt(tmp_path):
         "### Finding [INV-001]: Oracle settlement TWAP backfills stale interval\n"
         "**Source IDs**: [OS-1]\n"
         "**Severity**: High\n"
-        "**Location**: core/UmiaMarketManager.sol:L578\n"
+        "**Location**: core/MarketManager.sol:L578\n"
         "**Preferred Tag**: oracle\n"
         "**Description**: TWAP backfill with terminal reserves.\n\n"
         "### Finding [INV-002]: Post-deadline sweeps bypass LBP migration\n"
         "**Source IDs**: [ML-1]\n"
         "**Severity**: High\n"
-        "**Location**: launchpad/UmiaLBP.sol:L195\n"
+        "**Location**: launchpad/LBP.sol:L195\n"
         "**Preferred Tag**: liveness\n"
         "**Description**: Permissionless sweep drains reserves before migrate.\n\n"
     )
@@ -708,13 +708,13 @@ def test_promotion_all_blocked_writes_receipt(tmp_path):
     depth.write_text(
         "### Finding [DX-1]: Oracle settlement TWAP can backfill stale interval with terminal reserves\n"
         "**Severity**: High\n"
-        "**Location**: core/UmiaMarketManager.sol:L578\n"
+        "**Location**: core/MarketManager.sol:L578\n"
         "**Preferred Tag**: oracle\n"
         "**Verdict**: CONFIRMED\n"
         "**Description**: Same TWAP oracle backfill issue.\n\n"
         "### Finding [DX-2]: Permissionless post-deadline sweeps bypass LBP migration permanently\n"
         "**Severity**: High\n"
-        "**Location**: launchpad/UmiaLBP.sol:L195\n"
+        "**Location**: launchpad/LBP.sol:L195\n"
         "**Preferred Tag**: liveness\n"
         "**Verdict**: CONFIRMED\n"
         "**Description**: Same sweep-before-migrate issue.\n\n"
@@ -738,7 +738,7 @@ def test_promotion_all_blocked_writes_receipt(tmp_path):
 
 def test_promotion_all_blocked_validator_passes(tmp_path):
     """Receipt validator must pass when all depth findings are listed as blocked
-    in the receipt's 'Likely Duplicates' section (the Umia SC audit scenario)."""
+    in the receipt's 'Likely Duplicates' section (a past SC audit scenario)."""
     sp = tmp_path / "scratchpad"
     sp.mkdir()
 
@@ -748,7 +748,7 @@ def test_promotion_all_blocked_validator_passes(tmp_path):
         "### Finding [INV-001]: Oracle TWAP stale backfill\n"
         "**Source IDs**: [OS-1]\n"
         "**Severity**: High\n"
-        "**Location**: core/UmiaMarketManager.sol:L578\n"
+        "**Location**: core/MarketManager.sol:L578\n"
         "**Preferred Tag**: oracle\n"
         "**Description**: TWAP issue.\n\n"
     )
@@ -757,7 +757,7 @@ def test_promotion_all_blocked_validator_passes(tmp_path):
     depth.write_text(
         "### Finding [DX-1]: Oracle TWAP stale backfill with terminal reserves\n"
         "**Severity**: High\n"
-        "**Location**: core/UmiaMarketManager.sol:L578\n"
+        "**Location**: core/MarketManager.sol:L578\n"
         "**Preferred Tag**: oracle\n"
         "**Verdict**: CONFIRMED\n"
         "**Description**: Same issue.\n\n"
@@ -791,7 +791,7 @@ def test_promotion_mixed_blocked_and_promoted(tmp_path):
         "### Finding [INV-001]: Oracle TWAP stale backfill\n"
         "**Source IDs**: [OS-1]\n"
         "**Severity**: High\n"
-        "**Location**: core/UmiaMarketManager.sol:L578\n"
+        "**Location**: core/MarketManager.sol:L578\n"
         "**Preferred Tag**: oracle\n"
         "**Description**: TWAP issue.\n\n"
     )
@@ -800,7 +800,7 @@ def test_promotion_mixed_blocked_and_promoted(tmp_path):
     depth.write_text(
         "### Finding [DX-1]: Oracle TWAP stale backfill with terminal reserves\n"
         "**Severity**: High\n"
-        "**Location**: core/UmiaMarketManager.sol:L578\n"
+        "**Location**: core/MarketManager.sol:L578\n"
         "**Preferred Tag**: oracle\n"
         "**Verdict**: CONFIRMED\n"
         "**Description**: Same issue (should be blocked).\n\n"

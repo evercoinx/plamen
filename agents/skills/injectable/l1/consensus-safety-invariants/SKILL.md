@@ -162,7 +162,7 @@ Tag: `[SAFETY:{invariant}:{break-path}]`
 A block header is a struct with N fields, every one of which flows into consensus. The validator must check EVERY field against an INDEPENDENT ground truth — not against itself, not against another producer-supplied field in the same block.
 
 **Methodology**:
-1. Find the block header struct definition (`struct BlockHeader`, `struct IrysBlockHeader`, etc.)
+1. Find the block header struct definition (`struct BlockHeader`, `struct ChainBlockHeader`, etc.)
 2. List every field
 3. For each field, locate the validation site in `prevalidate_block` / `validate_header` / equivalent
 4. Verify each field is checked against ONE of: parent block (state continuity), local state (anchor / chain tip), wall clock (with bounded drift), reward curve (with bounded params), local mining keys, or a hardcoded protocol constant
@@ -174,7 +174,7 @@ Tag: `[HEADER-FIELD-UNVERIFIED:{field-name}]`
 
 ## 3b. Transaction Replay Protection Enumeration
 
-Every signed transaction format must carry a per-sender replay-protection field. EVM uses `nonce`. Non-EVM tx formats (Cosmos `sequence`, Solana `recent_blockhash`, Irys `anchor`) use varied schemes.
+Every signed transaction format must carry a per-sender replay-protection field. EVM uses `nonce`. Non-EVM tx formats (Cosmos `sequence`, Solana `recent_blockhash`, anchor-with-expiry schemes) use varied schemes.
 
 **Methodology**:
 1. Find the transaction struct definition for EACH tx type the protocol supports (data tx, commitment tx, system tx, etc.)
@@ -206,7 +206,7 @@ Tag: `[ID-NOT-VERIFIED:{type}.{id-field}]`
 **Required artifact**: when this skill triggers, write `{SCRATCHPAD}/validation_bundle_{struct_name}.md`:
 
 ```markdown
-# Validation Bundle: IrysBlockHeader (50 fields)
+# Validation Bundle: ChainBlockHeader (50 fields)
 
 | # | Field | Type | Validator function | Source of truth | Status |
 |---|---|---|---|---|---|
@@ -225,7 +225,7 @@ Tag: `[ID-NOT-VERIFIED:{type}.{id-field}]`
 3. Status values: `OK` (validated against independent ground truth), `CIRCULAR` (validated against another producer-supplied field), `MISSING` (no validator reference at all), `BOUNDED` (validator exists but bound is too loose).
 4. Every `MISSING` row generates a `[HEADER-FIELD-UNVERIFIED:{field-name}]` finding. Every `CIRCULAR` row generates a `[HEADER-FIELD-CIRCULAR:{field-name}]` finding. The bundle is the evidence — the orchestrator can verify the agent enumerated EVERY field by counting checklist rows against the struct field count.
 
-**Why mandatory**: Run 7 Core/Thorough on Irys produced finding "block.timestamp not validated against local clock" but missed `previous_solution_hash`, `block.height`, and `last_diff_timestamp` — the §3a methodology was present but didn't force enumeration. §3d closes this by making the checklist artifact the precondition for any header-validation finding. No checklist → no header-validation finding accepted.
+**Why mandatory**: a prior DA-chain run produced finding "block.timestamp not validated against local clock" but missed `previous_solution_hash`, `block.height`, and `last_diff_timestamp` — the §3a methodology was present but didn't force enumeration. §3d closes this by making the checklist artifact the precondition for any header-validation finding. No checklist → no header-validation finding accepted.
 
 Tag: `[BUNDLE-INCOMPLETE:{struct_name}:{field_count_validated}/{total_fields}]`
 
@@ -341,6 +341,40 @@ Findings use the standard Plamen format with these L1-specific fields:
 - Every type assertion `x.(T)` without the `ok` form
 
 Tag: `[PANIC-BLOCK:{func}:{trigger}]`
+
+## 10. Randomness / VRF Grinding (leader-selection bias)
+
+Leader election, lottery selection, committee shuffling, and any "who gets to act next" decision must derive from entropy a block producer cannot bias. The producer can withhold or re-mine its own block to grind toward a favorable outcome whenever (a) the entropy source is producer-influenceable AND (b) the producer can observe the selection result before committing to the block.
+
+**Bounded reads**: read SCIP graph artifacts (`caller_map.md`, `callee_map.md`, `state_write_map.md`, `function_summary.md`) to find selection callers/seed write-sites; on-demand single-symbol source reads for the seed-derivation and selection functions only; never bulk-read large files.
+
+**Heuristics**:
+1. Grep for `getRandom`, `seed`, `randao`, `vrf_verify`, `vrf_prove`, `next_leader`, `select_proposer`, `shuffle`, `committee`, `lottery`, `winner`.
+2. Trace the entropy source backward. Producer-biasable sources (each a finding): block hash of a block the producer mines (`prev_block.hash`, `parent_hash`), block timestamp, producer-supplied nonce/seed field, tx-set the producer chooses, a deterministic chain the producer can precompute.
+3. **Grinding test**: can the producer compute the selection result for several candidate blocks it could publish, then publish only the one that favors it? If selection reads producer-controlled bits AND the result is observable pre-commit → grindable → finding.
+4. **VRF correctness**: if a VRF is used, verify the verifier checks the proof against the producer's REGISTERED public key (not a producer-supplied key), and that the VRF input is bound to height/epoch so the same proof cannot be reused. A VRF whose output is never verified, or whose input is grindable, provides no unbiasability.
+5. RANDAO-style commit-reveal: verify the reveal cannot be selectively withheld for free (last-revealer advantage) and that a missed reveal is penalized or the value is still safe.
+
+**Severity**: producer-biasable leader/committee selection is High–Critical (consensus fairness / liveness); biasable lottery payout is High (economic). Non-consensus randomness (test fixtures, non-binding UI) is Informational.
+
+Tag: `[RAND-GRIND:{seed-source}:{selection-func}]`, `[VRF-UNVERIFIED:{func}]`
+
+## 11. Timestamp Trust / Timejacking
+
+A node that trusts peer-supplied or loosely-bounded timestamps can be pushed off the honest clock. Wide allowable block-timestamp drift, a node clock adjusted from peer messages, or missing local-clock sanity checks let an attacker shift the victim's notion of "now" — breaking slot calculation, slashing/evidence windows, unbonding timers, and finality.
+
+**Bounded reads**: read SCIP graph artifacts (`caller_map.md`, `callee_map.md`, `state_write_map.md`, `function_summary.md`) to find timestamp validators and clock-adjustment write-sites; on-demand single-symbol source reads for the timestamp-check and clock-source functions only; never bulk-read large files.
+
+**Heuristics**:
+1. Grep for `max_clock_drift`, `MAX_FUTURE`, `allowed_drift`, `timestamp > now`, `time.Now`, `adjusted_time`, `network_time`, `median_time`, `peer.*time`, `ntp`.
+2. **Drift bound**: locate the block-timestamp validation. Is `block.timestamp <= now + MAX_DRIFT` enforced with a TIGHT, protocol-justified `MAX_DRIFT`? A multi-minute or unbounded forward drift is a finding — it lets a producer post-date blocks to manipulate time-gated logic.
+3. **Peer-influenced clock**: if the node derives "now" from a median/aggregate of peer-reported times (Bitcoin-style `nTimeOffset`), can a cluster of attacker peers shift the victim's clock? Verify the offset is bounded AND that a local-clock / NTP sanity check overrides an implausible peer median.
+4. **Downstream consumers**: trace the timestamp/clock value into slot-number computation, slashing/evidence-window bounds, unbonding/withdrawal timers, and finality. A drifted clock that widens or closes a slashing window is High–Critical.
+5. **Monotonicity**: verify `block.timestamp > parent.timestamp` is enforced where the protocol requires monotonic time.
+
+**Severity**: timejacking that opens/closes a slashing or finality window is Critical; that only skews local logging is Informational.
+
+Tag: `[TIME-DRIFT-WIDE:{check}:{bound}]`, `[TIME-PEER-INFLUENCE:{clock-source}]`
 
 ## 9. Fallback if primitives unavailable
 

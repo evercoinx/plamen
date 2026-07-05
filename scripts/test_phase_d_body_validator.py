@@ -778,7 +778,7 @@ def test_MAN_sc_manifest_prefers_verified_claim_identity(tmp_path: Path):
 **Evidence Tag**: [CODE-TRACE]
 
 ## Description
-The verified issue is at `AwesomeX.sol:141`, where sqrtPriceX96 arithmetic floors three times.
+The verified issue is at `Protocol.sol:141`, where sqrtPriceX96 arithmetic floors three times.
 
 ## Recommendation
 Use higher precision arithmetic before casting.
@@ -792,7 +792,7 @@ Use higher precision arithmetic before casting.
     )
     check(
         "MAN.sc_manifest_prefers_verified_location",
-        row["location"] == "AwesomeX.sol:141",
+        row["location"] == "Protocol.sol:141",
         repr(row),
     )
 
@@ -836,17 +836,17 @@ def test_MAN_sc_missing_verify_preserves_report_index_location(tmp_path: Path):
 ## Master Finding Index
 | Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |
 |-----------|-------|----------|----------|--------------|------------|---------------------|
-| M-01 | Missing verify finding | Medium | AwesomeXMinting.sol:distributeSnapshot() | VERIFIED [CODE-TRACE] | - | H-21 |
+| M-01 | Missing verify finding | Medium | Minting.sol:distributeSnapshot() | VERIFIED [CODE-TRACE] | - | H-21 |
 """, encoding="utf-8")
     (sp / "findings_inventory.md").write_text("""## Finding [H-21]: Fallback finding
-**Location**: AwesomeXBuyAndBurn.sol:578-583
+**Location**: BuyAndBurn.sol:578-583
 **Description**: Fallback text from a non-verifier source.
 """, encoding="utf-8")
     manifests = D._build_sc_body_writer_manifests(sp)
     row = manifests["report_medium"]["findings"][0]
     check(
         "MAN.sc_missing_verify_keeps_index_location",
-        row["location"] == "AwesomeXMinting.sol:distributeSnapshot()",
+        row["location"] == "Minting.sol:distributeSnapshot()",
         repr(row),
     )
 
@@ -859,7 +859,7 @@ def test_MAN_sc_manifest_ignores_poc_test_file_as_primary_location(tmp_path: Pat
 ## Master Finding Index
 | Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |
 |-----------|-------|----------|----------|--------------|------------|---------------------|
-| H-01 | Production bug | High | AwesomeXMinting.sol:pre-liquidity path | VERIFIED [CODE-TRACE] | - | H-9 |
+| H-01 | Production bug | High | Minting.sol:pre-liquidity path | VERIFIED [CODE-TRACE] | - | H-9 |
 """, encoding="utf-8")
     (sp / "verify_H-9.md").write_text("""# Verification: H-9 — Production bug
 
@@ -870,14 +870,14 @@ def test_MAN_sc_manifest_ignores_poc_test_file_as_primary_location(tmp_path: Pat
 - Test File: test/Test_H43_Uint192Cast.t.sol
 
 ## Code Trace
-### Vulnerable code (AwesomeXMinting.sol:155-172)
+### Vulnerable code (Minting.sol:155-172)
 The production branch reassigns `_amount`.
 """, encoding="utf-8")
     manifests = D._build_sc_body_writer_manifests(sp)
     row = manifests["report_critical_high"]["findings"][0]
     check(
         "MAN.sc_manifest_uses_production_location_over_test_file",
-        row["location"] == "AwesomeXMinting.sol:155-172",
+        row["location"] == "Minting.sol:155-172",
         repr(row),
     )
 
@@ -1064,13 +1064,13 @@ def test_VAL_composite_manifest_location_allows_source_token_rewrite():
     """Composite index locations need not be copied verbatim if source identity survives."""
     finding = dict(
         _BASE_FINDING,
-        location="AwesomeXBuyAndBurn.sol, AwesomeXMinting.sol:admin setters",
+        location="BuyAndBurn.sol, Minting.sol:admin setters",
     )
     manifest = _make_manifest([finding])
     body = """# Test
 ## [M-01] renounceOwnership not overridden
 **Severity**: Medium
-**Location**: `AwesomeXBuyAndBurn.sol:L35`
+**Location**: `BuyAndBurn.sol:L35`
 **Evidence Tag**: CODE-TRACE
 **Description**: The contract inherits Ownable2Step and does not override renounceOwnership.
 **Impact**: Ownership can be renounced and leave privileged flows unmanaged.
@@ -1083,12 +1083,12 @@ def test_VAL_composite_manifest_location_allows_source_token_rewrite():
 
 def test_VAL_source_token_drift_still_fails():
     """A function word in the title cannot hide a body copied from another source file."""
-    finding = dict(_BASE_FINDING, location="AwesomeXBuyAndBurn.sol:buyAndBurn()")
+    finding = dict(_BASE_FINDING, location="BuyAndBurn.sol:buyAndBurn()")
     manifest = _make_manifest([finding])
     body = """# Test
 ## [M-01] buyAndBurn called with zero balance
 **Severity**: Medium
-**Location**: `AwesomeX.sol:L136-L141`
+**Location**: `Protocol.sol:L136-L141`
 **Evidence Tag**: CODE-TRACE
 **Description**: The sqrtPriceX96 constructor math truncates.
 **Recommendation**: Use higher precision arithmetic.

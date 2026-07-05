@@ -1,7 +1,7 @@
 """Tests for the Part 2 audit-driven fix queue (T1-a, T1-b, T2-a, T2-c).
 
-Covers the validators added/changed to fix application-layer failures the
-DODO audit exposed:
+Covers the validators added/changed to fix application-layer failures a
+prior audit exposed:
 
   T1-a  _validate_poc_pass_integrity defers to a mechanical PASS
   T1-b  _check_report_index_unresolved_authenticity rejects phantom UNRESOLVED
@@ -119,7 +119,7 @@ def _report_index(rows: str) -> str:
 
 def test_t1b_phantom_unresolved_without_judge_artifacts(tmp_path):
     """An UNRESOLVED(...) stamp with no skeptic-judge artifact at all is a
-    phantom (the DODO CONTESTED->UNRESOLVED mislabel)."""
+    phantom (the observed CONTESTED->UNRESOLVED mislabel)."""
     (tmp_path / "report_index.md").write_text(
         _report_index(
             "| L-18 | Some bug | Low | A.sol:1 | UNVERIFIED | UNRESOLVED(Medium) | H-7 |\n"
@@ -298,7 +298,7 @@ def test_t2c_joined_constituent_chain_flagged(tmp_path):
 # ---------------------------------------------------------------------------
 # F1: hypothesis-ID taxonomy — verify_queue parity recognizes all six
 # SC grouped prefixes (HC/HH/HM/HL/HI/GRP) plus CH + bare INV.
-# DODO scratchpad emitted all of these; the prior regex catalogue missed
+# A prior scratchpad emitted all of these; the prior regex catalogue missed
 # them all and silently dropped 78 INV constituents from accounting.
 # ---------------------------------------------------------------------------
 
@@ -321,8 +321,8 @@ def _inventory_block(fid: str) -> str:
     return f"## {fid} A bug\n**Location**: `src/Vault.sol:45`\n**Severity**: Medium\n\n"
 
 
-def _build_grouped_dodo_fixture(tmp_path):
-    """Build a fixture that mirrors the DODO scratchpad shape: a verify
+def _build_grouped_fixture(tmp_path):
+    """Build a fixture that mirrors a prior scratchpad shape: a verify
     queue with HC/HH/HM/HL/HI/GRP/CH grouped hypotheses + bare INV rows,
     plus matching finding_mapping.md and hypotheses.md."""
     # Inventory: 7 grouped constituents + 1 bare-INV active.
@@ -380,8 +380,8 @@ def _build_grouped_dodo_fixture(tmp_path):
 def test_f1_parity_recognizes_all_sc_grouped_prefixes(tmp_path):
     """Every SC grouped hypothesis prefix (HC/HH/HM/HL/HI/GRP/CH) plus the
     bare INV row must expand to its INV constituent — `_validate_*_parity`
-    returns no dropouts.  Pre-fix DODO reported 78 missing of 136."""
-    _build_grouped_dodo_fixture(tmp_path)
+    returns no dropouts.  Pre-fix a prior run reported 78 missing of 136."""
+    _build_grouped_fixture(tmp_path)
     issues = _validate_verification_queue_inventory_parity(tmp_path)
     assert issues == [], (
         f"expected zero dropouts on the all-grouped-prefixes fixture, got: {issues}"
@@ -392,7 +392,7 @@ def test_f1_parity_regression_unknown_prefix_still_flagged(tmp_path):
     """The fix is additive, not a wildcard — an unknown prefix `XX-99`
     appearing on the queue with no inventory backing is still flagged as
     extra (or, equivalently, the queue's claim is not silently swallowed)."""
-    _build_grouped_dodo_fixture(tmp_path)
+    _build_grouped_fixture(tmp_path)
     # Append a stray XX-99 row that nothing in the inventory backs.
     queue_path = tmp_path / "verification_queue.md"
     queue_path.write_text(

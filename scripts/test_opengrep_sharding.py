@@ -16,7 +16,7 @@ Sharding policy under test (verbatim from the plan):
   - Rows that match ZERO agents land in
     ``opengrep_obligations_UNASSIGNED.md`` AND the core_state agent's
     shard.
-  - No DODO-specific filenames, counts, or rules -- focus-area
+  - No protocol-specific filenames, counts, or rules -- focus-area
     matching is purely token-based.
 """
 from __future__ import annotations
@@ -104,7 +104,7 @@ def test_shard_files_use_opengrep_namespace_not_plamen(tmp_path: Path):
     (per the Subagent Prompt Template) must not be able to copy a
     `PLAMEN_*` marker out of the shard into its analysis file -- the
     contamination vector that produced B6's malformed header on
-    DODO 2026-05-22. Assert: every shard (including UNASSIGNED) contains
+    a prior run. Assert: every shard (including UNASSIGNED) contains
     OPENGREP_SHARD_* markers and ZERO `PLAMEN_` substrings."""
     sp = tmp_path
     _write_manifest(sp, [("B1", "core_state"), ("B6", "storage_layout")])

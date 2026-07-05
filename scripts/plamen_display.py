@@ -1006,7 +1006,54 @@ def wait_halt_choice() -> bool:
 
     Returns True to resume, False to exit.
     Suspends the background key listener so it doesn't steal keypresses.
+
+    Non-interactive safety net (mirrors wait_critical_halt_choice, v2.8.13).
+    This prompt is reached via rc==-3 (an Esc-initiated halt). It must NEVER
+    block the driver forever: the observed wedge was a long unattended audit
+    sitting here at 0 CPU after a stray Esc, because the bare `while True`
+    keypress loop has no exit when nobody answers. The driver is haltless by
+    design; an unanswered resume/exit prompt is a freeze, not a halt.
+      - An explicit env choice wins: PLAMEN_AUTO_HALT_CHOICE in {resume,retry}
+        -> resume (True); {exit,stop,skip} -> exit (False).
+      - A non-TTY stdin (headless/redirected — where graceful_stop can only come
+        from SIGINT) auto-exits cleanly (False), resumable via rerun. Matches
+        wait_critical_halt_choice's non-TTY convention.
+      - On a TTY the keypress loop is bounded by PLAMEN_HALT_PROMPT_TIMEOUT_S
+        (default 300s). If nobody answers, default to RESUME (True) so a healthy
+        run that was paused-and-abandoned is never stranded (haltless floor);
+        the user can press Esc again and actually answer to stop. This differs
+        from the critical-failure prompt (which exits) ON PURPOSE: there the
+        phase genuinely failed, here the run is healthy and merely paused.
+    A prompt answered within the window behaves exactly as before.
     """
+    _auto = os.environ.get("PLAMEN_AUTO_HALT_CHOICE", "").strip().lower()
+    if _auto in ("resume", "retry"):
+        return True
+    if _auto in ("exit", "stop", "skip"):
+        return False
+    try:
+        if not sys.stdin.isatty():
+            return False
+    except Exception:
+        return False
+    try:
+        _timeout_s = float(os.environ.get("PLAMEN_HALT_PROMPT_TIMEOUT_S", "300"))
+    except Exception:
+        _timeout_s = 300.0
+    _deadline = (time.time() + _timeout_s) if _timeout_s > 0 else None
+
+    def _on_timeout() -> bool:
+        try:
+            print(
+                f"\n  [halt prompt] no response in {int(_timeout_s)}s - "
+                f"auto-resuming so the run is not stranded "
+                f"(set PLAMEN_AUTO_HALT_CHOICE=exit to stop instead).",
+                file=sys.stderr, flush=True,
+            )
+        except Exception:
+            pass
+        return True
+
     pause_toggle._suspended = True
     try:
         if sys.platform == "win32":
@@ -1018,6 +1065,8 @@ def wait_halt_choice() -> bool:
                         return True
                     if ch == b"\x1b":  # Esc
                         return False
+                if _deadline is not None and time.time() >= _deadline:
+                    return _on_timeout()
                 time.sleep(0.05)
         else:
             import select
@@ -1029,6 +1078,8 @@ def wait_halt_choice() -> bool:
                         return True
                     if ch == "\x1b":
                         return False
+                if _deadline is not None and time.time() >= _deadline:
+                    return _on_timeout()
     finally:
         pause_toggle._suspended = False
 

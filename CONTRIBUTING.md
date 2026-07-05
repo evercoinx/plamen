@@ -7,7 +7,7 @@ Thank you for your interest in contributing to Plamen! This guide will help you 
 Plamen is a multi-agent security auditing pipeline that runs on Claude Code or OpenAI Codex CLI. It consists of:
 
 - **Orchestration rules** (`rules/`) - Phase definitions, scoring models, report templates
-- **Language prompts** (`prompts/{evm,solana,aptos,sui,soroban}/`) - Per-chain agent prompts and templates
+- **Language prompts** (`prompts/{evm,solana,aptos,sui,soroban,daml}/` + `prompts/l1/`) - Per-chain agent prompts and templates
 - **Skills** (`agents/skills/`) - Methodology files that agents read at audit time
 - **Agent definitions** (`agents/depth-*.md`) - Depth agent role definitions
 - **MCP servers** (`custom-mcp/`) - Tool servers (RAG database, static analyzers)

@@ -14,7 +14,7 @@ Pre-fix, the legacy tier confirmation handler `report_<tier>_<shard>`
 would FAIL the validator because the sidecar was missing, even though
 the body file's marker was right there. This halted the entire audit.
 
-The DODO May-2026 audit hit this exact failure mode at phase 42
+A prior audit hit this exact failure mode at phase 42
 (`report_medium_c`) — the medium tier had no findings in shard c, the
 body-writer skip wrote `report_medium_c.md` with the marker but the
 sidecar `body_manifests/report_medium_c.empty.json` was missing on disk.
@@ -99,7 +99,7 @@ def test_sidecar_present_accepts(tmp_path: Path):
 
 
 def test_body_marker_accepted_without_sidecar(tmp_path: Path):
-    """The DODO May-2026 failure mode: body file has the auth marker,
+    """A prior failure mode: body file has the auth marker,
     sidecar is missing on disk. Pre-fix: validator returned False and
     audit halted. Post-fix: validator accepts via body marker."""
     import plamen_validators as V
@@ -112,7 +112,7 @@ def test_body_marker_accepted_without_sidecar(tmp_path: Path):
     # NOTE: deliberately NO sidecar written.
     assert V._empty_tier_sidecar_valid(sp, "report_medium_c", "report_medium_c.md"), (
         "Body file with auth marker should pass even when sidecar is "
-        "absent — this is the DODO halt fix"
+        "absent — this is the halt fix"
     )
 
 

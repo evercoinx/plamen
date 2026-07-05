@@ -278,11 +278,11 @@ finding ID (e.g. `[B1-2]`, `[RS1-3]`) or a real `file:Lnnn` location drawn from
   coverage is NOT authoritative — only the provided exclusion set is.
 - Every exclusion entry you do write MUST carry its referent inline, e.g.
   `EXCLUDED [PC{N}-x] dup of [B1-2]` or
-  `EXCLUDED [PC{N}-x] dup of AccountEncoder.sol:L88`.
+  `EXCLUDED [PC{N}-x] dup of Vault.sol:L88`.
 - Every exclusion entry MUST ALSO carry the EXCLUDED CANDIDATE'S OWN content:
   its concrete `file:Lnnn` location, the mechanism (WHAT is wrong), and a
   one-line harm (WHAT goes wrong if real), e.g. `EXCLUDED [PC{N}-x] encoder
-  byte-width mismatch at AccountEncoder.sol:L412 — truncates the high byte so a
+  byte-width mismatch at Encoder.sol:L412 — truncates the high byte so a
   crafted account passes validation → asset mis-routing; dup of [B1-2]`. A bare
   `EXCLUDED [PC{N}-x] already known` with no location and no harm is a
   CONTENT-LESS stub: if its referent is also missing it cannot be dedup'd or

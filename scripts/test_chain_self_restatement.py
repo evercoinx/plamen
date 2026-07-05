@@ -1,4 +1,4 @@
-"""Tests for PLAN B — chain self-restatement collapse (DODO-class duplication).
+"""Tests for PLAN B — chain self-restatement collapse (duplication class).
 
 Covers:
   * `_validate_chain_self_restatement` (plamen_validators.py) — flags chains
@@ -200,6 +200,50 @@ def test_parse_chain_constituents_single(tmp_path):
     _write_chain(tmp_path, _chain_section("CH-05", "M-07", None, justified=False))
     links = pp._parse_chain_constituents(tmp_path)
     assert links.get("CH-05") == ["M-07"], links
+
+
+def test_justified_chain_with_all_standalone_constituents_is_linked(tmp_path):
+    """Precision fix #2: a chain self-marked Severity-Upgrade-Justified=YES whose
+    constituents ALL also appear standalone is a double-count -> it must be LINKED
+    for collapse despite the YES flag (a CH-* row beside its standalone parts)."""
+    _, pp = _mods()
+    # chain High, constituents also High -> NO elevation -> pure double-count.
+    _write_chain(tmp_path, _chain_section(
+        "CH-03", "M-07", "M-23", justified=True,
+        combined_impact="drains pool", severity="High",
+    ))
+    sev = {"M-07": "High", "M-23": "High"}
+    links = pp._parse_chain_constituents(tmp_path, standalone_severities=sev)
+    assert links.get("CH-03") == ["M-07", "M-23"], links
+    # legacy call (no standalone set) still excludes it (backward-compatible)
+    assert "CH-03" not in pp._parse_chain_constituents(tmp_path)
+
+
+def test_justified_chain_with_partial_standalone_stays_separate(tmp_path):
+    """If only SOME constituents stand alone, the chain is NOT a pure
+    double-count -> keep it separate (a genuine compound is preserved)."""
+    _, pp = _mods()
+    _write_chain(tmp_path, _chain_section(
+        "CH-04", "M-07", "M-23", justified=True,
+        combined_impact="novel sustained drain", severity="High",
+    ))
+    # only M-07 stands alone (M-23 absent) -> override does NOT fire
+    links = pp._parse_chain_constituents(
+        tmp_path, standalone_severities={"M-07": "High"})
+    assert "CH-04" not in links, links
+
+
+def test_justified_chain_that_elevates_severity_stays_separate(tmp_path):
+    """A GENUINE elevation (chain High > Medium constituents) is preserved even
+    when all constituents stand alone — the research-confirmed exception."""
+    _, pp = _mods()
+    _write_chain(tmp_path, _chain_section(
+        "CH-05", "M-07", "M-23", justified=True,
+        combined_impact="novel critical drain", severity="High",
+    ))
+    sev = {"M-07": "Medium", "M-23": "Medium"}  # chain High > Medium -> elevates
+    links = pp._parse_chain_constituents(tmp_path, standalone_severities=sev)
+    assert "CH-05" not in links, links
 
 
 def test_hypothesis_constituents_includes_chains(tmp_path):

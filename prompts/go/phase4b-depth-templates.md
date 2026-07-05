@@ -1,6 +1,6 @@
 # L1 Depth Agent — Iteration 1 Methodology
 
-> **Usage**: The subagent_composer extracts the first fenced code block below (the one
+> **Usage**: The V2 prompt builder (`build_phase_prompt` in `plamen_prompt.py`) extracts the first fenced code block below (the one
 > containing `Task(subagent_type="depth-`) and pastes the body verbatim into every L1
 > depth agent's per-iteration prompt. Applies uniformly to depth-consensus-invariant,
 > depth-network-surface, depth-state-trace, depth-external, depth-edge-case.

@@ -41,6 +41,7 @@ When a contract calls another contract via `invoke_contract`, the auth context m
 - `require_auth()` at top level but no auth context propagated to sub-contract invocations
 - Sub-contracts that perform privileged operations but rely on the caller to have checked auth (missing defense-in-depth)
 - `invoke_contract_check_auth` used as a bypass for normal `require_auth` flow
+- **Frame-descent (originate side)**: when the current contract invokes an intermediary that then pulls tokens/assets via a nested `transfer(from = this_contract, ...)`, that nested frame is NOT auto-authorized by the direct-caller rule — verify the originating function pre-declares it (`authorize_as_current_contract` / equivalent). Differentially compare EVERY sibling that performs the same nested-pull pattern; if one sibling pre-authorizes and another does not, the omission is a finding.
 
 ## 3. Custom Account Contracts (`__check_auth`)
 

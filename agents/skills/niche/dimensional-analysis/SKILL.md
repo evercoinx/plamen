@@ -5,10 +5,10 @@ description: "Trigger MIXED_DECIMALS flag (mulDiv/mulWad/rayMul + mixed scale fa
 
 # Niche Agent: Dimensional Analysis
 
-> **Trigger**: `MIXED_DECIMALS` flag in `template_recommendations.md` (detected when: `mulDiv|mulWad|divWad|rayMul|rayDiv|FullMath` AND any of `1e6|1e8|decimals()|10**6|10**8|10 **` in same scope)
+> **Trigger**: `MIXED_DECIMALS` flag in `template_recommendations.md` (detected when a fixed-point op AND any scale factor appear in the same scope. Fixed-point ops — EVM: `mulDiv|mulWad|divWad|rayMul|rayDiv|FullMath`; Rust/Move: `mul_div|mul_div_floor|mul_div_ceil|mul_div_wide`. Scale factors: `1e6|1e8|1eN|10**6|10**8|10^N|10 **|decimals()`)
 > **Agent Type**: `general-purpose` (standalone niche agent, NOT injected into another agent)
 > **Budget**: 1 depth budget slot in Phase 4b iteration 1
-> **Language**: EVM only (Solidity fixed-point arithmetic)
+> **Language**: all (fixed-point arithmetic — Solidity/Vyper as well as Rust/Move fixed-point and integer-scaled math)
 > **Finding prefix**: `[DA-N]`
 > **Added in**: v1.1.0 (injectable), v1.1.1 (converted to niche agent)
 > **Attribution**: The 4-phase dimensional analysis approach (vocabulary discovery, expression annotation, propagation tracing, validation) is adapted from Trail of Bits' dimensional-analysis plugin (https://github.com/trailofbits/skills, licensed CC BY-SA 4.0: https://creativecommons.org/licenses/by-sa/4.0/). Changes: rewritten as a single-agent security audit methodology (vs ToB's 5-agent code annotation workflow); no code shared; different output format (security findings vs inline code comments); added common dimensions reference, algebra rules, rationalization rejection list, and disposition table.
@@ -68,6 +68,7 @@ For each PHASE below, execute in order:
 Grep the in-scope source files (excluding test/, lib/, mocks/) for:
 ```
 1e6, 1e8, 1e18, 1e27, 10**6, 10**8, 10**18, 10**27
+10^6, 10^8, 10^9, 10^18, 1eN / 10^N (any other scale exponent)
 WAD, RAY, BASE, UNIT, PRECISION, SCALE, DENOMINATOR
 decimals(), DECIMALS, _decimals, 10 **
 ```
@@ -147,11 +148,11 @@ Tag: `[TRACE: price[8-dec] stored as priceWad -> mulWad(priceWad, amount) -> 10^
 Tag: `[BOUNDARY: USDC_amount=1e6 as WAD input -> mulWad rounds to 0 -> user receives nothing]`
 Tag: `[VARIATION: token.decimals()=6->18 -> 10^12 collateral valuation change]`
 
-### 4.4 Rounding-Direction Edge Cases (MANDATORY — class missed in AwesomeX run)
+### 4.4 Rounding-Direction Edge Cases (MANDATORY — class missed in a prior run)
 
 Dimensional correctness alone is insufficient. Even when units align, a rounding-direction choice on small remainders can produce the same severity of loss as a decimal mismatch. For EVERY division / mulDiv / mulWad / rayMul / FullMath.mulDiv / fixedPointMath call, check BOTH: the correctness-direction (up or down) AND what happens at the minimum non-zero input where integer division truncates or ceils across a unit boundary.
 
-**Ceil-round-up-on-small-remainder — the AwesomeX L-3 class**:
+**Ceil-round-up-on-small-remainder — a rounding-direction finding class**:
 - Pattern: `fee = mulDivRoundUp(amount, feeBps, BPS_DENOM)` where `amount` is small enough that `amount * feeBps < BPS_DENOM`
 - Dimensional result: `fee = 1 wei` (the ceiling of a fractional value < 1)
 - Semantic result: `net = amount - fee = amount - 1`. For `amount == 1 wei`, `net == 0`, and the subsequent `transferFrom(net)` reverts OR sends zero — user's transaction fails at the dust boundary.

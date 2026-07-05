@@ -19,6 +19,7 @@ Every finding MUST use this format:
 **Location**: SourceFile:LineN
 **Description**: What's wrong
 **Impact**: What can happen (if finding is in a shared utility/library, list impact at EACH consumption point)
+**Material Harm** (MANDATORY): The concrete CONSEQUENCE in one sentence — not the mechanism, the harm. State WHO loses WHAT (specific user class + funds/privilege/liveness/accounting/integrity consequence), e.g. "depositors lose 25-50% of their pro-rata share" or "any peer can permanently halt block production". A finding whose only stated harm is a MECHANISM ("state is corrupted", "a guard is missing", "the function is callable", "value diverges") without a concrete consequence is NOT a body finding: cap it at Informational and route it to the Quality Observations megasection. "Could be exploited" / "may be unsafe" without a named consequence does not qualify.
 **Evidence**: Code snippets
 
 ### Precondition Analysis (if PARTIAL or REFUTED)
@@ -87,6 +88,7 @@ breadth, depth, scanner, chain, and report phases.
 - R6 violation (role involved but ✗) → **MANDATORY depth review**
 - R8 violation (multi-step or stored external state but ✗) → **Check for parameter/external state staleness**
 - R10 violation (severity uses current snapshot) → **Recalibrate with worst-state**
+- R10 violation — **UNRESEARCHED-EXTERNAL burden inversion (the "valid-but-unresearched" fallacy)** → **MANDATORY**: when a finding's harm mechanism is CONFIRMED in-scope and ONLY an unresearched / out-of-scope / not-inspectable EXTERNAL factor could render it safe, do NOT default severity to Informational/Low "pending external research." That inverts the burden of proof. Apply R10: assume the WORST realistic external condition, report at that impact severity, tag `[EXTERNAL-ASSUMPTION: <assumed condition>]`, and route to verification. An unresearched external dependency is a **verification obligation, not a severity discount.** Demoting requires POSITIVE in-scope evidence of the safe external condition — its mere possibility does not rebut a mechanism already proven in-scope. (E.g. an EVM `abi.encode` payload sent to a Solana consumer is CONFIRMED-mismatch at impact severity even when the consumer's decoder is external and uninspectable — not Informational.)
 - R14 violation (setter for limit but ✗) → **Check constraint coherence and regression below accumulated state**
 - R15 violation (flash-loan-accessible state but ✗) → **MANDATORY flash loan skill analysis**
 - R13 violation (behavior marked "by design" but ✗) → **MANDATORY**: Document terminal user-facing consequence (e.g., "users lose X under condition Y") before REFUTED closure. "By design" describes mechanism, not impact - impact assessment is still required.
@@ -105,5 +107,6 @@ Used by depth agents and iteration 2+ agents:
 | `[TRACE:path→outcome]` | Agent traced execution to a terminal state (revert, return, state change) | `[TRACE:withdraw(maxUint)→revert at L120 "insufficient"]` |
 | `[MEDUSA-PASS]` | Medusa fuzzer found a counterexample violating an invariant - mechanical proof (same weight as `[POC-PASS]`) | `[MEDUSA-PASS: fuzz_totalSupplyInvariant violated after 3-call sequence]` |
 | `[CROSS-DOMAIN-DEP: {domain}]` | Agent identified an assumption outside its own domain that could enable exploitation if broken | `[CROSS-DOMAIN-DEP: external — assumes oracle price is fresh within 1 hour]` |
+| `[EXTERNAL-ASSUMPTION: {condition}]` | Severity assumes the WORST realistic external condition (R10) for an in-scope-confirmed mechanism whose safety hinges on an unresearched / out-of-scope factor; a verification obligation, NOT a severity discount to Informational | `[EXTERNAL-ASSUMPTION: destination gateway deserializes with Borsh; non-issue only if it abi.decodes]` |
 | `[REGRESS:symptom→cause]` | Agent traced a varying symptom backward to its architectural root cause | `[REGRESS:overflow threshold varies by decimals→missing decimal normalization]` |
 | `[PERTURBATION:operator]` | Perturbation agent found adjacent vulnerability via structured mutation of an existing finding (Thorough only) | `[PERTURBATION:DIRECTION_FLIP — deposit rounding found → withdrawal rounding also vulnerable]` |

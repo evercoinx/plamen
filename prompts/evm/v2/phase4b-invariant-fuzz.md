@@ -159,6 +159,15 @@ contract InvariantFuzz is Test {
 }
 ```
 
+### External-dependency mock tier (setUp deployment escalation)
+
+The `setUp()` deploy block above assumes the in-scope accounting/escrow/state-machine contract can be deployed standalone. When it CANNOT — because its constructor args / immutables / interface imports require a LIVE external dependency (an AMM pool manager, oracle, router, vault, bridge endpoint, etc.) — do NOT skip straight to the code-trace fallback. Insert this tier first:
+
+1. **Identify the dependency** from the constructor args, immutables, and interface imports of the in-scope contract.
+2. **Build a MINIMAL behavioral mock of ONLY the interface subset** the in-scope contract actually calls on that dependency (the methods exercised by the in-scope value paths — not the full external interface). Give each mocked method the simplest *faithful* behavior (e.g. an AMM pool manager mock that conserves value via constant-product / pass-through swaps; an oracle mock that returns a settable price). Deploy the in-scope state machine against the mock so the money-handling layer becomes directly fuzzable. Uniswap-V4 `PoolManager` is one illustrative example of such a dependency.
+3. **RECALL-SAFETY (mandatory — no fabricated coverage)**: the mock MUST be faithful to the dependency's value-relevant contract. If a faithful minimal mock is NOT achievable in bounded effort (the dependency's behavior is itself security-relevant and non-trivial to reproduce), DO NOT ship a guessed mock — a wrong mock yields false PASS/FAIL. Fall back to the existing code-trace path (STEP 3) and record the gap as an explicit coverage limitation (no silent cap), emitting `[CODE-TRACE]` for the affected invariants.
+4. **Mock fidelity receipt (mandatory)**: in `invariant_fuzz_results.md`, write one line naming which dependency was mocked and which methods, so a reviewer can judge fidelity, e.g. `Mock fidelity: mocked <Dependency> methods [<method1>, <method2>] with <faithful behavior>` OR `Mock fidelity: <Dependency> NOT mocked (faithful minimal mock infeasible: <reason>) — code-trace fallback`.
+
 ### Handler Rules
 
 **Value bounds** — use protocol-realistic ranges, not arbitrary caps:

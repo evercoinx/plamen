@@ -1,8 +1,8 @@
 # Skill Index
 
 > Skills are methodology files read by agents via `Read ~/.claude/agents/skills/{LANGUAGE}/{name}/SKILL.md`.
-> The orchestrator resolves `{LANGUAGE}` to `evm`, `solana`, `aptos`, or `sui` based on Step 0 detection.
-> EVM has 18 skills, Solana has 20 skills, Aptos has 22 skills (21 + core directives), Sui has 22 skills (21 + core directives) - no shared skills directory exists.
+> The orchestrator resolves `{LANGUAGE}` to `evm`, `solana`, `aptos`, `sui`, `soroban`, or `daml` based on Step 0 detection.
+> EVM has 18 skills, Solana has 20 skills, Aptos has 22 skills (21 + core directives), Sui has 22 skills (21 + core directives), Soroban has 19 skills, DAML has 12 skills - no shared skills directory exists.
 
 ## EVM Skills (`~/.claude/agents/skills/evm/`)
 
@@ -202,7 +202,7 @@
 | SEMANTIC_CONSISTENCY_AUDIT | `HAS_MULTI_CONTRACT` flag (2+ in-scope contracts sharing parameters or formulas) | 1 slot | Config variable unit mismatches, formula semantic drift, magic number consistency across contracts |
 | MULTI_STEP_OPERATION_SAFETY | `MULTI_STEP_OPS` flag (approve/delegate/authorize patterns + on-behalf-of functions: depositFor/stakeFor/delegateTo/mintFor/withdrawFor). **DAML**: re-scoped to `PROPOSE_ACCEPT` — propose template + accept choice; flag accept re-reading mutable state the proposer signed against, propose acceptable under different terms, non-revocable propose. | 1 slot | Authorization sequence conflicts in batch/multi-step operations, infrastructure address targeting via public on-behalf-of functions |
 | CALLBACK_RECEIVER_SAFETY | `OUTCOME_CALLBACK` flag (onERC721Received/onERC1155Received/tokensReceived/onTransferReceived/onFlashLoan/executeOperation/receive()/fallback()) | 1 slot | (EVM only) Callback handler access control, permissionless state inflation via callbacks, selective revert exploitation |
-| DIMENSIONAL_ANALYSIS | `MIXED_DECIMALS` flag (mulDiv/mulWad/rayMul + 1e6/1e8/decimals()/10** in scope) | 1 slot | (EVM only) Unit/scale mismatch detection: vocabulary discovery, expression annotation, cross-function propagation, boundary substitution. Sequential 4-phase methodology requires single agent context. |
+| DIMENSIONAL_ANALYSIS | `MIXED_DECIMALS` flag (mulDiv/mulWad/rayMul or mul_div/mul_div_floor/mul_div_wide + 1e6/1e8/10^N/decimals()/10** in scope) | 1 slot | (All languages) Unit/scale mismatch detection: vocabulary discovery, expression annotation, cross-function propagation, boundary substitution. Sequential 4-phase methodology requires single agent context. |
 | STABLESWAP_COMPLIANCE | `STABLESWAP_FORK` flag (fork-ancestry detects Curve/StableSwap parent via get_d/get_y/ramp_a patterns) | 1 slot | Curve spec compliance: Newton-Raphson convergence, A parameter encoding (A vs A*N^(N-1)), reserve decimal normalization, fee consistency, known Curve vulnerability patterns. All languages. |
 
 ### How Niche Agents Work
@@ -247,12 +247,14 @@
 | GO_CONCURRENCY_SAFETY | Always on for L1 + `LANGUAGE=go` | every L1 agent on Go code |
 | RUST_UNSAFE_AUDIT | Always on for L1 + `LANGUAGE=rust` | every L1 agent on Rust code |
 | DEPENDENCY_AUDIT_NODECLIENT | Always on for L1 (extends existing dependency-audit skill) | recon agent + every breadth agent |
-| DATA_AVAILABILITY_ENFORCEMENT | Protocol-type trigger: `data_availability` / `storage` / `da_chain` / `blob_storage` (Arweave/Filecoin/Irys/Crust/Celestia/EigenDA class) | depth-consensus-invariant, depth-state-trace |
+| DATA_AVAILABILITY_ENFORCEMENT | Protocol-type trigger: `data_availability` / `storage` / `da_chain` / `blob_storage` (Arweave/Celestia class) | depth-consensus-invariant, depth-state-trace |
 | PEER_SCORING_CORRECTNESS | `P2P` flag + `score_peer` / `peer_score` / `reputation` / `ban_peer` detected | depth-network-surface |
 | GOSSIP_CACHE_INVARIANCE | `P2P` flag + `seen_cache` / `message_cache` / `tx_cache` / `gossipsub` detected | depth-network-surface, depth-consensus-invariant |
 | CONSENSUS_TX_IDENTITY_INVARIANTS | `CONSENSUS` flag + `txid` / `tx_hash` / `nonce` / `sequence` / `signature` across modules | depth-consensus-invariant, depth-state-trace |
 | CONFIG_CORRECTNESS | `L1_PATTERN` + `config/` / `settings` / constants / docs or comments with protocol bounds | depth-edge-case, depth-state-trace |
 | WRITE_ERROR_DIVERGENCE | `STORAGE` or `DATABASE_TX` flag + file/DB write APIs (`write_all`, `fs::write`, `rename`, `commit`, `batch`, `transaction`) | depth-state-trace, depth-edge-case |
+| COSMOS_SDK_MODULE_SAFETY | COSMOS_SDK flag (cosmos-sdk/cometbft/tendermint/x/ modules) | depth-consensus-invariant, depth-state-trace |
+| COSMOS_IBC_SECURITY | IBC flag (ibc-go/ics23/IBC channels) | depth-consensus-invariant, depth-external |
 
 ### L1 depth agent roles (new in L1 mode)
 

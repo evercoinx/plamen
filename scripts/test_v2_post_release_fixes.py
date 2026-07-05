@@ -214,8 +214,8 @@ def test_subsystem_scope_outside_prefix_rejected():
 # 5. _validate_recon_coverage skip_tokens & scope_file
 # ---------------------------------------------------------------------------
 
-def _build_dhedge_tree(root: Path) -> Path:
-    """Synthesize a dHEDGE-shape: 20 in-scope Pools + 12 utils/gmx
+def _build_scope_tree(root: Path) -> Path:
+    """Synthesize a fund-manager-shape: 20 in-scope Pools + 12 utils/gmx
     + 15 interfaces/aave stubs + 15 tests. Returns the scratchpad path."""
     (root / "contracts").mkdir(parents=True)
     for i in range(20):
@@ -236,7 +236,7 @@ def _build_dhedge_tree(root: Path) -> Path:
 
 def test_recon_coverage_auto_skips_interfaces_and_tests(tmp_path):
     """interfaces/* and test/* must auto-exempt regardless of citation."""
-    sp = _build_dhedge_tree(tmp_path)
+    sp = _build_scope_tree(tmp_path)
     (sp / "recon_summary.md").write_text("- contracts/Pool0.sol")
     issues = _validate_recon_coverage(sp, str(tmp_path), "evm")
     flat = " ".join(issues).lower()
@@ -252,7 +252,7 @@ def test_recon_coverage_still_flags_uncited_utils(tmp_path):
     Recon must either cite OR ACKNOWLEDGE utils files. Without a scope
     file and without recon citation, the bucket trips the gate.
     """
-    sp = _build_dhedge_tree(tmp_path)
+    sp = _build_scope_tree(tmp_path)
     (sp / "recon_summary.md").write_text("- contracts/Pool0.sol")
     issues = _validate_recon_coverage(sp, str(tmp_path), "evm")
     assert any("utils/gmx" in i for i in issues), \
@@ -281,7 +281,7 @@ def test_recon_coverage_case_insensitive_skip_tokens(tmp_path):
 
 def test_recon_coverage_scope_file_narrows_universe(tmp_path):
     """When scope file lists only contracts/Pool*, utils/gmx is exempt."""
-    sp = _build_dhedge_tree(tmp_path)
+    sp = _build_scope_tree(tmp_path)
     (sp / "recon_summary.md").write_text("- contracts/Pool0.sol")
     sf = tmp_path / "scope.txt"
     sf.write_text("\n".join(f"contracts/Pool{i}.sol" for i in range(20)))
@@ -294,7 +294,7 @@ def test_recon_coverage_scope_file_narrows_universe(tmp_path):
 
 def test_recon_coverage_scope_file_includes_utils_still_flags(tmp_path):
     """If scope file LISTS utils, recon must still cite them."""
-    sp = _build_dhedge_tree(tmp_path)
+    sp = _build_scope_tree(tmp_path)
     (sp / "recon_summary.md").write_text("- contracts/Pool0.sol")
     sf = tmp_path / "scope.txt"
     sf.write_text(
@@ -311,7 +311,7 @@ def test_recon_coverage_scope_file_includes_utils_still_flags(tmp_path):
 
 def test_recon_coverage_acknowledged_exempts_bucket(tmp_path):
     """ACKNOWLEDGED row in scope_leftover.md exempts the bucket."""
-    sp = _build_dhedge_tree(tmp_path)
+    sp = _build_scope_tree(tmp_path)
     (sp / "recon_summary.md").write_text("- contracts/Pool0.sol")
     (sp / "scope_leftover.md").write_text(
         "| File | Status |\n"

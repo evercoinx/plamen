@@ -1,4 +1,4 @@
-"""Ship B — spawn manifest section-scoping (DODO instantiate unblock).
+"""Ship B — spawn manifest section-scoping (instantiate unblock).
 
 The breadth-manifest parsers must read ONLY the `## Breadth Agents` section, so
 a later table whose header also matches the template+required heuristic (e.g.
@@ -18,7 +18,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import plamen_parsers as P  # noqa: E402
 
-# DODO-shaped: `## Breadth Agents` (3 agents) followed by `## Required Template
+# Bleed-shaped: `## Breadth Agents` (3 agents) followed by `## Required Template
 # Coverage` whose `| Template (Required=YES) | Agent | Status |` header matches
 # the old "template+required" heuristic and bled in (count=16/outputs=None).
 BLEED = """# Spawn Manifest
@@ -81,15 +81,15 @@ def test_legacy_no_heading_still_parses(tmp_path):
     ]
 
 
-def test_real_dodo_manifest_regression(tmp_path):
+def test_real_manifest_regression(tmp_path):
     hits = glob.glob(
-        r"D:\Programming\Web3\Contests\DODO Crosschain Dex\2025-05-dodo-cross-chain-dex"
+        r"D:\Programming\Web3\Contests\Acme Crosschain Dex\2025-05-acme-cross-chain-dex"
         r"\omni-chain-contracts\contracts\.scratchpad\_retry_quarantine\instantiate"
         r"\spawn_manifest.md"
     )
     if not hits:
         import pytest
-        pytest.skip("DODO manifest fixture not on this machine")
+        pytest.skip("Manifest fixture not on this machine")
     sp = tmp_path / ".scratchpad"
     sp.mkdir()
     shutil.copy(hits[0], sp / "spawn_manifest.md")

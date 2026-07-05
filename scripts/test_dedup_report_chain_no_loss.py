@@ -1,6 +1,6 @@
 """End-to-end ZERO-DATA-LOSS chain test for the dedup -> report pipeline.
 
-Models the Irys INV-013/014 family:
+Models an INV-013/014 family from a prior L1 audit:
 
   * INV-013: consensus config-hash mismatch, INBOUND only,
     Source IDs {CI-1, NS-2}, peer_network_service.rs:990-1000, [CODE-TRACE],

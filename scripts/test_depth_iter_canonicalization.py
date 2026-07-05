@@ -5,7 +5,7 @@ Background: the driver's depth manifest instructs the orchestrator to write
 `_findings` segment and writes `depth_iter2_state_trace.md` etc. Multiple
 gates and parsers glob for the strict suffix and miss those files.
 
-Live DODO audit (May 2026) burned an entire opus depth retry because of
+A prior live audit burned an entire opus depth retry because of
 this exact mismatch — same class as v2.3.4's perturbation_findings fix.
 
 These tests lock in three guarantees:
@@ -72,7 +72,7 @@ def test_iter2_gate_tolerates_canonical_filename(tmp_path: Path):
 
 
 def test_iter2_gate_tolerates_non_canonical_filename(tmp_path: Path):
-    """The actual failure mode from the DODO audit: LLM dropped _findings."""
+    """The actual failure mode from a prior audit: LLM dropped _findings."""
     sp = tmp_path / ".scratchpad"
     sp.mkdir()
     _seed_uncertain_finding_inputs(sp)
@@ -199,7 +199,7 @@ def test_iter2_gate_tolerates_da_iter_namespace(tmp_path: Path):
 
 
 # --- Widened canonicalizer: token-decomposition variant matrix ------------
-# The DODO audit (May 2026) burned a $4 opus depth retry because the
+# A prior audit burned a $4 opus depth retry because the
 # orchestrator wrote `depth_state_trace_iteration2_findings.md` — the
 # iteration token mid-string and spelled out, which neither the prefix-only
 # canonicalizer nor the iter2 gate glob recognized. The canonicalizer was
@@ -212,7 +212,7 @@ def test_iter2_gate_tolerates_da_iter_namespace(tmp_path: Path):
 def test_canonicalizer_variant_matrix(tmp_path: Path):
     """Every iteration-token variant rewrites to depth_iter{N}_{role}_findings.md."""
     cases = {
-        # role-first, iteration spelled out (the exact DODO failure)
+        # role-first, iteration spelled out (the exact prior failure)
         "depth_state_trace_iteration2_findings.md":
             "depth_iter2_state_trace_findings.md",
         # iteration token in prefix position, spelled out
@@ -289,7 +289,7 @@ def test_expected_roles_excludes_uncanonicalized_iteration_variant(tmp_path: Pat
     """`_expected_depth_agent_roles` must not mis-parse an un-canonicalized
     `depth_<role>_iteration2_findings.md` as a phantom role.
 
-    Direct regression for the DODO failure log's second symptom:
+    Direct regression for a prior failure log's second symptom:
       `[depth] graph consumption: depth_edge_case_iteration2 references 0/4`
     — `iteration2` does not contain the substring `iter2`, so the exclusion
     token list must list both spellings.

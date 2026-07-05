@@ -1,6 +1,6 @@
 """Codex depth fan-out parity tests.
 
-Context (live dHEDGE SC Thorough Codex run): for backend==codex the depth
+Context (a live SC Thorough Codex run): for backend==codex the depth
 phase ran as ONE `codex exec` that had to produce ~15 artifacts. Codex's
 single turn under-fanned-out — it produced the 4 core role findings +
 blind_spot_a, then ran out and left blind_spot_b/c, validation_sweep,
@@ -17,7 +17,7 @@ be behavior-unchanged.
 These tests pin:
   (a) _should_use_depth_codex_fanout gating;
   (b) _run_depth_codex_fanout iterates ALL _depth_worker_jobs (reproducing-then-
-      fixing the dHEDGE halt: every never-cut artifact incl. blind_spot_b/c,
+      fixing the halt: every never-cut artifact incl. blind_spot_b/c,
       validation_sweep, design_stress, perturbation, skill_execution_checklist,
       and the triggered niche is produced non-stub);
   (c) resume-safe (already-complete jobs are skipped);
@@ -102,7 +102,7 @@ def test_gating_codex_l1_thorough_true(tmp_path):
 
 # ---------------------------------------------------------------------------
 # (b) _run_depth_codex_fanout iterates ALL jobs -> every never-cut artifact
-#     is produced non-stub. This reproduces-then-fixes the dHEDGE halt.
+#     is produced non-stub. This reproduces-then-fixes the halt.
 # ---------------------------------------------------------------------------
 
 _SUBSTANTIVE = (
@@ -189,7 +189,7 @@ def test_fanout_produces_every_nevercut_artifact_thorough(tmp_path, monkeypatch)
     expected_outputs = {str(j["output"]) for j in jobs}
 
     # The exact never-cut + thorough side artifacts that Codex's single mega-
-    # turn dropped in the dHEDGE halt MUST all be present and non-stub now.
+    # turn dropped in the halt MUST all be present and non-stub now.
     must_exist = {
         "depth_token_flow_findings.md",
         "depth_state_trace_findings.md",
@@ -212,7 +212,7 @@ def test_fanout_produces_every_nevercut_artifact_thorough(tmp_path, monkeypatch)
         assert p.exists(), f"{name} should be produced by the fan-out"
         assert p.stat().st_size >= 500, f"{name} should be non-stub"
 
-    # One `codex exec` per job — the dHEDGE failure was ONE exec for all.
+    # One `codex exec` per job — the prior failure was ONE exec for all.
     assert len(produced) == len(jobs)
     # Lifecycle synthesis runs exactly once after all jobs (mirrors PTY pool).
     assert synth_calls["n"] == 1

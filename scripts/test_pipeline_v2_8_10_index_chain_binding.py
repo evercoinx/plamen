@@ -1,12 +1,12 @@
 """Pipeline v2.8.10 — report_index duplicate-binding false-positive on chains.
 
-Root cause (PulsechainGameWards halt): a CHAIN row in the Master Finding Index
+Root cause (an observed halt): a CHAIN row in the Master Finding Index
 (Trust Adj. CHAIN-UPGRADE/CHAIN-DOWNGRADE) lists its `+`-joined CONSTITUENTS,
 which legitimately ALSO have their own standalone rows (a chain references
 standalone findings — the prompt explicitly allows the `H-2+H-13` form). The
 duplicate-binding gate counted those constituents toward the uniqueness
 substrate and flagged every chain constituent as a duplicate binding → 31 false
-dups → report_index HALT. (DODO didn't hit it because its chains used `CH-` ids,
+dups → report_index HALT. (a prior run didn't hit it because its chains used `CH-` ids,
 so constituents weren't in the chain's internal cell.)
 
 Fix: chain rows index their constituents for completeness (master set) but are
@@ -42,7 +42,7 @@ _HEADER = (
 
 
 def test_chain_constituents_not_counted_as_duplicate_binding():
-    """The exact PulsechainGameWards shape: a CHAIN row whose constituents also
+    """The exact observed shape: a CHAIN row whose constituents also
     have standalone rows must NOT be flagged as duplicate-bound."""
     body = _HEADER + (
         "| C-01 | editWinner + withdrawAmt single-block drain | Critical | a.sol:1 | VERIFIED (constituents) | CHAIN-UPGRADE(High) | HH-07+H-18 |\n"

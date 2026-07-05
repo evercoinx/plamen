@@ -3,7 +3,7 @@
 V1 ran a two-pass Semantic Invariant phase in Thorough mode. The V1→V2
 deterministic-driver refactor dropped the Pass 2 phase definition while
 leaving five separate documentation references and the prompt file
-intact (in V1 path). The DODO May-2026 audit confirmed Pass 2 never ran
+intact (in V1 path). An observed audit confirmed Pass 2 never ran
 in our V2 Thorough audit — `semantic_invariants.md` had only `Phase
 4a.5 Pass 1` content. v1.0.5 benchmark's PROCESS_LOG describes Pass 2
 specifically catching GT-M-06 (ETH sentinel `safeTransfer` DoS) — a
@@ -156,7 +156,7 @@ def test_validator_soft_pass_in_non_thorough_modes(tmp_path: Path):
 
 def test_validator_never_returns_hard_issue(tmp_path: Path):
     """Critical: the validator must NEVER halt the audit. All failure
-    modes return empty list. The DODO audit user explicitly required no
+    modes return empty list. The audit user explicitly required no
     new halt paths from this fix."""
     import plamen_validators as V
     sp = tmp_path / ".scratchpad"

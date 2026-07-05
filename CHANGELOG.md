@@ -5,6 +5,45 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-07-04
+
+### Fixed
+- **Recon pre-pass whole-project build no longer times out on cold, dependency-heavy repos.** The `forge build` / `hardhat compile` timeout is now sized off the full compile-unit tree (including the `lib/` dependency sources the compiler actually builds), not the in-scope production-source count — which under-counted the real solc load ~10x and tree-killed cold-cache builds (e.g. a 652s budget for a 188-file compile), degrading `build_status` to TIMEOUT and starving Slither/Medusa. The scaled value is a ceiling, so healthy builds still return immediately.
+- **Recon discovery inventory no longer ingests the project's own test/fuzz/mock harnesses.** `contract_inventory` / `function_list` / `state_variables` (and the derived `slither/*` flat files) now apply the production-source filter, excluding `test/` / `mock/` / `fuzz/` / `script/` (and `.medusa-tests/`) directories. A project's own harnesses — which can encode expected-failure assertions or bug reproductions — no longer leak into the discovery surface and prime analysis.
+
+### Added
+- **`--fresh` now archives prior-run answer-key artifacts out of the project root.** Before phase 1, a `--fresh` restart MOVES prior `AUDIT_REPORT*.md`, `*_RCA.md`, hardening notes, and generated fuzz-harness dirs (`.medusa-tests/`) into a dot-prefixed sibling archive (`.plamen_archive_<ts>/`) — moved, never deleted (recall-safe), and dot-prefixed so no build/Slither/recon walk can re-ingest them. Previously `--fresh` wiped only the scratchpad, leaving prior reports and harnesses in the tree where recon could ingest them and prime a supposedly-fresh discovery run.
+- **Live heartbeat for long silent mechanical phases.** Long synchronous inter-phase steps (verify recovery/backfill, mechanical PoC verify, cross-tier report dedup) now emit the existing phase heartbeat, so a multi-minute silent window is no longer indistinguishable from a hang. Interval-gated (no pulse for sub-interval steps) and never overlaps a worker-phase heartbeat.
+
+### Testing
+- New `test_fresh_archive.py` and `test_mechanical_heartbeat.py`; extended recon build-env tests. Full test suite green: 4117 passed, 7 skipped, 1 xfailed.
+
+## [2.2.0] - 2026-07-03
+
+### Fixed
+- **PoC integrity gate no longer spuriously demotes passing revert/error PoCs.** The mechanical harm-assertion integrity check now recognizes revert- and error-expectation assertions as valid harm proofs — `try_*().is_err()` / `is_err()` result checks, `#[should_panic]`, and `expect_err(...)` — so a finding whose harm IS "the call reverts / panics / errors" is scored on its executed assertion instead of being read as a mechanism-only test. Separately, a harness-side failure (`NO_TEST_FILE`, a PoC file that could not be relocated into a build root) no longer severity-caps an otherwise-passing PoC. Net effect: genuine `[POC-PASS]` findings stop being demoted to `[CODE-TRACE]` (and losing severity) because of an assertion shape or a harness-placement artifact rather than a real evidence gap.
+- **Executive-Summary counts reconcile with the mechanical summary table.** The assembled report's narrative Executive Summary is derived from the same mechanical severity counts as the summary table, so the prose no longer disagrees with the tabulated Critical/High/Medium/Low/Informational totals.
+
+### Changed
+- **R10 anti-burden-inversion enforced at inventory, with a load-bearing `[EXTERNAL-ASSUMPTION]` tag.** A finding whose harm mechanism is CONFIRMED in-scope and whose only path to "safe" runs through an unresearched / out-of-scope / not-inspectable EXTERNAL factor is now held at its worst-realistic-condition severity and tagged `[EXTERNAL-ASSUMPTION: <assumed condition>]`, routing it to verification as an obligation rather than demoting it. This stops the "valid-but-unresearched" fallacy from burying such a finding in the appendix as a quality note; demotion now requires POSITIVE in-scope evidence of the safe condition, not merely its possibility.
+- **Body-vs-appendix routing cleaned up.** Findings with a real security consequence stay in the report body at any severity; pure quality/hardening/observability observations route to the appendix. Reduces unverified-severity clutter in the body without dropping any candidate (every finding remains accounted for in the coverage ledger).
+
+### Added
+- **Depth recall recovery: table-row and self-exclusion harvesting.** Findings a depth worker buried inside a summary table, or self-dropped on an unverified premise, are now recovered and flow into inventory instead of vanishing before synthesis.
+- **Sibling-propagation originate-side authorization check.** Sibling propagation now performs a nested-pull authorization check on the originate side, extending symmetric-pair coverage to the paired originating path.
+- **Recon Required=YES niche agents actually spawn.** Fixed the wiring so niche agents recon marks `Required=YES` are instantiated in the depth phase rather than being silently skipped.
+
+### Hardening
+- **Internal bug-bounty lane confirmed excluded from the public tree.** Verified the internal-only bug-bounty lane is not present in the published repository.
+- **Full test suite green** on this release.
+
+### Measured effect (conservative)
+- On a held-out benchmark, **precision held with no recall/precision tradeoff**, and the number of unverified-severity findings surfaced in the report body was reduced.
+- The recall recoveries above were measured on the diagnosis benchmark; **further end-to-end recall validation is in progress**.
+
+### Coverage caveat
+- This release is **end-to-end verified on Windows across the Soroban and EVM lanes**. macOS/Linux and the remaining ecosystems are **static-verified only**; a **Solana-lane smoketest is in progress**.
+
 ## [2.1.4] - 2026-06-23
 
 ### Fixed

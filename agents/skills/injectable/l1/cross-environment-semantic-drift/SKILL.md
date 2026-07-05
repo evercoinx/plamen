@@ -140,6 +140,22 @@ For optimistic or zk rollups:
 - Optimistic: challenge window correctness, bond management, dispute game termination
 - ZK: verifier contract correctness, public input binding
 
+## 5d. Reorg-aware Off-chain Finality (Vector76 class)
+
+Off-chain components that act on chain state — watchers, relayers, bridges, indexers, exchange deposit crediters — must wait for SAFE finality before treating a transaction as settled. Treating N=1 confirmations (or any depth below the protocol's finality guarantee) as final, and updating accounting before that, is the Vector76 / one-confirmation double-spend class: the observed block is reorged out, the off-chain side has already credited/released, and the value is gone.
+
+**Bounded reads**: read SCIP graph artifacts (`caller_map.md`, `callee_map.md`, `state_write_map.md`, `function_summary.md`) to find confirmation-check call-sites and settlement/accounting write-sites; on-demand single-symbol source reads for the confirmation-gate and reorg-handler functions only; never bulk-read large files.
+
+**Heuristics**:
+1. Grep for `confirmations`, `>= 1`, `>= confirmations`, `min_conf`, `finalized`, `safe_block`, `is_final`, `mark_*_settled`, `credit`, `release`, `settle`, `process_deposit`, `on_new_block`, `head`.
+2. **Confirmation threshold**: locate every site that gates an irreversible off-chain action (credit funds, release escrow, mark settled, advance a bridge nonce) on a confirmation count or block tag. Flag any that act on `confirmations >= 1`, on `latest`/`head` rather than `finalized`/`safe`, or on a depth below the chain's documented reorg-resistance bound.
+3. **Reorg handler presence**: verify the off-chain component subscribes to reorg/head-change events AND has a rollback path that un-credits / re-queues any accounting it performed on a now-orphaned block. A settlement path with NO corresponding reorg-rollback handler is a finding.
+4. **PoW vs finalized-chain nuance**: on a probabilistic-finality chain, the threshold must be depth-based and policy-justified; on a finality-gadget chain, acting before the `finalized` tag (not merely `safe`) for value-bearing actions is the bug.
+
+**Severity**: irreversible value action on sub-finality confirmation is High–Critical (double-spend / loss); a missing reorg-rollback on a settlement path is High.
+
+Tag: `[REORG-PREMATURE-SETTLE:{site}:{threshold}]`, `[REORG-NO-ROLLBACK:{component}]`
+
 ## 6. Boundary conditions
 
 | State | Test | Expected | Observed |

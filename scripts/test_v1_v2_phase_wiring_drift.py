@@ -1,6 +1,6 @@
 """V1→V2 phase wiring drift detector.
 
-Background: the DODO May-2026 audit recall regression vs the v1.0.5
+Background: an observed audit recall regression vs the v1.0.5
 benchmark was traced to THREE phases that were documented in V1's
 mode matrix + prompts but never wired into V2's deterministic driver:
 
@@ -143,7 +143,7 @@ def test_no_orphaned_pipeline_phases_in_commands_plamen_md():
         f"\n{len(orphans)} documented pipeline phase(s) in "
         "commands/plamen.md have no matching Phase() entry in "
         "SC_PHASES or L1_PHASES — the V1→V2 wiring-gap class that "
-        "caused DODO recall regression:\n\n"
+        "caused a recall regression:\n\n"
         + "\n".join(f"  • {o}" for o in orphans)
     )
     strict = os.environ.get("PLAMEN_STRICT_PHASE_WIRING", "0") == "1"
@@ -153,7 +153,7 @@ def test_no_orphaned_pipeline_phases_in_commands_plamen_md():
     print(msg, file=sys.stderr)
 
 
-def test_known_post_dodo_orphans_now_wired():
+def test_known_orphans_now_wired():
     """Explicit positive lock: the 3 phases we just wired must be
     findable by the orphan check (i.e. they should NOT appear in the
     orphan list). If they regress and get unwired again, this test
@@ -167,7 +167,7 @@ def test_known_post_dodo_orphans_now_wired():
         match = any(required in m for m in wired)
         assert match, (
             f"Expected wired marker matching {required!r}, none found. "
-            "The post-DODO V1→V2 wiring fix has regressed; see "
+            "The V1→V2 wiring fix has regressed; see "
             "tests/test_invariants_pass2_wiring.py, "
             "test_chain_iter2_wiring.py, "
             "test_post_verify_extract_wiring.py for the originals."

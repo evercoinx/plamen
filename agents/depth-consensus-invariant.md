@@ -56,6 +56,8 @@ Also load these when the target matches:
 
 - Gossip / seen-cache target -> `~/.claude/agents/skills/injectable/l1/gossip-cache-invariance/SKILL.md`
 - Tx identity / replay target -> `~/.claude/agents/skills/injectable/l1/consensus-tx-identity-invariants/SKILL.md`
+- Cosmos-SDK / CometBFT module target -> `~/.claude/agents/skills/injectable/l1/cosmos-sdk-module-safety/SKILL.md`
+- IBC / ibc-go cross-chain target -> `~/.claude/agents/skills/injectable/l1/cosmos-ibc-security/SKILL.md`
 
 ### 2. Invariant enumeration
 

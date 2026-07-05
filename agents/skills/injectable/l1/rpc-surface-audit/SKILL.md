@@ -168,6 +168,23 @@ An RPC method that panics crashes the node. The Go standard library recovers in 
 
 Tag: `[RPC-PANIC:{method}:{path}]`
 
+## 6a. Admin-endpoint Exposure + Key/Secret Leakage
+
+Privileged and operator-facing RPC surfaces are a distinct, high-value class from public read methods. The failure modes: an admin/debug namespace reachable without authentication, an expensive trace/debug method exposed without auth or rate limit, or a response body that echoes a secret (private key, JWT, mnemonic, node identity key).
+
+**Bounded reads**: read SCIP graph artifacts (`caller_map.md`, `callee_map.md`, `state_write_map.md`, `function_summary.md`) to find privileged route registrations and their auth-gate callers; on-demand single-symbol source reads for the dispatcher and individual privileged handlers only; never bulk-read large files.
+
+**Heuristics**:
+1. Grep for privileged route names: `admin_*`, `debug_*`, `personal_*`, `miner_*`, `txpool_content`, `engine_*`, and registration of any handler whose name implies mutation (`setEtherbase`, `addPeer`, `removePeer`, `importRawKey`, `unlockAccount`, `startMining`, `stop`, `shutdown`, `nodeInfo`).
+2. **Auth gate**: for EACH privileged handler, trace to its dispatcher and verify an authentication/authorization check runs BEFORE the handler body. A privileged method registered on the same HTTP listener as public methods, with no per-method gate, is a finding. Confirm the default `--http.api` / enabled-namespace list does NOT include privileged namespaces.
+3. **Cost without auth**: any unauthenticated method that performs a trace, full-state walk, or unbounded historical scan (`debug_traceBlockByNumber`, custom `debug_*`) without a rate limit is a DoS finding even if it is "read-only".
+4. **Secret in response**: grep handler return paths for fields named `private_key`, `secret`, `jwt`, `mnemonic`, `seed_phrase`, `keystore`, `enode` with embedded key material. Verify no handler serializes a secret into a JSON body, error message, or log line returned to the caller. `nodeInfo`/`enode` exposure of the node identity key is a finding.
+5. **Bind address**: verify privileged transports (IPC for `admin`, Engine API) are not bound to `0.0.0.0` by default.
+
+**Severity**: unauthenticated admin/key-management method reachable over HTTP is Critical (remote node takeover); unauthenticated expensive debug method is High (DoS); secret echoed in a response is Critical.
+
+Tag: `[RPC-ADMIN-NOAUTH:{method}]`, `[RPC-SECRET-LEAK:{method}.{field}]`
+
 ## 7. Boundary conditions
 
 | State | Test | Expected | Observed |

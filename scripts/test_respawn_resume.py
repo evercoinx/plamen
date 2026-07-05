@@ -9,7 +9,7 @@ full respawn invokes ``ClaudePtySession.spawn`` which forks a real
 ``claude`` PTY child; the unit-test boundary is the pure command +
 snapshot construction. Production-level coverage of the spawn path
 lives in Ship 4's empirical preflight (``_test_agentid_resume``) and
-the live DODO/etc. audits that exercise it end-to-end.
+the live end-to-end audits that exercise it.
 """
 from __future__ import annotations
 

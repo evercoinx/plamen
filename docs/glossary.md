@@ -8,7 +8,7 @@ explained inline where it's used.
 
 - **Pipeline** — the full audit. Two flavors: `sc` (smart contract) and `l1`
   (node-client infrastructure). Picked at wizard step 0.
-- **Phase** — one stage of the pipeline. SC has 39, L1 has more. Examples:
+- **Phase** — one stage of the pipeline. SC has 40+, L1 has more. Examples:
   `recon`, `breadth`, `inventory`, `depth_iter1`, `verify_critical`,
   `report_assemble`. Sequence is hard-coded in
   [`docs/architecture.md`](architecture.md).
@@ -92,6 +92,12 @@ explained inline where it's used.
   recon, deleted on `--fresh` restart, otherwise preserved for resume.
   Contains a per-scratchpad `.plamen_run.lock` that prevents concurrent
   driver invocations against the same audit.
+- **`.plamen_archive_<ts>/`** — on a `--fresh` restart the driver MOVES prior-run
+  answer-key artifacts out of the project root (prior `AUDIT_REPORT*.md`,
+  `*_RCA.md`, hardening notes, and generated fuzz-harness dirs like
+  `.medusa-tests/`) into this dot-prefixed sibling folder. Moved, never deleted —
+  nothing is lost — and dot-prefixed so recon/build/Slither walks never
+  re-ingest a prior report or harness and prime a supposedly-fresh run.
 
 ## Models & accounts
 

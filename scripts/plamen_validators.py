@@ -181,6 +181,7 @@ __all__ = [
     "_validate_invariants_pass2",
     "_validate_chain_iter2",
     "_validate_exploration_skeptic",
+    "_validate_enumgap_exploration",
     "_validate_chain_anti_absorption",
     "_declared_depth_findings",
     "_validate_chain_baseline_not_regrouped",
@@ -205,6 +206,7 @@ __all__ = [
     "_validate_confidence_scores_quality",
     "_validate_depth_coverage",
     "_validate_percontract_self_exclusion",
+    "_validate_depth_self_exclusion",
     "_validate_depth_exit",
     "_validate_depth_iterations",
     "_validate_semantic_gap_niche",
@@ -1323,7 +1325,7 @@ def _depth_expected_outputs(phase: Phase) -> list[str]:
     the ``_DEPTH_CANONICAL_ROLES`` fallback. This is deterministic and
     independent of disk state, so a role whose file was never written
     is still expected (and therefore flagged MISSING) -- exactly the
-    DODO failure mode the supervision loop must catch.
+    failure mode (observed in a prior run) the supervision loop must catch.
     """
     roles = list(getattr(phase, "example_tokens", None) or _DEPTH_CANONICAL_ROLES)
     return [f"depth_{role}_findings.md" for role in roles if role]
@@ -2040,7 +2042,7 @@ def _validate_spawn_manifest_schema(scratchpad: Path, mode: str = "core") -> lis
     # markdown table only. Pre-fix, this regex ran against the entire
     # file body — including bullet-list prose where the LLM helpfully
     # explained "do NOT include these artifacts" with the filenames as
-    # examples. The DODO May-2026 audit halted on this exact false
+    # examples. A prior audit halted on this exact false
     # positive: spawn_manifest.md had a `## Phase 3b/3c Artifacts (NOT
     # breadth AGENT rows)` section that explicitly clarified the rules,
     # and the prose `- analysis_rescan_*.md → Phase 3b ...` lines made
@@ -2926,6 +2928,7 @@ def _owned_artifact_patterns(pipeline: str, scratchpad: Optional[Path] = None) -
                 "dedup_decisions.md", "verification_queue_deduped.md",
             ],
             "attention_repair": ["attention_repair_summary.md", "attention_repair_findings.md"],
+            "enumgap_exploration": ["enumgap_exploration_findings.md"],
             "verify_queue": [
                 "verification_queue.md", "verification_queue_evidence_excluded.md",
             ],
@@ -2955,6 +2958,11 @@ def _owned_artifact_patterns(pipeline: str, scratchpad: Optional[Path] = None) -
                 "AUDIT_REPORT.deduped.md",
                 *common_report,
             ],
+            # Material-harm disposition (LLM) writes the BODY/APPENDIX ledger.
+            "report_disposition": ["disposition.md"],
+            # Material-harm floor (Python-native, FINAL mutation) owns its marker
+            # and may rewrite the delivered report (relocation + summary update).
+            "report_floor": ["material_harm_floor.md", "disposition.md", *common_report],
         }
         # Dynamic tier shard entries based on actual manifests
         if scratchpad:
@@ -3023,6 +3031,11 @@ def _owned_artifact_patterns(pipeline: str, scratchpad: Optional[Path] = None) -
         # own additive findings + coverage-record artifact; never edits prior
         # artifacts, so ownership is exclusive to this one file.
         "exploration_skeptic": ["exploration_skeptic_findings.md"],
+        # Phase 4b.7: depth-exploration of enumeration obligations. Writes its
+        # own additive findings artifact; the driver promotes those into the
+        # inventory in the post-hook (mirroring the enumeration gate's own
+        # inventory append, which depth already performs).
+        "enumgap_exploration": ["enumgap_exploration_findings.md"],
         "sc_semantic_dedup": ["dedup_decisions.md", "findings_inventory_deduped.md"],
         "attention_repair": ["attention_repair_summary.md", "attention_repair_findings.md"],
         "chain": ["hypotheses.md", "finding_mapping.md", "enabler_results.md"],
@@ -3067,6 +3080,11 @@ def _owned_artifact_patterns(pipeline: str, scratchpad: Optional[Path] = None) -
             "AUDIT_REPORT.deduped.md",
             *common_report,
         ],
+        # Material-harm disposition (LLM) writes the BODY/APPENDIX ledger.
+        "report_disposition": ["disposition.md"],
+        # Material-harm floor (Python-native, FINAL mutation) owns its marker and
+        # may rewrite the delivered report (relocation + summary update).
+        "report_floor": ["material_harm_floor.md", "disposition.md", *common_report],
     }
     if scratchpad:
         manifest_dir = scratchpad / "body_manifests"
@@ -3267,8 +3285,8 @@ def _validate_verify_completion(
     # v2.2.1 Fix 1: accept aliases observed in practice. Verifier prompts
     # in the wild emit any of:
     #   **Preferred Tag**:           (canonical, what the prompt asks for)
-    #   **Preferred Verification**:  (verifier-side paraphrase observed in Irys L1 v2.2.0)
-    #   **Evidence Tag**:            (verifier-side paraphrase observed in Irys L1 v2.2.0)
+    #   **Preferred Verification**:  (verifier-side paraphrase observed in a prior L1 run)
+    #   **Evidence Tag**:            (verifier-side paraphrase observed in a prior L1 run)
     #   **Evidence Tags**:           (plural variant)
     # Pre-v2.2.1 the strict-substring gate ("Preferred Tag" not in txt) failed
     # twice on the same content → degraded → halted. Required manual recovery.
@@ -3603,7 +3621,7 @@ def _backfill_inventory_ids_into_ledger(scratchpad: Path) -> int:
 
 
 # Accept BOTH `flag: N` (the form agents actually write, verified against real
-# DODO + AwesomeX output) AND `flag = N`. The prior `=`-only regex silently
+# agent output) AND `flag = N`. The prior `=`-only regex silently
 # returned 0 counts for every run that used the colon form, so
 # `_semantic_gap_required` evaluated False even when conditional_writes=4 /
 # cluster_gaps=2 etc. were present — the niche then fired only by recon-
@@ -4610,7 +4628,7 @@ def _depth_artifact_is_stub(path: Path) -> Optional[str]:
 
     if name in ("perturbation_findings.md", "depth_perturbation_findings.md"):
         # A real perturbation file carries block tables; 79-byte reservations
-        # (the DODO failure) are well under 1KB.
+        # (the observed failure) are well under 1KB.
         if size < 1024:
             return f"{name} (stub — {size} bytes, perturbation blocks absent)"
         return None
@@ -5220,7 +5238,7 @@ def _build_percontract_referent_universe(
 
     Finding IDs are normalized upper-case (e.g. ``B1-2``); locations are
     normalized lower-case with whitespace stripped so a cited
-    ``AccountEncoder.sol:L88`` matches the universe regardless of case.
+    ``Vault.sol:L88`` matches the universe regardless of case.
     All parse failures degrade to empty contributions — never raise.
     """
     finding_ids: set[str] = set()
@@ -5305,7 +5323,7 @@ def _percontract_candidate_is_content_bearing(
     the suppressed candidate is never dropped) but the driver re-emits them at
     Informational severity with a ``[CONTENT-LESS]`` marker so report_index
     routes them to a LOW-confidence appendix disposition rather than promoting
-    them to a Medium body finding (DODO M-14/M-15 root fix).
+    them to a Medium body finding (root fix from a prior run).
 
     Recall-safe: this only DOWNGRADES a content-less stub's body-promotion; it
     never removes the candidate from the re-emit set.
@@ -5479,6 +5497,248 @@ def _validate_percontract_self_exclusion(
             f"({content_less} content-less → appendix disposition, "
             f"{len(recovered) - content_less} content-bearing → dedup/resolve) "
             f"(phase3b-rescan-prompt.md EXCLUSION SOURCE RULE)"
+        )
+    return warnings, recovered
+
+
+# Heading vocabulary for depth-agent self-exclusion sections. Depth agents
+# frequently park confirmed-mechanism candidates under a "Non-Reportable /
+# Absorbed Candidates" (or "self-dropped") heading and justify the drop
+# WITHOUT citing an in-scope refutation — the depth analogue of the Phase 3c
+# belief-based self-exclusion hazard. Mirrors _PERCONTRACT_EXCLUSION_HEADING_RE.
+_DEPTH_SELF_EXCLUSION_HEADING_RE = re.compile(
+    r"(?im)^\s{0,3}#{1,6}\s+.*"
+    r"(?:non[ _-]?reportable|absorbed|self[ _-]?drop|self[ _-]?exclu)"
+    r".*$"
+)
+
+# Vocabulary that marks a drop as resting on an UNVERIFIED EXTERNAL assumption
+# rather than an in-scope, verifiable refutation. A candidate dropped on any of
+# these premises is a candidate for re-emission even when it cites a location,
+# because the justification is not an in-scope proof. Kept narrow on purpose:
+# "reverts on" (behavioral premise) is matched, but "reverts at Foo.sol:L120"
+# (a concrete in-scope refutation) is NOT — that is a legitimate refutation.
+_DEPTH_EXTERNAL_ASSUMPTION_RE = re.compile(
+    r"(?i)(?:"
+    r"reverts?\s+on\b|"
+    r"\batomic\b|"
+    r"not\s+demonstrab|"
+    r"out[-\s]?of[-\s]?scope|"
+    r"\bassum(?:e|es|ed|ing|ption)\b|"
+    r"guaranteed\s+by\b"
+    r")"
+)
+
+# A bare Markdown horizontal rule (``---`` / ``***`` / ``___``, 3+ identical
+# chars, nothing else on the line). Such a line is a visual SEPARATOR, not a
+# list bullet — but the entry-detection regex ``^\s*(?:[-*+]|\|)`` would match
+# its leading ``-``/``*`` and mint a spurious content-less entry. ``_SEPARATOR_
+# ROW_RE`` only covers ``|---|`` table separators, so bare HRs need their own
+# skip (blemish 1). Kept strict (whole-line) so it never eats a real bullet.
+_BARE_HR_RE = re.compile(r"^\s*([-*_])\1{2,}\s*$")
+
+
+def _validate_depth_self_exclusion(
+    scratchpad: Path,
+) -> tuple[list[str], list[dict]]:
+    """Soft validator for depth-agent belief-based self-exclusion (F3).
+
+    Depth agents self-drop confirmed-mechanism candidates in
+    "Non-Reportable / Absorbed Candidates" (or "self-dropped") sections of
+    ``depth_*_findings.md``. Unlike a verifier-refuted finding, these drops are
+    frequently justified WITHOUT an in-scope refutation — either citing no
+    referent at all, or resting on an UNVERIFIED EXTERNAL assumption ("reverts
+    on insufficiency", "atomic", "out of scope", "assume ...", "guaranteed by
+    ..."). Nothing constrains the provenance of such a drop, so a true positive
+    can silently vanish. This is the depth analogue of
+    ``_validate_percontract_self_exclusion``.
+
+    The validator builds the SAME referent universe (real provided finding IDs +
+    ``analysis_*.md`` / ``analysis_rescan_*.md`` locations), scans every
+    ``depth_*_findings.md`` self-exclusion section, and flags any absorbed
+    candidate that EITHER:
+      (a) cites NO concrete provided referent — no upstream finding ID present in
+          the universe AND no concrete ``file:Lnnn`` location of any kind, OR
+      (b) rests on an unverified EXTERNAL assumption (``_DEPTH_EXTERNAL_
+          ASSUMPTION_RE``) to justify the drop.
+
+    Counterplan narrowing: a candidate whose drop cites a concrete in-scope
+    refutation (a real ``file:Lnnn``) AND does NOT rest on an external
+    assumption is NOT flagged — a legitimately-refuted candidate is left alone.
+
+    Returns ``(warnings, recovered)`` with the same dict shape as the
+    per-contract validator so the driver side effect can re-emit uniformly.
+
+    Recall-safe by construction: no depth files / no self-exclusion section →
+    ``([], [])``; parse failures degrade to empty contributions, never raise;
+    the validator ONLY ever adds candidates, never removes/refutes findings.
+    Idempotent: entries already tagged ``[RE-EMITTED`` are skipped so a re-run
+    does not re-flag driver-minted re-emits.
+    """
+    depth_files = sorted(scratchpad.glob("depth_*_findings.md"))
+    # Never re-scan the driver-owned re-emit artifact.
+    depth_files = [
+        p for p in depth_files
+        if p.name != "depth_selfexcl_reemit_findings.md"
+    ]
+    if not depth_files:
+        return [], []
+
+    from plamen_parsers import _SEPARATOR_ROW_RE
+
+    finding_ids, locations = _build_percontract_referent_universe(scratchpad)
+
+    warnings: list[str] = []
+    recovered: list[dict] = []
+
+    for p in depth_files:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        lines = text.splitlines()
+        # Identify self-exclusion section spans: from a matching heading until
+        # the next heading of the same-or-shallower depth (or EOF).
+        section_spans: list[tuple[int, int]] = []
+        for idx, ln in enumerate(lines):
+            if not _DEPTH_SELF_EXCLUSION_HEADING_RE.match(ln):
+                continue
+            hm = re.match(r"^\s*(#{1,6})\s", ln)
+            depth = len(hm.group(1)) if hm else 6
+            end = len(lines)
+            for j in range(idx + 1, len(lines)):
+                jm = re.match(r"^\s*(#{1,6})\s", lines[j])
+                if jm and len(jm.group(1)) <= depth:
+                    end = j
+                    break
+            section_spans.append((idx + 1, end))
+        if not section_spans:
+            continue
+
+        for (start, end) in section_spans:
+            # Group each entry with its CONTINUATION lines into ONE logical
+            # entry (blemish 2): an absorbed candidate is often a bullet whose
+            # concrete ``file:Lnnn`` / harm spills onto following lines. A
+            # continuation line is a non-empty line that is NOT itself a new
+            # bullet, heading, bare horizontal rule, or table row. Referent /
+            # content-bearing detection then runs over the FULL joined text, so
+            # a location or harm sitting on line 2+ is correctly seen. Bare HRs
+            # (``---``/``***``/``___``) are separators, never entries (blemish 1).
+            logical_entries: list[tuple[int, list[str]]] = []
+            current = None
+            for j in range(start, end):
+                entry = lines[j]
+                stripped = entry.strip()
+                if not stripped:
+                    current = None
+                    continue
+                if _BARE_HR_RE.match(stripped) or _SEPARATOR_ROW_RE.match(stripped):
+                    # Horizontal rule / table separator: boundary, not an entry.
+                    current = None
+                    continue
+                if re.match(r"^\s*#", entry):  # nested heading: boundary
+                    current = None
+                    continue
+                # A real Markdown bullet requires whitespace AFTER the marker,
+                # so a ``**bold**`` continuation line is not mistaken for one.
+                is_new_bullet = bool(re.match(r"^\s*[-*+]\s", entry))
+                is_table_row = bool(re.match(r"^\s*\|", entry))
+                if is_new_bullet or is_table_row:
+                    current = [entry]
+                    logical_entries.append((j, current))
+                    continue
+                if current is not None:
+                    current.append(entry)  # continuation of entry in progress
+                    continue
+                # Not currently in an entry: a plain prose line only STARTS a
+                # new logical entry when it carries absorbed/dropped vocabulary.
+                if re.search(
+                    r"\b(?:absorbed|self[ _-]?drop|dropped|excluded|"
+                    r"duplicate|not\s+report|already\s+(?:found|known))\b",
+                    entry,
+                    re.IGNORECASE,
+                ):
+                    current = [entry]
+                    logical_entries.append((j, current))
+
+            for (j, entry_lines) in logical_entries:
+                first = entry_lines[0]
+                # Detection text keeps newlines so ``^``-anchored regexes
+                # (severity) still match on continuation lines; stored line_text
+                # is space-joined so the driver evidence stays single-line.
+                detect_text = "\n".join(entry_lines)
+                line_text = " ".join(
+                    s for s in (ln.strip() for ln in entry_lines) if s
+                )
+                # Idempotency: never re-flag a driver-minted re-emit entry.
+                if "[RE-EMITTED" in detect_text.upper():
+                    continue
+
+                cited_ids = {
+                    m.group(1).strip().upper()
+                    for m in _BRACKETED_ID_RE.finditer(detect_text)
+                }
+                cited_locs = {
+                    _norm_referent_location(loc)
+                    for loc in _TABLE_LOCATION_RE.findall(detect_text)
+                }
+                # The candidate's OWN depth id (e.g. [TF-3], [DE-2]) is not a
+                # referent — but we cannot know the prefix set for depth, so we
+                # only treat IDs that appear in the provided universe as
+                # referents (see has_universe_id below).
+                has_universe_id = bool(cited_ids & finding_ids)
+                # A concrete in-scope refutation is ANY cited file:Lnnn (per the
+                # counterplan) OR a real upstream finding ID.
+                has_concrete_referent = bool(has_universe_id or cited_locs)
+                has_external_assumption = bool(
+                    _DEPTH_EXTERNAL_ASSUMPTION_RE.search(detect_text)
+                )
+                # Trigger: referent-less OR unverified-external-assumption.
+                if has_concrete_referent and not has_external_assumption:
+                    continue  # legitimately-refuted; leave alone
+
+                own_id = next(iter(cited_ids), None) if cited_ids else None
+                loc = ""
+                if cited_locs:
+                    loc = sorted(cited_locs)[0]
+                title = re.sub(
+                    r"^\s*(?:[-*+]\s*|\|\s*)", "", first.strip()
+                ).strip().strip("|").strip()
+                sev_m = _SEVERITY_RE.search(detect_text)
+                severity = ""
+                if sev_m:
+                    severity = (sev_m.group(1) or sev_m.group(2) or "").title()
+                # Content-bearing detection runs over the FULL joined entry so a
+                # concrete location / harm on a CONTINUATION line is seen.
+                content_bearing = _percontract_candidate_is_content_bearing(
+                    title, loc, line_text
+                )
+                recovered.append(
+                    {
+                        "title": title or "(untitled self-excluded candidate)",
+                        "location": loc,
+                        "severity": severity,
+                        "source": p.name,
+                        "own_id": own_id or "",
+                        "line_text": line_text,
+                        "content_bearing": content_bearing,
+                        "external_assumption": has_external_assumption,
+                    }
+                )
+
+    if recovered:
+        content_less = sum(
+            1 for c in recovered if not c.get("content_bearing")
+        )
+        ext = sum(1 for c in recovered if c.get("external_assumption"))
+        warnings.append(
+            f"{len(recovered)} depth self-exclusion entry(ies) across "
+            f"{len(depth_files)} file(s) cite no in-scope referent OR rest on "
+            f"an unverified external assumption ({ext} external-assumption) — "
+            f"belief-based self-exclusion; re-emitting candidates "
+            f"({content_less} content-less → appendix disposition, "
+            f"{len(recovered) - content_less} content-bearing → dedup/resolve) "
+            f"(finding-output-format.md R10 UNRESEARCHED-EXTERNAL burden)"
         )
     return warnings, recovered
 
@@ -6068,7 +6328,7 @@ def _graph_sweeps_needed(scratchpad: Path, mode: str) -> tuple[bool, str]:
 
     Thorough L1 audits should convert baked graph artifacts into work queues
     when either coverage is weak (<60%) or panic sites exist. This keeps the
-    phase cost bounded on small/well-covered projects while making the Irys
+    phase cost bounded on small/well-covered projects while making the
     class of 50%+ uncited code mechanically impossible to ignore.
     """
     if mode != "thorough":
@@ -6480,6 +6740,44 @@ def _validate_exploration_skeptic(scratchpad: Path, mode: str) -> list[str]:
     return []
 
 
+def _validate_enumgap_exploration(scratchpad: Path, mode: str) -> list[str]:
+    """SOFT validator for Phase 4b.7 (enumeration-obligation exploration).
+
+    Recall-positive / additive phase. Like exploration_skeptic / chain_iter2,
+    this validator NEVER returns hard issues — it returns [] in every branch, so
+    it can never set passed=False and can never halt. The phase only ADDS
+    depth-traced findings (and reasoned clears); its absence loses no prior
+    finding because the pre-existing ENUMGAP candidates already appended by the
+    enumeration gate remain as the haltless candidate->verify fallback.
+
+    On missing/near-empty output it writes a degraded sentinel and continues.
+    """
+    try:
+        scratchpad = Path(scratchpad)
+        out_path = scratchpad / "enumgap_exploration_findings.md"
+        if not (out_path.exists() and out_path.stat().st_size > 30):
+            try:
+                (scratchpad / "enumgap_exploration.degraded").write_text(
+                    "[ENUMGAP_EXPLORATION_DEGRADED] enumgap_exploration_findings.md "
+                    "missing or <30 bytes. Pipeline continues; this phase is "
+                    "additive-only — the enumeration gate's pre-existing ENUMGAP "
+                    "candidates remain as the candidate->verify fallback, so no "
+                    "obligation is lost by its absence.\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+            import logging as _logging
+            _logging.getLogger("plamen.validators").warning(
+                "[enumgap_exploration] enumgap_exploration_findings.md missing/empty "
+                "— sentinel written, pipeline continues (obligations fall back to "
+                "the verify candidates)"
+            )
+    except Exception:
+        pass
+    return []
+
+
 # v2.x Fix 2: Anti-Absorption Hard Gate ---------------------------------------
 #
 # Chain Agent 1 groups raw findings into hypotheses (GRP-* IDs). The prompt's
@@ -6487,7 +6785,7 @@ def _validate_exploration_skeptic(scratchpad: Path, mode: str) -> list[str]:
 # split groups whose constituents need different fixes, span different
 # functions, or differ in severity by >1 tier. In practice the LLM ignores
 # this rule and produces "super-groups" — e.g., absorbing 4 distinct
-# AccountEncoder bugs into one Medium hypothesis. When the verifier picks the
+# same-file bugs into one Medium hypothesis. When the verifier picks the
 # weakest constituent's PoC and it fails, the entire group is dropped via
 # poc_demotions.md, taking N true positives with it.
 #
@@ -6741,8 +7039,8 @@ def _validate_id_ledger_collisions(
     """v2.0.6 (P2.4): BLOCKING gate — register each ID the phase emitted
     and detect collisions against prior attempts.
 
-    Per the plan, this gate is hard-fail for chain / chain_agent2 — the
-    DODO 2026-05-21 GRP-01 collision (chain attempt 1 minted GRP-01 for
+    Per the plan, this gate is hard-fail for chain / chain_agent2 — a
+    prior GRP-01 collision (chain attempt 1 minted GRP-01 for
     Critical public-withdraw; attempt 2 re-minted for Medium reinitializer)
     is the canonical case. Returns issue strings describing each collision;
     empty list means no collisions (and IDs have been registered).
@@ -6786,13 +7084,13 @@ def _validate_id_ledger_collisions(
     # remain blocking.
     #
     # `chain` (Agent 1) owns GRP/HH/HM/... whose identity IS the title. We do
-    # NOT blind-purge those on retry — that would lose the genuine DODO
+    # NOT blind-purge those on retry — that would lose the genuine
     # collision (GRP-01 Critical-A on attempt 1 vs different Medium-B on
     # attempt 2). Instead, retry-awareness for `chain` is content-based: the
     # ledger's `_titles_collide` predicate treats a phase re-minting its own ID
     # with the SAME finding (cosmetic reword: em-dash -> hyphen, abbreviation
     # expanded, added detail) as REUSED, and only a genuinely DIFFERENT finding
-    # as COLLISION. This was the DODO/AwesomeX false-collision root cause: 36
+    # as COLLISION. This was a prior false-collision root cause: 36
     # cosmetic chain rewordings tripped the strict title-hash equality check.
     if attempt > 1 and phase_name == "chain_agent2":
         try:
@@ -7227,7 +7525,7 @@ def _generate_id_ledger_collision_retry_hint(
         "",
         f"Your previous attempt at `{phase_name}` re-minted an ID that a "
         "PRIOR attempt already allocated to DIFFERENT content. This is the "
-        "root cause of the DODO 2026-05-21 halt class: when the same ID "
+        "root cause of a prior halt class: when the same ID "
         "(e.g., GRP-01) means two different findings in different artifact "
         "files, downstream phases get incoherent data and either silently "
         "produce wrong reports OR halt at the authenticity gate.",
@@ -8225,48 +8523,24 @@ def _validate_invariants_pass2(scratchpad: Path, mode: str) -> list[str]:
     # Pass 2 header — tolerant of shape (## vs ### vs ####, bold, leading ws,
     # trailing qualifiers). The agent never writes this identically twice.
     _PASS2_HEADER = r"(?im)^\s{0,3}(?:#{1,4}\s*)?\*{0,3}\s*pass\s*2\b"
-    # Detect the niche-trigger flags by their DATA, NOT a heading. Verified
-    # against real output: agents label the block inconsistently — AWX wrote
-    # "### Summary Flags (...)", DODO wrote "### Pass 2 Summary Statistics" with
-    # the flags inside a ``` fence. A heading regex of ANY shape is the wrong
-    # signal (the prior "Summary Flags" exact-match AND its tolerant successor
-    # both missed DODO). What the SEMANTIC_GAP_INVESTIGATOR trigger actually
-    # reads is the flag VALUES; check for those tokens anywhere in the content,
-    # heading- and code-fence-agnostic.
-    _FLAG_TOKEN = re.compile(
-        r"\b(sync_gaps|accumulation_exposures|conditional_writes|cluster_gaps)\b"
-        r"\s*[:=]\s*-?\d",
-        re.IGNORECASE,
-    )
     if re.search(_PASS2_HEADER, text):
-        present_flags = {m.group(1).lower() for m in _FLAG_TOKEN.finditer(text)}
-        # Pipe-blindness fix (Tier C noise): the same flags are commonly
-        # rendered as table cells (`| sync_gaps | 5 |`). The `[:=]`-only token
-        # regex misses those, undercounting and emitting a false soft-WARN. Add
-        # the table-cell form via the shared tolerant extractor (numeric value).
-        # Strict superset — union with the colon/equals matches above.
-        for _flag in (
-            "sync_gaps", "accumulation_exposures",
-            "conditional_writes", "cluster_gaps",
-        ):
-            if _flag in present_flags:
-                continue
-            _cell, _ = _field_anywhere(text, (_flag,), value_pattern=r"-?\d", table_ok=True)
-            if _cell:
-                present_flags.add(_flag)
-        flags_present = len(present_flags)
-        # Warn ONLY when the niche-trigger flag DATA is genuinely (near-)absent,
-        # not when the heading is named differently. >=2 of the 4 canonical
-        # flags present = the trigger can be evaluated -> stay silent.
-        if flags_present < 2:
+        # Single source of truth (FIX): gate the advisory on the REAL depth
+        # trigger, not a local stricter parser. The prior `_FLAG_TOKEN` regex
+        # (`flag [:=] -?\d`, needs >=2) DIFFERED from the actual niche trigger
+        # `_semantic_gap_required` — which also counts CONFIRMED gap TOKENS
+        # (SYNC_GAP / ACCUMULATION_EXPOSURE / CONDITIONAL(_WRITE) / CLUSTER_GAP)
+        # and table cells. That mismatch produced false alarms ("1/4, may not
+        # fire") on runs where the niche actually fired 4/4. `_semantic_gap_
+        # required` reads the same post-Pass-2 semantic_invariants.md the depth
+        # phase evaluates, so the advisory can never disagree with whether
+        # SEMANTIC_GAP_INVESTIGATOR fires. Warn ONLY when it genuinely won't.
+        if not _semantic_gap_required(scratchpad):
             import logging as _logging
             _logging.getLogger("plamen.validators").warning(
-                "[invariants_p2] Pass 2 section present but the niche-trigger "
-                "flag data (sync_gaps / accumulation_exposures / "
-                "conditional_writes / cluster_gaps with values) is missing "
-                "(found %d/4); SEMANTIC_GAP_INVESTIGATOR trigger may not fire. "
-                "Continuing — Pass 1 data alone is sufficient for depth.",
-                flags_present,
+                "[invariants_p2] Pass 2 section present but no semantic-gap "
+                "flags/tokens in semantic_invariants.md; "
+                "SEMANTIC_GAP_INVESTIGATOR will not fire. Continuing — Pass 1 "
+                "data alone is sufficient for depth."
             )
         return []
     # Pass 2 didn't append a section. Soft-degrade sentinel; don't halt.
@@ -8754,7 +9028,7 @@ def _check_step_execution_traces(
     """Validator: every Thorough depth agent has a step trace + non-ceremonial rows.
 
     v2.3.3 — Auto-synthesizes traces from depth findings BEFORE running
-    checks, eliminating the agent-compliance dependency. The post-Irys-L1
+    checks, eliminating the agent-compliance dependency. A prior L1
     post-mortem found that agents were not emitting traces at runtime;
     the orchestrator was post-hoc reconstructing them inside the depth
     subprocess to satisfy the gate. Moving that reconstruction into the
@@ -9842,7 +10116,7 @@ def _validate_rc_parity(
 
     Before v2.1.2, the driver's gate check was pure file-existence: if the
     subprocess died via SIGKILL mid-write but the file existed with >= 100
-    bytes, the phase was marked complete. The AwesomeX postmortem surfaced
+    bytes, the phase was marked complete. A prior postmortem surfaced
     three consecutive silent acceptances (inventory, verify, report) that
     each had correct-looking output but incomplete content.
 
@@ -9862,7 +10136,7 @@ def _validate_rc_parity(
             p = scratchpad / "findings_inventory.md"
             if p.exists():
                 text = p.read_text(encoding="utf-8", errors="replace")
-                # Expect at least N inventory ID rows. 79 was the AwesomeX
+                # Expect at least N inventory ID rows. 79 was a prior
                 # count; a real small audit still produces >= 10 rows in
                 # core mode. <5 rows with rc!=0 is almost certainly
                 # truncation.
@@ -10522,6 +10796,24 @@ def _check_promotion_symmetry(
                 for x in _INTERNAL_FINDING_ID_RE.finditer(m.group(0))
             )
 
+    # Material-harm body floor: a CONFIRMED finding dispositioned APPENDIX is
+    # relocated to Appendix C (a row, not a `### [X-NN]` body section). That is
+    # NOT a dropout — acknowledge it via its mapped internal id(s) so the
+    # symmetry check does not flag the deliberate relocation.
+    appendix_rids = _appendix_disposition_report_ids(scratchpad)
+    if appendix_rids:
+        for a in assignments:
+            if (a.get("report_id") or "").upper() not in appendix_rids:
+                continue
+            fid_val = a.get("finding_id") or ""
+            if not fid_val:
+                continue
+            explicitly_non_body.add(_canonical_internal_id_key(fid_val))
+            for piece in re.split(r"[+,\s]+", fid_val):
+                piece = piece.strip()
+                if piece:
+                    explicitly_non_body.add(_canonical_internal_id_key(piece))
+
     dropped: list[str] = []
     for fid in sorted(receipts):
         key = _canonical_internal_id_key(fid)
@@ -10545,7 +10837,7 @@ def _check_promotion_symmetry(
 
 # --- v2.2.2 Fix 2 + Fix 5: post-Index completeness + Excluded honesty -----
 #
-# Failure mode (Irys L1 v2.2.0 first run, RC-PIPELINE-DROPOUT — silent):
+# Failure mode (a prior L1 run, RC-PIPELINE-DROPOUT — silent):
 # the Index Agent consumed only the crit/high verify shard and wrote
 # report_index.md with 33 entries while 31 verified Medium-shard
 # findings + 7 Low-tier hypotheses were silently dropped. The Excluded
@@ -10899,7 +11191,7 @@ def _check_index_completeness(
     issues: list[str] = []
 
     # v2.2.3: dedup check. Each internal hypothesis ID must appear EXACTLY
-    # ONCE in the Master Finding Index. Live failure mode (Irys L1 v2.2.2):
+    # ONCE in the Master Finding Index. Live failure mode (a prior L1 run):
     # L1-H-08 was bound to two different report findings (H-06 + H-24);
     # count-based gate satisfied because the ID appeared at least once,
     # but the row-level binding was duplicated. Mechanical detection:
@@ -11462,7 +11754,7 @@ def _maybe_skip_empty_body_writer(scratchpad: Path, phase_name: str) -> bool:
     # previously this `except Exception: pass` swallowed the sidecar
     # write error and halted the audit at the legacy tier validator
     # because the validator strictly required the sidecar. Live data
-    # from the DODO May-2026 audit confirmed the sidecar was missing.
+    # from a prior audit confirmed the sidecar was missing.
     try:
         manifests_dir.mkdir(parents=True, exist_ok=True)
         (manifests_dir / f"{shard_key}.empty.json").write_text(
@@ -11746,7 +12038,7 @@ def _validate_tier_body_against_manifest(
 
 # --- v2.2.1 Fix 2: UNRESOLVED authenticity cross-check -------------------
 #
-# Failure mode (Irys L1 v2.2.0): C-02's report body was tagged
+# Failure mode (a prior L1 run): C-02's report body was tagged
 # `[UNRESOLVED — needs human review]` even though the Skeptic-Judge had
 # ruled it SKEPTIC CORRECT (not UNRESOLVED). Tier writer or assembler
 # widened the UNRESOLVED bucket — every body [UNRESOLVED] section MUST
@@ -12093,7 +12385,7 @@ def validate_report_index_summary_master_parity(scratchpad: Path) -> list[str]:
     Index distinct report-ID set, and REPAIR the Summary in place when they
     drift.
 
-    The DODO failure shape: the `## Summary` count table claimed 45 findings
+    A prior failure shape: the `## Summary` count table claimed 45 findings
     while the Master Finding Index actually listed 74 distinct report IDs. Tier
     writers dispatched against that inconsistent index then hallucinated IDs to
     "fill" the gap between the summary count and the body, producing ghost
@@ -12187,7 +12479,7 @@ def _check_report_index_unresolved_authenticity(scratchpad: Path) -> list[str]:
         `_repair_report_index_severity_provenance`; matching entry in
         `_severity_override_ledger.json` required.
 
-    On the DODO run the Index Agent stamped verifier-`CONTESTED` findings
+    On a prior run the Index Agent stamped verifier-`CONTESTED` findings
     as Judge-`UNRESOLVED` AND the driver auto-repair function wrote more
     `UNRESOLVED(...)` stamps without Judge backing. This gate halted on
     both. P1 separates the two semantic surfaces.
@@ -12390,7 +12682,7 @@ def _run_report_quality_gate(
     """Mechanical post-assembly quality gate (A4).
 
     Runs after `report_assemble` completes. Replaces the LLM-written
-    quality check that the AwesomeX monolithic assembler was supposed to
+    quality check that a prior monolithic assembler was supposed to
     produce but timed out before emitting. Pure Python, sub-second.
 
     Writes `{SCRATCHPAD}/report_quality.md` with PASS/FAIL per check and
@@ -12400,7 +12692,7 @@ def _run_report_quality_gate(
     Body section counts are canonical. The `## Summary` tables in both
     `AUDIT_REPORT.md` and `report_index.md` are rewritten in place to
     match `tier_counts` before the count check runs. This eliminates the
-    Q83 false-alarm class observed in the Irys L1 v2.1.7 run, where
+    Q83 false-alarm class observed in a prior L1 run, where
     body and summary disagreed on Medium count by 1 and the gate
     trip-wired despite the body being correct.
 
@@ -12464,6 +12756,17 @@ def _run_report_quality_gate(
         ))
 
     assignments, assignment_source = get_tier_assignments(scratchpad)
+    # Material-harm body floor: APPENDIX-dispositioned findings are RELOCATED to
+    # Appendix C by report_assemble, so they legitimately leave the body. Drop
+    # them from the expected body-assignment set BEFORE the count / exact-id
+    # checks so the floor does not trip a false shortfall / missing-ID failure.
+    # No-op when disposition.md is absent (degrade to pre-floor behaviour).
+    _appendix_rids = _appendix_disposition_report_ids(scratchpad)
+    if _appendix_rids and assignments:
+        assignments = [
+            a for a in assignments
+            if (a.get("report_id") or "").upper() not in _appendix_rids
+        ]
     if assignments and total_sections != len(assignments):
         if total_sections > len(assignments):
             # v2.5.4: Body has MORE sections than assignments — extra
@@ -12874,7 +13177,7 @@ def _run_report_quality_gate(
 
         # T2-d: split missing-Impact by tier. A C/H/M finding shipped with
         # no substantive `## Impact` section is a hard quality failure (the
-        # DODO run shipped M-07/M-13/M-16 this way) — it must block the gate
+        # a prior run shipped M-07/M-13/M-16 this way) — it must block the gate
         # and trigger a retry, not just WARN. L/I missing Impact stays soft.
         missing_impact_chm: list[str] = []
         missing_impact_li: list[str] = []
@@ -13007,7 +13310,7 @@ def _run_report_quality_gate(
 
     # Check 6 (v2.2.1 Fix 2): UNRESOLVED authenticity. Body [UNRESOLVED]
     # sections must correspond to Judge UNRESOLVED rulings. Catches the
-    # Irys L1 v2.2.0 C-02 phantom-flag class (tier writer or assembler
+    # prior-L1-run C-02 phantom-flag class (tier writer or assembler
     # widened the bucket).
     unresolved_issues = _check_unresolved_authenticity(
         scratchpad, project_root
@@ -13096,7 +13399,7 @@ def _snapshot_report_timestamped(project_root: str) -> str | None:
 # --- end v2.1.2 helpers ------------------------------------------------------
 # --- v2.1.6: deterministic-retry + checkpoint-integrity helpers -------------
 #
-# Problem observed in AwesomeX SC and Irys L1 runs: when a completeness gate
+# Problem observed in prior SC and L1 runs: when a completeness gate
 # fails (tier writer short, assembler count mismatch), the driver re-spawns
 # the same prompt without telling the LLM WHICH specific items were missing.
 # LLMs routinely re-produce identical wrong output on hollow retries, burning
@@ -13148,7 +13451,7 @@ def _compute_tier_completeness_delta(
     # truth) instead of a private table-only regex over `report_index.md`.
     # Pre-v2.3.3 this function had its own strict regex, which silently returned
     # 0 expected IDs when the Index Agent emitted bullet-list narrative — the
-    # same bug class that produced the 42-byte AUDIT_REPORT.md on Irys L1.
+    # same bug class that produced the 42-byte AUDIT_REPORT.md in a prior L1 run.
     rows, _source = get_tier_assignments(scratchpad)
     expected = [
         a["report_id"] for a in rows
@@ -13475,7 +13778,7 @@ def _sync_degraded_sentinels_to_checkpoint(
 ) -> list[str]:
     """Scan scratchpad for `*.degraded` sentinels and append to checkpoint.
 
-    Fixes the Irys L1 observation: `_v2_checkpoint.json.degraded == []`
+    Fixes a prior L1 observation: `_v2_checkpoint.json.degraded == []`
     disagrees with 3 `.degraded` files on disk. Readers of the checkpoint
     JSON get a falsely-clean picture. This helper reconciles — called at
     pipeline shutdown.
@@ -13507,8 +13810,8 @@ def _generate_verify_core_if_missing(scratchpad: Path) -> bool:
     """Mechanical aggregation of verify_*.md into verify_core.md.
 
     v2.2.2 Fix 3 — ALWAYS rebuild. Pre-v2.2.2 this helper was a
-    "if missing or <100 bytes" fallback. Live failure mode (Irys L1
-    v2.2.0): the LLM-written verify_core.md existed and was >100 bytes
+    "if missing or <100 bytes" fallback. Live failure mode (a prior
+    L1 run): the LLM-written verify_core.md existed and was >100 bytes
     but contained ONLY the crit/high shard — the medium shard's 31
     verifier rows were missing. The fallback didn't fire, the Index
     Agent read the incomplete aggregate, and 31 verified findings were
@@ -13682,7 +13985,7 @@ def _validate_verify_content_quality(
 def _validate_crossbatch_quality(scratchpad: Path) -> list[str]:
     """Promote crossbatch warnings into gate signal (v2.1.6).
 
-    The Irys L1 run exposed that `cross_batch_consistency.md` frequently
+    A prior L1 run exposed that `cross_batch_consistency.md` frequently
     reports "Overall: ISSUES FOUND" with 21 findings missing evidence
     tags etc., but the driver did not halt. Those issues mean downstream
     verdicts lack mechanical proof tags — a substance problem.
@@ -14208,7 +14511,7 @@ def _quarantine_stale_on_retry(
     patterns.extend(extras)
 
     # Ship 8.15: TARGETED REPAIR. Quarantine ONLY the artifacts implicated by
-    # the gate-failure messages, not every expected artifact. DODO: a 443-byte
+    # the gate-failure messages, not every expected artifact. Observed: a 443-byte
     # recon_summary.md failure broadly quarantined 5 VALID drafts
     # (design_context, contract_inventory, state_variables, function_list,
     # template_recommendations), forcing a full re-run + recompaction. The
@@ -15230,7 +15533,7 @@ def verify_poc_contract_only_failed_ids(
     the caller skips the targeted attempt and degrades as now.
 
     The mandatory-not-attempted class was originally Codex-only. It is now
-    eligible on ALL backends: a Claude DODO run degraded shards because the
+    eligible on ALL backends: a prior Claude run degraded shards because the
     verifier non-silently reclassified findings (exactly as the prompt asks)
     and got only generic whole-shard retries — no precise per-finding hint — so
     it could never converge. The repair EXECUTION path (``_write_retry_hint`` +
@@ -15434,6 +15737,61 @@ def _validate_depth_exit(scratchpad: Path) -> list[str]:
     return issues
 
 
+# Non-production path classifier for finding LOCATIONS. CONSERVATIVE by design:
+# this routes a finding OUT of the report body, so it must only fire on
+# UNAMBIGUOUS test/fuzz/harness signals — a non-production DIRECTORY component or
+# an unambiguous test-file SUFFIX. It deliberately does NOT match bare name
+# components (mock/stub/fake/test inside a filename): a PRODUCTION contract can
+# legitimately be named `Stub.sol`, `MockableVault.sol`, etc., and matching those
+# would wrongly DROP real findings. Recall-safe: a genuine test helper sitting in
+# a production dir with a test-y name is KEPT (a false-negative on filtering),
+# never a dropped real finding.
+_NONPROD_PATH_PARTS = {
+    "test", "tests", "fuzz", "fuzzing", "script", "scripts", "fixture",
+    "fixtures", "mock", "mocks", "spec", "specs", "benchmark", "benchmarks",
+    "medusa", "echidna", "halmos", ".medusa-tests", "_fuzzproj",
+}
+_NONPROD_FILE_SUFFIXES = (
+    ".t.sol", ".s.sol", "_test.go", "_test.rs", ".test.ts", ".spec.ts",
+    ".test.js", ".spec.js", "_test.py",
+)
+
+
+def _is_nonproduction_location(rel_path: str) -> bool:
+    """True only on an UNAMBIGUOUS test/fuzz/harness signal: a non-production
+    directory component, or a test-file suffix. `rel_path` is project-root-
+    relative, optionally with a `:Lnnn` suffix (stripped here)."""
+    rel = (rel_path or "").strip().split(":")[0].strip().replace("\\", "/")
+    if not rel:
+        return False
+    parts = [p.lower() for p in rel.split("/")]
+    if any(p in _NONPROD_PATH_PARTS for p in parts[:-1]):  # directory parts only
+        return True
+    return parts[-1].endswith(_NONPROD_FILE_SUFFIXES)
+
+
+# A finding whose LOCATION is PROSE naming a test/fuzz/invariant HARNESS (no real
+# source file) is about non-audited test code, not the production protocol. Tight
+# + generic: requires "harness" next to a test/fuzz/invariant qualifier (or a
+# bare "test harness") and NO real-looking file token — so a production finding
+# that merely mentions "test" is not swept up.
+_HARNESS_PROSE_RE = re.compile(
+    r"(?i)(?:\b(?:fuzz|invariant|medusa|echidna|halmos)\b[^.\n]{0,24}\bharness\b"
+    r"|\bharness\b[^.\n]{0,24}\b(?:fuzz|invariant|test)\b"
+    r"|\b(?:fuzz|invariant)\s+(?:test\s+)?harness\b"
+    r"|\btest\s+harness\b)"
+)
+
+
+def _is_harness_location_prose(location: str) -> bool:
+    loc = (location or "").strip()
+    if not loc:
+        return False
+    if re.search(r"\.(?:sol|rs|go|move|vy|cairo)\b", loc, re.IGNORECASE):
+        return False  # a real-ish file token -> leave it to the path-based logic
+    return bool(_HARNESS_PROSE_RE.search(loc))
+
+
 def _validate_inventory_evidence(
     scratchpad: Path,
     project_root: str,
@@ -15461,6 +15819,17 @@ def _validate_inventory_evidence(
         loc_status, resolved, loc_reason = _resolve_inventory_location(
             project_root, source_index, item.get("location", "")
         )
+        # Gate 2 — non-production scope filter: a finding resolved to a real file
+        # that lives in a test/fuzz/mock/harness tree is about non-audited code,
+        # not the production protocol -> route out of the body (appendix).
+        if loc_status in ("OK", "RECOVERED_BASENAME") and _is_nonproduction_location(resolved):
+            loc_status = "LOCATION_NONPRODUCTION"
+            loc_reason = "resolved to a non-production (test/fuzz/mock/harness) path"
+        elif loc_status not in ("OK", "RECOVERED_BASENAME") and _is_harness_location_prose(item.get("location", "")):
+            # Location is prose naming a test/fuzz/invariant harness (no real file)
+            # -> the finding is about non-audited test code, not production.
+            loc_status = "LOCATION_NONPRODUCTION"
+            loc_reason = "finding is about the test/fuzz/invariant harness, not production code"
         source_tokens = _split_source_id_tokens(item.get("source_ids", ""))
         source_statuses = []
         source_reasons = []
@@ -15548,11 +15917,19 @@ def _parse_inventory_evidence_validation(scratchpad: Path) -> dict[str, dict[str
 
 
 def _filter_verification_queue_by_evidence(scratchpad: Path) -> list[str]:
-    """Remove obvious evidence-hallucination rows before expensive verify.
+    """Remove out-of-scope / hallucinated-location rows before expensive verify.
 
-    Conservative policy: only suppress a row when both location and provenance
-    are unresolved/invalid. Rows with one usable evidence anchor still proceed
-    to verifier/location recovery.
+    Two drop policies:
+      - HARD (location ground truth, drop on its own): the cited file genuinely
+        does not exist, the cited line exceeds the file length, or the location
+        resolved to a non-production (test/fuzz/mock/harness) path. These are
+        mechanical facts, not judgment — a finding citing absent/non-production
+        code is not an in-scope production vulnerability.
+      - CONSERVATIVE (both-bad): only suppress when BOTH location and provenance
+        are unresolved/invalid. A merely unparseable/prose location with a usable
+        Source ID still proceeds to verifier/location recovery.
+    All removals are written to verification_queue_evidence_excluded.md (ledger,
+    not a silent drop).
     """
     records = _parse_inventory_evidence_validation(scratchpad)
     if not records:
@@ -15568,14 +15945,34 @@ def _filter_verification_queue_by_evidence(scratchpad: Path) -> list[str]:
         if not rec:
             kept.append(row)
             continue
-        loc_bad = rec.get("location status") not in ("OK", "RECOVERED_BASENAME")
+        loc_status_val = rec.get("location status")
+        loc_reason_val = (rec.get("location reason") or "").lower()
+        loc_bad = loc_status_val not in ("OK", "RECOVERED_BASENAME")
         src_bad = rec.get("source status") in ("SOURCE_INVALID", "SOURCE_MISSING")
-        if loc_bad and src_bad:
+        # HARD ground-truth drop (on its own): the inventory location resolved to
+        # a real file that lives in a test/fuzz/mock/harness tree — out of audit
+        # scope regardless of provenance.
+        #
+        # NOTE: we deliberately do NOT hard-drop a file-not-found location even on
+        # its own. At the INVENTORY stage a not-found path with a GOOD Source ID is
+        # a real finding whose location field is wrong-but-recoverable from its
+        # provenance (the lenient policy the COMP/F-INV tests pin). The genuinely
+        # hallucinated-location case observed in practice is a DOWNSTREAM (report
+        # tier-writer) corruption that overwrites the validated report_index
+        # location — that is caught at report-assembly, not here.
+        loc_hard_invalid = (loc_status_val == "LOCATION_NONPRODUCTION")
+        if loc_hard_invalid or (loc_bad and src_bad):
             row = dict(row)
-            row["exclusion reason"] = (
-                f"Evidence invalid: location_status={rec.get('location status')}; "
-                f"source_status={rec.get('source status')}"
-            )
+            if loc_hard_invalid:
+                row["exclusion reason"] = (
+                    f"Out-of-scope location ({loc_status_val}): "
+                    f"{rec.get('location reason') or 'cited code is not an in-scope production file'}"
+                )
+            else:
+                row["exclusion reason"] = (
+                    f"Evidence invalid: location_status={loc_status_val}; "
+                    f"source_status={rec.get('source status')}"
+                )
             removed.append(row)
         else:
             kept.append(row)
@@ -16346,7 +16743,7 @@ def _validate_report_index_triage_safety(scratchpad: Path) -> list[str]:
         # is a legitimate non-body disposition (it is KEPT, not dropped). A
         # content-BEARING re-emit does NOT carry this marker, so it still
         # requires a real evidence/dedup reason to leave the body (negative
-        # control preserved). DODO M-14/M-15 root fix.
+        # control preserved). Root fix from a prior run.
         "CONTENT_LESS",
         "CONTENTLESS",
     )
@@ -16528,7 +16925,7 @@ def _expected_report_index_severities(scratchpad: Path) -> dict[str, str]:
         # wrote `**Severity**: Medium` AND `**Verdict**: PARTIAL`, they
         # already considered the partial-evidence context when picking
         # Medium — demoting here second-guesses the verifier.
-        # DODO INV-128 case: explicit Severity: Medium + Verdict: PARTIAL
+        # Observed INV-128 case: explicit Severity: Medium + Verdict: PARTIAL
         # → pre-suppression driver demoted to Low → LLM correctly wrote
         # Medium per the explicit field → provenance gate halted.
         verifier_assigned_severity = bool(
@@ -16671,7 +17068,7 @@ def _repair_report_index_severity_provenance(scratchpad: Path) -> list[dict[str,
     `UNRESOLVED(<upstream>)` here, overloading the Skeptic-Judge-reserved
     token. The authenticity gate then rejected every UNRESOLVED stamp
     that lacked a Skeptic-Judge ruling, INCLUDING the ones this function
-    had just written. The DODO 2026-05-21 halt traced to this driver
+    had just written. A prior halt traced to this driver
     self-contradiction. The fix: a distinct token `SEVERITY_OVERRIDE(...)`
     that is driver-only, backed by `_severity_override_ledger.json`, and
     accepted by the authenticity gate ONLY when the ledger contains a
@@ -17627,9 +18024,101 @@ def _validate_inventory_structure(scratchpad: Path) -> list[str]:
     return issues
 
 
+# FIX (#3): type-only-file detection for the SC subsystem-coverage gate.
+# A file with no executable body (pure struct/enum/constant/type-alias/abstract
+# type-holder / interface) has no logic for depth to analyze — flagging a bucket
+# made entirely of such files as "uncovered" is a false positive. Detection is
+# structural and generic (no protocol-specific tokens).
+_EXEC_BODY_RE = re.compile(
+    r"\b(?:function|constructor|modifier|receive|fallback)\b[^;{]*\{"
+)
+# Chain/network qualifiers used to detect cross-chain type "twins" (struct files
+# that must agree across deployments or signatures replay / assets mis-route).
+_CHAIN_NET_TOKENS = (
+    "ethereum", "polygon", "arbitrum", "optimism", "base", "bsc", "avalanche",
+    "avax", "gnosis", "mainnet", "testnet", "sepolia", "l1", "l2",
+)
+_TYPEHASH_TOKENS = ("typehash", "domain", "eip712", "permit", "separator")
+
+
+def _resolve_indexed_path(indexed: str, project_root: str | None) -> Path | None:
+    """Best-effort resolve a recon-indexed path to an on-disk file under
+    project_root. Returns None when unresolvable — callers treat None as
+    'has a body' (conservative: never drop a real logic file on a miss)."""
+    if not project_root or not indexed:
+        return None
+    rel = indexed.replace("\\", "/").lstrip("./")
+    root = Path(project_root)
+    cand = root / rel
+    try:
+        if cand.exists():
+            return cand
+        p = Path(indexed)
+        if p.is_absolute() and p.exists():
+            return p
+        # Last resort (only reached on a would-be-flagged bucket — rare path):
+        # match by basename under project_root.
+        base = rel.split("/")[-1]
+        for m in root.rglob(base):
+            return m
+    except Exception:
+        return None
+    return None
+
+
+def _sol_has_executable_body(path_abs: Path | None) -> bool:
+    """True if the .sol file defines at least one function/constructor/modifier/
+    receive/fallback WITH a body. Pure type/interface/constant files return
+    False. Unresolved path or read failure → True (conservative: keep required)."""
+    if path_abs is None:
+        return True
+    try:
+        txt = path_abs.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return True
+    return bool(_EXEC_BODY_RE.search(txt))
+
+
+def _strip_chain_tokens(name: str) -> str:
+    out = name
+    for t in _CHAIN_NET_TOKENS:
+        out = out.replace(t, "")
+    return out
+
+
+def _cross_type_consistency_leads(files: list[str]) -> list[str]:
+    """Emit `[CONSISTENCY-CHECK: A vs B]` leads for paired type files a single
+    logic flow may never compare: (a) cross-chain/network type twins (identical
+    base name modulo a chain token); (b) a struct file paired with its
+    typehash/domain constant sharing a stem. Generic structural matching only;
+    bounded (small type-only buckets, rare path); capped output."""
+    leads: list[str] = []
+    bases = [f.replace("\\", "/").split("/")[-1].lower() for f in files]
+    n = len(files)
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = bases[i], bases[j]
+            if a == b:
+                continue
+            twin = (
+                _strip_chain_tokens(a) == _strip_chain_tokens(b)
+                and any(t in a or t in b for t in _CHAIN_NET_TOKENS)
+            )
+            ha = any(t in a for t in _TYPEHASH_TOKENS)
+            hb = any(t in b for t in _TYPEHASH_TOKENS)
+            stem_a = re.sub(r"\.(sol|move|rs)$", "", a)
+            stem_b = re.sub(r"\.(sol|move|rs)$", "", b)
+            pair = (ha != hb) and (stem_a[:5] == stem_b[:5]) and len(stem_a) >= 5
+            if twin or pair:
+                leads.append(f"[CONSISTENCY-CHECK: {files[i]} vs {files[j]}]")
+                if len(leads) >= 12:
+                    return leads
+    return leads
+
+
 def _validate_sc_subsystem_coverage(
     scratchpad: Path, mode: str, min_bucket_files: int = 4,
-    scope_file: str | None = None,
+    scope_file: str | None = None, project_root: str | None = None,
 ) -> list[str]:
     """Hard SC coverage gate from contract inventory / Slither flat files.
 
@@ -17725,11 +18214,45 @@ def _validate_sc_subsystem_coverage(
 
     uncovered: list[str] = []
     uncovered_details: dict[str, list[str]] = {}
+    type_only_accounted: list[str] = []   # [SCOPE-TYPE-ONLY: ...] rows
+    consistency_leads: list[str] = []     # [CONSISTENCY-CHECK: A vs B] rows
     for key, files in sorted(buckets.items()):
         if len(files) < min_bucket_files:
             continue
         if not any(covered(f) for f in files):
             file_list = sorted(files)
+            # FIX (#3): a bucket whose .sol files ALL lack an executable body is
+            # non-auditable-for-depth (same rationale as the interface
+            # exclusion) — there is no logic to cite, so it must not be a
+            # required-coverage FAIL. Bounded: the file reads run only for
+            # buckets that would OTHERWISE be flagged (rare path). Conservative:
+            # an unresolved/unreadable file is treated as having a body, so a
+            # genuine logic file is never dropped from coverage. .move/.rs
+            # buckets fall through to the original behaviour (type-only Move/Rust
+            # modules are rarer — injectable-first, extend only if a run shows
+            # the same FP).
+            all_sol = bool(file_list) and all(
+                f.lower().endswith(".sol") for f in file_list
+            )
+            if all_sol and all(
+                not _sol_has_executable_body(
+                    _resolve_indexed_path(f, project_root)
+                )
+                for f in file_list
+            ):
+                # No silent drop: account each file + route paired type files to
+                # the consistency lane. A type-rooted bug shows at the
+                # consumption site (in depth scope) or via cross-type comparison
+                # — never as a missing standalone depth bucket here.
+                for f in file_list:
+                    type_only_accounted.append(
+                        f"[SCOPE-TYPE-ONLY: {f} — no executable body; "
+                        "covered-by-consumption]"
+                    )
+                consistency_leads.extend(
+                    _cross_type_consistency_leads(file_list)
+                )
+                continue
             uncovered.append(f"{key} ({len(file_list)} files)")
             uncovered_details[key] = file_list
 
@@ -17748,10 +18271,44 @@ def _validate_sc_subsystem_coverage(
             lines.append(f"| {key} ({len(files)} files) | {', '.join(files)} |")
     else:
         lines += ["All substantial SC source buckets have at least one citation or ACKNOWLEDGED row."]
+    if type_only_accounted:
+        lines += [
+            "",
+            "## Type-only buckets (excluded from required coverage — "
+            "no executable body; covered at consumption sites)",
+            "",
+        ]
+        lines += type_only_accounted
+    if consistency_leads:
+        lines += [
+            "",
+            "## Cross-type consistency leads "
+            "(route to SEMANTIC_CONSISTENCY_AUDIT / CROSS_CHAIN_MESSAGE_INTEGRITY)",
+            "",
+        ]
+        lines += consistency_leads
     try:
         out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     except Exception:
         pass
+    # Route paired type files to the consistency lane by raising a flag the
+    # SEMANTIC_CONSISTENCY_AUDIT niche reads — converts the exclusion from
+    # "ignore" to "compare these explicitly". Append-only, dedup'd.
+    if consistency_leads:
+        try:
+            dp = scratchpad / "detected_patterns.md"
+            existing = dp.read_text(encoding="utf-8", errors="replace") if dp.exists() else ""
+            if "CROSS_TYPE_CONSISTENCY" not in existing:
+                with dp.open("a", encoding="utf-8") as fh:
+                    if existing and not existing.endswith("\n"):
+                        fh.write("\n")
+                    fh.write(
+                        "\nCROSS_TYPE_CONSISTENCY=true  "
+                        "# type-only files paired across chain/network or "
+                        "struct<->typehash; compare for divergence\n"
+                    )
+        except Exception:
+            pass
 
     if uncovered:
         exact_files = [
@@ -18077,7 +18634,7 @@ def _has_live_placeholder_language(text: str) -> str | None:
         # staked address check"), not being a placeholder itself.
         # Requires a follow-on word (about/for/in/regarding/...) to
         # distinguish "the TODO about X" from "TODO: fill later".
-        # v2.7.1: fixes false recon retry on Irys L1 where
+        # v2.7.1: fixes false recon retry on a prior L1 run where
         # trust_boundaries wrote "the TODO about staked address check".
         if re.search(
             r"\b(?:the|that|said|above|aforementioned|existing"
@@ -18092,7 +18649,7 @@ def _has_live_placeholder_language(text: str) -> str | None:
         # Negation: parenthesized status annotation in table rows —
         # recon tables use "(todo)" or "(tbd)" as status markers on
         # findings/entry-points, not as placeholder content.
-        # v2.7.3: fixes false recon retry on Irys L1 attack_surface.md
+        # v2.7.3: fixes false recon retry on a prior L1 run's attack_surface.md
         # where table cells contained "(todo)" as issue status.
         if re.search(r"^\s*\|", raw.strip()) and re.search(
             r"\(\s*(?:todo|tbd|stub)\s*\)", line
@@ -18366,7 +18923,7 @@ def _validate_scope_leftover(
             or "[x]" in ack_lc
             or "check" in ack_lc
             # v2.1.6: honor `LEFTOVER-ACK:` convention used by L1 recon.
-            # Observed Irys L1 run: recon correctly acknowledged
+            # Observed prior L1 run: recon correctly acknowledged
             # crates/macros/src/lib.rs as a proc-macro leftover via
             # `LEFTOVER-ACK: proc-macro / no runtime surface` but the
             # gate ignored it. Prefix-match on any ACK-family token.
@@ -18391,8 +18948,8 @@ def _validate_scope_leftover(
             ):
                 ack_ok = True
         # v2.1.2: auto-acknowledge files under known out-of-scope library
-        # directories (Foundry / npm / vendored deps). Prevents the AwesomeX
-        # false recon degradation where forge-std / v2-periphery / v3-core
+        # directories (Foundry / npm / vendored deps). Prevents the
+        # false recon degradation class where forge-std / v2-periphery / v3-core
         # tripped the gate despite being conventionally out of scope.
         if not ack_ok and _is_whitelisted_lib_path(file_name):
             ack_ok = True
@@ -18592,6 +19149,17 @@ def _effective_poc_class(
     poc_class = (queue_class or "structural").strip().lower()
     if not content:
         return poc_class
+    # STICKY FLOOR (MODE A, load-bearing): a finding whose verify content
+    # asserts a resource-exhaustion / executable-harm mechanism (unbounded
+    # input, gas griefing, storage bloat, balance double-count) HAS an
+    # executable harm assertion. Do NOT honor a verifier's
+    # structural/integration/spec/docs self-declaration for it — that is the
+    # exact escape that let a real gas-bomb finding be refused with no PoC.
+    # Floor the effective class at a TESTABLE class so the mandatory-PoC
+    # contract re-queues a real attempt before any refutation is accepted.
+    # (A queue estimate that is already unit/property is left as-is.)
+    if _matches_resource_exhaustion(content):
+        return poc_class if poc_class in {"unit", "property"} else "property"
     declared_raw, _shape = _field_anywhere(
         content, ("PoC Class", "Poc Class"), table_ok=True
     )
@@ -18637,9 +19205,19 @@ def _poc_contract_required(
     if mode_l == "light":
         return False
     sev = normalize_severity(row.get("severity", ""))
-    if mode_l == "core":
-        return sev in {"Critical", "High", "Medium"}
-    return True
+    # Mandatory unit/property PoC enforcement caps at Medium in ALL modes.
+    # A Low/Info finding shipping `Attempted: NO` (no fork PoC, or a property
+    # skip) is NORMAL — Low/Info findings rarely warrant a property PoC — yet
+    # under Thorough the old `return True` made the mandatory-PoC contract apply
+    # to every severity, so each all-Low/Info verify shard tripped this gate,
+    # fired a FUTILE one-shot targeted repair (which a retry can never satisfy
+    # for a Low CODE-TRACE finding), and degraded anyway — paying a full
+    # re-spawn per low shard for no possible outcome change. Capping at Medium
+    # lets the Low/Info finding ship as the verifier's verdict (e.g. CODE-TRACE)
+    # with NO spurious UNPROVEN and NO wasted retry. Critical/High/Medium
+    # enforcement (and their fixable retries) is UNCHANGED in every mode — a
+    # real fork-PoC still matters there and a retry can fix a fixable gap.
+    return sev in {"Critical", "High", "Medium"}
 
 
 def _validate_poc_contract_for_rows(
@@ -18708,6 +19286,17 @@ def _validate_poc_contract_for_rows(
         attempted_yes = attempted == "YES"
         attempted_no = attempted == "NO"
         poc_class = (row.get("poc class") or "structural").strip().lower()
+        # MODE A floor: a resource-exhaustion / executable-harm finding is
+        # testable regardless of a structural self-declaration. Floor the local
+        # gate class to 'property' so the STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION
+        # skip (evaluated against poc_class below) is rejected, and suppress the
+        # structural/integration reclassification softening for it. Other
+        # findings keep their raw queue class (no regression).
+        forced_executable = _matches_resource_exhaustion(
+            content, row.get("title", ""), row.get("bug class", "")
+        )
+        if forced_executable:
+            poc_class = "property"
         if attempted_yes:
             command = _field_from_markdown(content, ("Command",))
             test_file = _field_from_markdown(content, ("Test File",))
@@ -18767,7 +19356,7 @@ def _validate_poc_contract_for_rows(
         # still fails — the verifier must DECLARE the reclassification — and
         # `_valid_poc_skip` still enforces mock-feasibility / class rules for
         # the declared class, so this opens no new bypass vector.
-        if attempted_no:
+        if attempted_no and not forced_executable:
             declared_raw = (
                 _field_from_markdown(content, ("PoC Class", "Poc Class", "PoC class")) or ""
             ).strip().lower()

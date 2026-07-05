@@ -186,7 +186,7 @@ def test_gate_fresh_rejects_unmarked(tmp_path: Path, caplog):
 def test_gate_fresh_rejects_in_progress(tmp_path: Path):
     """A fresh-audit scratchpad MUST block an artifact whose PLAMEN_STATUS
     is IN_PROGRESS even though it has markers and substantive size. This
-    is the central correctness property closing the DODO failure class."""
+    is the central correctness property closing an observed failure class."""
     project = tmp_path / "project"
     sp = project / ".scratchpad"
     sp.mkdir(parents=True)
@@ -336,7 +336,7 @@ def test_gate_breadth_partial_returns_inprogress_bucket_only(tmp_path: Path):
     COMPLETE+structurally OK, 3 are IN_PROGRESS. The gate MUST fail with
     ONLY the 3 in_progress rows in the in_progress bucket and the 5
     complete rows absent from every failure bucket. This is the exact
-    DODO 2026-05-21 attempt-1 shape (6 of 8 missing); here we use 3 of 8
+    an observed attempt-1 shape (6 of 8 missing); here we use 3 of 8
     IN_PROGRESS to exercise the bucket plumbing and confirm the
     completed rows are NOT re-listed for retry."""
     project = tmp_path / "project"

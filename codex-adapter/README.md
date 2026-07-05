@@ -15,7 +15,7 @@ python scripts/codex_adapter.py
 ```
 
 The installer:
-1. Generates Codex config files into this `codex/` directory
+1. Generates Codex config files into this `codex-adapter/` directory
 2. Creates `~/.codex/` if it does not exist
 3. Symlinks `~/.codex/plamen/` to the Plamen repo (shared methodology files)
 4. Copies Codex-specific files (`config.toml`, agent TOMLs, `AGENTS.md`) into `~/.codex/`
@@ -68,8 +68,12 @@ python scripts/codex_adapter.py
   developer_instructions are templated and must be updated manually when
   Claude-side files change. Phase 2 goal is to derive more content from
   CLAUDE.md and commands/plamen.md parsing.
-- **Model**: Codex uses `gpt-5.3-codex` (272K context) vs Claude Code's Opus (1M context).
-  Thorough mode may require more careful context management.
+- **Model**: On ChatGPT-authenticated Codex, use an entitled base model
+  (`gpt-5.5` for the opus tier, `gpt-5.4` for sonnet, `gpt-5.4-mini` for haiku;
+  see `_CODEX_MODEL_MAP` in `scripts/plamen_types.py`). `-codex`/preview
+  suffixes such as `gpt-5.3-codex` are rejected on ChatGPT accounts. Codex
+  context is smaller than Claude Code's Opus (1M context), so Thorough mode may
+  require more careful context management.
 - **Thorough mode parity**: Several Thorough-only features are experimental or
   not yet implemented on Codex. See the Mode Support Status table in
   `skills/plamen/SKILL.md` for details. Skeptic-Judge, invariant fuzz,

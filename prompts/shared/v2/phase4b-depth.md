@@ -218,7 +218,7 @@ depth analog of the breadth Subagent Prompt Template's marker contract. On a
 fresh audit the driver's gate requires each canonical depth output file to
 carry a `COMPLETE` marker AND pass a depth-appropriate structural check; an
 agent that exhausts its context window before its final `Write` would
-otherwise leave NO artifact (the DODO 2026-05-21 breadth failure class). The
+otherwise leave NO artifact (an observed breadth failure class). The
 IN_PROGRESS-first Write makes that survivable: the file is on disk in
 `IN_PROGRESS` state and the driver's supervision loop continues the agent.
 

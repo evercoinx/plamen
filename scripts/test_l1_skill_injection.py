@@ -17,7 +17,7 @@ from plamen_prompt import (
 )
 
 
-IRYS_TEMPLATE_RECOMMENDATIONS = """\
+NODECLIENT_TEMPLATE_RECOMMENDATIONS = """\
 | Skill / Template | Inject Into | Required | Rationale |
 |---|---|---|---|
 | `P2P_DOS_AND_ECLIPSE` | `depth-network-surface` | YES | Inbound gossip is attacker-reachable. |
@@ -33,7 +33,7 @@ IRYS_TEMPLATE_RECOMMENDATIONS = """\
 class TestParseL1RequiredSkills:
     def test_basic(self, tmp_path: Path):
         (tmp_path / "template_recommendations.md").write_text(
-            IRYS_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
+            NODECLIENT_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
         )
         required, excluded = _parse_l1_required_skills(tmp_path)
         assert len(required) == 6
@@ -46,7 +46,7 @@ class TestParseL1RequiredSkills:
 
     def test_excluded(self, tmp_path: Path):
         (tmp_path / "template_recommendations.md").write_text(
-            IRYS_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
+            NODECLIENT_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
         )
         _, excluded = _parse_l1_required_skills(tmp_path)
         assert "RUST_UNSAFE_AUDIT" in excluded
@@ -113,10 +113,10 @@ class TestResolveL1SkillPaths:
 
 
 class TestBuildManifest:
-    def test_irys_scenario(self, tmp_path: Path):
-        """Reproduce the exact Irys template_recommendations.md."""
+    def test_nodeclient_scenario(self, tmp_path: Path):
+        """Reproduce a representative node-client template_recommendations.md."""
         (tmp_path / "template_recommendations.md").write_text(
-            IRYS_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
+            NODECLIENT_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
         )
         manifest = _build_l1_depth_skill_injection(tmp_path, "rust")
         assert "## L1 SKILL INJECTION MANIFEST" in manifest
@@ -130,7 +130,7 @@ class TestBuildManifest:
 
     def test_routing_consensus_invariant(self, tmp_path: Path):
         (tmp_path / "template_recommendations.md").write_text(
-            IRYS_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
+            NODECLIENT_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
         )
         manifest = _build_l1_depth_skill_injection(tmp_path, "rust")
         ci_start = manifest.index("#### depth-consensus-invariant")
@@ -142,7 +142,7 @@ class TestBuildManifest:
 
     def test_routing_network_surface(self, tmp_path: Path):
         (tmp_path / "template_recommendations.md").write_text(
-            IRYS_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
+            NODECLIENT_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
         )
         manifest = _build_l1_depth_skill_injection(tmp_path, "rust")
         sections = manifest.split("####")
@@ -154,7 +154,7 @@ class TestBuildManifest:
 
     def test_routing_state_trace(self, tmp_path: Path):
         (tmp_path / "template_recommendations.md").write_text(
-            IRYS_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
+            NODECLIENT_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
         )
         manifest = _build_l1_depth_skill_injection(tmp_path, "rust")
         sections = manifest.split("####")
@@ -165,7 +165,7 @@ class TestBuildManifest:
 
     def test_routing_edge_case(self, tmp_path: Path):
         (tmp_path / "template_recommendations.md").write_text(
-            IRYS_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
+            NODECLIENT_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
         )
         manifest = _build_l1_depth_skill_injection(tmp_path, "rust")
         sections = manifest.split("####")
@@ -176,7 +176,7 @@ class TestBuildManifest:
     def test_always_on_no_override_by_explicit_no(self, tmp_path: Path):
         """RUST_UNSAFE_AUDIT with explicit NO should be filtered from always-on."""
         (tmp_path / "template_recommendations.md").write_text(
-            IRYS_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
+            NODECLIENT_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
         )
         manifest = _build_l1_depth_skill_injection(tmp_path, "rust")
         assert "rust-unsafe-audit" not in manifest
@@ -239,7 +239,7 @@ class TestBuildManifest:
     def test_sc_pipeline_no_injection(self, tmp_path: Path):
         """SC pipeline should never produce a manifest."""
         (tmp_path / "template_recommendations.md").write_text(
-            IRYS_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
+            NODECLIENT_TEMPLATE_RECOMMENDATIONS, encoding="utf-8"
         )
         manifest = _build_l1_depth_skill_injection(tmp_path, "rust")
         assert manifest != ""
@@ -281,6 +281,265 @@ class TestRoutingTableCompleteness:
                 assert t in _L1_DEPTH_AGENT_ROLES, (
                     f"Skill {skill} routes to unknown role {t}"
                 )
+
+
+class TestCosmosSdkModuleSafety:
+    """Phase 1: Cosmos-SDK / CometBFT framework lane wiring."""
+
+    SKILL = "COSMOS_SDK_MODULE_SAFETY"
+
+    def test_skill_resolves_on_disk(self):
+        resolved = _resolve_l1_skill_paths([self.SKILL])
+        assert self.SKILL in resolved
+        assert resolved[self.SKILL].exists()
+
+    def test_routing_targets(self):
+        assert _L1_SKILL_DEPTH_ROUTING[self.SKILL] == (
+            "consensus_invariant",
+            "state_trace",
+        )
+        for role in _L1_SKILL_DEPTH_ROUTING[self.SKILL]:
+            assert role in _L1_DEPTH_AGENT_ROLES
+
+    def test_required_yes_is_parsed(self, tmp_path: Path):
+        content = (
+            "| Skill / Template | Inject Into | Required | Rationale |\n"
+            "|---|---|---|---|\n"
+            "| `COSMOS_SDK_MODULE_SAFETY` | `depth-consensus-invariant`, "
+            "`depth-state-trace` | YES | Cosmos-SDK detected. |\n"
+        )
+        (tmp_path / "template_recommendations.md").write_text(
+            content, encoding="utf-8"
+        )
+        required, _ = _parse_l1_required_skills(tmp_path)
+        assert self.SKILL in required
+
+    def test_injected_into_manifest(self, tmp_path: Path):
+        content = (
+            "| Skill / Template | Inject Into | Required | Rationale |\n"
+            "|---|---|---|---|\n"
+            "| `COSMOS_SDK_MODULE_SAFETY` | `depth-consensus-invariant`, "
+            "`depth-state-trace` | YES | Cosmos-SDK detected. |\n"
+        )
+        (tmp_path / "template_recommendations.md").write_text(
+            content, encoding="utf-8"
+        )
+        manifest = _build_l1_depth_skill_injection(tmp_path, "go")
+        assert "cosmos-sdk-module-safety" in manifest
+        sections = manifest.split("####")
+        ci = [s for s in sections if "depth-consensus-invariant" in s][0]
+        st = [s for s in sections if "depth-state-trace" in s][0]
+        assert "cosmos-sdk-module-safety" in ci
+        assert "cosmos-sdk-module-safety" in st
+
+
+class TestCosmosIbcSecurity:
+    """Phase 2: Cosmos IBC / ibc-go cross-chain lane wiring."""
+
+    SKILL = "COSMOS_IBC_SECURITY"
+
+    def test_skill_resolves_on_disk(self):
+        resolved = _resolve_l1_skill_paths([self.SKILL])
+        assert self.SKILL in resolved
+        assert resolved[self.SKILL].exists()
+
+    def test_routing_targets(self):
+        assert _L1_SKILL_DEPTH_ROUTING[self.SKILL] == (
+            "consensus_invariant",
+            "external",
+        )
+        for role in _L1_SKILL_DEPTH_ROUTING[self.SKILL]:
+            assert role in _L1_DEPTH_AGENT_ROLES
+
+    def test_required_yes_is_parsed(self, tmp_path: Path):
+        content = (
+            "| Skill / Template | Inject Into | Required | Rationale |\n"
+            "|---|---|---|---|\n"
+            "| `COSMOS_IBC_SECURITY` | `depth-consensus-invariant`, "
+            "`depth-external` | YES | IBC detected. |\n"
+        )
+        (tmp_path / "template_recommendations.md").write_text(
+            content, encoding="utf-8"
+        )
+        required, _ = _parse_l1_required_skills(tmp_path)
+        assert self.SKILL in required
+
+    def test_injected_into_both_roles(self, tmp_path: Path):
+        content = (
+            "| Skill / Template | Inject Into | Required | Rationale |\n"
+            "|---|---|---|---|\n"
+            "| `COSMOS_IBC_SECURITY` | `depth-consensus-invariant`, "
+            "`depth-external` | YES | IBC detected. |\n"
+        )
+        (tmp_path / "template_recommendations.md").write_text(
+            content, encoding="utf-8"
+        )
+        manifest = _build_l1_depth_skill_injection(tmp_path, "go")
+        assert "cosmos-ibc-security" in manifest
+        sections = manifest.split("####")
+        ci = [s for s in sections if "depth-consensus-invariant" in s][0]
+        ext = [s for s in sections if "depth-external" in s][0]
+        assert "cosmos-ibc-security" in ci
+        assert "cosmos-ibc-security" in ext
+
+
+class TestCosmosReconDetection:
+    """Mechanical Cosmos-SDK manifest detection in the recon pre-pass."""
+
+    def _detect(self):
+        import recon_prepass
+        return recon_prepass
+
+    def test_go_mod_cosmos_detected(self, tmp_path: Path):
+        rp = self._detect()
+        (tmp_path / "go.mod").write_text(
+            "module example.com/chain\n\n"
+            "require (\n"
+            "\tgithub.com/cosmos/cosmos-sdk v0.50.1\n"
+            "\tgithub.com/cometbft/cometbft v0.38.0\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        cosmos, ibc = rp._detect_cosmos_markers(tmp_path)
+        assert cosmos is True
+        assert ibc is False
+
+    def test_ibc_detected(self, tmp_path: Path):
+        rp = self._detect()
+        (tmp_path / "go.mod").write_text(
+            "module example.com/chain\n\n"
+            "require (\n"
+            "\tgithub.com/cosmos/cosmos-sdk v0.50.1\n"
+            "\tgithub.com/cosmos/ibc-go/v8 v8.0.0\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        cosmos, ibc = rp._detect_cosmos_markers(tmp_path)
+        assert cosmos is True
+        assert ibc is True
+
+    def test_non_cosmos_not_detected(self, tmp_path: Path):
+        rp = self._detect()
+        (tmp_path / "go.mod").write_text(
+            "module example.com/geth\n\nrequire github.com/ethereum/go-ethereum v1.13.0\n",
+            encoding="utf-8",
+        )
+        cosmos, ibc = rp._detect_cosmos_markers(tmp_path)
+        assert cosmos is False
+        assert ibc is False
+
+    def test_cosmwasm_rust_detected(self, tmp_path: Path):
+        rp = self._detect()
+        (tmp_path / "Cargo.toml").write_text(
+            '[dependencies]\ncosmwasm-std = "2.0"\n', encoding="utf-8"
+        )
+        cosmos, _ = rp._detect_cosmos_markers(tmp_path)
+        assert cosmos is True
+
+    def test_seed_flips_template_rec_and_emits_flags(self, tmp_path: Path):
+        rp = self._detect()
+        proj = tmp_path / "proj"
+        scratch = tmp_path / "scratch"
+        proj.mkdir()
+        scratch.mkdir()
+        (proj / "go.mod").write_text(
+            "module example.com/chain\n\nrequire github.com/cosmos/cosmos-sdk v0.50.1\n",
+            encoding="utf-8",
+        )
+        # Seed pre-pass-owned files (must carry the marker) as the prepass would.
+        marker = rp._PREPASS_MARKER + "\n"
+        (scratch / "template_recommendations.md").write_text(
+            marker
+            + "# Template Recommendations\n\n## BINDING MANIFEST\n\n### L1 Skills\n\n"
+            "| Skill | Trigger | Required | Rationale |\n"
+            "|-------|---------|----------|-----------|\n"
+            "| `COSMOS_SDK_MODULE_SAFETY` | COSMOS_SDK flag | NO | [LLM TO ENRICH] |\n",
+            encoding="utf-8",
+        )
+        (scratch / "recon_summary.md").write_text(
+            marker + "# Recon Summary\n\n- **Language**: go\n", encoding="utf-8"
+        )
+        status = rp._seed_cosmos_flag(scratch, proj)
+        assert status.startswith("DETECTED:COSMOS_SDK")
+
+        tr = (scratch / "template_recommendations.md").read_text(encoding="utf-8")
+        required, _ = _parse_l1_required_skills(scratch)
+        assert "COSMOS_SDK_MODULE_SAFETY" in required, tr
+
+        rs = (scratch / "recon_summary.md").read_text(encoding="utf-8")
+        assert "COSMOS_SDK" in rs
+
+        dp = (scratch / "detected_patterns.md").read_text(encoding="utf-8")
+        assert "COSMOS_SDK" in dp
+
+    def test_seed_flips_ibc_row_when_ibc_present(self, tmp_path: Path):
+        rp = self._detect()
+        proj = tmp_path / "proj"
+        scratch = tmp_path / "scratch"
+        proj.mkdir()
+        scratch.mkdir()
+        (proj / "go.mod").write_text(
+            "module example.com/chain\n\nrequire (\n"
+            "\tgithub.com/cosmos/cosmos-sdk v0.50.1\n"
+            "\tgithub.com/cosmos/ibc-go/v8 v8.0.0\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        marker = rp._PREPASS_MARKER + "\n"
+        (scratch / "template_recommendations.md").write_text(
+            marker
+            + "# Template Recommendations\n\n## BINDING MANIFEST\n\n### L1 Skills\n\n"
+            "| Skill | Trigger | Required | Rationale |\n"
+            "|-------|---------|----------|-----------|\n"
+            "| `COSMOS_SDK_MODULE_SAFETY` | COSMOS_SDK flag | NO | [LLM TO ENRICH] |\n"
+            "| `COSMOS_IBC_SECURITY` | IBC flag | NO | [LLM TO ENRICH] |\n",
+            encoding="utf-8",
+        )
+        status = rp._seed_cosmos_flag(scratch, proj)
+        assert status == "DETECTED:COSMOS_SDK,IBC"
+
+        required, _ = _parse_l1_required_skills(scratch)
+        assert "COSMOS_SDK_MODULE_SAFETY" in required
+        assert "COSMOS_IBC_SECURITY" in required
+
+    def test_seed_does_not_flip_ibc_row_without_ibc(self, tmp_path: Path):
+        rp = self._detect()
+        proj = tmp_path / "proj"
+        scratch = tmp_path / "scratch"
+        proj.mkdir()
+        scratch.mkdir()
+        (proj / "go.mod").write_text(
+            "module example.com/chain\n\nrequire github.com/cosmos/cosmos-sdk v0.50.1\n",
+            encoding="utf-8",
+        )
+        marker = rp._PREPASS_MARKER + "\n"
+        (scratch / "template_recommendations.md").write_text(
+            marker
+            + "# Template Recommendations\n\n## BINDING MANIFEST\n\n### L1 Skills\n\n"
+            "| Skill | Trigger | Required | Rationale |\n"
+            "|-------|---------|----------|-----------|\n"
+            "| `COSMOS_SDK_MODULE_SAFETY` | COSMOS_SDK flag | NO | [LLM TO ENRICH] |\n"
+            "| `COSMOS_IBC_SECURITY` | IBC flag | NO | [LLM TO ENRICH] |\n",
+            encoding="utf-8",
+        )
+        status = rp._seed_cosmos_flag(scratch, proj)
+        assert status == "DETECTED:COSMOS_SDK"
+
+        required, _ = _parse_l1_required_skills(scratch)
+        assert "COSMOS_SDK_MODULE_SAFETY" in required
+        assert "COSMOS_IBC_SECURITY" not in required
+
+    def test_seed_noop_when_not_cosmos(self, tmp_path: Path):
+        rp = self._detect()
+        proj = tmp_path / "proj"
+        scratch = tmp_path / "scratch"
+        proj.mkdir()
+        scratch.mkdir()
+        (proj / "go.mod").write_text(
+            "module x\n\nrequire github.com/ethereum/go-ethereum v1.13.0\n",
+            encoding="utf-8",
+        )
+        assert rp._seed_cosmos_flag(scratch, proj) == "NOT_DETECTED"
 
 
 def _scip_scratch(tmp_path: Path, files: dict[str, str],
@@ -384,8 +643,8 @@ class TestGraphSweepsArtifactDirective:
         directive = _build_graph_sweeps_artifact_directive(tmp_path)
         assert "lifecycle_replay_findings.md" in directive
 
-    def test_irys_scenario_all_surfaces(self, tmp_path: Path):
-        """Irys P2P subsystem: all surfaces detected."""
+    def test_nodeclient_scenario_all_surfaces(self, tmp_path: Path):
+        """Node-client P2P subsystem: all surfaces detected."""
         _scip_scratch(tmp_path, {
             "subsystem_coverage_gap.md": (
                 "**Indexed prod files**: 50 | **Cited**: 0 | "

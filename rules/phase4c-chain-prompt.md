@@ -82,6 +82,8 @@ From all CONFIRMED, PARTIAL, and CONTESTED findings, extract each dangerous prec
 
 | Finding ID | Dangerous State S | Current Known Path(s) to S | Actor Category of Known Path |
 
+**Low-confidence candidate enablers (ENABLER-ONLY relaxation).** A finding may serve as a candidate ENABLER (a postcondition provider) or a blocked-finding even when its verdict is UNVERIFIED / NEEDS_VERIFICATION / LOW_CONFIDENCE — not only CONFIRMED/PARTIAL/CONTESTED. This is exactly the class of "individually-invalid observation that enables another finding" that chain analysis exists to catch, and chain runs BEFORE verify. The driver pre-fills these in `enabler_results.md` under `## STEP 0a-LC: Low-Confidence Potential Enablers (unverified — ENUMGAP/derivers)`, carrying each candidate's `Postconditions Created` / `Missing Precondition` type tags. Treat STEP 0a-LC rows as candidate enablers ONLY: do NOT add them to the dangerous-state baseline above, and do NOT report them as standalone findings. Any chain you build on a STEP 0a-LC enabler is LOW-CONFIDENCE until its constituents verify — and like every chain hypothesis it is sent to verification (see PHASE 3 / verification handoff), which refutes spurious enabler chains. So include them as enabler candidates freely; precision is preserved downstream by the verify-the-positives filter.
+
 ### STEP 0b: Enumerate Missing Paths (Rule 12)
 
 For EACH dangerous state S, fill the 5-actor-category table:
@@ -187,8 +189,8 @@ If chain_candidate_pairs.md is MISSING, fall back to the original algorithm belo
 For each PARTIAL or REFUTED finding:
 1. Extract its missing precondition and type (STATE/ACCESS/TIMING/EXTERNAL/BALANCE)
 2. **For STATE-type preconditions**: extract the specific state variable name(s). Use variable_finding_map.md to find ALL findings that write to the SAME variable - match on variable names, not just descriptions.
-3. Search ALL CONFIRMED/PARTIAL findings for matching postconditions - across ALL severity tiers and vulnerability classes
-4. If found: Create CHAIN HYPOTHESIS with combined attack sequence
+3. Search ALL CONFIRMED/PARTIAL findings for matching postconditions - across ALL severity tiers and vulnerability classes. **Also search the low-confidence candidate enablers** (UNVERIFIED / NEEDS_VERIFICATION / LOW_CONFIDENCE findings, including the driver's `## STEP 0a-LC` rows in `enabler_results.md` — ENUMGAP/deriver candidates carry `Postconditions Created` + type tags for exactly this match). A blocked finding may ALSO be one of these unverified candidates.
+4. If found: Create CHAIN HYPOTHESIS with combined attack sequence. **If either constituent is an unverified candidate enabler, mark the chain LOW-CONFIDENCE** (Match Strength WEAK unless the postcondition→precondition match is exact) — it remains a hypothesis sent to verification, which confirms or refutes it. Never report such a chain as confirmed without verification.
 
 ### Chain Hypothesis Format
 

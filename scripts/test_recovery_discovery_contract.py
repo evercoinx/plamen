@@ -28,7 +28,7 @@ def test_security_obligations_are_generic_feature_derived(tmp_path: Path):
     assert "swap_execution" in text
     assert "refund_revert" in text
     assert "native_wrapped_asset" in text
-    assert "DODO" not in text
+    assert "Acme" not in text
     assert "ground truth" not in text.lower()
 
 

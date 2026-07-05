@@ -51,11 +51,11 @@ real `file:Lnnn` location that appears in the first-pass `analysis_*.md` or
   the only authority on what is already known; your own belief is not.
 - Every exclusion entry you do write MUST carry its referent inline, e.g.
   `EXCLUDED [PCn-x] dup of [B1-2]` or
-  `EXCLUDED [PCn-x] dup of AccountEncoder.sol:L88`.
+  `EXCLUDED [PCn-x] dup of Vault.sol:L88`.
 - Every exclusion entry MUST ALSO carry the EXCLUDED CANDIDATE'S OWN content:
   its concrete `file:Lnnn` location, the mechanism (WHAT is wrong), and a
   one-line harm (WHAT goes wrong if real). Example:
-  `EXCLUDED [PCn-x] encoder byte-width mismatch at AccountEncoder.sol:L412 —
+  `EXCLUDED [PCn-x] encoder byte-width mismatch at Encoder.sol:L412 —
   truncates the high byte so a crafted account passes validation → asset
   mis-routing; dup of [B1-2]`.
   A bare `EXCLUDED [PCn-x] already known` with no location and no harm is a

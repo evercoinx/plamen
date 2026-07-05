@@ -1,6 +1,6 @@
 """Regression test for the spawn_manifest validator's prose-tolerance fix.
 
-Background: DODO May-2026 audit halt at Phase 2 (instantiate). The LLM
+Background: an observed audit halt at Phase 2 (instantiate). The LLM
 produced a structurally-correct spawn_manifest.md AGENT table with no
 forbidden artifacts, then added a helpful `## Phase 3b/3c Artifacts
 (NOT breadth AGENT rows)` section in PROSE bullet points to explicitly
@@ -36,7 +36,7 @@ def _write(p: Path, body: str) -> None:
 
 
 def test_prose_mention_of_forbidden_artifact_does_not_fail(tmp_path: Path):
-    """The DODO failure mode verbatim: a `## Phase 3b/3c Artifacts` block
+    """The failure mode verbatim: a `## Phase 3b/3c Artifacts` block
     with bullet-list mentions of analysis_rescan_*.md / analysis_percontract_*.md
     explaining what the table does NOT contain. Pre-fix: validator halted.
     Post-fix: validator passes."""
@@ -143,7 +143,7 @@ def test_code_fence_mentions_with_pipe_chars_still_flagged(tmp_path: Path):
       (a) LLMs almost never write `do NOT do this` illustrative tables
           in spawn_manifest.md
       (b) The fix is to use bullet-list prose for examples (which the
-          DODO LLM actually did), and prose is now tolerated
+          LLM actually did), and prose is now tolerated
       (c) Code-fence tracking adds state machine complexity that risks
           breaking other parsers — explicitly out of scope
     Lock the known limitation in so a future test author doesn't claim

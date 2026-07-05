@@ -4,7 +4,7 @@ The default claude exec mode is "pty" -- a PERSISTENT interactive session, NOT
 `claude -p` single-turn. The supervision loop (Ship 6) may CONTINUE a phase
 after a turn, and completion is derived from disk artifacts. The old
 single-turn / one-wave / "exiting orphans agents" framing is therefore FALSE
-under PTY and pushes the coordinator toward a premature DONE (the verified DODO
+under PTY and pushes the coordinator toward a premature DONE (an observed verified
 failure). Ship 8.8 selects a PTY variant by exec mode.
 
 These tests assert on BOTH levels:

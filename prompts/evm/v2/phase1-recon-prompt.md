@@ -362,7 +362,7 @@ Grep for these patterns (exclude lib/, test/, mocks/):
 | `ecrecover\|ECDSA.recover\|SignatureChecker\|isValidSignature\|EIP712\|domainSeparator\|_domainSeparatorV4\|permit(` | HAS_SIGNATURES |
 | `proxy\|upgradeable\|diamond\|delegatecall\|sstore\|sload\|assembly\s*{` | STORAGE_LAYOUT |
 | `lzReceive\|ccipReceive\|receiveWormholeMessages\|_nonblockingLzReceive\|setPeer\|setTrustedRemote\|setTrustedRemoteAddress\|onOFTReceived` | CROSS_CHAIN_MSG |
-| EVM contract SERIALIZES data for a NON-EVM destination VM: `AccountEncoder\|Borsh\|base58\|bech32\|solana\|Pubkey\|programId\|ed25519\|bytes32.*pubkey\|bytes20\(.*sender` OR a custom assembly byte encoder building a foreign account/instruction/message layout (Solana/Bitcoin/Move/Cosmos target) | NON_EVM_TARGET |
+| EVM contract SERIALIZES data for a NON-EVM destination VM: `Borsh\|base58\|bech32\|solana\|Pubkey\|programId\|ed25519\|bytes32.*pubkey\|bytes20\(.*sender` OR a custom assembly byte encoder building a foreign account/instruction/message layout (Solana/Bitcoin/Move/Cosmos target) | NON_EVM_TARGET |
 | `_safeMint\|safeTransfer\|onERC721Received\|onERC1155Received\|tokensReceived\|onTransferReceived\|onFlashLoan\|executeOperation\|FlashCallback\|beforeSwap\|afterSwap` | OUTCOME_CALLBACK |
 | `depositFor\(\|stakeFor\(\|delegateTo\(\|mintFor\(\|withdrawFor\(\|OnBehalf\(\|claimFor\(\|harvestFor\(\|compoundFor\(` OR (`approve\(\|safeApprove\(\|increaseAllowance\(\|permit\(.*deadline` AND `multicall\|batch\|aggregate\|loop.*approve\|for.*approve`) | MULTI_STEP_OPS |
 | `IUniswapV2Router\|IUniswapV3Pool\|IUniswapV4Pool\|IBalancerVault\|IWeightedPool\|IAToken\|ILendingPool\|IPool\(aave\)\|ICToken\|IComptroller\|ICurvePool\|IStableSwap\|IChainlinkAggregator\|AggregatorV3Interface\|IStETH\|IWstETH` (EXCLUDE: @openzeppelin generic utilities, solmate, solady " only flag when calling protocol-specific functions) | NAMED_EXTERNAL_PROTOCOL |
@@ -374,7 +374,7 @@ Write detected flags to {SCRATCHPAD}/detected_patterns.md
 **`NON_EVM_TARGET` is a MECHANICAL trigger — do NOT downgrade it on judgment.**
 Set `NON_EVM_TARGET = YES` whenever BOTH hold: (a) the codebase builds bytes via
 `abi.encode`/`abi.encodePacked` or a custom assembly/byte encoder (e.g.
-`AccountEncoder`, a Borsh/BCS packer); AND (b) that output flows into a
+a Borsh/BCS packer); AND (b) that output flows into a
 cross-chain send / message / withdraw call whose destination is a confirmed
 non-EVM VM (a non-EVM chain-id constant, a Solana/Move/Cosmos/Bitcoin
 program-id or address, or base58/bech32/32-byte-pubkey handling on that path).

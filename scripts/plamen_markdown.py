@@ -4,7 +4,8 @@ Layer 0: no internal plamen_* imports. Depends only on stdlib + markdown-it-py.
 
 WHY THIS EXISTS
 ---------------
-The recurring pipeline failure (DODO instantiate halt, swarm clusters 1-3) is
+The recurring pipeline failure (an instantiate halt observed in a prior run,
+swarm clusters 1-3) is
 the driver parsing LLM-authored Markdown as a machine protocol with loose,
 un-anchored regex: a parser locates a table by a "header has these words"
 heuristic, then scans line-by-line until a non-pipe line — which silently bleeds

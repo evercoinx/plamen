@@ -152,7 +152,7 @@ def test_validator_treats_near_empty_as_degraded(tmp_path: Path):
     assert (sp / "exploration_skeptic.degraded").exists()
 
 
-# -------- Instance-level rubber-stamp gate (root fix for the DODO FP) -------
+# -------- Instance-level rubber-stamp gate (root fix for an observed FP) -------
 #
 # LIVE FLAW: the phase judged completeness at the AXIS level — "was the
 # area/direction touched somewhere?" — and wrote blanket NO-GAP rows like

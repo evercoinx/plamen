@@ -11,7 +11,7 @@
 **Model**: opus | **Timeout**: 25min | **Critical**: yes
 **Execution**: LLM phase session
 
-Detects the smart contract language (EVM/Solana/Aptos/Sui/Soroban), initializes the scratchpad directory, then spawns 4 parallel recon agents. Agent 1A does RAG meta-buffer lookup (fire-and-forget), 1B analyzes protocol design and operational implications, Agent 2 maps the attack surface and state variables, Agent 3 scans for feature flags (oracles, flash loans, cross-chain, etc.) and recommends skills/niche agents/injectables. This is the foundation phase — every subsequent phase reads recon artifacts to understand what the protocol does, what its trust boundaries are, and what analysis lanes are relevant. Without recon, breadth agents would analyze code blind with no protocol context.
+Detects the smart contract language (EVM/Solana/Aptos/Sui/Soroban/DAML), initializes the scratchpad directory, then spawns 4 parallel recon agents. Agent 1A does RAG meta-buffer lookup (fire-and-forget), 1B analyzes protocol design and operational implications, Agent 2 maps the attack surface and state variables, Agent 3 scans for feature flags (oracles, flash loans, cross-chain, etc.) and recommends skills/niche agents/injectables. This is the foundation phase — every subsequent phase reads recon artifacts to understand what the protocol does, what its trust boundaries are, and what analysis lanes are relevant. Without recon, breadth agents would analyze code blind with no protocol context.
 
 **Produces**: `recon_summary.md`, `design_context.md`, `attack_surface.md`, `state_variables.md`, `function_list.md`, `contract_inventory.md`, `template_recommendations.md`, `build_status.md`
 

@@ -1,6 +1,6 @@
 """A2 report_index Summary <-> Master Finding Index reconciliation.
 
-DODO failure shape: the Index Agent `## Summary` count table claimed 45
+Observed failure shape: the Index Agent `## Summary` count table claimed 45
 findings while the Master Finding Index actually listed 74 distinct report IDs.
 Tier writers dispatched against that inconsistent index then hallucinated ghost
 IDs to fill the 45->74 gap, producing report findings with no backing section.
@@ -71,9 +71,9 @@ def _master_row_count(scratchpad: Path) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# A2: DODO shape — Summary disagrees with Master -> repair to Master.
+# A2: drift shape — Summary disagrees with Master -> repair to Master.
 # --------------------------------------------------------------------------- #
-def test_a2_dodo_shape_summary_repaired_to_master_cardinality():
+def test_a2_drift_shape_summary_repaired_to_master_cardinality():
     """Summary=45 Medium but Master lists 74 distinct Medium IDs -> the gate
     rewrites the Summary to 74 and flags the inconsistency."""
     d = Path(tempfile.mkdtemp())
@@ -91,7 +91,7 @@ def test_a2_dodo_shape_summary_repaired_to_master_cardinality():
     assert _master_row_count(d) == master_before == 74
 
 
-def test_a2_dodo_multi_tier_drift_all_repaired():
+def test_a2_multi_tier_drift_all_repaired():
     """Drift across several tiers all get reconciled to the Master set."""
     d = Path(tempfile.mkdtemp())
     _mk_index(

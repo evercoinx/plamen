@@ -815,8 +815,8 @@ class TestDedupAbsorbedCoverage:
         for row in rows:
             assert "UNACCOUNTED" not in row, f"Unexpected UNACCOUNTED: {row}"
 
-    def test_irys_exact_scenario(self, tmp_path):
-        """Reproduce the exact Irys L1 Codex halt: 5 dedup-absorbed IDs
+    def test_l1_exact_scenario(self, tmp_path):
+        """Reproduce an observed L1 Codex halt: 5 dedup-absorbed IDs
         appearing in findings_inventory.md and verification_queue_pre_dedup.md
         but not in the active report set."""
         (tmp_path / "dedup_decisions.md").write_text(dedent("""\
@@ -832,7 +832,7 @@ class TestDedupAbsorbedCoverage:
             | INV-28 | MERGED into INV-003 | derivative payload-cache |
             | INV-32 | MERGED into INV-004 | derivative compatibility |
         """), encoding="utf-8")
-        # Real Irys IDs: padded INV-001..INV-023, unpadded INV-24..INV-33
+        # Representative IDs: padded INV-001..INV-023, unpadded INV-24..INV-33
         all_ids = [f"INV-{i:03d}" for i in range(1, 24)] + [
             f"INV-{i}" for i in range(24, 34)
         ]

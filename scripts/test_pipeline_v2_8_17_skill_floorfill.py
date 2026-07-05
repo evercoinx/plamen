@@ -1,6 +1,6 @@
 """v2.8.17 — instantiate skill floor-fill: reject fabricated skill templates.
 
-Root cause (PulsechainGameWards 2026-05-31): the Complex breadth floor (>=7)
+Root cause (observed in a prior run): the Complex breadth floor (>=7)
 forced instantiate to add breadth agents beyond the real recon-recommended
 skills (5), and it FABRICATED skill-template names after the protocol's domains
 (REWARD_ACCOUNTING / GAME_LOGIC_CORRECTNESS / MINIGAME_AUXILIARY). Those resolve

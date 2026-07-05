@@ -1,7 +1,7 @@
 """Regression tests for the E2E-hardening bundle (audit findings RPT/GATE/VERIF/
 PARSE/LLM/RECON/LIFECYCLE/PARITY + calibration/consolidation).
 
-Every test locks in a behavior change from the post-DODO full-pipeline audit.
+Every test locks in a behavior change from a post-audit full-pipeline review.
 HOW-not-WHAT: synthetic IDs/titles stand in for any real finding.
 """
 from __future__ import annotations

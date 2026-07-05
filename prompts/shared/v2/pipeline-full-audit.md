@@ -30,9 +30,9 @@
 
 ### Rules (~/.plamen/rules\) — 10 files, all loaded via CLAUDE.md
 ### V2 Prompt Templates (~/.claude/prompts\shared\v2\) — 37 files, ~3500 lines total
-### Language-Specific Prompts (~/.claude/prompts\{evm,solana,aptos,sui,soroban,l1}\) — ~12 files per tree
+### Language-Specific Prompts (~/.claude/prompts\{evm,solana,aptos,sui,soroban,daml,l1}\) — ~7-12 files per tree
 ### Agent Definitions (~/.claude/agents\) — 8 files (6 depth + security-analyzer + security-verifier)
-### Skills — 140 SKILL.md files across 5 language trees + 9 niche + 30 injectable (including 16 L1)
+### Skills — 155 SKILL.md files across 6 language trees + 9 niche + 30 injectable (including 16 L1)
 
 ---
 
@@ -346,14 +346,14 @@ Spawn ALL 10 subagents in parallel. Each writes findings to `{SCRATCHPAD}/audit_
 
 ### SUBAGENT 7: Cross-Language Parity
 
-**Scope**: 5 language trees (evm, solana, aptos, sui, soroban) + L1 — check for drift, missing ports, inconsistencies
+**Scope**: 6 language trees (evm, solana, aptos, sui, soroban, daml) + L1 — check for drift, missing ports, inconsistencies
 
 **Read**: For each tree, read: `phase1-recon-prompt.md`, `phase4a-inventory-prompt.md`, `phase4b-depth-templates.md`, `phase4b-scanner-templates.md`, `phase5-verification-prompt.md`, `generic-security-rules.md`, `self-check-checklists.md`. Also read the `v2/` variants where they exist.
 
 **Audit dimensions**:
 
 1. **Feature parity matrix**: Build a table:
-   | Feature | EVM | Solana | Aptos | Sui | Soroban | L1 |
+   | Feature | EVM | Solana | Aptos | Sui | Soroban | DAML | L1 |
    For each of: recon tasks, breadth methodology, scanner checks, depth directives, verification templates, fuzz support, invariant fuzz, Medusa, skill count, v2 prompt variants.
    Flag any feature present in one tree but missing from another where it should apply.
 

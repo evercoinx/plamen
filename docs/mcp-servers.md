@@ -8,7 +8,7 @@ Two Codex-specific caveats:
 1. `evm-chain-data` is currently disabled on Codex due to an MCP protocol version mismatch (`scripts/codex_adapter.py:276`).
 2. Four Python MCP servers (`slither-analyzer`, `unified-vuln-db`, `farofino`, `solana-fender`) are wrapped through `mcp-packages/schema-sanitizer.js` to strip `oneOf`/`allOf` JSON-schema constructs Codex rejects (`scripts/codex_adapter.py:270-275`).
 
-Tool permissions on Codex cannot be pre-configured: select "Always allow" on the first prompt per MCP server (`plamen.py:_install_codex_adapter`, ~L2690-2694).
+Tool permissions on Codex cannot be pre-configured: select "Always allow" on the first prompt per MCP server (`plamen.py:_install_codex_adapter`).
 
 ## Bundled (custom-mcp/)
 

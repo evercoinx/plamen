@@ -111,12 +111,12 @@ def test_build_status_forge_uses_bounded_production_compile(tmp_path):
 
     seen = []
 
-    def fake_run(cmd, **kwargs):
+    def fake_hardened(cmd, *args, **kwargs):
         seen.append(cmd)
-        return mock.Mock(returncode=0, stdout="", stderr="")
+        return (0, "")
 
     with mock.patch("shutil.which", side_effect=lambda name: "/usr/bin/forge" if name == "forge" else None), \
-         mock.patch("subprocess.run", side_effect=fake_run):
+         mock.patch("recon_prepass._run_hardened", side_effect=fake_hardened):
         result = _write_build_status(scratch, proj, "evm")
 
     assert result == "WRITTEN"
@@ -215,11 +215,12 @@ def test_scan_fail_timeout(tmp_path):
     sec_dir.mkdir()
     (sec_dir / "test.yaml").write_text("rules: []", encoding="utf-8")
 
+    # _run_hardened returns the 124 sentinel on a tree-killed timeout.
     with mock.patch("shutil.which", return_value="/usr/bin/opengrep"), \
          mock.patch("recon_prepass._ensure_opengrep_rules",
                     return_value={"opengrep-rules": rules_dir, "decurity-rules": rules_dir}), \
-         mock.patch("subprocess.Popen", side_effect=_fake_popen_factory(timeout=True)), \
-         mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)):
+         mock.patch("recon_prepass._run_hardened",
+                    return_value=(124, "[hardened: timed out after 300s, tree-killed]")):
         result = _run_opengrep_scan(scratch, proj, "evm")
     assert result.startswith("FAILED:")
     assert "timeout" in result
@@ -342,13 +343,13 @@ def test_ensure_rules_skip_if_present(tmp_path):
 def test_ensure_rules_clones_missing(tmp_path):
     """Missing repos trigger git clone."""
     with mock.patch("recon_prepass._OPENGREP_RULES_BASE", tmp_path):
-        def fake_clone(cmd, **kwargs):
+        def fake_clone(cmd, *args, **kwargs):
             target = Path(cmd[-1])
             target.mkdir(parents=True, exist_ok=True)
             (target / ".git").mkdir()
-            return mock.Mock(returncode=0)
+            return (0, "")
 
-        with mock.patch("subprocess.run", side_effect=fake_clone) as mock_run:
+        with mock.patch("recon_prepass._run_hardened", side_effect=fake_clone) as mock_run:
             result = _ensure_opengrep_rules()
         assert mock_run.call_count == 3  # opengrep-rules + decurity + aptos-move-rules
         assert "opengrep-rules" in result

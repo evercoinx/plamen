@@ -1,6 +1,6 @@
 """Pipeline v2.8.14 — Complex-tier breadth floor.
 
-Discrepancy (PulsechainGameWards): the instantiate Merge Hierarchy collapsed
+Discrepancy (observed in a prior run): the instantiate Merge Hierarchy collapsed
 breadth to 5 agents on a Complex codebase (>10 contracts / >5000 lines), below
 the documented Complex floor of 7-9 (phase2-instantiate Step 2a) — merging away
 whole lenses (NFT/economic/centralization). The 300-line merge cap is an upper

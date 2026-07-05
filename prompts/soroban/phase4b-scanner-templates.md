@@ -178,6 +178,13 @@ Rules:
 - **Stale contractimport**: If the contract was compiled against an older version of an imported contract's interface (using `contractimport!`), function signatures may have changed. Verify the imported WASM hash matches the currently deployed contract.
 - **Re-entrancy via cross-contract**: Soroban does not have EVM-style re-entrancy, but a cross-contract call CAN call back into the original contract within the same transaction. Verify state is fully settled before any outbound call that could trigger a callback.
 - **Auth forwarding**: Does the cross-contract call need `require_auth` from the user? Verify the auth context is forwarded correctly; missing auth forwarding causes silent permission escalation.
+- **Originate-side nested-pull auth**: When THIS contract invokes an intermediary/vault that then pulls tokens/assets one frame deeper via a nested `transfer(from = this_contract, ...)` (e.g. a `deposit(assets, this, this, this)` where operator == from == this_contract), the direct-caller auto-authorization does NOT cover that nested sub-invocation. The calling function MUST pre-declare the nested frame with `env.authorize_as_current_contract(...)` (aka `authorize_pull`) BEFORE the call. A plain SEP-41 `.approve()` is NOT sufficient: `approve` writes an allowance that only `transfer_from` reads, whereas a `transfer` never consults allowances — so the pull reverts under enforcing auth despite the approval. Fill this row for every function that invokes an intermediary which nests a pull-from-self:
+
+| Call Site | Intermediary | Nested `transfer(from=self)`? | `authorize_as_current_contract`/`authorize_pull` pre-declared? | Relies only on `.approve()`? | Reverts under enforcing auth? |
+|-----------|-------------|-------------------------------|----------------------------------------------------------------|------------------------------|-------------------------------|
+
+- **Originate-side DIFFERENTIAL**: Compare EVERY sibling call site that performs the same nested-pull pattern. If one sibling pre-declares (`authorize_as_current_contract`/`authorize_pull`) and another only calls `.approve()` (or declares nothing), the sibling missing the pre-declaration reverts under enforcing auth in production — flag it as a finding, EVEN IF the consumer-side user `require_auth` is present. Divergent auth-handling across siblings that share the nested-pull pattern is the tell.
+- **Test-harness masking trap**: `env.mock_all_auths_allowing_non_root_auth()` fabricates the missing sub-authorization, so a passing test suite does NOT prove the originate-side auth is present. Plain `mock_all_auths()` (root-only) would reject the un-declared nested pull. If tests pass only under the non-root-allowing variant, treat the originate-side auth as UNPROVEN and audit it from source, not from test outcomes.
 
 ## CHECK 7: Contract Upgrade Protection
 For each contract with upgrade capability (`update_current_contract_wasm`):
@@ -444,6 +451,8 @@ For EVERY validation that protects against value loss (slippage checks, balance 
 - Does it check a PROXY metric (correlated value) or the DIRECT metric (actual value at risk)?
 
 If the validation uses absolute/aggregate/proxy AND the protected operation is per-item or requires delta measurement â†’ FINDING: validation measures the wrong granularity. A batch of operations where each individually loses value but the aggregate stays flat passes an aggregate check but fails a per-item check.
+
+**Unit-scale axis** (per validation): for any `x < floor` / `x >= min_out` / slippage comparison, identify the TOKEN each side is denominated in. If one side derives from an INPUT amount (`x rate`) and the other is an OUTPUT/received amount, verify BOTH sides share the SAME token's decimal scale. Flag ONLY when the two sides are PROVABLY different token decimal scales â€” a floor in the input token's decimals compared against an output in a different token's decimals is a finding (too loose if output higher-dec, too tight if lower-dec).
 
 **Coverage assertion**: Before returning, verify every entity enumerated under each CHECK has been processed. Report enumerated vs analyzed counts in your return message.
 

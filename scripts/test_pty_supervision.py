@@ -509,7 +509,7 @@ def test_supervision_loop_respects_budget(tmp_path: Path, monkeypatch):
 def test_supervision_loop_missing_only_when_no_transport(tmp_path, monkeypatch):
     """SHIP 8.11/8.12 CRITICAL PROOF.
 
-    Scenario replays the verified DODO failure: the coordinator emits a
+    Scenario replays an observed verified failure: the coordinator emits a
     false DONE (every turn reaches end_turn / complete=True), the Ship 8.2
     gate correctly catches that not all manifest rows are COMPLETE, AND the
     preflight reported BOTH transports unsupported (live=False, resume=False

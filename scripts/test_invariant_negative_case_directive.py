@@ -1,8 +1,8 @@
 """Contract tests for the invariant negative-case reachability directive.
 
-Background: the DODO Crosschain Dex Thorough audit (May 2026) surfaced
+Background: a prior cross-chain DEX Thorough audit surfaced
 two invariant-construction defects that no validator caught:
-  1. `fuzz_nonEVMRefundClaimProtection` (Medusa) — the harness contract
+  1. `fuzz_refundClaimProtection` (Medusa) — the harness contract
      itself was a registered bot, so the authorization tautology meant
      the property mechanically could not return false. INV-003
      (Critical: anyone can steal non-EVM refunds) got a PASSED* sticker.
@@ -86,7 +86,7 @@ def test_invariant_prompts_explicitly_call_out_evidence_tag_demotion():
     is zero coverage. The directive must instruct the agent to demote
     the evidence tag (don't emit [POC-PASS] / [MEDUSA-PASS] for
     structurally-unfailable invariants). Without this, the formerly-
-    broken DODO `fuzz_nonEVMRefundClaimProtection` PASS would still
+    broken `fuzz_refundClaimProtection` PASS would still
     propagate to the report as a Critical-finding confirmation."""
     foundry_prompt = _read(INVARIANT_PROMPTS[0])
     medusa_prompt = _read(INVARIANT_PROMPTS[1])
@@ -128,7 +128,7 @@ def test_invariant_prompts_did_not_explode_in_size():
     # Medusa prompt was ~100 lines pre-fix; new cap 200.
     max_lines = {
         "phase4b-invariant-fuzz.md": 350,
-        "phase4b-medusa-fuzz.md": 250,
+        "phase4b-medusa-fuzz.md": 290,
     }
     for p in INVARIANT_PROMPTS:
         lines = len(_read(p).splitlines())

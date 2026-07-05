@@ -320,7 +320,7 @@ def _mkrepo(files: list[str]) -> Path:
 
 
 def test_A1_monorepo_granularity():
-    """Irys-style Rust mono-repo. crates/types and crates/api-client are
+    """Rust mono-repo style. crates/types and crates/api-client are
     distinct coverage buckets; citing crates/p2p/src/lib.rs must NOT
     satisfy crates/types."""
     files = []
@@ -1306,7 +1306,7 @@ def test_G5b2_sc_coverage_excludes_interfaces_directory():
         "contract_inventory.md": (
             "| Contract | Path |\n"
             "|----------|------|\n"
-            "| IDODORouteProxy | interfaces/IDODORouteProxy.sol |\n"
+            "| IRouteProxy | interfaces/IRouteProxy.sol |\n"
             "| IUniswapV2Factory | interfaces/IUniswapV2Factory.sol |\n"
             "| IUniswapV2Router01 | interfaces/IUniswapV2Router01.sol |\n"
             "| IWETH9 | interfaces/IWETH9.sol |\n"
@@ -1330,7 +1330,7 @@ def test_G5b3_sc_coverage_excludes_mocks_directory():
             "| ERC20Mock | mocks/ERC20Mock.sol |\n"
             "| GatewayMock | mocks/GatewayEVMMock.sol |\n"
             "| ZRC20Mock | mocks/ZRC20Mock.sol |\n"
-            "| DODOMock | mocks/DODORouteProxyMock.sol |\n"
+            "| RouteProxyMock | mocks/RouteProxyMock.sol |\n"
             "| CoreA | contracts/core/CoreA.sol |\n"
             "| CoreB | contracts/core/CoreB.sol |\n"
         ),
@@ -1372,7 +1372,7 @@ def test_G5b5_sc_coverage_still_flags_real_uncited_prod_buckets():
         "contract_inventory.md": (
             "| Contract | Path |\n"
             "|----------|------|\n"
-            "| IDODORouteProxy | interfaces/IDODORouteProxy.sol |\n"
+            "| IRouteProxy | interfaces/IRouteProxy.sol |\n"
             "| IUniswapV2Factory | interfaces/IUniswapV2Factory.sol |\n"
             "| IUniswapV2Router01 | interfaces/IUniswapV2Router01.sol |\n"
             "| IWETH9 | interfaces/IWETH9.sol |\n"
@@ -1814,7 +1814,7 @@ def test_A3_attention_repair_graph_rows_do_not_require_exact_source_path():
         "attention_repair_queue.md": (
             "| # | Kind | Target | Reason | Source | Evidence hint |\n"
             "|---|------|--------|--------|--------|---------------|\n"
-            "| 1 | graph-row | `| IrysTransactionHeader | ledger_id | transaction.rs:61 |` | graph row | `field_validation_matrix.md` | `transaction.rs, block.rs` |\n"
+            "| 1 | graph-row | `| TransactionHeader | ledger_id | transaction.rs:61 |` | graph row | `field_validation_matrix.md` | `transaction.rs, block.rs` |\n"
         ),
         "attention_repair_summary.md": (
             "# Attention Repair Summary\n\n"
@@ -2069,7 +2069,7 @@ def test_M4_l1_verify_shards_are_severity_weighted():
     ]
     # Uniform per-shard target (VERIFY_TARGET_PER_SHARD=4): C/H spreads across
     # the full 10-slot pool (84 findings -> ~9/shard, slot-pool capped).
-    check("M4 L1 C/H verify shards are <=9 on Irys-sized queue",
+    check("M4 L1 C/H verify shards are <=9 on a large queue",
           max(ch_sizes) <= 9,
           repr(non_empty))
     # Medium now uses ALL 6 slots (43 findings / 4 ~= 11 desired, capped at 6

@@ -309,7 +309,7 @@ def test_ENFORCE_E7_downgrades_queue_only_critical():
 
 def test_ENFORCE_no_matrix_data_high_preserved_when_verifier_states():
     """Verifier explicitly wrote Severity: High -> preserve. This is the exact
-    Irys L1 failure mode: verify file says 'Severity: High' but has no
+    an observed L1 failure mode: verify file says 'Severity: High' but has no
     Impact/Likelihood fields, so E7 was incorrectly flattening to Medium."""
     verify_text = """
 Severity: High
@@ -401,7 +401,7 @@ def test_ENFORCE_verifier_higher_than_matrix_loses():
 
 
 def test_ENFORCE_verifier_lower_with_rationale():
-    """AwesomeX SC pattern: verifier says 'High (Impact High x Likelihood High
+    """An observed SC pattern: verifier says 'High (Impact High x Likelihood High
     = Critical; see note below)'. Verifier deliberately chose lower."""
     verify_text = """
 **Verdict**: CONFIRMED

@@ -309,12 +309,12 @@ def test_s13_synthesize_keeps_real_llm_confidence(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F2 — depth lifecycle recompute (post-DODO hardening)
+# F2 — depth lifecycle recompute (post-audit hardening)
 # ---------------------------------------------------------------------------
 
 def test_f2_0_blind_spot_findings_are_counted(tmp_path):
     """F2.0: the broadened _FINDING_HEADING_RE must score BLIND-A-N style IDs
-    (the prior regex rejected them — 0/14 in DODO)."""
+    (the prior regex rejected them — 0/14 in a past audit)."""
     (tmp_path / "blind_spot_a_findings.md").write_text(
         "# F\n\n"
         "## Finding [BLIND-A-1] Some bug\n"
@@ -791,7 +791,7 @@ def test_a3_lifecycle_marks_stubs_as_stub(tmp_path):
     that was there pre-v2.0.3 hid the orphan signature from the
     diagnostic surface.
     """
-    # 1 substantive + 3 stubs (the DODO 2026-05-20 attempt-2 shape)
+    # 1 substantive + 3 stubs (a prior audit's attempt-2 shape)
     (tmp_path / "depth_token_flow_findings.md").write_text(
         "## Finding [DT-1] Real bug\n**Severity**: High\n" * 30,
         encoding="utf-8",
@@ -1056,8 +1056,8 @@ def test_b1_slugify_cwd_for_transcript():
     separators, drive colons, AND spaces collapsing to dashes.
     """
     assert _slugify_cwd_for_transcript(
-        r"D:\Programming\Web3\Contests\DODO Crosschain Dex\sub"
-    ) == "D--Programming-Web3-Contests-DODO-Crosschain-Dex-sub"
+        r"D:\Programming\Web3\Contests\Sample Audit Project\sub"
+    ) == "D--Programming-Web3-Contests-Sample-Audit-Project-sub"
     assert _slugify_cwd_for_transcript("/home/user/work") == "-home-user-work"
     # No spaces, no Windows drive
     assert _slugify_cwd_for_transcript("/usr/local") == "-usr-local"

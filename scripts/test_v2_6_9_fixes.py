@@ -66,8 +66,8 @@ class TestSkepticJudgeDowngrade:
         result = V._collect_judge_downgrade_map(tmp_path)
         assert result == {"INV-005": "Medium", "INV-006": "Low"}
 
-    def test_irys_format(self, tmp_path):
-        """Parse the exact format from the Irys L1 Codex audit."""
+    def test_l1_judge_format(self, tmp_path):
+        """Parse a representative format from an L1 Codex audit."""
         self._write_judge(tmp_path, dedent("""\
             # Skeptic Judge Decisions
 

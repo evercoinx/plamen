@@ -7,7 +7,7 @@ before the end-of-turn token), the rate-limit retry path historically
 fired `run_phase(attempt=2)` unconditionally — a full re-run that produced
 the same artifacts at a fresh model spend (~$10-12 per Thorough rescan).
 
-The DODO Crosschain Dex Thorough audit (May 2026) demonstrated this:
+A prior Thorough audit demonstrated this:
 rescan attempt-1 wrote all 4 expected files BEFORE the 429 hit, then
 attempt-2 re-wrote them at $11.96 of pure waste.
 
