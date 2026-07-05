@@ -2,7 +2,7 @@
 
 > **Purpose**: Investigate the mechanically-flagged enumeration obligations by TRACING each one to a definite conclusion — a real finding with evidence, or a reasoned clear. This is a depth EXPLORATION pass, NOT a validate-or-dismiss filter.
 > **Output artifact**: `enumgap_exploration_findings.md`
-> **Finding format**: follow `~/.claude/rules/finding-output-format.md`
+> **Finding format**: follow `~/.plamen/rules/finding-output-format.md`
 
 ---
 
@@ -60,7 +60,7 @@ Process every obligation row independently. For each one:
 
 3. **TRACE the relationship to a definite conclusion.** Use concrete analytical
    work and record it with the depth-evidence tags from
-   `~/.claude/rules/finding-output-format.md`:
+   `~/.plamen/rules/finding-output-format.md`:
    - `[BOUNDARY:X=val]` — substitute concrete boundary values (0, 1, MAX,
      empty, duplicate, type-edge) into the shared symbol or input and state the
      outcome.
@@ -107,7 +107,7 @@ downstream; a falsely-cleared real bug is a missed vulnerability.
 Write everything to `enumgap_exploration_findings.md`.
 
 1. **Findings**: every real finding (or UNRESOLVED obligation) in the standard
-   finding format from `~/.claude/rules/finding-output-format.md`. Use finding
+   finding format from `~/.plamen/rules/finding-output-format.md`. Use finding
    IDs of the form `NEXP-1`, `NEXP-2`, … Include the depth-evidence tags that
    prove the trace, and a `## Chain Summary` line per finding so downstream
    composition analysis can consume it.
