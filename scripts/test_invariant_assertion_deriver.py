@@ -89,6 +89,33 @@ def test_all_six_shapes_one_candidate_each(tmp_path: Path):
         assert c.get("postcondition_type") in {"BALANCE", "ACCESS", "STATE", "EXTERNAL"}
 
 
+def test_shard_namespaced_ci_ids_are_harvested(tmp_path: Path):
+    """Regression (feedback_id_regex_catalog): skeptic shard-workers emit
+    CI-<shard><n> (CI-A1..CI-D3), not the bare CI-1 form. A `CI-\\d+`-only
+    harvest regex silently dropped every namespaced block (12 dropped in the
+    DODO run, incl. all skeptic-committed invariants). The deriver must parse
+    the namespaced form."""
+    eg = _eg()
+    _root, sp = _proj(tmp_path)
+
+    def _blk(cid: str, shape: str) -> str:
+        return (
+            f"committed-invariant [{cid}]\n"
+            f"Locus: src/Pricing.sol:L142  (fn: getQuote)\n"
+            f"Shape: {shape}\n"
+            f"Assertion: assert(relation holds at src/Pricing.sol:L142)\n"
+            f"Falsify Class: property\n"
+            f"Provenance: skeptic NO-GAP @ {cid}\n"
+        )
+
+    _write_skeptic(sp, _blk("CI-A1", "CONSERVATION"),
+                   _blk("CI-B2", "FRESHNESS"), _blk("CI-D3", "ROUNDTRIP"))
+    out = eg.compute_invariant_assertion_candidates(sp)
+    assert len(out) == 3, f"expected 3 namespaced candidates, got {len(out)}"
+    tags = " ".join(c["source_tag"] for c in out)
+    assert "INVARIANT:CI-A1" in tags and "INVARIANT:CI-D3" in tags, tags
+
+
 def test_emitted_candidate_stamps_source_id_invariant(tmp_path: Path):
     """When routed through _emit_candidates with source_id='INVARIANT' the
     inventory block carries `**Source IDs**: INVARIANT` + NEEDS_VERIFICATION."""

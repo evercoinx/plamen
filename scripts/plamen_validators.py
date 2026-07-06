@@ -6801,8 +6801,13 @@ def _validate_enumgap_exploration(scratchpad: Path, mode: str) -> list[str]:
 # The habit is recall-positive (more falsifiable candidates); its absence loses
 # no prior finding, so a gap is advisory, not fatal.
 
-_CI_BLOCK_PRESENCE_RE = re.compile(r"committed-invariant\s*\[\s*CI-\d+\s*\]", re.IGNORECASE)
+_CI_BLOCK_PRESENCE_RE = re.compile(r"committed-invariant\s*\[\s*CI-[A-Za-z0-9]+\s*\]", re.IGNORECASE)
 _CI_CLEAR_SIGNAL_RE = re.compile(r"\bNO-?GAP\b|\bDOWNGRADE\b", re.IGNORECASE)
+# Format-agnostic committed-invariant header counter. Any `committed-invariant
+# [<anything>]` header, regardless of ID shape. Compared against the harvestable
+# _CI_BLOCK_PRESENCE_RE count to detect ID-format drift (a block the deriver's
+# _CI_BLOCK_RE cannot parse = a silently-dropped committed invariant).
+_CI_BLOCK_ANY_RE = re.compile(r"committed-invariant\s*\[\s*[^\]\n]+\]", re.IGNORECASE)
 
 
 def _validate_invariant_commitment(scratchpad: Path, mode: str) -> list[str]:
@@ -6832,6 +6837,7 @@ def _validate_invariant_commitment(scratchpad: Path, mode: str) -> list[str]:
         return []
     clears = 0
     ci_blocks = 0
+    ci_blocks_any = 0
     for p in arts:
         try:
             body = p.read_text(encoding="utf-8", errors="replace")
@@ -6839,6 +6845,33 @@ def _validate_invariant_commitment(scratchpad: Path, mode: str) -> list[str]:
             continue
         clears += len(_CI_CLEAR_SIGNAL_RE.findall(body))
         ci_blocks += len(_CI_BLOCK_PRESENCE_RE.findall(body))
+        ci_blocks_any += len(_CI_BLOCK_ANY_RE.findall(body))
+    # Harvest-vs-emit reconciliation (durable guard against ID-format drift):
+    # committed-invariant blocks the harvester regex can't parse are silently
+    # dropped — the CI-A1-vs-`CI-\d+` class that dark-dropped 12 skeptic
+    # invariants pre-fix. If the artifacts carry more CI headers than the
+    # harvestable pattern matches, surface it LOUDLY (sentinel + warning) rather
+    # than letting the deriver harvest 0 with no signal. Never raises.
+    if ci_blocks_any > ci_blocks:
+        import logging as _logging
+        _logging.getLogger("plamen.validators").warning(
+            "[invariant_commitment] CI ID-FORMAT DRIFT: %d committed-invariant "
+            "block(s) present but only %d match the harvestable pattern — %d "
+            "would be silently dropped by the deriver. Investigate _CI_BLOCK_RE "
+            "/ _CI_BLOCK_PRESENCE_RE ID shape.",
+            ci_blocks_any, ci_blocks, ci_blocks_any - ci_blocks,
+        )
+        try:
+            (scratchpad / "invariant_commitment.ci_format_gap").write_text(
+                f"[INVARIANT_COMMITMENT_CI_FORMAT_GAP] {ci_blocks_any} "
+                f"committed-invariant block(s) present but only {ci_blocks} are "
+                f"harvestable ({ci_blocks_any - ci_blocks} dropped by ID-format "
+                "mismatch). The deriver's _CI_BLOCK_RE cannot parse these IDs; "
+                "broaden it to match the emitted ID shape.\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
     if clears > 0 and ci_blocks == 0:
         import logging as _logging
         _logging.getLogger("plamen.validators").warning(

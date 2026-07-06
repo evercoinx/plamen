@@ -3950,8 +3950,13 @@ def _propagate_dedup_absorbed_to_finding_mapping(scratchpad: Path) -> int:
 
     # Build survivor_id -> hypothesis_id from existing finding_mapping rows:
     #   | <finding_id> | <hypothesis_id> | <status> | <notes> |
+    # Both columns use the widened / unified ID shapes so severity-encoded L1
+    # hypothesis IDs (H-C01, HC-01, L1-H-12) and multi-segment finding IDs are
+    # not silently skipped — the same ID-format-too-narrow drop class fixed for
+    # the AXIS/CI promoters. Column 2 reuses _ID_HYPO_ALTS (no capture groups).
     row_re = re.compile(
-        r"^\|\s*([A-Za-z]+-\d+)\s*\|\s*(H-\d+|CH-\d+)\s*\|", re.MULTILINE
+        r"^\|\s*([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)\s*\|\s*(" + _ID_HYPO_ALTS + r")\s*\|",
+        re.MULTILINE,
     )
     survivor_to_hyp: dict[str, str] = {}
     existing_finding_ids: set[str] = set()
@@ -14178,6 +14183,38 @@ def _run_phase_validators(
         try:
             import enumeration_gate as _eg
             _pr = _eg.promote_axis_findings_to_inventory(scratchpad)
+            # Harvest-vs-emit reconciliation (durable guard against ID-format
+            # drift silently dropping candidates — the class that dark-dropped
+            # 14 AXIS findings, incl. a High, pre-fix). If the artifact carries
+            # finding headings but promotion parsed none, the parser/ID-format
+            # has drifted; surface it LOUDLY instead of the prior silent 0.
+            try:
+                _axf = Path(scratchpad) / "axis_coverage_findings.md"
+                _headings = 0
+                if _axf.exists():
+                    import re as _re
+                    _headings = len(_re.findall(
+                        r"(?m)^#{2,4}\s*Finding\s*\[",
+                        _axf.read_text(encoding="utf-8", errors="replace")))
+                if _headings > 0 and _pr.get("parsed", 0) == 0:
+                    log.warning(
+                        f"[{phase.name}] AXIS PROMOTION MISMATCH: {_headings} "
+                        "finding heading(s) in axis_coverage_findings.md but "
+                        "promotion parsed 0 — ID-format/parser drift; candidates "
+                        "would be silently dropped. Investigate _EXPL_HEADING_RE."
+                    )
+                    try:
+                        (Path(scratchpad) / "axis_coverage_promotion_receipt.md"
+                         ).write_text(
+                            f"[AXIS_PROMOTION_MISMATCH] {_headings} finding "
+                            "heading(s) present but 0 parsed — ID-format/parser "
+                            "drift. No AXIS candidate reached the inventory. Fix "
+                            "the heading parser (_EXPL_HEADING_RE).\n",
+                            encoding="utf-8")
+                    except OSError:
+                        pass
+            except Exception:
+                pass
             if _pr.get("emitted"):
                 log.info(
                     f"[{phase.name}] promoted {_pr['emitted']} multi-axis "

@@ -821,7 +821,12 @@ def compute_unbounded_input_candidates(scratchpad: Path) -> list:
 # case-insensitively anywhere in the block. Emitters live in
 # phase4b6-exploration-skeptic.md, phase5-skeptic.md, phase4b-depth.md.
 _CI_BLOCK_RE = re.compile(
-    r"committed-invariant\s*\[\s*(?P<id>CI-\d+)\s*\]\s*\n(?P<body>.*?)"
+    # ID accepts shard-namespaced forms (CI-A1, CI-B12) as well as the bare
+    # CI-1 form. The skeptic shard-workers emit CI-<shard><n> (CI-A1..CI-D3);
+    # a `CI-\d+`-only pattern silently dropped every namespaced block — the same
+    # ID-format-too-narrow silent-drop class as _EXPL_HEADING_RE (see
+    # feedback_id_regex_catalog). Anchored on `committed-invariant [...]`.
+    r"committed-invariant\s*\[\s*(?P<id>CI-[A-Za-z0-9]+)\s*\]\s*\n(?P<body>.*?)"
     r"(?=\n\s*committed-invariant\s*\[|\n#{1,6}\s|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
@@ -1372,8 +1377,8 @@ def promote_axis_findings_to_inventory(scratchpad: Path) -> dict:
     promoted: set = set()
     if receipt.exists():
         try:
-            promoted = set(re.findall(r"\b([A-Za-z]{2,6}-\d+)\s*->\s*INV-\d+",
-                                      receipt.read_text(encoding="utf-8", errors="replace")))
+            promoted = set(_PROMOTION_RECEIPT_ID_RE.findall(
+                receipt.read_text(encoding="utf-8", errors="replace")))
         except Exception:
             promoted = set()
 
@@ -1477,10 +1482,24 @@ def promote_axis_findings_to_inventory(scratchpad: Path) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _EXPL_HEADING_RE = re.compile(
-    r"^#{2,4}\s*Finding\s*\[\s*(?P<id>[A-Za-z]{2,6}-\d+)\s*\]\s*:\s*(?P<title>.+?)\s*$",
+    # ID accepts multi-segment forms (AXIS-A-1, AXIS-F-4) as well as the bare
+    # two-part form (NEXP-1, INV-001). The M2 axis-worker emits AXIS-<shard>-<n>;
+    # a `[A-Za-z]{2,6}-\d+`-only pattern silently dropped every 3-part AXIS
+    # heading (14 findings incl. a High), the same silent-drop class fixed for
+    # _CI_BLOCK_RE (see feedback_id_regex_catalog). Anchored on `Finding [...]`.
+    r"^#{2,4}\s*Finding\s*\[\s*(?P<id>[A-Za-z]{2,6}(?:-[A-Za-z0-9]+)+)\s*\]\s*:\s*(?P<title>.+?)\s*$",
     re.MULTILINE,
 )
 _EXPL_REQUIRED_FIELDS = ("Severity", "Location", "Description")
+# Receipt idempotency re-read for the promote_*_to_inventory promoters. MUST use
+# the SAME multi-segment ID shape as _EXPL_HEADING_RE: the receipt is written as
+# `<finding-id> -> INV-nnn`, and a narrower `[A-Za-z]{2,6}-\d+` re-read captured
+# only the `A-1` substring of a 3-part `AXIS-A-1`, so `id not in promoted` was
+# always True → duplicate promotion on every haltless resume/retry. Pairs with
+# the heading regex; widen both together or idempotency silently breaks.
+_PROMOTION_RECEIPT_ID_RE = re.compile(
+    r"\b([A-Za-z]{2,6}(?:-[A-Za-z0-9]+)+)\s*->\s*INV-\d+"
+)
 
 
 def promote_enumgap_exploration_to_inventory(scratchpad: Path) -> dict:
@@ -1516,8 +1535,8 @@ def promote_enumgap_exploration_to_inventory(scratchpad: Path) -> dict:
     promoted: set = set()
     if receipt.exists():
         try:
-            promoted = set(re.findall(r"\b([A-Za-z]{2,6}-\d+)\s*->\s*INV-\d+",
-                                      receipt.read_text(encoding="utf-8", errors="replace")))
+            promoted = set(_PROMOTION_RECEIPT_ID_RE.findall(
+                receipt.read_text(encoding="utf-8", errors="replace")))
         except Exception:
             promoted = set()
 

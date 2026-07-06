@@ -340,6 +340,47 @@ def test_promotion_appends_axisgap_and_is_idempotent(tmp_path):
     assert eg.promote_axis_findings_to_inventory(sp)["emitted"] == 0
 
 
+def test_promotion_parses_three_part_axis_ids(tmp_path):
+    """Regression (feedback_id_regex_catalog): the M2 axis-worker emits
+    AXIS-<shard>-<n> (AXIS-A-1..AXIS-F-4), not the bare AXIS-1 form the old
+    fixture used. A `[A-Za-z]{2,6}-\\d+`-only heading regex silently dropped
+    every 3-part heading (14 findings incl. a High in the DODO run)."""
+    eg = _eg()
+    sp = tmp_path / ".scratchpad"
+    sp.mkdir()
+    (sp / "findings_inventory.md").write_text(
+        "# Findings Inventory\n", encoding="utf-8")
+
+    def _f(fid: str, title: str) -> str:
+        return (
+            f"### Finding [{fid}]: {title}\n"
+            "**Severity**: High\n"
+            "**Location**: `C.sol:L10` (fn: `hotFn`)\n"
+            "**Preferred Tag**: [CODE-TRACE]\n"
+            "**Description**: [TRACE:withdraw->stranded] concrete trace\n"
+            "**Impact**: principal stranded on abort path\n"
+            "**Material Harm**: depositor permanently loses bridged principal\n\n")
+
+    (sp / "axis_coverage_findings.md").write_text(
+        "# Multi-Axis Coverage Meta-Pass\n\n"
+        + _f("AXIS-A-1", "theft on a hot function")
+        + _f("AXIS-F-4", "liveness brick on withdraw"),
+        encoding="utf-8")
+    res = eg.promote_axis_findings_to_inventory(sp)
+    assert res["emitted"] == 2, res
+    inv = (sp / "findings_inventory.md").read_text(encoding="utf-8").replace("**", "")
+    assert "AXISGAP:AXIS-A-1" in inv
+    assert "AXISGAP:AXIS-F-4" in inv
+    # Idempotency regression guard: the receipt is written as `AXIS-A-1 -> INV-00n`;
+    # if the receipt re-read regex is narrower than the heading regex it cannot
+    # match the 3-part ID, so every resume/retry re-appends duplicates. Second
+    # run must emit 0 and leave exactly one block per source finding.
+    assert eg.promote_axis_findings_to_inventory(sp)["emitted"] == 0
+    inv2 = (sp / "findings_inventory.md").read_text(encoding="utf-8").replace("**", "")
+    assert inv2.count("AXISGAP:AXIS-A-1") == 1, inv2.count("AXISGAP:AXIS-A-1")
+    assert inv2.count("AXISGAP:AXIS-F-4") == 1, inv2.count("AXISGAP:AXIS-F-4")
+
+
 # ── soft validator ───────────────────────────────────────────────────────────
 
 def test_validator_in_all_and_soft():
