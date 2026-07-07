@@ -108,12 +108,17 @@ def test_shard_namespaced_ci_ids_are_harvested(tmp_path: Path):
             f"Provenance: skeptic NO-GAP @ {cid}\n"
         )
 
+    # CI-ES6-1 is a real 3-segment shard form observed in the Spectra run; the
+    # reconciliation gate caught it as a residual drop when the CI pattern was
+    # only 2-segment (CI-[A-Za-z0-9]+). The deriver must harvest it too.
     _write_skeptic(sp, _blk("CI-A1", "CONSERVATION"),
-                   _blk("CI-B2", "FRESHNESS"), _blk("CI-D3", "ROUNDTRIP"))
+                   _blk("CI-B2", "FRESHNESS"), _blk("CI-D3", "ROUNDTRIP"),
+                   _blk("CI-ES6-1", "CONSERVATION"))
     out = eg.compute_invariant_assertion_candidates(sp)
-    assert len(out) == 3, f"expected 3 namespaced candidates, got {len(out)}"
+    assert len(out) == 4, f"expected 4 namespaced candidates, got {len(out)}"
     tags = " ".join(c["source_tag"] for c in out)
     assert "INVARIANT:CI-A1" in tags and "INVARIANT:CI-D3" in tags, tags
+    assert "INVARIANT:CI-ES6-1" in tags, tags
 
 
 def test_emitted_candidate_stamps_source_id_invariant(tmp_path: Path):

@@ -6801,7 +6801,7 @@ def _validate_enumgap_exploration(scratchpad: Path, mode: str) -> list[str]:
 # The habit is recall-positive (more falsifiable candidates); its absence loses
 # no prior finding, so a gap is advisory, not fatal.
 
-_CI_BLOCK_PRESENCE_RE = re.compile(r"committed-invariant\s*\[\s*CI-[A-Za-z0-9]+\s*\]", re.IGNORECASE)
+_CI_BLOCK_PRESENCE_RE = re.compile(r"committed-invariant\s*\[\s*CI(?:-[A-Za-z0-9]+)+\s*\]", re.IGNORECASE)
 _CI_CLEAR_SIGNAL_RE = re.compile(r"\bNO-?GAP\b|\bDOWNGRADE\b", re.IGNORECASE)
 # Format-agnostic committed-invariant header counter. Any `committed-invariant
 # [<anything>]` header, regardless of ID shape. Compared against the harvestable

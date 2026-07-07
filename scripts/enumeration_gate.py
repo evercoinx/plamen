@@ -826,7 +826,7 @@ _CI_BLOCK_RE = re.compile(
     # a `CI-\d+`-only pattern silently dropped every namespaced block — the same
     # ID-format-too-narrow silent-drop class as _EXPL_HEADING_RE (see
     # feedback_id_regex_catalog). Anchored on `committed-invariant [...]`.
-    r"committed-invariant\s*\[\s*(?P<id>CI-[A-Za-z0-9]+)\s*\]\s*\n(?P<body>.*?)"
+    r"committed-invariant\s*\[\s*(?P<id>CI(?:-[A-Za-z0-9]+)+)\s*\]\s*\n(?P<body>.*?)"
     r"(?=\n\s*committed-invariant\s*\[|\n#{1,6}\s|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
