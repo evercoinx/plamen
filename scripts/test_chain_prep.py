@@ -364,3 +364,121 @@ def test_enabler_baseline_overwrites_passthrough_stub(tmp_path):
     text = (tmp_path / "enabler_results.md").read_text(encoding="utf-8")
     assert "MECHANICAL_BASELINE_STEP0A" in text
     assert "No new enabler paths were mechanically introduced" not in text
+
+
+# ---------------------------------------------------------------------------
+# Fix 7 Part B — CROSS-DOMAIN-DEP → STEP-0a-LC enabler harvester
+# ---------------------------------------------------------------------------
+
+
+def _write_depth_findings(sp: Path, name: str, body: str) -> None:
+    (sp / name).write_text(body, encoding="utf-8")
+
+
+def test_cross_domain_harvest_substantive_only(tmp_path):
+    """Substantive [CROSS-DOMAIN-DEP: domain — detail] tags become enablers;
+    bare domain-only tags and the `none` admission are skipped."""
+    cp = _cp()
+    _write_depth_findings(tmp_path, "depth_external_findings.md", (
+        "### Finding [DX-1]\n"
+        "**Location**: Bridge.sol:L42\n"
+        "Analysis. [CROSS-DOMAIN-DEP: external — destination VM deserialization "
+        "scheme decides whether the payload decodes]\n\n"
+        "### Finding [DX-2]\n"
+        "**Location**: Bridge.sol:L88\n"
+        "Bare tag. [CROSS-DOMAIN-DEP: external]\n\n"
+        "### Finding [DX-3]\n"
+        "**Location**: Bridge.sol:L120\n"
+        "In-scope. [CROSS-DOMAIN-DEP: none — fully in-scope permissionless theft]\n"
+    ))
+    _write_inventory(tmp_path, [
+        {"id": "INV-001", "severity": "High", "location": "Bridge.sol:L42",
+         "verdict": "CONFIRMED", "root_cause": "real dangerous state"},
+    ])
+    harv = cp._harvest_cross_domain_enablers(tmp_path, cp._load_inventory(tmp_path))
+    dets = [h["detail"] for h in harv]
+    assert len(harv) == 1, dets
+    assert "destination VM deserialization" in harv[0]["detail"]
+    assert harv[0]["finding_id"] == "DX-1"
+    assert harv[0]["domain"] == "external"
+    # bare + none must NOT appear
+    assert all("none" != h["domain"] for h in harv)
+    assert all("fully in-scope" not in h["detail"] for h in harv)
+
+
+def test_cross_domain_harvest_dedup_by_locus_detail(tmp_path):
+    """Identical (locus, detail) tags in two files collapse to one enabler."""
+    cp = _cp()
+    common = ("### Finding [DE-1]\n**Location**: X.sol:L10\n"
+              "[CROSS-DOMAIN-DEP: token-flow — pooled residual provides drained funds]\n")
+    _write_depth_findings(tmp_path, "depth_token_flow_findings.md", common)
+    _write_depth_findings(tmp_path, "depth_edge_case_findings.md", common)
+    _write_inventory(tmp_path, [
+        {"id": "INV-001", "severity": "High", "location": "X.sol:L10",
+         "verdict": "CONFIRMED", "root_cause": "rc"},
+    ])
+    harv = cp._harvest_cross_domain_enablers(tmp_path, cp._load_inventory(tmp_path))
+    assert len(harv) == 1
+
+
+def test_cross_domain_harvest_dedup_vs_axisgap_provenance(tmp_path):
+    """A CROSS-DOMAIN-DEP tag at a locus already covered by an M2 AXISGAP
+    provenance-gap candidate is not re-emitted (append-only dedup)."""
+    cp = _cp()
+    _write_depth_findings(tmp_path, "depth_external_findings.md", (
+        "### Finding [DX-9]\n**Location**: Y.sol:L55\n"
+        "[CROSS-DOMAIN-DEP: external — assumes freshness of an off-domain value]\n"
+    ))
+    _write_inventory(tmp_path, [
+        # An AXISGAP provenance candidate at the SAME locus (Y.sol:L55).
+        {"id": "INV-050", "severity": "Low", "location": "Y.sol:L55",
+         "verdict": "NEEDS_VERIFICATION",
+         "source_ids": "AXISGAP:AXIS-9 (multi-axis coverage meta-pass)",
+         "root_cause": "provenance axis unexamined at hot function",
+         "description": "provenance freshness gap"},
+    ])
+    entries = cp._load_inventory(tmp_path)
+    assert cp._axisgap_provenance_loci(entries)  # locus is recognized
+    harv = cp._harvest_cross_domain_enablers(tmp_path, entries)
+    assert harv == []
+
+
+def test_cross_domain_harvest_cap_40(tmp_path):
+    """The harvester never emits more than _MAX_CROSS_DOMAIN_ENABLERS."""
+    cp = _cp()
+    blocks = []
+    for i in range(60):
+        blocks.append(
+            f"### Finding [DX-{i}]\n**Location**: F.sol:L{i}\n"
+            f"[CROSS-DOMAIN-DEP: external — distinct off-domain assumption number {i}]\n"
+        )
+    _write_depth_findings(tmp_path, "depth_external_findings.md", "\n".join(blocks))
+    _write_inventory(tmp_path, [
+        {"id": "INV-001", "severity": "High", "location": "F.sol:L1",
+         "verdict": "CONFIRMED", "root_cause": "rc"},
+    ])
+    harv = cp._harvest_cross_domain_enablers(tmp_path, cp._load_inventory(tmp_path))
+    assert len(harv) <= cp._MAX_CROSS_DOMAIN_ENABLERS == 40
+
+
+def test_enabler_baseline_writes_cross_domain_table(tmp_path):
+    """compute_enabler_baseline emits the CROSS-DOMAIN-DEP enabler sub-table and
+    counts them; bare tags do not appear."""
+    cp = _cp()
+    _write_depth_findings(tmp_path, "depth_external_findings.md", (
+        "### Finding [DX-1]\n**Location**: Bridge.sol:L42\n"
+        "[CROSS-DOMAIN-DEP: external — destination VM deserialization scheme]\n"
+        "### Finding [DX-2]\n**Location**: Bridge.sol:L88\n"
+        "[CROSS-DOMAIN-DEP: external]\n"
+    ))
+    _write_inventory(tmp_path, [
+        {"id": "INV-001", "severity": "High", "location": "Bridge.sol:L42",
+         "verdict": "CONFIRMED", "root_cause": "real dangerous state"},
+    ])
+    out = cp.compute_enabler_baseline(tmp_path)
+    assert out["status"] == "ok"
+    assert out["cross_domain_enablers"] == 1
+    text = (tmp_path / "enabler_results.md").read_text(encoding="utf-8")
+    assert "Cross-Domain Dependency Enablers" in text
+    assert "destination VM deserialization scheme" in text
+    assert "DX-1" in text

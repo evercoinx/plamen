@@ -26,6 +26,13 @@ to identify the semantic relationships the mechanical signals miss.
   severity, location, and the internal hypothesis it maps to.
 - `{SCRATCHPAD}/finding_mapping.md` — hypothesis → source-finding IDs (use to
   confirm two report findings share provenance).
+- `{SCRATCHPAD}/report_dedup_candidate_pairs.md` — OPTIONAL driver-computed HINT
+  list of CROSS-TIER pairs whose FIRST Location range matches within ±3 lines on
+  the same file. These are CANDIDATES ONLY, not merge instructions: same lines is
+  a coincidence signal. Apply the consolidation test below to BOTH full bodies
+  before proposing a MERGE. Two DISTINCT bugs at the same location (different
+  mechanism / different fix) MUST stay separate. The file may be absent or empty
+  — that is fine; still run your own full semantic pass over the report.
 
 Read the FULL body of any finding you are considering merging — title alone is
 not enough. Base every decision on the Description, Impact, and Recommendation

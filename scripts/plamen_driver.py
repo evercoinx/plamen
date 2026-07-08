@@ -41,6 +41,7 @@ from plamen_parsers import _dedup_live_pair_cap  # noqa: F401
 # it by name too (mirrors the _dedup_live_pair_cap robustness pattern) so the
 # phase wiring below is insulated from __all__ drift.
 from plamen_parsers import _compute_dedup_candidate_blocks  # noqa: F401
+from plamen_parsers import _compute_report_dedup_candidate_pairs  # noqa: F401
 from plamen_mechanical import _extract_dedup_absorbed_ids  # noqa: F401
 import plamen_display as display
 from pty_exec import (
@@ -17910,6 +17911,25 @@ def main():
             # actual bounded dedup worker.
             _skip_artifact_recovery_this_phase = True
 
+        # Fix 4: pre-compute the cross-tier same-location candidate HINT list for
+        # the report_dedup_agent (Phase 6d LLM proposer). The mechanical
+        # report_dedup pass has no candidate list, so an identical-location twin
+        # across tiers (a High and a Medium at the same lines) never reached the
+        # proposer. This writes report_dedup_candidate_pairs.md (candidate-only —
+        # the agent's same-root-cause + same-fix test stays the sole merge
+        # authority). Best-effort: a failure only loses the hint, never a finding.
+        if phase.name == "report_dedup_agent":
+            try:
+                n_cand = _compute_report_dedup_candidate_pairs(scratchpad)
+                log.info(
+                    f"[report_dedup_agent] wrote report_dedup_candidate_pairs.md "
+                    f"({n_cand} cross-tier same-location candidate pair(s))"
+                )
+            except Exception as exc:
+                log.warning(
+                    f"[report_dedup_agent] candidate-pair pre-compute failed: {exc!r}"
+                )
+
         # Pre-compute binding severity table for report_index LLM.
         # Eliminates retry cycles caused by the LLM silently inflating
         # severity without a Trust Adj. reason.
@@ -17938,6 +17958,45 @@ def main():
                     )
             except Exception as exc:
                 log.warning(f"[report_index] severity binding failed: {exc!r}")
+
+            # Fix 1: pre-compute the ONE canonical verification-status token per
+            # finding (status_binding.md). The Index Agent fills BOTH the
+            # report_index Verification column AND the body finding-header tag
+            # from this file, ending the 71-index / 12-body / 17-PoC label
+            # collision. Best-effort: a failure only loses the convenience
+            # binding (the LLM falls back to reading the verify verdicts).
+            try:
+                status_map = _expected_report_index_statuses(scratchpad)
+                if status_map:
+                    _slines = [
+                        "# Verification Status Binding Table",
+                        "",
+                        "Driver-computed canonical verification-status token per "
+                        "finding, from (verifier verdict, best evidence tag). The "
+                        "Index Agent MUST use these tokens for BOTH the "
+                        "report_index Verification column AND the body "
+                        "`### [X-NN] Title [STATUS]` header tag.",
+                        "",
+                        "- VERIFIED  = verdict CONFIRMED + proof-grade evidence "
+                        "([POC-PASS]/[MEDUSA-PASS]/[PROD-*])",
+                        "- CONFIRMED = verdict CONFIRMED but only [CODE-TRACE]",
+                        "- CONTESTED = disputed (CONTESTED/UNRESOLVED/PARTIAL)",
+                        "- UNVERIFIED = refuted / none",
+                        "",
+                        "| Finding ID | Verification Status |",
+                        "|------------|---------------------|",
+                    ]
+                    for fid in sorted(status_map, key=lambda x: x.upper()):
+                        _slines.append(f"| {fid} | {status_map[fid]} |")
+                    (scratchpad / "status_binding.md").write_text(
+                        "\n".join(_slines) + "\n", encoding="utf-8",
+                    )
+                    log.info(
+                        f"[report_index] wrote status_binding.md "
+                        f"({len(status_map)} finding(s))"
+                    )
+            except Exception as exc:
+                log.warning(f"[report_index] status binding failed: {exc!r}")
 
             # R2: mechanical completeness backbone. Enumerate every finding/
             # hypothesis ID from bounded ledgers so the Index Agent never has

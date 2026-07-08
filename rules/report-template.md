@@ -22,6 +22,27 @@ The report uses **clean sequential severity-prefixed IDs only**:
 
 ---
 
+## Verification-Status Legend - MANDATORY
+
+Every finding carries ONE canonical verification-status token in both the
+`report_index.md` Master Finding Index `Verification` column and the body
+`### [X-NN] Title [STATUS]` header. The driver pre-computes this per finding in
+`status_binding.md` from (verifier verdict, effective best-evidence tag); use it
+verbatim — do NOT re-derive the label from raw verify prose.
+
+| Status | Meaning | Evidence |
+|--------|---------|----------|
+| `VERIFIED` | Verdict CONFIRMED **and** effective best evidence is proof-grade | `[POC-PASS]` / `[MEDUSA-PASS]` / `[PROD-*]` (a tag demoted to `[CODE-TRACE]` by `(was [POC-PASS], …)` is NOT proof-grade) |
+| `CONFIRMED` | Verdict CONFIRMED but effective best evidence is only `[CODE-TRACE]` | A real confirmed finding — **NOT** `UNVERIFIED` |
+| `CONTESTED` | Disputed (verifier CONTESTED / UNRESOLVED / PARTIAL) | — |
+| `UNVERIFIED` | Refuted / false-positive / none | — |
+
+Sort strength: `VERIFIED` > `CONFIRMED` > `CONTESTED` > `UNVERIFIED`. `CONFIRMED`
+is a **non-speculative** status: a Critical/High that is `VERIFIED` or
+`CONFIRMED` is never capped as "unverified" on a label basis.
+
+---
+
 ## Severity Matrix (Impact × Likelihood)
 
 | | **Likelihood: High** (no prerequisites, anyone) | **Likelihood: Medium** (specific conditions) | **Likelihood: Low** (unlikely/complex setup) |
@@ -98,7 +119,7 @@ For every finding, classify BODY or APPENDIX:
 **Every finding gets its own full section.** No catch-all tables, no grouped summaries, no "remaining findings" dumps. A finding that only appears in a table row is effectively invisible to the reader.
 
 ```markdown
-### [X-NN] Title [VERIFIED/UNVERIFIED/CONTESTED]
+### [X-NN] Title [VERIFIED/CONFIRMED/UNVERIFIED/CONTESTED]
 
 **Severity**: Critical/High/Medium/Low/Informational
 **Location**: `SourceFile:L123-L145`
@@ -163,6 +184,20 @@ invent severity overrides from prose; without the ledger, use the normal
 severity matrix, verifier result, UNRESOLVED/PARTIAL, trusted-actor, chain, or
 PoC-fail rules.
 
+### EXTERNAL-ASSUMPTION-CAP token
+
+`EXTERNAL-ASSUMPTION-CAP(original_sev)` is the Trust Adj. token for the driver's
+narrow always-on severity brake: a High/Critical whose only in-scope-proven fact
+is the ABSENCE of a balance-delta check and whose fund-loss harm materializes
+ONLY under an assumed worst-case UNTRUSTED-EXTERNAL return value (over-report /
+return-inflation / misrouted output), with no PoC attempted (an
+external/deployment/structural no-fork blocker). The driver caps it to **Medium
+(floor Medium, in-body, never Low)** in `severity_binding.md`; stamp
+`EXTERNAL-ASSUMPTION-CAP(<orig>)` and keep the finding in the body. It is NOT a
+false positive — it is a real hardening gap whose severity must not ride at High
+on an assumed external behavior. A finding whose PoC was actually attempted and
+PASSED is NOT capped (carve-out).
+
 **Rules for descriptions**:
 - Write as if the reader has never seen the audit pipeline. No "as identified by the breadth agent" or "this chain combines H-1 with H-3."
 - For chain findings (multiple bugs combining): describe the full attack sequence from start to finish in the Description. The reader should understand the complete attack path without needing to read other findings.
@@ -218,10 +253,10 @@ PoC-fail rules.
 
 ## High Findings
 
-### [H-01] Title [VERIFIED/UNVERIFIED/CONTESTED]
+### [H-01] Title [VERIFIED/CONFIRMED/UNVERIFIED/CONTESTED]
 [Full finding section]
 
-### [H-02] Title [VERIFIED/UNVERIFIED/CONTESTED]
+### [H-02] Title [VERIFIED/CONFIRMED/UNVERIFIED/CONTESTED]
 [Full finding section]
 
 [... every High finding gets its own section ...]
@@ -230,10 +265,10 @@ PoC-fail rules.
 
 ## Medium Findings
 
-### [M-01] Title [VERIFIED/FALSE_POSITIVE/CONTESTED]
+### [M-01] Title [VERIFIED/CONFIRMED/FALSE_POSITIVE/CONTESTED]
 [Full finding section]
 
-### [M-02] Title [VERIFIED/FALSE_POSITIVE/CONTESTED]
+### [M-02] Title [VERIFIED/CONFIRMED/FALSE_POSITIVE/CONTESTED]
 [Full finding section]
 
 [... every Medium finding gets its own section ...]

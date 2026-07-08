@@ -494,6 +494,23 @@ mechanically harvested downstream into falsifiable candidates for the fuzz/PoC
 gates. The six shapes are generic relational forms; NEVER encode a specific
 protocol/token/function as "the answer" — symbols resolve at the locus at runtime.
 
+**FALSIFIABILITY-AWARE SHAPE SELECTION (MANDATORY).** Emit the shape whose
+falsifier could actually FAIL at this locus. If the shape you first reach for is
+*true by construction* — its assertion cannot be violated by any reachable input
+because the code trivially satisfies it (for example a 1:1 unwrap step
+trivially satisfies `CONSERVATION`, so a conservation falsifier can never break)
+— that block is worthless as a downstream PoC target. In that case you MUST ALSO
+add at least one shape that CAN break at the same locus: a
+`NO_REVERT_AT_BOUNDARY` block (does the boundary/limit case revert, brick, or
+mis-round?) and/or a `REQUESTED_EQ_DELIVERED` block (does the amount/asset the
+caller requested equal what the callee actually delivered, across a
+conversion/bridge/wrap boundary?). You MAY emit **2–3 CI blocks per locus** for
+exactly this reason — one per distinct falsifiable relation. This is a generic
+HOW-directive about picking a *breakable* invariant; it names no protocol, token,
+or function (a native↔wrapped conversion is only an illustrative example of a
+boundary where `CONSERVATION` looks satisfied yet `REQUESTED_EQ_DELIVERED` can
+still diverge). Symbols always resolve at the locus at runtime.
+
 ## FIX GENERATION (POC-PASS only)
 If your PoC PASSES (verdict = CONFIRMED with [POC-PASS]):
 1. Write a minimal diff-style fix (smallest change that eliminates the bug)

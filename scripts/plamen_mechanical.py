@@ -1943,14 +1943,15 @@ def _defined_report_section_ids(*tier_texts: str) -> set[str]:
 def _finalize_report_tier_section(section: str, id_to_title: dict) -> str:
     """Rewrite generic/broken finding headings from the canonical index title
     and strip internal-status prose. Preserves a trailing verification-status
-    tag ([VERIFIED]/[UNVERIFIED]/[CONTESTED]); drops a [REPORT-BLOCKED ...] tag."""
+    tag ([VERIFIED]/[CONFIRMED]/[UNVERIFIED]/[CONTESTED]); drops a
+    [REPORT-BLOCKED ...] tag."""
     if not section:
         return section
     head_re = re.compile(
         r"^(#{2,3})\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[\s*([CHMLI]-\d+)\s*\]\s*(.*?)\s*$"
     )
     status_re = re.compile(
-        r"(?i)(\[(?:VERIFIED|UNVERIFIED|CONTESTED|VERIFICATION NOT EXECUTED|REPORT-BLOCKED[^\]]*)\])\s*$"
+        r"(?i)(\[(?:VERIFIED|CONFIRMED|UNVERIFIED|CONTESTED|VERIFICATION NOT EXECUTED|REPORT-BLOCKED[^\]]*)\])\s*$"
     )
     out = []
     for ln in section.split("\n"):
@@ -2707,7 +2708,7 @@ def _dedup_report_sections(body: str) -> list[dict]:
                 impacts.add(bm.group(1).strip())
         title = hm.group(0)
         title = re.sub(r"(?i)^#{2,3}\s*\[\s*[CHMLI]-\d+\s*\]\s*", "", title)
-        title = re.sub(r"(?i)\s*\[(?:VERIFIED|UNVERIFIED|CONTESTED|UNRESOLVED[^\]]*|VERIFICATION NOT EXECUTED)\]\s*$", "", title).strip()
+        title = re.sub(r"(?i)\s*\[(?:VERIFIED|CONFIRMED|UNVERIFIED|CONTESTED|UNRESOLVED[^\]]*|VERIFICATION NOT EXECUTED)\]\s*$", "", title).strip()
         # Recommendation/fix prose: the load-bearing same-fix discriminator.
         fix_text = ""
         fix_block = re.search(

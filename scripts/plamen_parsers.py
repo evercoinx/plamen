@@ -161,6 +161,7 @@ __all__ = [
     "_merge_inventory_entries",
     "_compute_dedup_candidate_pairs",
     "_compute_dedup_candidate_blocks",
+    "_compute_report_dedup_candidate_pairs",
     "_dedup_extract_findings",
     "_dedup_live_pair_cap",
     "_dedup_block_max",
@@ -254,6 +255,12 @@ __all__ = [
     "parse_report_index_assignments",
     "parse_report_index_counts",
     "parse_verification_queue_rows",
+    # cross-module helpers imported by other modules (must be in __all__ for the
+    # star-import + export-invariant test): report-dedup candidate helpers and the
+    # PoC keyword predicate now imported by plamen_validators.
+    "_parse_report_index_master_rows",
+    "_report_index_first_location",
+    "_poc_kw_present",
 ]
 
 
@@ -5296,6 +5303,240 @@ def _compute_dedup_candidate_pairs(scratchpad: Path) -> int:
         pass
 
     return len(pairs)
+
+
+# Report-stage cross-tier candidate cap. Mirrors the Fix-4 Hard DO-NOT: never
+# raise the 50-pair dedup cap. Cross-tier near-identical pairs over a ~90-finding
+# report index never approach this in practice; it is a safety ceiling only.
+_REPORT_DEDUP_CANDIDATE_CAP = 50
+
+# Fix-4 location tolerance. The FIRST Location range of two findings must match
+# within this many lines on BOTH endpoints (near-identical range) to be a
+# candidate. DO NOT loosen beyond ±3 — a wider window explodes to 40-55 false
+# pairs on a dense report (per a dense-report precision post-mortem).
+_REPORT_DEDUP_LINE_TOLERANCE = 3
+
+
+def _report_index_first_location(cell: str) -> tuple[str, tuple[int, int] | None]:
+    """Extract (basename, first-line-range) from a Master Finding Index Location cell.
+
+    The Location column can list several sites (``A.sol:10-20; B.sol:30``). This
+    returns ONLY the FIRST location's file basename and line range — the "first
+    Location range" the Fix-4 candidate list keys on. Returns ("", None) when no
+    parseable ``file:Lnnn`` prefix exists (e.g. ``GatewaySend.sol (file)``).
+    """
+    norm = _norm_loc(cell)
+    lr = _parse_line_range(norm)
+    if lr is None:
+        return "", None
+    # Everything before the first `:digit` is the first file reference.
+    file_head = re.sub(r":L?\d+.*$", "", norm).strip()
+    # Guard against a leading prose token; take the last path-like component.
+    fm = re.search(r"([\w./\-]+\.(?:sol|rs|move|ts|go|vy))\s*$", file_head)
+    file_part = fm.group(1) if fm else file_head
+    base = file_part.rsplit("/", 1)[-1].strip().lower()
+    if not base:
+        return "", None
+    return base, lr
+
+
+def _parse_report_index_master_rows(text: str) -> list[dict]:
+    """Parse the Master Finding Index table into report-ID / title / location rows.
+
+    Header-aware: resolves the Title / Severity / Location column positions from
+    the table header so a reordered or extended index still parses. Only the
+    ``## Master Finding Index`` section is read (the Tier Assignments / Excluded
+    tables repeat report IDs and must NOT be treated as findings).
+    """
+    section = _report_index_assignment_text(text)
+    id_re = re.compile(r"^[\*\[`_]*([CHMLI]-\d+)\b")
+    col: dict[str, int] = {}
+    rows: list[dict] = []
+    for line in section.splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        if _is_separator_row(s):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        # Header row: locate Title / Severity / Location columns by name.
+        if not col:
+            lowered = [c.lower() for c in cells]
+            if any("location" in c for c in lowered) and any(
+                "title" in c for c in lowered
+            ):
+                for idx, name in enumerate(lowered):
+                    if "title" in name and "title" not in col:
+                        col["title"] = idx
+                    elif "severity" in name and "severity" not in col:
+                        col["severity"] = idx
+                    elif "location" in name and "location" not in col:
+                        col["location"] = idx
+                continue
+        m = id_re.match(cells[0]) if cells else None
+        if not m:
+            continue
+        report_id = m.group(1)
+        loc_idx = col.get("location")
+        title_idx = col.get("title")
+        # Fall back to positional defaults (Report ID | Title | Severity |
+        # Location) only if the header never resolved a Location column.
+        if loc_idx is None:
+            loc_idx = 3
+        if title_idx is None:
+            title_idx = 1
+        location = cells[loc_idx] if loc_idx < len(cells) else ""
+        title = cells[title_idx] if title_idx < len(cells) else ""
+        rows.append({
+            "report_id": report_id,
+            "tier": report_id[0],
+            "title": title,
+            "location": location,
+        })
+    return rows
+
+
+def _compute_report_dedup_candidate_pairs(scratchpad: Path) -> int:
+    """Emit report_dedup_candidate_pairs.md — cross-tier same-location HINTS.
+
+    Fix 4: read ``report_index.md``'s Master Finding Index and list every
+    CROSS-TIER pair (report-ID prefix differs, e.g. High↔Medium) whose FIRST
+    Location range matches within ±3 lines on BOTH endpoints on the same file
+    basename. A precision post-mortem showed the mechanical report_dedup pass has no
+    candidate list, so the H-01/M-06 identical-location twin (a High and a
+    Medium describing the same permissionless ``withdraw`` at the same lines)
+    never reached the LLM proposer.
+
+    CANDIDATE-ONLY. This helper NEVER merges anything. The report_dedup_agent's
+    same-root-cause + same-fix + describable-together test remains the SOLE merge
+    authority, and the Python executor's zero-loss embed + data-loss gate is the
+    final safety net. Distinct-mechanism findings that happen to sit at the same
+    lines (e.g. two different bugs in one function) surface here purely as
+    candidates for the LLM to VETO.
+
+    Guards left UNCHANGED per Fix 4: the report_dedup decision tree's
+    anti-transitive / survivor-superset guard, the live-pair cap, and the
+    Phase-4e never-cross-tier policy. This helper adds a bounded (±3, ≤50)
+    candidate list only.
+
+    Returns the number of candidate pairs written.
+    """
+    idx_path = scratchpad / "report_index.md"
+    if not idx_path.exists():
+        return 0
+    try:
+        text = _llm_norm(idx_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return 0
+
+    rows = _parse_report_index_master_rows(text)
+
+    # Attach first-location file basename + range; drop rows with no range.
+    findings: list[dict] = []
+    for r in rows:
+        base, lr = _report_index_first_location(r["location"])
+        if not base or lr is None:
+            continue
+        findings.append({**r, "_file": base, "_lines": lr})
+
+    # Group by file basename; pair cross-tier findings with near-identical first
+    # ranges (both endpoints within ±3).
+    by_file: dict[str, list[int]] = {}
+    for i, f in enumerate(findings):
+        by_file.setdefault(f["_file"], []).append(i)
+
+    tol = _REPORT_DEDUP_LINE_TOLERANCE
+    pairs: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for _file, indices in by_file.items():
+        for a in range(len(indices)):
+            for b in range(a + 1, len(indices)):
+                fa, fb = findings[indices[a]], findings[indices[b]]
+                if fa["tier"] == fb["tier"]:
+                    continue  # cross-tier only
+                sa, ea = fa["_lines"]
+                sb, eb = fb["_lines"]
+                dstart = abs(sa - sb)
+                dend = abs(ea - eb)
+                if dstart > tol or dend > tol:
+                    continue
+                key = tuple(sorted((fa["report_id"], fb["report_id"])))
+                if key in seen:
+                    continue
+                seen.add(key)
+                # Order the row so the higher-severity finding is listed first
+                # (survivor hint), matching the agent's survivor-selection rule.
+                order = "CHMLI"
+                if order.index(fb["tier"]) < order.index(fa["tier"]):
+                    fa, fb = fb, fa
+                    sa, ea, sb, eb = sb, eb, sa, ea
+                pairs.append({
+                    "a": fa, "b": fb,
+                    "file": _file,
+                    "loc_a": (sa, ea), "loc_b": (sb, eb),
+                    "dstart": abs(sa - sb), "dend": abs(ea - eb),
+                })
+
+    # Deterministic ordering: tightest match first, then report ID.
+    pairs.sort(key=lambda p: (p["dstart"] + p["dend"], p["a"]["report_id"], p["b"]["report_id"]))
+
+    n_total = len(pairs)
+    truncated = n_total > _REPORT_DEDUP_CANDIDATE_CAP
+    live = pairs[:_REPORT_DEDUP_CANDIDATE_CAP]
+
+    out = ["# Report Dedup Candidate Pairs", ""]
+    if not live:
+        out.append(
+            "No cross-tier same-location candidate pairs found. The "
+            "report_dedup_agent still runs its own semantic pass."
+        )
+        (scratchpad / "report_dedup_candidate_pairs.md").write_text(
+            "\n".join(out) + "\n", encoding="utf-8",
+        )
+        return 0
+
+    out.append(
+        f"{len(live)} cross-tier candidate pair(s): findings on the SAME file "
+        f"whose FIRST Location range matches within ±{tol} lines on both "
+        "endpoints."
+    )
+    out.append("")
+    out.append(
+        "**CANDIDATE HINTS ONLY.** This list does NOT merge anything. Apply the "
+        "consolidation test (same root cause + same fix + describable together) "
+        "to BOTH full finding bodies before proposing a MERGE — same lines is a "
+        "coincidence signal, not proof. Two DISTINCT bugs at the same location "
+        "(different mechanism / different fix) MUST be kept separate. When in "
+        "doubt, KEEP SEPARATE."
+    )
+    if truncated:
+        out.append("")
+        out.append(
+            f"NOTE: {n_total} candidate pair(s) found; showing the tightest "
+            f"{_REPORT_DEDUP_CANDIDATE_CAP}. Remaining pairs are deferred (not "
+            "discarded) — the agent may still merge them on its own semantic pass."
+        )
+    out.append("")
+    out.append(
+        "| Survivor (higher sev) | Absorbed candidate | File | Loc A | Loc B | Δstart | Δend |"
+    )
+    out.append(
+        "|-----------------------|--------------------|------|-------|-------|--------|------|"
+    )
+    for p in live:
+        a, b = p["a"], p["b"]
+        la, ea = p["loc_a"]
+        lb, eb = p["loc_b"]
+        out.append(
+            f"| {a['report_id']}: {a['title'][:44]} "
+            f"| {b['report_id']}: {b['title'][:44]} "
+            f"| {p['file']} | L{la}-{ea} | L{lb}-{eb} | {p['dstart']} | {p['dend']} |"
+        )
+    out.append("")
+    (scratchpad / "report_dedup_candidate_pairs.md").write_text(
+        "\n".join(out) + "\n", encoding="utf-8",
+    )
+    return len(live)
 
 
 def _compute_dedup_candidate_blocks(scratchpad: Path) -> int:

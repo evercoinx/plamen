@@ -374,3 +374,85 @@ def test_depth_and_verify_both_scanned(tmp_path: Path):
     out = eg.compute_invariant_assertion_candidates(sp)
     tags = {c["source_tag"] for c in out}
     assert tags == {"INVARIANT:CI-1", "INVARIANT:CI-2"}, tags
+
+
+# ── Fix 7 Part A: falsifiability-aware shape selection (driver nudge) ──────────
+
+def _ci_conversion_block(n: int, assertion: str) -> str:
+    """A CONSERVATION CI block whose assertion carries a value-conversion cue."""
+    return (
+        f"committed-invariant [CI-{n}]\n"
+        f"Locus: src/Pricing.sol:L142  (fn: getQuote)\n"
+        f"Shape: CONSERVATION\n"
+        f"Assertion: {assertion}\n"
+        f"Falsify Class: conservation\n"
+        f"Provenance: skeptic NO-GAP @ instance-{n}\n"
+    )
+
+
+def test_conservation_at_conversion_boundary_appends_breakable_shapes(tmp_path: Path):
+    """A CONSERVATION invariant emitted at a value-conversion boundary is often
+    true by construction, so the emitted candidate's Falsify Class is enriched
+    with the breakable shapes NO_REVERT_AT_BOUNDARY + REQUESTED_EQ_DELIVERED."""
+    eg = _eg()
+    _root, sp = _proj(tmp_path)
+    _write_skeptic(sp, _ci_conversion_block(1, "amountIn == amountOut for the 1:1 unwrap step"))
+    out = eg.compute_invariant_assertion_candidates(sp)
+    assert len(out) == 1, out
+    note = out[0]["source_note"]
+    assert "ALSO falsify" in note
+    assert "NO_REVERT_AT_BOUNDARY" in note
+    assert "REQUESTED_EQ_DELIVERED" in note
+    # still a single candidate — the nudge enriches, it does not multiply rows
+    assert out[0]["source_tag"] == "INVARIANT:CI-1"
+
+
+def test_conservation_without_conversion_cue_not_nudged(tmp_path: Path):
+    """A CONSERVATION invariant with no conversion cue keeps its Falsify Class
+    unchanged (no spurious breakable-shape append)."""
+    eg = _eg()
+    _root, sp = _proj(tmp_path)
+    _write_skeptic(sp, _ci_conversion_block(1, "sum(shares) == totalShares across the settle"))
+    out = eg.compute_invariant_assertion_candidates(sp)
+    assert len(out) == 1, out
+    assert "ALSO falsify" not in out[0]["source_note"]
+
+
+def test_non_conservation_shape_never_nudged(tmp_path: Path):
+    """The nudge fires ONLY on CONSERVATION; a ROUNDTRIP block at a conversion
+    boundary is left alone (its own falsifier can already break)."""
+    eg = _eg()
+    _root, sp = _proj(tmp_path)
+    blk = (
+        "committed-invariant [CI-7]\n"
+        "Locus: src/Pricing.sol:L142  (fn: getQuote)\n"
+        "Shape: ROUNDTRIP\n"
+        "Assertion: decode(encode(x)) == x across the wrap conversion\n"
+        "Falsify Class: roundtrip\n"
+        "Provenance: skeptic NO-GAP @ instance-7\n"
+    )
+    _write_skeptic(sp, blk)
+    out = eg.compute_invariant_assertion_candidates(sp)
+    assert len(out) == 1, out
+    assert "ALSO falsify" not in out[0]["source_note"]
+
+
+# ── Fix 7 Part B: CROSS-DOMAIN-DEP is NOT a provenance-axis EXAMINED signal ────
+
+def test_cross_domain_dep_no_longer_closes_provenance_gap():
+    """A [CROSS-DOMAIN-DEP: external] tag is an ADMISSION the domain was NOT
+    analyzed — it must NOT count as an EXAMINED provenance signal (else the M2
+    provenance gap is wrongly closed)."""
+    eg = _eg()
+    block = ("**Location**: X.sol:L10\n"
+             "Analysis with a [CROSS-DOMAIN-DEP: external — off-domain assumption] tag.\n")
+    assert eg._axis_examined_signals(block, "provenance") is False
+
+
+def test_external_assumption_still_closes_provenance_gap():
+    """The [EXTERNAL-ASSUMPTION:] tag remains a valid provenance EXAMINED signal
+    (it is a positive R10 worst-case adjudication, not an unanalyzed admission)."""
+    eg = _eg()
+    block = ("**Location**: X.sol:L10\n"
+             "[EXTERNAL-ASSUMPTION: destination decoder uses Borsh] worst-case taken.\n")
+    assert eg._axis_examined_signals(block, "provenance") is True

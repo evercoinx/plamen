@@ -109,6 +109,50 @@ If execution was not attempted, explain why (no build environment, no test frame
 
 ---
 
+## Fork PoC mandate (external-integration findings)
+
+> Applies to any Medium+ finding whose HARM is an **external-integration fund
+> drain / misrouting** — funds drained, over-paid, or routed to the wrong
+> recipient/chain because an **untrusted external contract's return value** is
+> consumed verbatim. Such a finding is NOT `structural`: it has a concrete,
+> fork-testable harm. Self-declaring `PoC Class: structural` (or `spec`/`docs`)
+> to zero the PoC requirement is not permitted for this class — the effective
+> PoC class is floored to `integration`.
+
+**Decision rule:**
+
+1. **Single-chain external dependency at a KNOWN deployed address** → **mandate
+   a fork PoC.** Pin the block and fork against the real deployed contract:
+
+   ```
+   forge test --match-test test_{ID} --fork-url {RPC_URL} --fork-block-number {PINNED} -vvv
+   ```
+
+   Assert the CLAIMED HARM directly (funds drained / misrouted / over-paid), not
+   merely that a function is callable. A passing fork run is `[PROD-FORK]`
+   (proof-grade); its harm-assertion failing is `[POC-FAIL]`.
+
+2. **Cross-chain relay / message-passing harm** (the external leg is a
+   destination chain's consumer that no single-node fork can execute) →
+   **structured skip.** There is no off-the-shelf simulator for the relayed leg;
+   record `PoC Not Attempted Because: EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS`
+   (or `DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL`) with the concrete reason.
+
+3. **No reachable fork RPC in the audit environment** → the mandate is **inert**.
+   Keep the structured skip and stamp the finding `[UNPROVEN-EXTERNAL]`: the harm
+   mechanism is in-scope-proven but its external leg is unverified for want of a
+   fork. The finding STAYS IN THE BODY at its **proven-mechanism severity**; R10
+   must NOT promote it ABOVE that severity on the assumed worst-case external
+   behavior (and never demotes it below).
+
+> The `[UNPROVEN-EXTERNAL]` stamp is an evidence-honesty marker that co-exists
+> with `[CODE-TRACE]`. It is NOT proof-grade and NEVER upgrades a finding's
+> evidence. It records exactly "in-scope mechanism proven; external leg
+> unproven for lack of a fork" so a reader (and R10) can calibrate severity
+> honestly.
+
+---
+
 ## Language-Specific Commands
 
 | Language | Build | Test | Fuzz |

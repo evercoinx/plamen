@@ -1888,6 +1888,7 @@ _LEGITIMATE_SUBPRODUCER_PATTERNS = {
     "rescan_manifest.md",      # Ship 8.17 authoritative rescan gate input
     "opengrep_findings.md",    # driver-sharded opengrep source ([OBLIG:...])
     "severity_binding.md",     # v2.8.3 driver-written severity provenance
+    "status_binding.md",       # Fix 1 driver-written canonical verification-status
     "security_obligations.md", # generic feature-derived audit obligations
     "candidate_semantic_facets.md",
     "candidate_semantic_facets.json",
@@ -3001,6 +3002,34 @@ verification queue. For each finding:
   severity_binding.md will FAIL the provenance gate.
 - When severity_binding.md is absent, fall back to the normal severity
   authority order above.
+
+## VERIFICATION-STATUS BINDING (MANDATORY — Fix 1)
+
+Read `status_binding.md` BEFORE building the Master Finding Index. It holds ONE
+driver-computed canonical verification-status token per finding, derived from
+(verifier verdict, effective best-evidence tag). Use it as the SINGLE source of
+truth for the label in BOTH the Master Finding Index `Verification` column AND
+the body `### [X-NN] Title [STATUS]` header tag — never re-derive the label from
+raw verify prose (that produced the 71-index / 12-body / 17-PoC collision).
+
+Canonical ternary (sort order VERIFIED > CONFIRMED > CONTESTED > UNVERIFIED):
+
+- `VERIFIED`  — verdict CONFIRMED AND effective best evidence is proof-grade
+  (`[POC-PASS]` / `[MEDUSA-PASS]` / `[PROD-*]`). A tag demoted to `[CODE-TRACE]`
+  by an integrity downgrade (`(was [POC-PASS], …)`) is NOT proof-grade.
+- `CONFIRMED` — verdict CONFIRMED but effective best evidence is only
+  `[CODE-TRACE]`. This is a REAL confirmed finding; it is NOT `UNVERIFIED`.
+- `CONTESTED` — disputed (verifier CONTESTED / UNRESOLVED / PARTIAL).
+- `UNVERIFIED` — refuted / false-positive / none.
+
+STEP 1 rule 8 (speculative-critical): a Critical/High whose Verification is
+`VERIFIED` OR `CONFIRMED` is NOT speculative — do not cap it as unverified on a
+label basis. Only a genuinely `CONTESTED`/`UNVERIFIED` chain critical is capped.
+
+For a finding capped by the driver's external-assumption brake (its severity in
+severity_binding.md is Medium and its verify file shows an unproven external-
+return-value assumption), stamp Trust Adj. `EXTERNAL-ASSUMPTION-CAP(<orig>)` and
+keep it in the body at Medium.
 """
     elif phase.name == "report_critical_high":
         report_scope_directive = """

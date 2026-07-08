@@ -137,13 +137,30 @@ class TestAntiAbsorption:
             fm_lines.append(f"| {c[0]} | {hyp_id} |\n")
         (scratch / "finding_mapping.md").write_text("".join(fm_lines), encoding="utf-8")
 
-    def test_distinct_functions_flagged(self, scratch: Path):
+    def test_distinct_functions_not_hard_flagged(self, scratch: Path):
+        # Fix 6: distinct (file, function) ALONE is no longer a hard violation.
+        # Same-fix mirror-contract clusters legitimately span functions/files,
+        # so a same-severity, same-root-cause pair across two functions must
+        # NOT be flagged (and must never drive mechanical atomization).
+        self._seed(scratch, [
+            ("INV-001", "Medium", "GatewayA.sol:L10 handleRefund()", "shared refund handler missing state reset"),
+            ("INV-002", "Medium", "GatewayB.sol:L20 handleRefund()", "shared refund handler missing state reset"),
+        ], "GRP-M-001")
+        issues = validators._validate_chain_anti_absorption(scratch, "thorough")
+        assert issues == []
+
+    def test_distinct_functions_soft_note_on_hard_violation(self, scratch: Path):
+        # When a REAL violation (here: zero-overlap root causes -> Jaccard) fires,
+        # the distinct-functions observation is surfaced as an advisory SOFT NOTE
+        # inside the same issue string, never as its own hard violation.
         self._seed(scratch, [
             ("INV-001", "Medium", "AccountEncoder.sol:L10 fooDecompress()", "memory layout pointer bug"),
             ("INV-002", "Medium", "GatewayTransfer.sol:L20 withdraw()", "access control missing"),
         ], "GRP-M-001")
         issues = validators._validate_chain_anti_absorption(scratch, "thorough")
         assert len(issues) == 1
+        assert "Jaccard" in issues[0]
+        assert "soft note" in issues[0]
         assert "distinct functions" in issues[0]
 
     def test_severity_span_flagged(self, scratch: Path):
@@ -194,6 +211,119 @@ class TestAntiAbsorption:
         assert "ATTEMPT 2 RETRY" in hint
         assert "Anti-absorption override:" in hint
         assert "GRP-M-001" in hint
+
+
+# --- Fix 5+6: exact-locus sub-clustering repair (no singleton explosion) -----
+
+class TestAntiAbsorptionSubcluster:
+    def _seed(self, scratch: Path,
+              constituents: list[tuple[str, str, str, str]],
+              hyp_id: str = "GRP-M-001", hyp_sev: str = "Medium"):
+        _seed_inventory(scratch, constituents)
+        cids = ", ".join(c[0] for c in constituents)
+        (scratch / "hypotheses.md").write_text(
+            "# Hypotheses\n\n"
+            "| Hypothesis ID | Severity | Source Findings |\n"
+            "|---|---|---|\n"
+            f"| {hyp_id} | {hyp_sev} | {cids} |\n",
+            encoding="utf-8",
+        )
+        fm = ["| Finding ID | Hypothesis ID |\n", "|---|---|\n"]
+        for c in constituents:
+            fm.append(f"| {c[0]} | {hyp_id} |\n")
+        (scratch / "finding_mapping.md").write_text("".join(fm), encoding="utf-8")
+
+    def _result_groups(self, scratch: Path) -> list[tuple[str, list[str]]]:
+        text = (scratch / "hypotheses.md").read_text(encoding="utf-8")
+        out: list[tuple[str, list[str]]] = []
+        for line in text.splitlines():
+            if not line.strip().startswith("|"):
+                continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) < 5:
+                continue
+            hid = cells[0]
+            if hid == "Hypothesis ID" or set(hid) <= set("-: "):
+                continue
+            srcs = re.findall(r"INV-\d+", cells[3])
+            out.append((hid, srcs))
+        return out
+
+    # ---- helper-level ----
+    def test_line_ref_not_treated_as_function(self):
+        # location-only; line-ref tokens discarded; prose is never consulted
+        assert validators._normalize_locus_function("X.sol L671 (safeTransfer)") == ""
+        assert validators._normalize_locus_function("X.sol:661 (fn)") == ""
+        assert validators._normalize_locus_function("X.sol claimRefund()") == "claimrefund"
+        # a real `name()` in the Location field is still extracted
+        assert validators._normalize_locus_function("Vault.sol:L10 settle()") == "settle"
+
+    def test_partition_exact_keys_only(self):
+        meta = [
+            ("A", {"location": "F.sol L671 (x)", "root_cause": "rc", "severity": "High"}),
+            ("B", {"location": "F.sol:671-672", "root_cause": "rc", "severity": "High"}),
+            ("C", {"location": "G.sol foo()", "root_cause": "rc", "severity": "High"}),
+        ]
+        subs = validators._partition_into_subclusters(meta)
+        keys = [sorted(cid for cid, _ in s) for s in subs]
+        assert ["A", "B"] in keys   # same file + (normalized) empty func + tier
+        assert ["C"] in keys        # distinct exact locus
+        assert len(subs) == 2
+
+    # ---- repair-level ----
+    def test_severity_span_keeps_highs_merged_low_split(self, scratch: Path):
+        # Mirror of the claimRefund-CEI cluster: three High CEI findings + one
+        # Low invariant note, all in the same file, with noisy line-ref
+        # locations. Old code exploded to 4 singletons; sub-clustering keeps the
+        # three Highs as ONE hypothesis and only separates the Low tier.
+        self._seed(scratch, [
+            ("INV-010", "High", "GatewayTransferNative.sol:661-680 (claimRefund); ordering between L671 (safeTransfer) and L672 (delete)",
+             "checks effects interactions violation refund reentrancy drain"),
+            ("INV-166", "High", "GatewayTransferNative.sol:671-672 (transfer at L671, delete at L672)",
+             "checks effects interactions violation refund reentrancy drain"),
+            ("INV-167", "High", "GatewayTransferNative.sol:L661-672 (claimRefund)",
+             "checks effects interactions violation refund reentrancy drain"),
+            ("INV-164", "Low", "GatewayTransferNative.sol:L661-672 (fn: claimRefund)",
+             "committed invariant claimRefund cannot be claimed twice disposition"),
+        ], "GRP-H-001", "High")
+        n = validators._repair_chain_anti_absorption_splits(scratch)
+        assert n >= 1  # a split occurred (Low tier separated)
+        groups = self._result_groups(scratch)
+        allsrc = {s for _, srcs in groups for s in srcs}
+        # every source id retained, nothing dropped
+        assert {"INV-010", "INV-166", "INV-167", "INV-164"} <= allsrc
+        # the three Highs stay in ONE hypothesis (not 3 singletons)
+        high = [srcs for _, srcs in groups if "INV-010" in srcs][0]
+        assert set(high) == {"INV-010", "INV-166", "INV-167"}
+        # the Low is its own hypothesis
+        low = [srcs for _, srcs in groups if "INV-164" in srcs][0]
+        assert low == ["INV-164"]
+
+    def test_distinct_functions_only_preserved_whole(self, scratch: Path):
+        # Post-Fix-6: distinct (file, function) alone does NOT violate, so the
+        # group is preserved intact — no split, no rewrite.
+        self._seed(scratch, [
+            ("INV-201", "Medium", "GatewayA.sol:L10 onRevert()", "unguarded refundInfos overwrite same shared handler"),
+            ("INV-202", "Medium", "GatewayB.sol:L20 onAbort()", "unguarded refundInfos overwrite same shared handler"),
+        ], "GRP-M-001", "Medium")
+        n = validators._repair_chain_anti_absorption_splits(scratch)
+        assert n == 0  # nothing split; LLM grouping preserved
+
+    def test_jaccard_same_locus_merges_not_singletons(self, scratch: Path):
+        # Two disjoint-root-cause findings at the EXACT same file+function+tier
+        # trip the Jaccard predicate, but exact-locus keying keeps them merged
+        # (same fix site = one finding) rather than exploding to singletons.
+        self._seed(scratch, [
+            ("INV-301", "Medium", "Vault.sol:L100 settle()", "missing length validation causes overflow"),
+            ("INV-302", "Medium", "Vault.sol:L100 settle()", "wrong return value type interface violation"),
+        ], "GRP-M-001", "Medium")
+        n = validators._repair_chain_anti_absorption_splits(scratch)
+        assert n == 0  # single exact-locus sub-cluster -> no reassignment
+        from plamen_parsers import _parse_hypothesis_constituents
+        mapping = _parse_hypothesis_constituents(scratch)
+        merged = [srcs for srcs in mapping.values()
+                  if "INV-301" in srcs or "INV-302" in srcs]
+        assert merged and set(merged[0]) == {"INV-301", "INV-302"}
 
 
 # --- Fix 4: per-constituent demotion ---------------------------------------

@@ -62,6 +62,20 @@ _CI_SHAPE_CHAIN: dict = {
     "FRESHNESS": ("EXTERNAL: input-freshness/source relation asserted at the locus", "EXTERNAL"),
 }
 
+# Generic conversion/boundary cues. A `CONSERVATION` invariant emitted at a
+# value-conversion boundary is frequently *true by construction* (a 1:1 unwrap
+# trivially conserves), so the emitted candidate's Falsify Class is enriched with
+# the two shapes that CAN break there — NO_REVERT_AT_BOUNDARY + REQUESTED_EQ_
+# DELIVERED. These are HOW-shaped substrings (wrap/convert/bridge boundaries),
+# NEVER a protocol/token/function signature; native↔wrapped is only illustrative.
+_CI_CONVERSION_CUE = re.compile(
+    r"(?i)\b(?:wrap|unwrap|wrapped|native|convert|conversion|redeem|"
+    r"deposit\s*/?\s*withdraw|withdraw\s*/?\s*deposit|bridge|mint\s*/?\s*burn|"
+    r"burn\s*/?\s*mint|swap|exchange|peg|1\s*[:=]\s*1)\b"
+)
+# The breakable shapes appended to a true-by-construction CONSERVATION candidate.
+_CI_BREAKABLE_SHAPES: tuple = ("NO_REVERT_AT_BOUNDARY", "REQUESTED_EQ_DELIVERED")
+
 
 def _chain_metadata_lines(postcondition: str = "", postcondition_type: str = "",
                           missing_precondition: str = "", precondition_type: str = "") -> list[str]:
@@ -900,6 +914,22 @@ def compute_invariant_assertion_candidates(scratchpad: Path) -> list:
                 loc_disp = locus or "file-scope (locus unresolved)"
                 fn_disp = f" (fn: `{fn}`)" if fn else ""
                 assert_disp = assertion or "assert the committed local guard holds at this locus"
+                # DRIVER NUDGE (falsifiability-aware): a CONSERVATION invariant at
+                # a value-conversion boundary is often true by construction, so its
+                # conservation falsifier can never break. Append the breakable
+                # shapes (NO_REVERT_AT_BOUNDARY + REQUESTED_EQ_DELIVERED) to the
+                # emitted Falsify Class so the downstream falsifier ALSO tests the
+                # relations that CAN diverge. Additive/recall-safe; generic HOW.
+                falsify_extra = ""
+                cue_src = f"{shape_raw} {assertion} {locus} {provenance}"
+                if shape == "CONSERVATION" and _CI_CONVERSION_CUE.search(cue_src):
+                    falsify_extra = (
+                        "; conservation may be true by construction at this "
+                        "conversion boundary — ALSO falsify "
+                        + " + ".join(_CI_BREAKABLE_SHAPES)
+                        + " (does the boundary case revert/mis-round, and does "
+                        "requested==delivered across the conversion?)"
+                    )
                 out.append({
                     "key": f"INVARIANT:{dkey}",
                     # Clean, greppable generator class token stamped on the
@@ -911,6 +941,7 @@ def compute_invariant_assertion_candidates(scratchpad: Path) -> list:
                     "location": f"{loc_disp}{fn_disp}",
                     "source_note": (f"{cid}; committed-invariant assertion; Falsify Class: "
                                     f"{fclass}"
+                                    + falsify_extra
                                     + (f"; {provenance}" if provenance else "")
                                     + "; mechanically harvested — falsifier to confirm or refute"),
                     "root_cause": (f"A prior verdict ruled this locus safe on the tacit local "
@@ -919,7 +950,7 @@ def compute_invariant_assertion_candidates(scratchpad: Path) -> list:
                     "description": (f"Falsify the committed invariant {cid} ({shape_label}) at "
                                     f"{loc_disp}: {assert_disp}. Survived → sharpened spec; "
                                     f"triggered → real bug the SAFE/REFUTE verdict hid. "
-                                    f"Falsify Class: {fclass}."),
+                                    f"Falsify Class: {fclass}{falsify_extra}."),
                     "impact": ("If the committed local guard does not hold at a boundary or "
                                "reachable path, the value-bearing verdict that relied on it is "
                                "wrong (falsifier to confirm the concrete harm)."),
@@ -1152,7 +1183,12 @@ def _axis_examined_signals(block: str, axis: str) -> bool:
         return bool(_TAG_VARIATION.search(b) or _TAG_REGRESS.search(b)
                     or (_TAG_BOUNDARY.search(b) and _POST_TYPE_BAL_ACC.search(b)))
     if axis == "provenance":
-        return bool(_TAG_EXT_ASSUMPTION.search(b) or _TAG_CROSS_DOMAIN_EXT.search(b)
+        # A [CROSS-DOMAIN-DEP: external] tag is an ADMISSION the external domain
+        # was NOT analyzed, not evidence it WAS — so it must NOT count as an
+        # EXAMINED signal here (that would wrongly close the provenance gap). It
+        # is instead harvested into a STEP-0a-LC enabler (see chain_prep). An
+        # ambiguous provenance cell defaults to GAP (recall-safe).
+        return bool(_TAG_EXT_ASSUMPTION.search(b)
                     or (_STALENESS_CUE.search(b) and _TAG_TRACE.search(b)))
     if axis == "boundary":
         return bool(_TAG_BOUNDARY.search(b) and _BOUNDARY_ZERO_ETC.search(b))

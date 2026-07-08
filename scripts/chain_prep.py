@@ -92,6 +92,47 @@ _DISCOVERY_GENERIC_TERMS = _STOPWORD_IDENTIFIERS | frozenset({
 
 
 # ---------------------------------------------------------------------------
+# CROSS-DOMAIN-DEP → STEP-0a-LC enabler harvester
+# ---------------------------------------------------------------------------
+# A `[CROSS-DOMAIN-DEP: {domain}]` tag is a depth agent's ADMISSION that an
+# assumption lives OUTSIDE its own domain — a potential compound-exploit path
+# invisible to single-domain analysis. Rather than silently closing that
+# provenance gap, we convert each SUBSTANTIVE tag into a low-confidence
+# STEP-0a-LC enabler that verify must adjudicate. Generic, additive, recall-safe.
+
+# Any tag, captured so we can split domain vs. detail.
+_CROSS_DOMAIN_TAG_RE = re.compile(
+    r"\[\s*CROSS-DOMAIN-DEP\s*:\s*(?P<body>[^\]]*?)\s*\]", re.IGNORECASE
+)
+# A tag is SUBSTANTIVE iff, after the domain label, there is elaboration prose
+# introduced by an em-dash / en-dash / spaced hyphen / colon. A bare
+# `[CROSS-DOMAIN-DEP: external]` (domain word only) carries no described
+# dependency → skipped. A `none` domain is an explicit admission there is NO
+# cross-domain dependency → also skipped.
+_CROSS_DOMAIN_ELAB_RE = re.compile(r"(?:—|–|:|\s-\s)")
+# Cap on emitted CROSS-DOMAIN-DEP enablers (mirrors _MAX_ENUMGAP_PER_RUN=40).
+_MAX_CROSS_DOMAIN_ENABLERS = 40
+# Raw finding artifacts the tags live in. Depth/exploration/analysis/niche/axis
+# outputs — NOT prompt/stdio/log scaffolding. Bounded, best-effort globs.
+_CROSS_DOMAIN_SOURCE_GLOBS = (
+    "depth_*_findings.md",
+    "enumgap_*_findings.md",
+    "enumgap_exploration_findings.md",
+    "_exploration_shard_*.md",
+    "axis_coverage_findings.md",
+    "niche_*_findings.md",
+    "blind_spot_*_findings.md",
+    "validation_sweep_findings.md",
+    "sibling_propagation_findings.md",
+    "design_stress_findings.md",
+    "analysis_*.md",
+)
+# Anchors used to attribute a tag to a nearby finding id / location.
+_FINDING_ID_ANCHOR_RE = re.compile(r"^#{2,4}\s*(?:Finding\s*)?\[?([A-Za-z][A-Za-z0-9]*-\d+)\]?", re.MULTILINE)
+_LOCATION_ANCHOR_RE = re.compile(r"^\s*\*{0,2}Location\*{0,2}\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+# ---------------------------------------------------------------------------
 # Shared parsing
 # ---------------------------------------------------------------------------
 
@@ -562,6 +603,137 @@ def _is_unverified_enabler(entry: dict) -> bool:
     return bool(re.search(r"\bENUMGAP\b|\bNEXP-\d+", blob, re.IGNORECASE))
 
 
+def _cross_domain_locus_key(loc: str) -> str:
+    """Normalize a location string to a coarse locus key for dedup: bare file
+    name + first line number if present. Empty string when no location."""
+    if not loc:
+        return ""
+    s = re.sub(r"[`*]", "", str(loc)).strip()
+    # bare file name (drop any directory path), first path-like token
+    fm = re.search(r"([A-Za-z0-9_./\\-]+\.(?:sol|rs|move|go|vy))", s)
+    fname = ""
+    if fm:
+        fname = re.split(r"[\\/]", fm.group(1))[-1].lower()
+    lm = re.search(r"[Ll]?\s*(\d{1,7})", s)
+    line = lm.group(1) if lm else ""
+    key = f"{fname}:{line}".strip(":")
+    return key or s[:60].lower()
+
+
+def _axisgap_provenance_loci(entries: list[dict]) -> set[str]:
+    """Loci already covered by an M2 AXISGAP provenance-gap candidate, so the
+    CROSS-DOMAIN-DEP harvester does not emit a redundant enabler for the same
+    locus. An AXISGAP finding whose text names the provenance axis (or the
+    provenance cue vocabulary) is treated as covering that locus's provenance
+    gap. Best-effort; empty set on any miss (harvester then keeps all rows)."""
+    loci: set[str] = set()
+    for e in entries:
+        blob = " ".join(str(s) for s in (e.get("source_ids") or []))
+        # The inventory parser may retain the full `AXISGAP:AXIS-n` tag OR strip
+        # the prefix to a bare `AXIS-n` source id — accept either form.
+        if not re.search(r"\bAXISGAP\b|\bAXIS-\d+\b", blob, re.IGNORECASE):
+            continue
+        text = f"{blob} {e.get('title','')} {e.get('root_cause','')} {e.get('description','')}".lower()
+        if re.search(r"\bprovenance\b|freshness|staleness|source[- ]of|external[- ]assumption", text):
+            k = _cross_domain_locus_key(str(e.get("location") or ""))
+            if k:
+                loci.add(k)
+    return loci
+
+
+def _harvest_cross_domain_enablers(scratchpad: Path, entries: list[dict]) -> list[dict]:
+    """Convert each SUBSTANTIVE `[CROSS-DOMAIN-DEP: {domain}]` tag in the raw
+    depth/enumgap finding artifacts into a LOW-CONFIDENCE STEP-0a-LC enabler.
+
+    A CROSS-DOMAIN-DEP tag is an admission the domain was NOT analyzed in-domain
+    — exactly the "individually-invalid observation that enables another finding"
+    class chain analysis exists to catch. Each becomes a candidate ENABLER that
+    verify must adjudicate (a spurious one yields a chain verify refutes).
+
+    Rules (match the plan):
+      - SUBSTANTIVE only: the tag body must carry elaboration prose after the
+        domain label (an em/en-dash, colon, or spaced hyphen). Bare
+        `[CROSS-DOMAIN-DEP: external]` and the `none` admission are SKIPPED.
+      - Append-only / bounded / deduped: cap _MAX_CROSS_DOMAIN_ENABLERS (40),
+        dedup on (locus, normalized detail), and dedup vs any M2 AXISGAP
+        provenance-gap candidate at the SAME locus.
+    Best-effort; returns [] on any failure. Generic — names no protocol."""
+    out: list[dict] = []
+    try:
+        scratchpad = Path(scratchpad)
+        files: list[Path] = []
+        seen_files: set[str] = set()
+        for pat in _CROSS_DOMAIN_SOURCE_GLOBS:
+            try:
+                for p in sorted(scratchpad.glob(pat)):
+                    if p.name not in seen_files:
+                        seen_files.add(p.name)
+                        files.append(p)
+            except Exception:
+                continue
+        prov_loci = _axisgap_provenance_loci(entries)
+        seen_keys: set[str] = set()
+        for art in files:
+            try:
+                text = art.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            # Pre-index finding-id / location anchors by character offset so a
+            # tag can be attributed to the nearest PRECEDING finding + location.
+            id_anchors = [(m.start(), m.group(1)) for m in _FINDING_ID_ANCHOR_RE.finditer(text)]
+            loc_anchors = [(m.start(), m.group(1).strip()) for m in _LOCATION_ANCHOR_RE.finditer(text)]
+            for m in _CROSS_DOMAIN_TAG_RE.finditer(text):
+                body = (m.group("body") or "").strip()
+                if not body:
+                    continue
+                # domain label = leading token(s) up to the first elaboration sep.
+                sep = _CROSS_DOMAIN_ELAB_RE.search(body)
+                if not sep:
+                    continue   # bare domain-only tag → skip
+                domain = body[:sep.start()].strip().lower()
+                detail = body[sep.end():].strip()
+                if not detail:
+                    continue   # separator but no prose → skip
+                if domain in ("none", "n/a", "na", ""):
+                    continue   # explicit "no cross-domain dependency" → skip
+                pos = m.start()
+                fid = ""
+                for off, val in id_anchors:
+                    if off <= pos:
+                        fid = val
+                    else:
+                        break
+                loc = ""
+                for off, val in loc_anchors:
+                    if off <= pos:
+                        loc = val
+                    else:
+                        break
+                lkey = _cross_domain_locus_key(loc)
+                # Dedup vs M2 provenance-gap at the same locus (append-only).
+                if lkey and lkey in prov_loci:
+                    continue
+                detail_norm = re.sub(r"\s+", " ", detail.lower())[:80]
+                dkey = f"{lkey}|{detail_norm}"
+                if dkey in seen_keys:
+                    continue
+                seen_keys.add(dkey)
+                loc_disp = (re.sub(r"[`*]", "", loc).strip() if loc
+                            else (fid or art.name))
+                out.append({
+                    "finding_id": fid or "CROSS-DOMAIN",
+                    "domain": domain,
+                    "detail": detail,
+                    "location": loc_disp,
+                    "source_file": art.name,
+                })
+                if len(out) >= _MAX_CROSS_DOMAIN_ENABLERS:
+                    return out
+        return out
+    except Exception:
+        return []
+
+
 def compute_enabler_baseline(scratchpad: Path) -> dict:
     """Overwrite enabler_results.md with a STEP 0a dangerous-state baseline.
 
@@ -589,7 +761,9 @@ def compute_enabler_baseline(scratchpad: Path) -> dict:
             in ("CONFIRMED", "PARTIAL", "CONTESTED")
         ]
         unverified = [e for e in entries if _is_unverified_enabler(e)][:40]
-        if not dangerous and not unverified:
+        # Harvest SUBSTANTIVE CROSS-DOMAIN-DEP tags into low-confidence enablers.
+        cross_domain = _harvest_cross_domain_enablers(scratchpad, entries)
+        if not dangerous and not unverified and not cross_domain:
             return {"status": "skipped", "reason": "no CONFIRMED/PARTIAL findings",
                     "states": 0}
 
@@ -661,6 +835,36 @@ def compute_enabler_baseline(scratchpad: Path) -> dict:
         else:
             lines.append("| (none) | - | - | - | - |")
 
+        # CROSS-DOMAIN-DEP enablers: each substantive tag is a depth agent's
+        # admission that a value-bearing assumption lives OUTSIDE its own domain.
+        # These are low-confidence candidate enablers (verify adjudicates each),
+        # appended below the ENUMGAP/deriver rows. Cap 40; deduped by locus +
+        # detail and vs M2 provenance-gap at the same locus.
+        lines += [
+            "",
+            "### STEP 0a-LC (cont.): Cross-Domain Dependency Enablers (unverified)",
+            "",
+            "Each row is a `[CROSS-DOMAIN-DEP: {domain}]` admission harvested from "
+            "depth/exploration findings — an assumption a depth agent flagged as "
+            "OUTSIDE its own domain. Treat ONLY as a candidate ENABLER: if the "
+            "named external/other-domain dependency, once broken, creates the "
+            "precondition another finding needs, build a LOW-CONFIDENCE chain "
+            "hypothesis that MUST go to verification. Do NOT promote to the "
+            "dangerous-state baseline.",
+            "",
+            "| Source Finding | Domain | Location | Cross-Domain Dependency (verify to adjudicate) |",
+            "|----------------|--------|----------|------------------------------------------------|",
+        ]
+        if cross_domain:
+            for c in cross_domain:
+                fid = re.sub(r"\s+", " ", str(c.get("finding_id") or "CROSS-DOMAIN")).replace("|", "/")
+                dom = re.sub(r"\s+", " ", str(c.get("domain") or "")).replace("|", "/")
+                loc = re.sub(r"\s+", " ", str(c.get("location") or "UNKNOWN")).replace("|", "/")
+                det = re.sub(r"\s+", " ", str(c.get("detail") or "")).replace("|", "/")
+                lines.append(f"| {fid[:40]} | {dom[:24]} | {loc[:120]} | {det[:240]} |")
+        else:
+            lines.append("| (none substantive) | - | - | - |")
+
         lines += [
             "",
             "## STEP 0b: 5-Actor Reachability (Chain Agent 1 fills this)",
@@ -677,7 +881,8 @@ def compute_enabler_baseline(scratchpad: Path) -> dict:
             "\n".join(lines) + "\n", encoding="utf-8"
         )
         return {"status": "ok", "states": len(dangerous),
-                "low_confidence_enablers": len(unverified)}
+                "low_confidence_enablers": len(unverified),
+                "cross_domain_enablers": len(cross_domain)}
     except Exception as exc:
         return {"status": "error", "error": str(exc), "states": 0}
 
@@ -701,5 +906,6 @@ __all__ = [
     "compute_chain_candidate_pairs",
     "compute_variable_finding_map",
     "compute_enabler_baseline",
+    "_harvest_cross_domain_enablers",
     "run_chain_prep",
 ]
