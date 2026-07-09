@@ -2090,6 +2090,71 @@ def _recover_tier_locations(
     return sec_re.sub(_patch, section), n
 
 
+_BODY_STATUS_TOKENS = ("VERIFIED", "CONFIRMED", "CONTESTED", "UNRESOLVED", "UNVERIFIED")
+_BODY_HEADER_STATUS_RE = re.compile(
+    r"(?m)^(###\s+\[([CHMLI]-\d+)\]\s+.+?)"
+    r"(?:\s+\[(?:" + "|".join(_BODY_STATUS_TOKENS) + r")[^\]\n]*\])?\s*$"
+)
+
+
+def _index_status_map(idx_text: str) -> dict[str, str]:
+    """Map report_id -> canonical verification status from the report_index
+    Master Finding Index 'Verification' column.
+
+    The Verification column is driver-computed from `status_binding.md`
+    (verifier verdict + best evidence tag), so it is the single source of truth
+    for the body header tag. This lets the assembler stamp the body header
+    MECHANICALLY instead of trusting the tier-writer LLM's own [STATUS] token,
+    which historically disagreed with the index (index CONFIRMED vs body
+    UNVERIFIED). Returns {} when no Verification column is present.
+    """
+    out: dict[str, str] = {}
+    try:
+        section = _extract_h2_section(idx_text, "Master Finding Index")
+    except Exception:
+        section = ""
+    if not section:
+        return out
+    id_re = re.compile(r"^[\*\[`_]*([CHMLI]-\d+)\b")
+    vcol: int | None = None
+    for line in section.splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if vcol is None:
+            low = [c.lower() for c in cells]
+            if any("verification" in c for c in low):
+                vcol = next(i for i, c in enumerate(low) if "verification" in c)
+            continue
+        m = id_re.match(cells[0]) if cells else None
+        if not m or vcol >= len(cells):
+            continue
+        raw = cells[vcol].upper()
+        for tok in _BODY_STATUS_TOKENS:
+            if tok in raw:
+                out[m.group(1)] = tok
+                break
+    return out
+
+
+def _stamp_body_header_status(tier_text: str, status_map: dict[str, str]) -> str:
+    """Overwrite each `### [X-NN] Title [STATUS]` header's status token with the
+    canonical index status. Findings absent from the map keep their existing tag;
+    only a KNOWN trailing status token is replaced (a title's own `[...]` is left
+    alone). Mechanical — no LLM."""
+    if not status_map:
+        return tier_text
+
+    def _repl(m: "re.Match[str]") -> str:
+        canon = status_map.get(m.group(2))
+        if not canon:
+            return m.group(0)
+        return f"{m.group(1).rstrip()} [{canon}]"
+
+    return _BODY_HEADER_STATUS_RE.sub(_repl, tier_text)
+
+
 def _assemble_report_python(
     scratchpad: Path, project_root: str
 ) -> bool:
@@ -2140,6 +2205,17 @@ def _assemble_report_python(
     crit_high_text = _read(crit_high_path)
     medium_text = _read(medium_path)
     low_info_text = _read(low_info_path)
+
+    # Fix 1 (mechanical body-label binding): stamp every body header's
+    # verification status from the canonical report_index Verification column so
+    # the body can never disagree with the index. The tier-writer LLM's own
+    # [STATUS] token is overridden — it historically wrote [UNVERIFIED] for
+    # findings the index (correctly) marked CONFIRMED.
+    _status_map = _index_status_map(idx_text)
+    if _status_map:
+        crit_high_text = _stamp_body_header_status(crit_high_text, _status_map)
+        medium_text = _stamp_body_header_status(medium_text, _status_map)
+        low_info_text = _stamp_body_header_status(low_info_text, _status_map)
 
     if not (crit_high_text or medium_text or low_info_text):
         log.error(

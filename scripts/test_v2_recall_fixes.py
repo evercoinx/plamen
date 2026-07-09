@@ -271,11 +271,14 @@ class TestAntiAbsorptionSubcluster:
         assert len(subs) == 2
 
     # ---- repair-level ----
-    def test_severity_span_keeps_highs_merged_low_split(self, scratch: Path):
-        # Mirror of the claimRefund-CEI cluster: three High CEI findings + one
-        # Low invariant note, all in the same file, with noisy line-ref
-        # locations. Old code exploded to 4 singletons; sub-clustering keeps the
-        # three Highs as ONE hypothesis and only separates the Low tier.
+    def test_same_locus_stays_one_finding_even_cross_tier(self, scratch: Path):
+        # The claimRefund-CEI cluster: three High CEI findings + one Low
+        # invariant note, ALL at the SAME claimRefund locus. Distinctness is
+        # location-based, so a single locus is ONE bug: all four stay one
+        # hypothesis (severity inherited as the highest, High), NOT split by
+        # tier or by prose. This is the corrected behavior that ends the
+        # fresh-generation over-fragmentation (the old code split the Low out
+        # and shattered paraphrase duplicates into many findings).
         self._seed(scratch, [
             ("INV-010", "High", "GatewayTransferNative.sol:661-680 (claimRefund); ordering between L671 (safeTransfer) and L672 (delete)",
              "checks effects interactions violation refund reentrancy drain"),
@@ -287,17 +290,36 @@ class TestAntiAbsorptionSubcluster:
              "committed invariant claimRefund cannot be claimed twice disposition"),
         ], "GRP-H-001", "High")
         n = validators._repair_chain_anti_absorption_splits(scratch)
-        assert n >= 1  # a split occurred (Low tier separated)
-        groups = self._result_groups(scratch)
-        allsrc = {s for _, srcs in groups for s in srcs}
-        # every source id retained, nothing dropped
-        assert {"INV-010", "INV-166", "INV-167", "INV-164"} <= allsrc
-        # the three Highs stay in ONE hypothesis (not 3 singletons)
-        high = [srcs for _, srcs in groups if "INV-010" in srcs][0]
-        assert set(high) == {"INV-010", "INV-166", "INV-167"}
-        # the Low is its own hypothesis
-        low = [srcs for _, srcs in groups if "INV-164" in srcs][0]
-        assert low == ["INV-164"]
+        # single locus -> one bug -> NO split; the original grouping (all four
+        # constituents in one hypothesis) is preserved untouched.
+        assert n == 0
+        fm = (scratch / "finding_mapping.md").read_text(encoding="utf-8")
+        assert len(set(re.findall(r"GRP-\S+|H[HCLMI]?-\d+", fm))) == 1  # still one hypothesis
+
+    def test_same_locus_paraphrase_dups_do_not_split(self, scratch: Path):
+        # Fresh-generation failure mode: the SAME bug written by two agents with
+        # divergent prose (low token Jaccard) at the SAME locus must NOT split.
+        # This is the exact trigger that exploded 53 chain hypotheses -> 140.
+        self._seed(scratch, [
+            ("INV-300", "High", "GatewayTransferNative.sol:286-304 (withdraw)",
+             "public withdraw drains contract ZRC20 balance to an attacker recipient via the standing gateway allowance"),
+            ("INV-301", "Medium", "GatewayTransferNative.sol:286 (withdraw)",
+             "any account may invoke the unrestricted withdraw and redirect held tokens to itself"),
+        ], "GRP-H-002", "High")
+        n = validators._repair_chain_anti_absorption_splits(scratch)
+        assert n == 0  # same-locus paraphrases stay ONE finding (no explosion)
+
+    def test_distinct_bugs_at_distinct_loci_still_split(self, scratch: Path):
+        # Guardrail: two GENUINELY different bugs (different loci, unrelated
+        # root cause) bundled into one hypothesis MUST still split.
+        self._seed(scratch, [
+            ("INV-400", "Medium", "GatewayA.sol:10 (swapGas)",
+             "missing minAmountOut slippage bound on the gas conversion swap enables sandwich MEV"),
+            ("INV-401", "Medium", "Proxy.sol:99 (initialize)",
+             "uninitialized proxy lets any first caller seize admin and take over the contract"),
+        ], "GRP-M-002", "Medium")
+        n = validators._repair_chain_anti_absorption_splits(scratch)
+        assert n >= 1  # distinct-locus + unrelated root cause -> split
 
     def test_distinct_functions_only_preserved_whole(self, scratch: Path):
         # Post-Fix-6: distinct (file, function) alone does NOT violate, so the
@@ -494,3 +516,43 @@ class TestSmokeIntegration:
         src = inspect.getsource(validators)
         assert "CROSS_VM_ENCODING_NO_RUNTIME" in src
         assert "cross_vm_keyword_present" in src
+
+
+# --- Fix 1: mechanical body-label binding from the report_index status column --
+
+class TestBodyStatusStamp:
+    _IDX = (
+        "## Master Finding Index\n\n"
+        "| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| C-01 | claimRefund theft | Critical | GTN.sol:661 | VERIFIED | - | HC-01 |\n"
+        "| M-07 | unconditional refund write | Medium | GCC.sol:449 | CONFIRMED | - | HM-01 |\n"
+        "| M-08 | slippage bound | Medium | A.sol:10 | CONFIRMED | - | HM-02 |\n"
+        "| M-09 | contested thing | Medium | B.sol:20 | CONTESTED | - | HM-03 |\n"
+    )
+
+    def test_status_map_reads_verification_column(self):
+        sm = mech._index_status_map(self._IDX)
+        assert sm == {"C-01": "VERIFIED", "M-07": "CONFIRMED",
+                      "M-08": "CONFIRMED", "M-09": "CONTESTED"}
+
+    def test_body_header_overwritten_from_index(self):
+        # The tier-writer mislabeled M-07 [UNVERIFIED] and left M-08 untagged;
+        # the stamp must make BOTH read [CONFIRMED] (matching the index), and
+        # C-01 stays VERIFIED.
+        body = (
+            "## Critical Findings\n\n### [C-01] claimRefund theft [VERIFIED]\n\nx\n\n"
+            "## Medium Findings\n\n### [M-07] unconditional refund write [UNVERIFIED]\n\ny\n\n"
+            "### [M-08] slippage bound\n\nz\n\n### [M-09] contested thing [UNVERIFIED]\n\nw\n"
+        )
+        out = mech._stamp_body_header_status(body, mech._index_status_map(self._IDX))
+        assert "### [C-01] claimRefund theft [VERIFIED]" in out
+        assert "### [M-07] unconditional refund write [CONFIRMED]" in out
+        assert "### [M-08] slippage bound [CONFIRMED]" in out
+        assert "### [M-09] contested thing [CONTESTED]" in out
+        assert "[UNVERIFIED]" not in out  # no leftover mislabel
+
+    def test_unknown_id_keeps_existing_tag(self):
+        body = "### [L-99] not in index [UNVERIFIED]\n"
+        out = mech._stamp_body_header_status(body, mech._index_status_map(self._IDX))
+        assert out == body  # absent from map -> untouched

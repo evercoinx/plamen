@@ -8249,26 +8249,44 @@ def _next_chain_hyp_id(prefix: str, used: set[str], counters: dict[str, int]) ->
 def _chain_group_violates_anti_absorption(
     meta_list: list[tuple[str, dict[str, str]]],
 ) -> bool:
-    # Fix 6: distinct (file, function) is NO LONGER a mechanical atomization
-    # trigger. Same-fix mirror-contract clusters (paired handlers duplicated
-    # across sibling contracts, e.g. onRevert/onAbort or claimRefund across two
-    # gateways) legitimately span multiple functions/files; splitting them into
-    # singletons fragments one root cause into many findings before the LLM's
-    # own grouping is even honored. A group is a mechanical violation ONLY when
-    # it (b) obscures a severity tier span > 1 OR (c) bundles genuinely-
-    # unrelated root causes (pairwise token Jaccard < 0.30). The residual split
-    # is then handled by exact-locus sub-clustering (see
-    # `_repair_chain_anti_absorption_splits`), never per-constituent explosion.
+    # A group is a mechanical anti-absorption VIOLATION (-> split) ONLY when it
+    # bundles constituents at genuinely DIFFERENT locations that are also
+    # different bugs. Distinctness is judged on LOCATION, never on lexical
+    # overlap: same-location constituents -- paraphrase duplicates with divergent
+    # prose, and the same bug labeled at adjacent severities -- are ONE finding
+    # and must never be split. (The prior prose-Jaccard trigger fired on
+    # same-location paraphrases generated fresh each run and shattered single
+    # root bugs into many findings: 53 chain hypotheses -> 140, 2 -> 6 Criticals.)
     if len(meta_list) < 2:
         return False
-    sev_ranks = [_severity_tier(m.get("severity", "")) for _, m in meta_list]
-    sev_ranks = [r for r in sev_ranks if r >= 0]
-    if sev_ranks and max(sev_ranks) - min(sev_ranks) > 1:
-        return True
-    rcs = [m.get("root_cause") or m.get("title", "") for _, m in meta_list]
-    for i in range(len(rcs)):
-        for j in range(i + 1, len(rcs)):
-            if _jaccard_token_similarity(rcs[i], rcs[j]) < 0.30:
+    loc_keys = [
+        (
+            _extract_file_name(m.get("location", "")).lower(),
+            _normalize_locus_function(m.get("location", "")),
+        )
+        for _, m in meta_list
+    ]
+    if len({k for k in loc_keys if k[0] or k[1]}) <= 1:
+        return False  # a single locus -> one bug -> never split
+    # >= 2 distinct loci: a distinctness signal counts ONLY between constituents
+    # at DIFFERENT loci (never between same-locus prose paraphrases).
+    #   (b) a severity span > 1 tier across distinct loci (obscures a real gap);
+    #   (c) unrelated root cause across distinct loci (token Jaccard < 0.30).
+    for i in range(len(meta_list)):
+        ki = loc_keys[i]
+        if not (ki[0] or ki[1]):
+            continue
+        ti = _severity_tier(meta_list[i][1].get("severity", ""))
+        rci = meta_list[i][1].get("root_cause") or meta_list[i][1].get("title", "")
+        for j in range(i + 1, len(meta_list)):
+            kj = loc_keys[j]
+            if ki == kj or not (kj[0] or kj[1]):
+                continue  # same locus (or unknown) -> not a distinctness signal
+            tj = _severity_tier(meta_list[j][1].get("severity", ""))
+            if ti >= 0 and tj >= 0 and abs(ti - tj) > 1:
+                return True
+            rcj = meta_list[j][1].get("root_cause") or meta_list[j][1].get("title", "")
+            if _jaccard_token_similarity(rci, rcj) < 0.30:
                 return True
     return False
 
@@ -8317,21 +8335,25 @@ def _partition_into_subclusters(
 ) -> list[list[tuple[str, dict[str, str]]]]:
     """Partition constituents into MAXIMAL sub-clusters (Fix 5).
 
-    Key = EXACT normalized (file, function) + severity tier. This is a strict
+    Key = EXACT normalized (file, function) — tier is NOT keyed. This is a strict
     equality partition — NEVER fuzzy union-find — so it cannot transitively
-    over-merge: two constituents merge only when they share the identical
-    locus+tier key. Constituents at the same exact fix site + tier stay ONE
-    hypothesis (same fix = one finding, per report-template's "same fix, not
-    same file" consolidation rule); genuinely-unshared loci fall out as
-    singletons. Order-preserving (first-seen key order) for deterministic IDs.
+    over-merge: two constituents merge only when they share the identical locus.
+    Constituents at the same exact fix site stay ONE hypothesis regardless of the
+    severity each was labeled with (same fix = one finding, per report-template's
+    "same fix, not same file" consolidation rule; severity inherited as the
+    highest); genuinely-unshared loci fall out as singletons. Order-preserving
+    (first-seen key order) for deterministic IDs.
     """
-    buckets: dict[tuple[str, str, int], list[tuple[str, dict[str, str]]]] = {}
-    order: list[tuple[str, str, int]] = []
+    # Key = EXACT normalized (file, function). Severity tier is deliberately NOT
+    # in the key: the SAME bug labeled at two tiers (e.g. a public function
+    # reported once High, once Medium) must merge into ONE hypothesis (severity
+    # inherited as the highest), not fragment across tier boundaries.
+    buckets: dict[tuple[str, str], list[tuple[str, dict[str, str]]]] = {}
+    order: list[tuple[str, str]] = []
     for cid, m in meta_list:
         key = (
             _extract_file_name(m.get("location", "")).lower(),
             _normalize_locus_function(m.get("location", "")),
-            _severity_tier(m.get("severity", "")),
         )
         if key not in buckets:
             buckets[key] = []
