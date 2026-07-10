@@ -26,18 +26,18 @@ _INDEX = """# Report Index
 
 | Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |
 |-----------|-------|----------|----------|--------------|-----------|--------------------|
-| H-01 | Public `withdraw` lacks access modifier | High | GatewayTransferNative.sol:286-304 | VERIFIED | - | HH-11 |
-| M-06 | `withdraw` permissionless-path defect | Medium | GatewayTransferNative.sol:286-304 | VERIFIED | - | H-36 |
-| M-22 | Public `withdraw`/`onRevert` refund-path interaction | Medium | GatewayTransferNative.sol:286-304,607-638 | CONTESTED | - | H-02 |
-| H-04 | claimRefund non-EVM branch guard self-satisfies | High | GatewayTransferNative.sol:661-680; GatewayCrossChain.sol:571-590 | VERIFIED | - | HH-02 |
-| L-14 | claimRefund emits event fields after delete | Low | GatewayTransferNative.sol:661-679,674-678 | VERIFIED | - | HL-07 |
-| M-10 | decompressAccounts OOB read | Medium | libraries/AccountEncoder.sol:19-56 | VERIFIED | - | HM-04 |
-| L-26 | decompressAccounts contested facets | Low | AccountEncoder.sol:19-56 | CONTESTED | - | HM-01 |
-| M-01 | Fee/accounting asymmetry in claimRefund | Medium | GatewayTransferNative.sol:661-680 | VERIFIED | - | H-21 |
-| M-27 | claimRefund CEI ordering / reentrancy gap | Medium | GatewayTransferNative.sol:661-680 | VERIFIED | - | HH-05 |
-| I-07 | GatewaySend general code-quality observation | Informational | GatewaySend.sol (file) | VERIFIED | - | H-116 |
-| L-07 | Shared constant across gateways | Low | GatewayCrossChain.sol:19 | VERIFIED | - | H-63 |
-| H-05 | bytes20 truncation | High | GatewayCrossChain.sol:291 | VERIFIED | - | HH-15 |
+| H-01 | Public `withdraw` lacks access modifier | High | NativeVault.sol:286-304 | VERIFIED | - | HH-11 |
+| M-06 | `withdraw` permissionless-path defect | Medium | NativeVault.sol:286-304 | VERIFIED | - | H-36 |
+| M-22 | Public `withdraw`/`onRevert` refund-path interaction | Medium | NativeVault.sol:286-304,607-638 | CONTESTED | - | H-02 |
+| H-04 | claimPayout non-EVM branch guard self-satisfies | High | NativeVault.sol:661-680; CrossChainRouter.sol:571-590 | VERIFIED | - | HH-02 |
+| L-14 | claimPayout emits event fields after delete | Low | NativeVault.sol:661-679,674-678 | VERIFIED | - | HL-07 |
+| M-10 | decompressAccounts OOB read | Medium | libraries/PayloadCodec.sol:19-56 | VERIFIED | - | HM-04 |
+| L-26 | decompressAccounts contested facets | Low | PayloadCodec.sol:19-56 | CONTESTED | - | HM-01 |
+| M-01 | Fee/accounting asymmetry in claimPayout | Medium | NativeVault.sol:661-680 | VERIFIED | - | H-21 |
+| M-27 | claimPayout CEI ordering / reentrancy gap | Medium | NativeVault.sol:661-680 | VERIFIED | - | HH-05 |
+| I-07 | MessageRouter general code-quality observation | Informational | MessageRouter.sol (file) | VERIFIED | - | H-116 |
+| L-07 | Shared constant across gateways | Low | CrossChainRouter.sol:19 | VERIFIED | - | H-63 |
+| H-05 | bytes20 truncation | High | CrossChainRouter.sol:291 | VERIFIED | - | HH-15 |
 
 ## Tier Assignments
 
@@ -47,7 +47,7 @@ _INDEX = """# Report Index
 - H-05
 
 ### Medium Tier
-- M-06 at GatewayTransferNative.sol:286-304
+- M-06 at NativeVault.sol:286-304
 """
 
 
@@ -80,26 +80,26 @@ def _parse_pairs(scratchpad: Path) -> set[frozenset[str]]:
 # --------------------------------------------------------------------------
 def test_first_location_takes_first_site_only():
     base, lr = _report_index_first_location(
-        "GatewayTransferNative.sol:530-537, :425-432; GatewayCrossChain.sol swap"
+        "NativeVault.sol:530-537, :425-432; CrossChainRouter.sol swap"
     )
-    assert base == "gatewaytransfernative.sol"
+    assert base == "nativevault.sol"
     assert lr == (530, 537)
 
 
 def test_first_location_single_line():
-    base, lr = _report_index_first_location("GatewayCrossChain.sol:291")
-    assert base == "gatewaycrosschain.sol"
+    base, lr = _report_index_first_location("CrossChainRouter.sol:291")
+    assert base == "crosschainrouter.sol"
     assert lr == (291, 291)
 
 
 def test_first_location_basename_strips_dir():
-    base, lr = _report_index_first_location("libraries/AccountEncoder.sol:19-56")
-    assert base == "accountencoder.sol"
+    base, lr = _report_index_first_location("libraries/PayloadCodec.sol:19-56")
+    assert base == "payloadcodec.sol"
     assert lr == (19, 56)
 
 
 def test_first_location_no_range_returns_none():
-    base, lr = _report_index_first_location("GatewaySend.sol (file)")
+    base, lr = _report_index_first_location("MessageRouter.sol (file)")
     assert base == ""
     assert lr is None
 
@@ -155,9 +155,9 @@ def test_distinct_mechanism_same_location_is_candidate_not_merged(tmp_path: Path
 
 
 def test_cross_file_same_lines_not_paired(tmp_path: Path):
-    """M-10 (AccountEncoder 19-56) must NOT pair with H-05 (CrossChain 291).
+    """M-10 (PayloadCodec 19-56) must NOT pair with H-05 (CrossChain 291).
 
-    Same lines only counts on the SAME file. M-10/L-26 (both AccountEncoder
+    Same lines only counts on the SAME file. M-10/L-26 (both PayloadCodec
     19-56, cross-tier) MUST pair despite one carrying a `libraries/` prefix.
     """
     _write_index(tmp_path)

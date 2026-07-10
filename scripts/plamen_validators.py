@@ -5911,7 +5911,7 @@ def _is_spec_support_path(path: str) -> bool:
         return True
     if re.match(r"^i[a-z0-9][a-z0-9_]*\.(?:sol|vy)$", leaf):
         return True
-    # Mock/stub/fake declared via SUFFIX (ERC20Mock.sol, GatewayEVMMock.sol)
+    # Mock/stub/fake declared via SUFFIX (ERC20Mock.sol, BridgeRouterMock.sol)
     # are test-support doubles, not production surface.
     stem = leaf.rsplit(".", 1)[0]
     if stem.endswith(("mock", "stub", "fake", "mockup", "harness")):

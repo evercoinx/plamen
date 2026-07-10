@@ -93,7 +93,7 @@ def test_shard_namespaced_ci_ids_are_harvested(tmp_path: Path):
     """Regression (feedback_id_regex_catalog): skeptic shard-workers emit
     CI-<shard><n> (CI-A1..CI-D3), not the bare CI-1 form. A `CI-\\d+`-only
     harvest regex silently dropped every namespaced block (12 dropped in the
-    DODO run, incl. all skeptic-committed invariants). The deriver must parse
+    a live Thorough run, incl. all skeptic-committed invariants). The deriver must parse
     the namespaced form."""
     eg = _eg()
     _root, sp = _proj(tmp_path)
@@ -108,7 +108,7 @@ def test_shard_namespaced_ci_ids_are_harvested(tmp_path: Path):
             f"Provenance: skeptic NO-GAP @ {cid}\n"
         )
 
-    # CI-ES6-1 is a real 3-segment shard form observed in the Spectra run; the
+    # CI-ES6-1 is a real 3-segment shard form observed in another live run; the
     # reconciliation gate caught it as a residual drop when the CI pattern was
     # only 2-segment (CI-[A-Za-z0-9]+). The deriver must harvest it too.
     _write_skeptic(sp, _blk("CI-A1", "CONSERVATION"),

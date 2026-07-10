@@ -1,6 +1,6 @@
 """M2 (recall): interface-vs-implementation parity. A contract that `is IFoo`
 but whose external/public function is missing from `IFoo` is an interface-
-completeness gap (the Umia I-01 miss). Inheritance-gated, standard-fn-denylisted,
+completeness gap (an interface-completeness gap seen in a live audit). Inheritance-gated, standard-fn-denylisted,
 mechanical Solidity parse. Pins low false positives."""
 from __future__ import annotations
 

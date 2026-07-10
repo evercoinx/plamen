@@ -6,7 +6,7 @@ agents (AUDIT MODES table), so the floor must NOT false-fail a correctly-sized
 Light manifest. Core/Thorough keep the floor unchanged.
 
 FIX 2 — CROSS_VM_SERIALIZATION_CONFORMANCE is an EVM-SIDE skill (it audits
-Solidity that serializes OUTBOUND for a non-EVM VM, e.g. an AccountEncoder/Borsh
+Solidity that serializes OUTBOUND for a non-EVM VM, e.g. an PayloadCodec/Borsh
 packer in a bridge — an observed gap it was built for). It must fire on an EXPLICIT
 EVM audit (language='evm') that has non-EVM-target evidence, and must NOT fire on
 a NATIVE non-EVM audit (solana/aptos/sui/soroban) — no EVM-side serialization
@@ -122,7 +122,7 @@ def _nonevm_manifest(sp: Path) -> None:
 def _write_heuristic_evidence(sp: Path) -> None:
     (sp / "recon_summary.md").write_text(
         "Gateway withdrawAndCall targets Solana and Bitcoin. "
-        "AccountEncoder serializes Solana pubkey/account bytes for a "
+        "PayloadCodec serializes Solana pubkey/account bytes for a "
         "destination chain.",
         encoding="utf-8",
     )

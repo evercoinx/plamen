@@ -35,7 +35,7 @@ def test_is_nonproduction_location():
     # production contracts whose NAME contains stub/mock/test but live in a real
     # dir with a real suffix must NOT be flagged (would drop real findings).
     prod = [
-        "core/UmiaMarketManager.sol", "libraries/CPMM.sol",
+        "core/MarketManager.sol", "libraries/CPMM.sol",
         "periphery/Hook.sol", "tokens/QOrgToken.sol:L40",
         "core/Stub.sol", "src/MockableVault.sol", "x/MockOracle.sol",
         "a/FooTest.sol",
@@ -56,7 +56,7 @@ def test_is_harness_location_prose():
         "Medusa harness configuration",
     ]
     notharness = [
-        "core/UmiaMarketManager.sol:L40",        # real file -> path logic
+        "core/MarketManager.sol:L40",        # real file -> path logic
         "the addLiquidity function",             # prose but not a harness
         "Missing test coverage for settleMarket",  # mentions test, not a harness loc
         "src/test/Foo.t.sol",                    # real-ish file token -> path logic

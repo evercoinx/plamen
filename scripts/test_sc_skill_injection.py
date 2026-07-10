@@ -94,17 +94,56 @@ def test_non_evm_target_evidence_mechanically_recovers_cross_vm_binding():
     sp = _mkscratch_realistic()
     (sp / "recon_summary.md").write_text(
         "Gateway withdrawAndCall targets Solana and Bitcoin. "
-        "AccountEncoder serializes Solana pubkey/account bytes for a destination chain.",
+        "PayloadCodec serializes Solana pubkey/account bytes for a destination chain.",
         encoding="utf-8",
     )
     # CROSS_VM is an EVM-SIDE skill: recovery fires on an EXPLICIT EVM audit that
-    # serializes outbound for a non-EVM VM (e.g. an AccountEncoder). Native
+    # serializes outbound for a non-EVM VM (e.g. an PayloadCodec). Native
     # non-EVM (solana/aptos/sui/soroban) and legacy/unknown ('') runs must NOT recover.
     breadth, depth = D._parse_sc_skill_bindings(sp, "evm")
     assert "CROSS_VM_SERIALIZATION_CONFORMANCE" in breadth.get(
         "cross_chain_message_integrity", []
     )
     assert "CROSS_VM_SERIALIZATION_CONFORMANCE" in depth.get("external", [])
+
+
+# --- Recall re-validation: the generic cross-chain detector must fire across
+# bridge families (not just one protocol's literal contract names). Each fixture
+# uses only GENERIC bridge vocabulary + non-EVM (Solana/Borsh) evidence. ---
+
+def _binds_cross_vm(tmp_summary: str) -> bool:
+    sp = _mkscratch_realistic()
+    (sp / "recon_summary.md").write_text(tmp_summary, encoding="utf-8")
+    breadth, depth = D._parse_sc_skill_bindings(sp, "evm")
+    return "CROSS_VM_SERIALIZATION_CONFORMANCE" in breadth.get(
+        "cross_chain_message_integrity", [])
+
+
+def test_cross_vm_recovers_on_layerzero_shaped():
+    # LayerZero-style: no literal method in the regex; caught via generic bridge vocab
+    assert _binds_cross_vm(
+        "lzReceive handler forwards a cross-chain bridge payload; "
+        "serializes Solana pubkey/account bytes with Borsh for the destination chain.")
+
+
+def test_cross_vm_recovers_on_wormhole_shaped():
+    assert _binds_cross_vm(
+        "receiveWormholeMessages parses the payload and relays it; "
+        "encodes a Solana account address (base58/Borsh) for the destination chain.")
+
+
+def test_cross_vm_recovers_on_ccip_axelar_shaped():
+    assert _binds_cross_vm(
+        "ccipReceive on the destination chain via the relay/bridge; "
+        "packs a Solana Pubkey (Borsh) for the source chain.")
+
+
+def test_cross_vm_no_recover_evm_only_bridge_negative_control():
+    # bridge/message/payload vocabulary but NO non-EVM (Solana/Bitcoin/Borsh)
+    # evidence -> the positive AND cross_chain gate must NOT fire (no over-firing).
+    assert not _binds_cross_vm(
+        "A generic EVM bridge relays a cross-chain message payload between two "
+        "EVM chains; no non-EVM serialization involved.")
 
 
 def test_recon_and_verifier_skills_excluded():

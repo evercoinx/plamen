@@ -927,7 +927,7 @@ def test_MAN_sc_manifest_prefers_index_verification_files_over_all_constituents(
 ## Master Finding Index
 | Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |
 |-----------|-------|----------|----------|--------------|------------|---------------------|
-| M-29 | Merged duplicate report | Medium | Gateway.sol:admin | verify_HM-05.md, verify_HM-06.md | - | HM-05+HM-06+HM-07+HM-08 |
+| M-29 | Merged duplicate report | Medium | BridgeRouter.sol:admin | verify_HM-05.md, verify_HM-06.md | - | HM-05+HM-06+HM-07+HM-08 |
 """, encoding="utf-8")
     for fid in ("HM-05", "HM-06"):
         (sp / f"verify_{fid}.md").write_text(f"""# Verification: {fid}
@@ -936,7 +936,7 @@ def test_MAN_sc_manifest_prefers_index_verification_files_over_all_constituents(
 **Evidence Tag**: [CODE-TRACE]
 
 ## Description
-Verified duplicate constituent at `Gateway.sol:L42`.
+Verified duplicate constituent at `BridgeRouter.sol:L42`.
 
 ## Execution Result
 Code trace verified; no executable PoC was required.

@@ -8736,8 +8736,15 @@ def _parse_sc_skill_bindings(
             re.IGNORECASE,
         )
         cross_chain = re.search(
-            r"\b(cross-chain|cross chain|destination chain|withdrawAndCall|"
-            r"GatewayZEVM|GatewayEVM|revertMessage|onRevert|onAbort)\b",
+            # Generic cross-chain-messaging vocabulary (bridge/relay families —
+            # LayerZero/Wormhole/Axelar/CCIP-style), NOT any one protocol's literal
+            # contract/method names. Drawn from the CROSS_CHAIN_MESSAGE_INTEGRITY
+            # trigger set. The AND-gate with `positive` (Solana/Bitcoin/Borsh) keeps
+            # this from over-firing on plain EVM bridges.
+            r"\b(cross-chain|cross chain|destination chain|source chain|bridge|"
+            r"relay|gateway|payload|onRevert|onAbort|onFailure|onCall|onMessage|"
+            r"onReceive|withdrawAndCall|sendAndCall|ccipReceive|"
+            r"receiveWormholeMessages)\b",
             hay,
             re.IGNORECASE,
         )
@@ -10598,7 +10605,7 @@ def _tokenize_path(file_path: str) -> set[str]:
     """Tokenize a file path for focus-area matching.
 
     Splits on path separators, dots, underscores, hyphens, AND
-    camelCase boundaries (so ``GatewayCrossChain.sol`` yields
+    camelCase boundaries (so ``CrossChainRouter.sol`` yields
     ``gateway``, ``cross``, ``chain``, ``sol``). Lowercase.
     """
     if not file_path:
@@ -10641,7 +10648,7 @@ def _focus_area_tokens(focus: str) -> set[str]:
 # to every agent whose focus-area name corresponds to that bucket
 # (token overlap between focus_area and bucket name), IN ADDITION to
 # file-path routing. This fixes the under-routing failure where an
-# access-control finding in GatewayCrossChain.sol routed only to the
+# access-control finding in CrossChainRouter.sol routed only to the
 # cross-chain agents because the FILENAME contained cross/chain --
 # the access-control agent never saw it. Content-based routing is the
 # PRIMARY signal; file-path is one additional signal.
@@ -10763,7 +10770,7 @@ def _match_agents_for_row(
         (see ``_OPENGREP_SEMANTIC_BUCKETS``). The row routes to every
         agent whose focus-area name shares a token with a matched
         bucket name. This is what gets an access-control finding in
-        GatewayCrossChain.sol to the access_control agent even though
+        CrossChainRouter.sol to the access_control agent even though
         the filename screams cross-chain.
 
       Signal B (file path, ONE additional signal): the agent's

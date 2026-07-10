@@ -194,10 +194,10 @@ Every emitted candidate/finding uses the standard format from `rules/finding-out
 
 ---
 
-## 6. Validation plan — rerun DODO (EVM) + Spectra (Soroban), un-primed via `--fresh`
+## 6. Validation plan — rerun the EVM + Soroban benchmark targets, un-primed via `--fresh`
 
 ### 6.1 Setup (un-priming)
-Both targets are now **un-primed** (the v2.2.1 overfit archive removed DODO finding descriptions + the file:line, and same-contest judging RAG). Rerun with `--fresh` so `_ensure_fresh_audit_sentinel` (`plamen_driver.py` @L11055) + `_archive_prior_audit_artifacts` (@L15527) archive any prior scratchpad, guaranteeing a clean generation. Score the delivered `AUDIT_REPORT.md` against each target's **existing ground truth** (`scripts/bounty/_realdata/index.json` and the per-target GT), NOT against any same-contest judging repo (anti-overfit).
+Both targets are now **un-primed** (the v2.2.1 overfit archive removed prior-audit finding descriptions + file:line, and same-contest judging RAG). Rerun with `--fresh` so `_ensure_fresh_audit_sentinel` (`plamen_driver.py` @L11055) + `_archive_prior_audit_artifacts` (@L15527) archive any prior scratchpad, guaranteeing a clean generation. Score the delivered `AUDIT_REPORT.md` against each target's **existing ground truth** (`scripts/bounty/_realdata/index.json` and the per-target GT), NOT against any same-contest judging repo (anti-overfit).
 
 ### 6.2 What to measure
 - **Per-class recall on B1–B5**: for each GT finding tagged to one of the 5 classes, matched / missed.

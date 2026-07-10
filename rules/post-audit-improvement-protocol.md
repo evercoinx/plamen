@@ -12,7 +12,7 @@
 Audit methodology (skills, rules, prompts, scanner checks) and persistent memory MUST encode **HOW to analyze**, NEVER **WHAT to find in a specific protocol**.
 
 **Forbidden:**
-- A specific project/protocol/token/contract/struct/function name used as a "check for X" hint, a floor-catalog row, or a dedicated section (e.g. a "ZetaChain Gateway: check native ZETA vs WZETA" row). Naming the answer is overfitting.
+- A specific project/protocol/token/contract/struct/function name used as a "check for X" hint, a floor-catalog row, or a dedicated section (e.g. a "Bridge X: check native GAS vs wrapped GAS" row). Naming the answer is overfitting.
 - Storing specific past-audit FINDING descriptions, finding IDs, or file:line locations in memory. Memory may store ONLY recall %, precision %, and RC-distribution counts — never the bugs themselves.
 - RAG/web queries that pull the SAME-CONTEST judging/answer repo (`*-judging`, the contest's own issues) when measuring recall.
 
@@ -20,7 +20,7 @@ Audit methodology (skills, rules, prompts, scanner checks) and persistent memory
 
 **The test, applied before adding ANY skill/rule/memory content:** "Does this teach a general method, or does it name a specific codebase's answer?" If the latter → genericize it, route it to RAG-as-generic-vuln-class, or drop it.
 
-**Why this exists (permanent record):** the DODO Crosschain Dex benchmark was found primed by (a) a ZetaChain-specific HARD_OVERFIT floor row + §0c-bis in integration-hazard-research, (b) RAG electing the same-contest Sherlock judging repo as precedent, and (c) memory files storing DODO finding descriptions + a file:line. The generic methodology found the bugs on its own (0/4 recalls were load-bearing on the overfit) — so overfitting adds NO recall and only fakes the benchmark. Never again.
+**Why this exists (permanent record):** a cross-chain DEX benchmark was found primed by (a) a chain-specific HARD_OVERFIT floor row + a dedicated integration-hazard-research section, (b) RAG electing the same-contest judging/answer repo as precedent, and (c) memory files storing prior-audit finding descriptions + a file:line. The generic methodology found the bugs on its own (none of the recalls were load-bearing on the overfit) — so overfitting adds NO recall and only fakes the benchmark. Never again.
 
 ---
 

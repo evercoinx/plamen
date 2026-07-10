@@ -82,7 +82,7 @@ def test_classify_structural_patterns():
     check("cross-client", classify_poc_testability("cross-client divergence", "", "EVM diff", "High") == "structural")
     check("byzantine", classify_poc_testability("byzantine tolerance", "", "2/3 threshold", "Critical") == "structural")
     check("network partition", classify_poc_testability("network partition", "", "Split brain", "High") == "structural")
-    check("missing setter beats approve keyword", classify_poc_testability("", "CODE-TRACE", "GatewaySend.Approve Has No Admin Setter", "Low") == "structural")
+    check("missing setter beats approve keyword", classify_poc_testability("", "CODE-TRACE", "MessageRouter.Approve Has No Admin Setter", "Low") == "structural")
     check("missing event beats setter/withdraw keywords", classify_poc_testability("", "CODE-TRACE", "Event Emission Missing on setBot, superWithdraw, setGasLimit, and setSlippage", "Low") == "structural")
 
 
@@ -324,7 +324,7 @@ def test_verify_completion_accepts_bold_skip_ledger_with_explanation():
             "# Verification Queue Manifest\n"
             "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact | PoC Class |\n"
             "|---------|-----------|----------|-------|-----------|--------------|----------|------------------|-----------|\n"
-            "| 1 | H-12 | Medium | Cross env issue | integration | [CODE-TRACE] | Gateway.sol:10 | hypotheses.md | unit |\n"
+            "| 1 | H-12 | Medium | Cross env issue | integration | [CODE-TRACE] | BridgeRouter.sol:10 | hypotheses.md | unit |\n"
         ),
         "verify_H-12.md": (
             "# Verify H-12\n"
@@ -356,7 +356,7 @@ def test_verify_completion_rejects_bold_structural_skip_for_unit():
             "# Verification Queue Manifest\n"
             "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact | PoC Class |\n"
             "|---------|-----------|----------|-------|-----------|--------------|----------|------------------|-----------|\n"
-            "| 1 | H-13 | Medium | Unit-testable design issue | access-control | [CODE-TRACE] | Gateway.sol:10 | hypotheses.md | unit |\n"
+            "| 1 | H-13 | Medium | Unit-testable design issue | access-control | [CODE-TRACE] | BridgeRouter.sol:10 | hypotheses.md | unit |\n"
         ),
         "verify_H-13.md": (
             "# Verify H-13\n"
@@ -388,7 +388,7 @@ def test_verify_completion_rejects_deployment_skip_for_unit():
             "# Verification Queue Manifest\n"
             "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact | PoC Class |\n"
             "|---------|-----------|----------|-------|-----------|--------------|----------|------------------|-----------|\n"
-            "| 1 | H-14 | Medium | Fee mutation | accounting | [CODE-TRACE] | Gateway.sol:10 | hypotheses.md | unit |\n"
+            "| 1 | H-14 | Medium | Fee mutation | accounting | [CODE-TRACE] | BridgeRouter.sol:10 | hypotheses.md | unit |\n"
         ),
         "verify_H-14.md": (
             "# Verify H-14\n"
@@ -420,7 +420,7 @@ def test_verify_completion_rejects_missing_mock_external_skip():
             "# Verification Queue Manifest\n"
             "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact | PoC Class |\n"
             "|---------|-----------|----------|-------|-----------|--------------|----------|------------------|-----------|\n"
-            "| 1 | H-15 | Medium | Token mismatch | validation | [CODE-TRACE] | Gateway.sol:10 | hypotheses.md | unit |\n"
+            "| 1 | H-15 | Medium | Token mismatch | validation | [CODE-TRACE] | BridgeRouter.sol:10 | hypotheses.md | unit |\n"
         ),
         "verify_H-15.md": (
             "# Verify H-15\n"
@@ -452,7 +452,7 @@ def test_verify_completion_reports_all_poc_contract_failures():
     for idx in range(1, 9):
         fid = f"H-{idx}"
         rows.append(
-            f"| {idx} | {fid} | Medium | Unit issue {idx} | logic | [CODE-TRACE] | Gateway.sol:{idx} | hypotheses.md | unit |\n"
+            f"| {idx} | {fid} | Medium | Unit issue {idx} | logic | [CODE-TRACE] | BridgeRouter.sol:{idx} | hypotheses.md | unit |\n"
         )
         files[f"verify_{fid}.md"] = (
             f"# Verify {fid}\n"

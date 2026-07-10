@@ -19,7 +19,7 @@ def _proj(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
     (root / "core").mkdir(parents=True)
     (root / "libraries").mkdir(parents=True)
-    (root / "core" / "UmiaMarketManager.sol").write_text("x\n" * 900, encoding="utf-8")
+    (root / "core" / "MarketManager.sol").write_text("x\n" * 900, encoding="utf-8")
     (root / "libraries" / "GovernanceVM.sol").write_text("y\n" * 200, encoding="utf-8")
     return root
 
@@ -35,7 +35,7 @@ def test_corrupted_location_recovered_from_index(tmp_path: Path):
         "**Location**: `src/factories/StrategyFactory.sol`\n\n"
         "**Description**: TOCTOU over the multi-day window.\n"
     )
-    id_to_location = {"M-25": "libraries/GovernanceVM.sol:L130-135; core/UmiaMarketManager.sol:L720-749"}
+    id_to_location = {"M-25": "libraries/GovernanceVM.sol:L130-135; core/MarketManager.sol:L720-749"}
     patched, n = m._recover_tier_locations(section, id_to_location, str(root))
     assert n == 1
     assert "StrategyFactory.sol" not in patched
@@ -49,13 +49,13 @@ def test_valid_location_is_untouched(tmp_path: Path):
     root = _proj(tmp_path)
     section = (
         "### [M-26] real finding\n\n"
-        "**Location**: `core/UmiaMarketManager.sol:L666-674`\n\n"
+        "**Location**: `core/MarketManager.sol:L666-674`\n\n"
         "**Description**: x\n"
     )
     id_to_location = {"M-26": "libraries/GovernanceVM.sol:L1"}
     patched, n = m._recover_tier_locations(section, id_to_location, str(root))
     assert n == 0   # body location is real -> not corruption -> untouched
-    assert "UmiaMarketManager.sol:L666-674" in patched
+    assert "MarketManager.sol:L666-674" in patched
 
 
 def test_no_recover_when_index_also_missing(tmp_path: Path):
@@ -75,12 +75,12 @@ def test_partial_real_location_not_treated_as_corruption(tmp_path: Path):
     root = _proj(tmp_path)
     section = (
         "### [M-28] x\n\n"
-        "**Location**: `core/UmiaMarketManager.sol:L1; ghost/Fake.sol:L2`\n\n"
+        "**Location**: `core/MarketManager.sol:L1; ghost/Fake.sol:L2`\n\n"
     )
     id_to_location = {"M-28": "libraries/GovernanceVM.sol:L1"}
     patched, n = m._recover_tier_locations(section, id_to_location, str(root))
     assert n == 0   # at least one real file cited -> not corruption
-    assert "UmiaMarketManager.sol" in patched
+    assert "MarketManager.sol" in patched
 
 
 if __name__ == "__main__":

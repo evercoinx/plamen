@@ -1,6 +1,6 @@
 """FIX 1 (attribution) — provenance-preserving dedup merge + attribution ledger.
 
-Root cause 1 of recall-precision-fix-plan.md: attribution was unmeasurable
+Root cause 1 (attribution unmeasurable):
 because (a) the multi-axis promoter stamped `AXIS-101` (not a clean greppable
 class token) and (b) when semantic dedup merged an AXIS/CI finding INTO a normal
 twin, the survivor kept only the NORMAL source and the "also independently found

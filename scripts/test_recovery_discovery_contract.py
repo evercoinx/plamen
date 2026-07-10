@@ -37,7 +37,7 @@ def test_candidate_semantic_facets_extract_general_mechanisms(tmp_path: Path):
     (tmp_path / "verification_queue.md").write_text(
         "| Finding ID | Severity | Title | Location |\n"
         "|---|---|---|---|\n"
-        "| H-1 | High | Asset mismatch skips swap | Gateway.sol:42 |\n",
+        "| H-1 | High | Asset mismatch skips swap | BridgeRouter.sol:42 |\n",
         encoding="utf-8",
     )
     (tmp_path / "verify_H-1.md").write_text(
@@ -150,11 +150,11 @@ def test_chain_anti_absorption_repair_splits_overmerged_groups(tmp_path: Path):
         "# Finding Inventory\n\n"
         "## Finding [INV-001]: Refund recipient is unauthenticated\n"
         "**Severity**: High\n"
-        "**Location**: Gateway.sol:L10 claimRefund()\n"
+        "**Location**: BridgeRouter.sol:L10 claimPayout()\n"
         "**Root Cause**: refund recipient is taken from untrusted calldata\n\n"
         "## Finding [INV-002]: Swap skips min-out enforcement\n"
         "**Severity**: Medium\n"
-        "**Location**: Gateway.sol:L20 doSwap()\n"
+        "**Location**: BridgeRouter.sol:L20 doSwap()\n"
         "**Root Cause**: router call uses zero minAmountOut and accepts any output\n\n",
         encoding="utf-8",
     )

@@ -97,7 +97,7 @@ def test_exec_count_synced_to_summary_table():
 
 
 def test_second_split_case():
-    # DODO-shaped: exec 89 (8/17/27/29/8), delivered table 73 (8/17/20/20/8).
+    # real-audit-shaped: exec 89 (8/17/27/29/8), delivered table 73 (8/17/20/20/8).
     exec_split = (8, 17, 27, 29, 8)
     table_split = (8, 17, 20, 20, 8)
     text = _make_report(89, exec_split, table_split)

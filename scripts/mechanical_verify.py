@@ -51,7 +51,14 @@ from typing import Optional
 
 # Per-file and per-phase budgets (overridable via env for ops scenarios).
 _DEFAULT_PER_TEST_TIMEOUT_S = int(os.environ.get("PLAMEN_MECH_VERIFY_TIMEOUT", "180"))
-_DEFAULT_BUILD_TIMEOUT_S = int(os.environ.get("PLAMEN_MECH_BUILD_TIMEOUT", "300"))
+# One-time pre-warm compile budget (see _prewarm_build). Raised from 300s: a cold
+# `--via-ir` dependency-heavy repo cannot compile in the old budget, so the cache
+# never warmed and every PoC TIMEOUTed at [CODE-TRACE]. Default matches recon's build
+# ceiling (a measured large-repo cold via-ir build runs >34min, so a 40-min budget
+# was too tight for the cold-verify path). On a cache already warmed by recon this
+# pre-warm is a ~seconds incremental build; the generous budget only bites when verify
+# runs against a cold cache. Ops-overridable via PLAMEN_MECH_BUILD_TIMEOUT.
+_DEFAULT_BUILD_TIMEOUT_S = int(os.environ.get("PLAMEN_MECH_BUILD_TIMEOUT", "5400"))
 _DEFAULT_PHASE_BUDGET_S = int(os.environ.get("PLAMEN_MECH_VERIFY_BUDGET", "1800"))
 
 
@@ -1333,6 +1340,51 @@ def read_verdict_manifest(scratchpad: Path) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _prewarm_build(build_root: Path, language: str, registry: dict,
+                   timeout_s: int) -> tuple[bool, str]:
+    """One-time best-effort compile from the build root to WARM the build cache
+    before the per-finding test loop.
+
+    Without this, the first `forge test` / `cargo test` on a COLD cache must do
+    the whole-project (often `--via-ir`) compile inside its own per-test budget
+    and TIMEOUTs on a dependency-heavy repo — capping every finding at
+    [CODE-TRACE] instead of [POC-PASS]. A warm cache makes each subsequent test
+    an incremental (seconds) build.
+
+    Best-effort and NON-FATAL: any failure/timeout just leaves the cache as-is
+    and the loop proceeds exactly as before (the per-test build then behaves as
+    it did pre-fix). Never raises."""
+    try:
+        env = os.environ.copy()
+        if language == "evm":
+            cmd = [shutil.which("forge") or "forge", "build"]
+        else:
+            lang_cfg = registry.get(language) or {}
+            build_cmd = str(lang_cfg.get("build_command") or "").strip()
+            if not build_cmd:
+                return (False, f"no build_command for '{language}' — pre-warm skipped")
+            cmd = build_cmd.split()
+            resolved = shutil.which(cmd[0])
+            if resolved:
+                cmd[0] = resolved
+        t0 = time.time()
+        proc = subprocess.run(
+            cmd, cwd=str(build_root), capture_output=True, text=True,
+            timeout=max(1, int(timeout_s)), shell=False, env=env,
+        )
+        dt = time.time() - t0
+        if proc.returncode == 0:
+            return (True, f"warm ok (rc=0) in {dt:.0f}s")
+        # A non-zero build here is informative but not fatal — the per-test run
+        # still tries (a scoped compile can succeed where a whole-project one
+        # fails), and the classifier handles COMPILE_FAIL.
+        return (False, f"build rc={proc.returncode} in {dt:.0f}s (cache left as-is)")
+    except subprocess.TimeoutExpired:
+        return (False, f"pre-warm build exceeded {timeout_s}s (cache left as-is)")
+    except Exception as exc:  # never let cache-warming break verification
+        return (False, f"pre-warm build error: {exc}")
+
+
 def run_phase5b_mechanical_verify(scratchpad: Path, project_root: Path,
                                   language: str, *,
                                   per_test_timeout_s: Optional[int] = None,
@@ -1404,6 +1456,13 @@ def run_phase5b_mechanical_verify(scratchpad: Path, project_root: Path,
         Path(project_root), lang
     )
 
+    # Warm the build cache ONCE before the per-finding loop. A cold, dependency-
+    # heavy (`--via-ir`) repo cannot compile inside a single per-test budget, so
+    # without this every finding TIMEOUTs and caps at [CODE-TRACE]; a warm cache
+    # makes each test an incremental build. Best-effort / non-fatal.
+    prewarm_ok, prewarm_note = _prewarm_build(
+        build_root, lang, registry, _DEFAULT_BUILD_TIMEOUT_S)
+
     results: list[ExecResult] = []
     annotated = 0
     t_start = time.time()
@@ -1435,6 +1494,8 @@ def run_phase5b_mechanical_verify(scratchpad: Path, project_root: Path,
         "counts": counts,
         "files_annotated": annotated,
         "build_root": str(build_root),
+        "prewarm_ok": prewarm_ok,
+        "prewarm_note": prewarm_note,
         "elapsed_s": time.time() - t_start,
     }
 

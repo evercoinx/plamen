@@ -70,7 +70,7 @@ def _simulate_wait(events, quiescence_s=8.0):
 
 
 _CAP = "API Error: Claude's response exceeded the 32000 output token maximum"
-_WORK = "Writing test file RouteProxyMock.sol ... tool_use bash forge build"
+_WORK = "Writing test file SwapRouterMock.sol ... tool_use bash forge build"
 
 
 def test_cap_loop_trips_when_events_stay_fresh():

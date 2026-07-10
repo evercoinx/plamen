@@ -4790,7 +4790,7 @@ def estimate_cost(target: str, mode: str,
                         continue
                     # Extract .sol/.rs/.move filenames from any format:
                     #   bare paths: "src/contracts/Vault.sol"
-                    #   markdown tables: "| GatewaySend.sol | 301 |"
+                    #   markdown tables: "| MessageRouter.sol | 301 |"
                     #   bullet lists: "- contracts/Vault.sol"
                     matches = _re.findall(r'[\w/\\.-]+\.(?:sol|rs|move)', line)
                     if matches:

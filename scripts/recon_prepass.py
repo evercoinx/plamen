@@ -503,7 +503,16 @@ BUILD_SPECS = {
 # stalls still returns rc=124 so the caller degrades. Generic across ecosystems
 # (.sol / .rs / .move / etc. — the caller passes the relevant file count).
 _BUILD_TIMEOUT_PER_FILE_S = 4       # per source-file budget added to the base
-_BUILD_TIMEOUT_CEILING_S = 1800     # 30-min hard ceiling (bounded by hardened wrapper)
+# Default ceiling for the file-count-scaled build timeout. 30-min (1800s) was too
+# low for a COLD `--via-ir` compile of a dependency-heavy repo: a real large dependency-heavy EVM
+# run's whole-project build hit the ceiling and degraded to TIMEOUT, which starves
+# Slither (approximate source graph) and caps every PoC at [CODE-TRACE] (the verify
+# `forge test` can never compile in its own budget against a cold cache). Raised to
+# 90-min and made ops-overridable via PLAMEN_BUILD_TIMEOUT_CEILING_S. Harmless per the
+# wrapper contract above — a fast build still returns immediately; only a genuinely-
+# heavy build spends the extra time, and a truly stuck one still tree-kills at the
+# (higher) bound. Generic across every ecosystem sized via _scale_build_timeout.
+_BUILD_TIMEOUT_CEILING_S = 5400     # 90-min default ceiling (env: PLAMEN_BUILD_TIMEOUT_CEILING_S)
 # Source suffixes per build key, used purely to size the timeout.
 _BUILD_TIMEOUT_SUFFIXES = {
     "evm_forge":   (".sol",),
@@ -539,13 +548,25 @@ def _is_rust_ecosystem_build(key: Optional[str], cmd: Optional[List[str]]) -> bo
     return False
 
 
+def _build_timeout_ceiling() -> int:
+    """Active build-timeout ceiling: PLAMEN_BUILD_TIMEOUT_CEILING_S when set (ops
+    override for very large/slow cold builds), else the module default. Read
+    per-call so operators and tests can retune without a module reload. Never
+    raises."""
+    try:
+        return max(1, int(os.environ.get(
+            "PLAMEN_BUILD_TIMEOUT_CEILING_S", _BUILD_TIMEOUT_CEILING_S)))
+    except Exception:
+        return _BUILD_TIMEOUT_CEILING_S
+
+
 def _scale_build_timeout(base: int, n_files: int) -> int:
     """base + per-file budget, bounded to [base, ceiling]. Never raises."""
     try:
         scaled = int(base) + _BUILD_TIMEOUT_PER_FILE_S * max(0, int(n_files))
     except Exception:
         return int(base)
-    return max(int(base), min(_BUILD_TIMEOUT_CEILING_S, scaled))
+    return max(int(base), min(_build_timeout_ceiling(), scaled))
 
 
 def _graph_implies_compiles(graph_status: Optional[str], lang: str) -> bool:
@@ -2039,6 +2060,48 @@ def _bake_evm_source_graph(scratch: Path, proj: Path) -> str:
     return _finalize_source_graph(scratch, "evm-source", fn_loc, sym_refs, fn_callees)
 
 
+_VIA_IR_WARNED = False
+
+
+def _foundry_via_ir_root(proj: Path) -> Optional[Path]:
+    """Search `proj` and up to 4 parent dirs for a foundry.toml that enables the
+    whole-program IR pipeline (`via_ir`/`via-ir = true` in any profile). Returns
+    the owning dir, else None. Best-effort; never raises."""
+    try:
+        d = Path(proj).resolve()
+        for cand in [d, *list(d.parents)[:4]]:
+            ft = cand / "foundry.toml"
+            if ft.is_file():
+                txt = ft.read_text(encoding="utf-8", errors="ignore")
+                if re.search(r"(?im)^\s*via[_-]ir\s*=\s*true\b", txt):
+                    return cand
+    except Exception:
+        pass
+    return None
+
+
+def _maybe_warn_via_ir_build(proj: Path) -> None:
+    """One-time console heads-up before the first EVM compile when the project
+    uses `--via-ir`. A COLD via-ir build of a dependency-heavy repo can run for
+    tens of minutes producing no output — indistinguishable from a hang — which
+    leads operators to kill a healthy run. Warn up front. Best-effort; never
+    raises. Generic (no project-specific knowledge)."""
+    global _VIA_IR_WARNED
+    if _VIA_IR_WARNED or _foundry_via_ir_root(proj) is None:
+        return
+    _VIA_IR_WARNED = True
+    msg = ("via-ir build detected (foundry.toml). The first COLD compile of a "
+           "dependency-heavy repo can take TENS OF MINUTES with no output — this "
+           "is NOT a hang; subsequent builds are incremental (seconds). Budgets "
+           "are ops-overridable via PLAMEN_BUILD_TIMEOUT_CEILING_S (recon) and "
+           "PLAMEN_MECH_BUILD_TIMEOUT (verify).")
+    log.warning("[recon] %s", msg)
+    try:
+        print(f"\n[PLAMEN] NOTE: {msg}\n", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
 def _bake_evm_graph(scratch: Path, proj: Path) -> str:
     """EVM graph provider with tiered degradation (never mock the compiler):
       1. Slither (PRECISE, type-resolved) when the project builds.
@@ -2048,6 +2111,10 @@ def _bake_evm_graph(scratch: Path, proj: Path) -> str:
     Mocking missing dependencies to force a Slither compile is deliberately NOT
     done: type-unsound stubs fabricate data-flow, which would make the gate's
     denominator untrustworthy — strictly worse than the honest approximate tier."""
+    # Slither's crytic-compile triggers the first (cold) via-ir compile — warn
+    # the operator before the potentially-long silent build so it isn't mistaken
+    # for a hang.
+    _maybe_warn_via_ir_build(proj)
     slither = _bake_evm_slither_graph(scratch, proj)
     if slither == "WRITTEN":
         return "WRITTEN:slither"

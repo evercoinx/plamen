@@ -6,7 +6,7 @@ Covers:
 - Fix 2: _validate_chain_anti_absorption — distinct-function / severity /
   Jaccard violations are flagged; explicit override clears them.
 - Fix 4: _per_constituent_claim_match — single_winner / shared_claim /
-  ambiguous classification on the AccountEncoder-style super-group case.
+  ambiguous classification on the PayloadCodec-style super-group case.
 - Fix 4: _apply_poc_fail_demotions writes poc_demotion_carveouts.md when
   the verifier tested only one constituent's claim.
 - Fix 5: CROSS_VM_ENCODING_NO_RUNTIME — keyword guard rejects abuse,
@@ -154,7 +154,7 @@ class TestAntiAbsorption:
         # the distinct-functions observation is surfaced as an advisory SOFT NOTE
         # inside the same issue string, never as its own hard violation.
         self._seed(scratch, [
-            ("INV-001", "Medium", "AccountEncoder.sol:L10 fooDecompress()", "memory layout pointer bug"),
+            ("INV-001", "Medium", "PayloadCodec.sol:L10 fooDecompress()", "memory layout pointer bug"),
             ("INV-002", "Medium", "GatewayTransfer.sol:L20 withdraw()", "access control missing"),
         ], "GRP-M-001")
         issues = validators._validate_chain_anti_absorption(scratch, "thorough")
@@ -184,7 +184,7 @@ class TestAntiAbsorption:
 
     def test_override_clears_violations(self, scratch: Path):
         self._seed(scratch, [
-            ("INV-001", "Medium", "AccountEncoder.sol:L10 fooDecompress()", "memory layout bug"),
+            ("INV-001", "Medium", "PayloadCodec.sol:L10 fooDecompress()", "memory layout bug"),
             ("INV-002", "Medium", "GatewayTransfer.sol:L20 withdraw()", "access control bug"),
         ], "GRP-M-001", override_text="agents detect same single defect")
         issues = validators._validate_chain_anti_absorption(scratch, "thorough")
@@ -199,8 +199,8 @@ class TestAntiAbsorption:
 
     def test_skipped_in_light_mode(self, scratch: Path):
         self._seed(scratch, [
-            ("INV-001", "Medium", "AccountEncoder.sol:L10 a()", "x"),
-            ("INV-002", "Medium", "Gateway.sol:L20 b()", "y"),
+            ("INV-001", "Medium", "PayloadCodec.sol:L10 a()", "x"),
+            ("INV-002", "Medium", "BridgeRouter.sol:L20 b()", "y"),
         ], "GRP-M-001")
         assert validators._validate_chain_anti_absorption(scratch, "light") == []
 
@@ -254,7 +254,7 @@ class TestAntiAbsorptionSubcluster:
         # location-only; line-ref tokens discarded; prose is never consulted
         assert validators._normalize_locus_function("X.sol L671 (safeTransfer)") == ""
         assert validators._normalize_locus_function("X.sol:661 (fn)") == ""
-        assert validators._normalize_locus_function("X.sol claimRefund()") == "claimrefund"
+        assert validators._normalize_locus_function("X.sol claimPayout()") == "claimpayout"
         # a real `name()` in the Location field is still extracted
         assert validators._normalize_locus_function("Vault.sol:L10 settle()") == "settle"
 
@@ -272,22 +272,22 @@ class TestAntiAbsorptionSubcluster:
 
     # ---- repair-level ----
     def test_same_locus_stays_one_finding_even_cross_tier(self, scratch: Path):
-        # The claimRefund-CEI cluster: three High CEI findings + one Low
-        # invariant note, ALL at the SAME claimRefund locus. Distinctness is
+        # The claimPayout-CEI cluster: three High CEI findings + one Low
+        # invariant note, ALL at the SAME claimPayout locus. Distinctness is
         # location-based, so a single locus is ONE bug: all four stay one
         # hypothesis (severity inherited as the highest, High), NOT split by
         # tier or by prose. This is the corrected behavior that ends the
         # fresh-generation over-fragmentation (the old code split the Low out
         # and shattered paraphrase duplicates into many findings).
         self._seed(scratch, [
-            ("INV-010", "High", "GatewayTransferNative.sol:661-680 (claimRefund); ordering between L671 (safeTransfer) and L672 (delete)",
+            ("INV-010", "High", "NativeVault.sol:661-680 (claimPayout); ordering between L671 (safeTransfer) and L672 (delete)",
              "checks effects interactions violation refund reentrancy drain"),
-            ("INV-166", "High", "GatewayTransferNative.sol:671-672 (transfer at L671, delete at L672)",
+            ("INV-166", "High", "NativeVault.sol:671-672 (transfer at L671, delete at L672)",
              "checks effects interactions violation refund reentrancy drain"),
-            ("INV-167", "High", "GatewayTransferNative.sol:L661-672 (claimRefund)",
+            ("INV-167", "High", "NativeVault.sol:L661-672 (claimPayout)",
              "checks effects interactions violation refund reentrancy drain"),
-            ("INV-164", "Low", "GatewayTransferNative.sol:L661-672 (fn: claimRefund)",
-             "committed invariant claimRefund cannot be claimed twice disposition"),
+            ("INV-164", "Low", "NativeVault.sol:L661-672 (fn: claimPayout)",
+             "committed invariant claimPayout cannot be claimed twice disposition"),
         ], "GRP-H-001", "High")
         n = validators._repair_chain_anti_absorption_splits(scratch)
         # single locus -> one bug -> NO split; the original grouping (all four
@@ -301,9 +301,9 @@ class TestAntiAbsorptionSubcluster:
         # divergent prose (low token Jaccard) at the SAME locus must NOT split.
         # This is the exact trigger that exploded 53 chain hypotheses -> 140.
         self._seed(scratch, [
-            ("INV-300", "High", "GatewayTransferNative.sol:286-304 (withdraw)",
-             "public withdraw drains contract ZRC20 balance to an attacker recipient via the standing gateway allowance"),
-            ("INV-301", "Medium", "GatewayTransferNative.sol:286 (withdraw)",
+            ("INV-300", "High", "NativeVault.sol:286-304 (withdraw)",
+             "public withdraw drains contract WrappedToken balance to an attacker recipient via the standing gateway allowance"),
+            ("INV-301", "Medium", "NativeVault.sol:286 (withdraw)",
              "any account may invoke the unrestricted withdraw and redirect held tokens to itself"),
         ], "GRP-H-002", "High")
         n = validators._repair_chain_anti_absorption_splits(scratch)
@@ -325,8 +325,8 @@ class TestAntiAbsorptionSubcluster:
         # Post-Fix-6: distinct (file, function) alone does NOT violate, so the
         # group is preserved intact — no split, no rewrite.
         self._seed(scratch, [
-            ("INV-201", "Medium", "GatewayA.sol:L10 onRevert()", "unguarded refundInfos overwrite same shared handler"),
-            ("INV-202", "Medium", "GatewayB.sol:L20 onAbort()", "unguarded refundInfos overwrite same shared handler"),
+            ("INV-201", "Medium", "GatewayA.sol:L10 onRevert()", "unguarded pendingClaims overwrite same shared handler"),
+            ("INV-202", "Medium", "GatewayB.sol:L20 onAbort()", "unguarded pendingClaims overwrite same shared handler"),
         ], "GRP-M-001", "Medium")
         n = validators._repair_chain_anti_absorption_splits(scratch)
         assert n == 0  # nothing split; LLM grouping preserved
@@ -377,13 +377,13 @@ class TestPerConstituentDemotion:
         assert kind == "ambiguous"
 
     def test_apply_poc_fail_demotions_writes_carveout(self, scratch: Path):
-        # Seed inventory with 3 distinct AccountEncoder findings
+        # Seed inventory with 3 distinct PayloadCodec findings
         _seed_inventory(scratch, [
-            ("INV-001", "Medium", "AccountEncoder.sol:L10 decompressAccounts()",
+            ("INV-001", "Medium", "PayloadCodec.sol:L10 decompressAccounts()",
              "OOB read from attacker controlled len parameter"),
-            ("INV-002", "Medium", "AccountEncoder.sol:L20 decompressAccounts()",
+            ("INV-002", "Medium", "PayloadCodec.sol:L20 decompressAccounts()",
              "mload reads 32 bytes for 1-byte isWritable boolean field"),
-            ("INV-003", "High", "AccountEncoder.sol:L30 decompressAccounts()",
+            ("INV-003", "High", "PayloadCodec.sol:L30 decompressAccounts()",
              "memory layout uses pointer table instead of inline struct data"),
         ])
         # Hypothesis groups all 3
@@ -444,7 +444,7 @@ class TestCrossVmSkip:
     def test_valid_solana_skip(self):
         content = (
             "PoC Not Attempted Because: CROSS_VM_ENCODING_NO_RUNTIME\n"
-            "This finding involves AccountEncoder wire format for Solana decode.\n"
+            "This finding involves PayloadCodec wire format for Solana decode.\n"
         )
         # Build the regex inline to mirror validator behavior
         skip_codes = (
@@ -525,7 +525,7 @@ class TestBodyStatusStamp:
         "## Master Finding Index\n\n"
         "| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal |\n"
         "|---|---|---|---|---|---|---|\n"
-        "| C-01 | claimRefund theft | Critical | GTN.sol:661 | VERIFIED | - | HC-01 |\n"
+        "| C-01 | claimPayout theft | Critical | GTN.sol:661 | VERIFIED | - | HC-01 |\n"
         "| M-07 | unconditional refund write | Medium | GCC.sol:449 | CONFIRMED | - | HM-01 |\n"
         "| M-08 | slippage bound | Medium | A.sol:10 | CONFIRMED | - | HM-02 |\n"
         "| M-09 | contested thing | Medium | B.sol:20 | CONTESTED | - | HM-03 |\n"
@@ -541,12 +541,12 @@ class TestBodyStatusStamp:
         # the stamp must make BOTH read [CONFIRMED] (matching the index), and
         # C-01 stays VERIFIED.
         body = (
-            "## Critical Findings\n\n### [C-01] claimRefund theft [VERIFIED]\n\nx\n\n"
+            "## Critical Findings\n\n### [C-01] claimPayout theft [VERIFIED]\n\nx\n\n"
             "## Medium Findings\n\n### [M-07] unconditional refund write [UNVERIFIED]\n\ny\n\n"
             "### [M-08] slippage bound\n\nz\n\n### [M-09] contested thing [UNVERIFIED]\n\nw\n"
         )
         out = mech._stamp_body_header_status(body, mech._index_status_map(self._IDX))
-        assert "### [C-01] claimRefund theft [VERIFIED]" in out
+        assert "### [C-01] claimPayout theft [VERIFIED]" in out
         assert "### [M-07] unconditional refund write [CONFIRMED]" in out
         assert "### [M-08] slippage bound [CONFIRMED]" in out
         assert "### [M-09] contested thing [CONTESTED]" in out

@@ -183,7 +183,7 @@ def _parse_state_write_map(scratchpad: Path) -> dict[str, set[str]]:
         # skip header / separator rows
         if not var or var.lower() in ("state variable", "variable") or set(var) <= {"-", ":"}:
             continue
-        # Strip mapping/index decoration: `refundInfos[externalId]` → `refundInfos`
+        # Strip mapping/index decoration: `pendingClaims[externalId]` → `pendingClaims`
         bare = re.sub(r"[\[\(].*$", "", var).strip()
         bare = re.sub(r"\s*\(.*$", "", bare).strip()
         if bare:

@@ -131,8 +131,8 @@ Evidence Tag: [POC-PASS]
 
 - PoC Class: unit
 - Attempted: YES
-- Test File: test/VerifyH87_GatewaySendAsymmetry.t.sol
-- Command: forge test --match-test "test_H87" --match-path test/VerifyH87_GatewaySendAsymmetry.t.sol -vvv
+- Test File: test/VerifyH87_MessageRouterAsymmetry.t.sol
+- Command: forge test --match-test "test_H87" --match-path test/VerifyH87_MessageRouterAsymmetry.t.sol -vvv
 
 ## Execution Result
 
@@ -144,7 +144,7 @@ Evidence Tag: [POC-PASS]
         assert probe.llm_tag == "[POC-PASS]"
         assert probe.llm_verdict == "CONFIRMED"
         assert probe.poc_class == "unit"
-        assert probe.test_file_resolved == "test/VerifyH87_GatewaySendAsymmetry.t.sol"
+        assert probe.test_file_resolved == "test/VerifyH87_MessageRouterAsymmetry.t.sol"
         assert probe.test_function == "test_H87"
 
     def test_read_error_does_not_raise(self, scratch: Path):

@@ -53,7 +53,7 @@ def _verify_files(declared_class: str) -> dict[str, str]:
         "# Verification Queue Manifest\n"
         "| Queue # | Finding ID | Severity | Title | Bug Class | Preferred Tag | Location | Primary Artifact | PoC Class |\n"
         "|---------|-----------|----------|-------|-----------|--------------|----------|------------------|-----------|\n"
-        "| 1 | H-01 | Medium | Missing event on admin setter | missing event | [CODE-TRACE] | Gateway.sol:10 | hypotheses.md | unit |\n"
+        "| 1 | H-01 | Medium | Missing event on admin setter | missing event | [CODE-TRACE] | BridgeRouter.sol:10 | hypotheses.md | unit |\n"
     )
     verify = (
         "# Verify H-01\n"
@@ -171,18 +171,18 @@ def test_fc5_semantic_dedup_timeout_is_bounded():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("path", [
-    "interfaces/IRouteProxy.sol",
+    "interfaces/ISwapRouter.sol",
     "src/interfaces/IUniswapV2Router01.sol",
     "IUniswapV2Router01.sol",
     "contracts/mocks/ERC20Mock.sol",
-    "GatewayEVMMock.sol",
+    "BridgeRouterMock.sol",
 ])
 def test_fc6_interface_and_mock_paths_are_support(path):
     assert _is_spec_support_path(path) is True
 
 
 @pytest.mark.parametrize("path", [
-    "src/GatewayCrossChain.sol",
+    "src/CrossChainRouter.sol",
     "contracts/Vault.sol",
 ])
 def test_fc6_production_paths_are_not_support(path):

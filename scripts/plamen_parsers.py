@@ -1490,7 +1490,7 @@ def _title_tokens(title: str) -> set[str]:
     """Content-word token set of a normalized title.
 
     Drops short/stop tokens so that an abbreviation expanded into a full word
-    (`gcc` → `gatewaycrosschain`) and surrounding identical wording compare on
+    (`gcc` → `crosschainrouter`) and surrounding identical wording compare on
     their shared, meaningful tokens rather than the differing label token.
     """
     import re as _re
@@ -1508,7 +1508,7 @@ def _titles_collide(title_a: str, title_b: str) -> bool:
       1. Normalized forms are identical (exact fast-path, == `_title_hash`).
       2. One normalized form is a prefix of the other (abbreviation expanded,
          trailing detail added: "gcc trusts inbound externalid verbatim" vs
-         "gatewaycrosschain trusts inbound externalid verbatim ...").
+         "crosschainrouter trusts inbound externalid verbatim ...").
       3. Token-set Jaccard similarity >= 0.6 (cosmetic reword / synonym swap
          leaving most meaningful words intact).
 
@@ -5323,7 +5323,7 @@ def _report_index_first_location(cell: str) -> tuple[str, tuple[int, int] | None
     The Location column can list several sites (``A.sol:10-20; B.sol:30``). This
     returns ONLY the FIRST location's file basename and line range — the "first
     Location range" the Fix-4 candidate list keys on. Returns ("", None) when no
-    parseable ``file:Lnnn`` prefix exists (e.g. ``GatewaySend.sol (file)``).
+    parseable ``file:Lnnn`` prefix exists (e.g. ``MessageRouter.sol (file)``).
     """
     norm = _norm_loc(cell)
     lr = _parse_line_range(norm)
@@ -8519,7 +8519,7 @@ def _load_scope_file_paths(scope_file: str | None) -> set[str]:
     `plamen.estimate_cost`):
 
       - bare paths:        `src/contracts/Vault.sol`
-      - markdown tables:   `| GatewaySend.sol | 301 lines |`
+      - markdown tables:   `| MessageRouter.sol | 301 lines |`
       - bullet lists:      `- contracts/Vault.sol`
 
     Returns a lowercase set containing both each full POSIX-normalised

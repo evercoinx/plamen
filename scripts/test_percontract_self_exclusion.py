@@ -56,7 +56,7 @@ RESCAN_FINDING = (
     "## Findings\n\n"
     "## Finding [RS1-3]: Stale price\n\n"
     "**Severity**: Medium\n"
-    "**Location**: AccountEncoder.sol:L88\n"
+    "**Location**: PayloadCodec.sol:L88\n"
     "**Description**: stale.\n"
 )
 
@@ -77,11 +77,11 @@ def test_drop_reproduction_referentless_exclusion_flagged_and_reemitted(tmp_path
         "## Findings\n\n"
         "## Finding [PC3-1]: Some real finding\n\n"
         "**Severity**: Low\n"
-        "**Location**: AccountEncoder.sol:L200\n"
+        "**Location**: PayloadCodec.sol:L200\n"
         "**Description**: ok.\n\n"
         "## Exclusion List (Already Found - Not Duplicated)\n\n"
         "- EXCLUDED [PC3-9] isWritable byte-width mismatch at "
-        "AccountEncoder.sol:L412 (dup of SL-1/CC-7)\n",
+        "PayloadCodec.sol:L412 (dup of SL-1/CC-7)\n",
     )
 
     warnings, recovered = _validate_percontract_self_exclusion(tmp_path)
@@ -94,7 +94,7 @@ def test_drop_reproduction_referentless_exclusion_flagged_and_reemitted(tmp_path
     body = out.read_text(encoding="utf-8")
     assert "## Finding [PCRE-1]" in body
     assert "[RE-EMITTED: self-excluded without real referent]" in body
-    assert "AccountEncoder.sol:L412".lower() in body.lower()
+    assert "PayloadCodec.sol:L412".lower() in body.lower()
     # Declared into the manifest so the exact gate accepts it.
     manifest = (tmp_path / "rescan_manifest.md").read_text(encoding="utf-8")
     assert "analysis_percontract_reemit.md" in manifest
@@ -133,7 +133,7 @@ def test_healthy_noop_real_referent_by_location(tmp_path):
         "# Per-Contract Agent 2\n\n"
         "## Findings\n\n"
         "## Exclusion List\n\n"
-        "- EXCLUDED [PC2-3] stale price dup of AccountEncoder.sol:L88\n",
+        "- EXCLUDED [PC2-3] stale price dup of PayloadCodec.sol:L88\n",
     )
     warnings, recovered = _validate_percontract_self_exclusion(tmp_path)
     assert warnings == []
@@ -141,7 +141,7 @@ def test_healthy_noop_real_referent_by_location(tmp_path):
 
 
 def test_healthy_noop_real_referent_by_location_pathprefix(tmp_path):
-    # Location in universe is a/b/AccountEncoder.sol:L88; citation uses basename.
+    # Location in universe is a/b/PayloadCodec.sol:L88; citation uses basename.
     _write(tmp_path, "analysis_1.md", PROVIDED_BREADTH)
     _write(
         tmp_path,
@@ -149,14 +149,14 @@ def test_healthy_noop_real_referent_by_location_pathprefix(tmp_path):
         "# Re-Scan 1\n\n## Findings\n\n"
         "## Finding [RS1-3]: stale\n\n"
         "**Severity**: Medium\n"
-        "**Location**: contracts/AccountEncoder.sol:L88\n"
+        "**Location**: contracts/PayloadCodec.sol:L88\n"
         "**Description**: x.\n",
     )
     _write(
         tmp_path,
         "analysis_percontract_1.md",
         "# PC 1\n\n## Findings\n\n## Exclusion List\n\n"
-        "- EXCLUDED [PC1-2] dup of AccountEncoder.sol:88\n",
+        "- EXCLUDED [PC1-2] dup of PayloadCodec.sol:88\n",
     )
     warnings, recovered = _validate_percontract_self_exclusion(tmp_path)
     assert warnings == []

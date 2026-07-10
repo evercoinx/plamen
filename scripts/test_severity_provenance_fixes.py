@@ -100,7 +100,7 @@ def test_explicit_verifier_severity_wins_when_higher_than_matrix():
 **Impact**: HIGH
 **Likelihood**: MEDIUM
 
-**Note on Vector B (Trusted Actor)**: While RouteProxy changes
+**Note on Vector B (Trusted Actor)**: While SwapRouter changes
 require the owner to act maliciously, the severity discount for
 fully-trusted actors applies only when the attack path requires the
 actor to violate their trust assumption. The overall finding severity

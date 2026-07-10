@@ -6,7 +6,7 @@ two invariant-construction defects that no validator caught:
      itself was a registered bot, so the authorization tautology meant
      the property mechanically could not return false. INV-003
      (Critical: anyone can steal non-EVM refunds) got a PASSED* sticker.
-  2. `INV-9` (Foundry) — asserted "20-byte walletAddress claimRefund
+  2. `INV-9` (Foundry) — asserted "20-byte walletAddress claimPayout
      sends to stored wallet" while INV-8 simultaneously asserted "52-byte
      revertMessage triggers immediate transfer, never stored" — mutually
      exclusive properties. INV-9 "VIOLATED" because of its own setup,

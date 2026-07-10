@@ -258,7 +258,7 @@ def test_shard_duplicates_cross_cutting_rows_with_dedup_key(tmp_path: Path):
         sp,
         [
             # cross + chain tokens match both B2 and B5
-            {"location": "contracts/CrossChainGateway.sol:42"},
+            {"location": "contracts/CrossChainBridgeRouter.sol:42"},
         ],
     )
 
@@ -313,7 +313,7 @@ def test_shard_global_coverage_preserves_total_count(tmp_path: Path):
     _write_opengrep_findings(
         sp,
         [
-            {"location": "contracts/GatewaySend.sol:10"},        # 1 -> no token match -> UNASSIGNED+core
+            {"location": "contracts/MessageRouter.sol:10"},        # 1 -> no token match -> UNASSIGNED+core
             {"location": "contracts/AccessController.sol:5"},    # 2 -> B3 (access)
             {"location": "contracts/Migration.sol:99"},          # 3 -> B7 (migration)
             {"location": "src/CoreState.sol:1"},                 # 4 -> B1 (core/state)
@@ -449,7 +449,7 @@ def test_shard_idempotent_same_inputs_same_bytes(tmp_path: Path):
 # ===========================================================================
 #
 # The original sharder routed by file-path token intersection alone, which
-# under-routes: an access-control finding in GatewayCrossChain.sol matched
+# under-routes: an access-control finding in CrossChainRouter.sol matched
 # only the cross-chain agents (filename contains cross/chain) and the
 # access_control agent never saw it. These tests prove content-based
 # semantic routing (row rule + message + location) reaches the right
@@ -477,7 +477,7 @@ def test_semantic_access_control_in_cross_chain_file_routes_to_access(
     tmp_path: Path,
 ):
     """The reviewer's canonical example: an onlyOwner / auth finding
-    located in GatewayCrossChain.sol MUST route to access_control even
+    located in CrossChainRouter.sol MUST route to access_control even
     though the filename screams cross-chain. It SHOULD also reach the
     cross-chain agents via file-path (over-routing is acceptable), but
     access_control reaching it is the non-negotiable property."""
@@ -489,7 +489,7 @@ def test_semantic_access_control_in_cross_chain_file_routes_to_access(
             {
                 "rule": "missing-access-control",
                 "message": "setOwner lacks onlyOwner modifier; any caller can seize ownership",
-                "location": "contracts/GatewayCrossChain.sol:42",
+                "location": "contracts/CrossChainRouter.sol:42",
             },
         ],
     )
@@ -521,7 +521,7 @@ def test_semantic_token_transfer_in_cross_chain_file_is_cross_cutting(
             {
                 "rule": "unchecked-transfer-return",
                 "message": "ERC20 transfer return value ignored; token amount may not move",
-                "location": "contracts/GatewayCrossChain.sol:88",
+                "location": "contracts/CrossChainRouter.sol:88",
             },
         ],
     )
@@ -619,7 +619,7 @@ def test_semantic_routing_no_row_disappears(tmp_path: Path):
             {
                 "rule": "auth",
                 "message": "onlyOwner missing on privileged setter",
-                "location": "contracts/GatewayCrossChain.sol:1",
+                "location": "contracts/CrossChainRouter.sol:1",
             },
             # 2: semantic token in a neutral file
             {

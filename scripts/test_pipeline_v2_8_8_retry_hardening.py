@@ -144,7 +144,7 @@ _QUEUE = (
 # project-wide mocking demonstrably feasible.
 _VERIFY_MOCK_PROOF = (
     "# Verify H-90\nSeverity: High\nEvidence Tag: [POC-PASS]\nVerdict: CONFIRMED\n\n"
-    "```solidity\ncontract RouteProxyMock { }\n```\n"
+    "```solidity\ncontract SwapRouterMock { }\n```\n"
 )
 
 
@@ -163,7 +163,7 @@ def _ext_dep_skip(fid: str, sev: str) -> str:
         "### Execution Result\n"
         "- Compiled: N/A\n"
         "- Result: NOT_EXECUTED\n"
-        "- Output: requires deploying with a mock GatewayZEVM; full mock setup "
+        "- Output: requires deploying with a mock BridgeRouter; full mock setup "
         "is disproportionate for this finding\n"
     )
 

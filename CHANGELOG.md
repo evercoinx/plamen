@@ -5,6 +5,29 @@ All notable changes to Plamen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.3] - 2026-07-10
+
+### Fixed
+- **Report-body inflation from same-location duplicate splitting eliminated (anti-absorption on location, not prose).** The chain-phase anti-absorption gate previously split a hypothesis group whenever it bundled two or more `(file, function)` pairs, and a follow-on repair keyed sub-clusters on severity tier — so a single root-cause bug written up as paraphrase duplicates (or the same bug labelled at adjacent severities across mirror contracts) fragmented into many findings and several spurious Criticals. The gate now splits a group **only** when it bundles constituents at genuinely different locations that are also different bugs; same-location paraphrase duplicates and the same bug at two tiers collapse into one finding (severity inherited as the highest). This removes the prose-similarity trigger that shattered single root-cause findings without merging any genuinely distinct ones — every constituent source id is retained.
+- **Report body labels can no longer disagree with the report index.** The assembler now stamps each `### [X-NN] Title [STATUS]` body header from the driver-computed canonical verification-status column (`VERIFIED` = proof-grade evidence / `CONFIRMED` = analytical / `CONTESTED` / `UNVERIFIED`), overriding the tier-writer's own tag. This ends the failure mode where the index recorded a finding as CONFIRMED while the body header rendered it as UNVERIFIED.
+- **Cold, dependency-heavy `--via-ir` builds no longer degrade evidence to `[CODE-TRACE]`.** The file-count-scaled recon build timeout had a 30-minute hard ceiling that clamped ~5x below the real cold-build time of a large dependency-heavy Solidity repo (a measured cold `forge build` of a via-ir codebase runs ~48 min). The recon whole-project probe was killed at 30 min, degrading `build_status` to TIMEOUT — which starved Slither to the approximate source-parse graph and, because the verify phase's own build budget was never scaled, capped every PoC at `[CODE-TRACE]` instead of executing to `[POC-PASS]`. The ceiling is raised and made ops-overridable (`PLAMEN_BUILD_TIMEOUT_CEILING_S`, applied to every ecosystem's recon build via the shared `_scale_build_timeout`), and the mechanical-verify phase now warms the build cache once before the per-finding loop (`PLAMEN_MECH_BUILD_TIMEOUT`, wiring the previously-dead build budget) so each subsequent PoC `forge test` is an incremental (seconds) compile that reaches `[POC-PASS]`. Best-effort and non-fatal — a failed/timed-out warm-up leaves the loop exactly as before. Additionally, a one-time console heads-up now fires when a `via-ir` project is detected, warning that a cold whole-project compile can run for tens of minutes with no output (not a hang) — so operators don't kill a healthy run.
+
+### Testing
+- New/extended tests: the fresh-generation dedup/label failure modes (same-location paraphrase → no split; mirror contracts → no split; cross-tier same-location → merged; genuinely distinct bugs → still split; body header overwritten from index) and the build-timeout fix (ceiling clamp + env override read per-call; verify pre-warm success/timeout/skip/non-fatal; pre-warm wired into the phase; via-ir "not a hang" heads-up detection + one-time fire). Full test suite green: 4282 passed, 7 skipped, 1 xfailed. Build fix validated end-to-end on a real dependency-heavy via-ir repo: the cold whole-project build completes within the raised ceiling, and the mechanical-verify phase runs its PoCs through to `[POC-PASS]` instead of `[CODE-TRACE]`.
+
+## [2.2.2] - 2026-07-07
+
+### Added
+- **M1 — assumption-commitment falsifier (recall generator).** Depth/verify SAFE and REFUTE verdicts now commit the tacit local guard they relied on as a falsifiable `[CI-n]` invariant (six generic shapes), fed through a new `compute_invariant_assertion_candidates` deriver (own budget pool) into the existing invariant-fuzz / PoC / chain paths. A candidate GENERATOR only — the unchanged verify/skeptic/PoC discriminator preserves precision. No new phase, strictly-additive and trivially removable.
+- **M2 — multi-axis coverage meta-pass (recall generator).** A driver-owned deterministic hot-function set (capped) is checked across five orthogonal analysis axes, with axis-EXAMINED detected only from the closed depth-evidence-tag vocabulary and ambiguity resolved to GAP (recall-safe). Runs as a soft Thorough-only `axis_coverage` phase (skips when clean).
+
+### Fixed
+- **M1/M2 candidate ingestion no longer silently dropped by narrow ID-format regexes** (third recurrence of the ID-format catalog class). The axis-heading and committed-invariant parsers missed multi-segment / namespaced ids (`AXIS-A-1`, `CI-A1`, `CI-ES6-1`), so well-formed candidates parsed as zero and never reached inventory — including High-severity ones. Both regexes are widened to multi-segment ids, a shared receipt-id pattern keeps resume/retry de-dup in sync, and mechanical harvest-vs-emit reconciliation gates make any future ID drift a loud sentinel rather than a silent zero.
+- **Attribution provenance + dedup clustering + M1 emission + M2 parity.** Clean `AXISGAP:` / `INVARIANT:` source tokens with a provenance-preserving dedup merge (the survivor keeps an absorbed generator's tag); transitive-closure clustering of co-referent survivors as a report-index consolidation hint (clique requirement + size cap + same-function guard + antonym veto against over-merge); M1 emission moved from the rare skeptic no-gap disposition to the abundant depth/verify verdicts; and non-EVM depth-evidence-tag emission raised to parity to stop false coverage-gap inflation.
+
+### Testing
+- New `test_invariant_assertion_deriver.py`, `test_axis_coverage_gate.py`, and extended recall/dedup suites. Full test suite green: 4164 passed, 7 skipped, 1 xfailed.
+
 ## [2.2.1] - 2026-07-04
 
 ### Fixed
@@ -84,7 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Report-dedup agent decisions were silently dropped (column-mismatch) and one lossy QO retab vetoed every merge.** The `report_dedup_agent` decision parser is now column-agnostic: it reads report IDs by position-in-row (first = survivor, the rest = absorbed) instead of assuming a fixed `Survivor | Absorbed` two-column layout, so it correctly ingests the agent's richer table (`Survivor ID | Title | Absorbed IDs | …`), supports multi-absorb, and loose-matches the QO header. Separately, the Quality-Observation retabulation is now gated **independently** from the merges: previously the single end-of-pass all-or-nothing data-loss gate would revert *every* good consolidation when the QO retab happened to be lossy (e.g. a fee-rounding finding whose impact sub-bullets don't fit the compact QO row). A lossy QO retab is now dropped on its own while the merges still apply. Net effect on a representative report: dedup that had been a silent no-op (proposed merges parsed as zero) now consolidates correctly (81 → 70).
 - **Semantic-dedup compaction no-op on large inventories.** The semantic-dedup phase now spends its in-session continuation budget to keep working when live candidate pairs remain, instead of accepting a pre-written `PASSTHROUGH` result unchanged after a context compaction. This closes the large-inventory case where dedup silently did nothing.
-- **De-overfit: removed protocol-specific answer-priming from the methodology.** A ZetaChain-specific binding-template primer (and any other protocol-specific answer-priming found in the same sweep) was removed, restoring the HARD no-overfit invariant: the methodology encodes HOW to analyze, never WHAT to find in a specific protocol. (Generic, illustrative-only mentions of named protocols — e.g. ZetaChain/LayerZero/Wormhole as one example among several, or the documented "never again" case study in the post-audit-improvement protocol — are retained, as permitted by the rule.)
+- **De-overfit: removed protocol-specific answer-priming from the methodology.** A protocol-specific binding-template primer (and any other protocol-specific answer-priming found in the same sweep) was removed, restoring the HARD no-overfit invariant: the methodology encodes HOW to analyze, never WHAT to find in a specific protocol. (Generic, illustrative-only mentions of cross-chain standards — e.g. LayerZero/Wormhole/Axelar as one example among several, or the documented "never again" case study in the post-audit-improvement protocol — are retained, as permitted by the rule.)
 
 ## [2.1.0] - 2026-06-15
 
@@ -102,7 +125,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **More deterministic, fewer LLM-prose phases**: mechanical SC `report_index` recovery, mechanical verify backfill / queue manifests, the data-loss-free `report_dedup` builder, and the recon prepass.
 - **Zero-data-loss dedup**: dedup runs over the full candidate set rather than a pruned subset.
 - **Cross-platform / POSIX execution**: POSIX PTY via `Popen` ownership + SIGCHLD reset on macOS/Linux, nested-session env isolation (strips `CLAUDE_CODE_*` from child workers), and shell-rc PATH persistence.
-- **HARD de-overfit rule enforced**: protocol-specific knowledge (DODO, ZetaChain) purged from methodology — the pipeline encodes HOW to analyze, never WHAT to find.
+- **HARD de-overfit rule enforced**: protocol-specific knowledge purged from methodology — the pipeline encodes HOW to analyze, never WHAT to find.
 
 ### Fixed
 - **Silent-hang / 0-byte-stdio class**: disk-derived completion replaces the stdout/JSON envelope; the context-thrash fast-fail that killed slow-but-completing workers was removed.
@@ -365,7 +388,7 @@ qualitative read, not a contract.
 - **Solana Compilation Weight Check (Step 1e)**: Recon TASK 1 now counts `.rs` files and workspace members before `anchor build`/`cargo build-sbf`. Heavy projects (>300 files, >3 workspace members) get `CARGO_BUILD_JOBS=2` prefix. Prevents parallel rustc instances from causing OOM.
 
 ### Why
-Observed repeated crashes on large projects (e.g., Umia: 5,699 .sol files with `via-ir = true`). Foundry spawns 5-6 solc instances at 4-8GB each, exhausting RAM. Cargo does the same with rustc. Aptos/Sui Move compilers are single-threaded and lightweight — no mitigation needed.
+Observed repeated crashes on large projects (e.g., a Solidity monorepo with 5,000+ .sol files with `via-ir = true`). Foundry spawns 5-6 solc instances at 4-8GB each, exhausting RAM. Cargo does the same with rustc. Aptos/Sui Move compilers are single-threaded and lightweight — no mitigation needed.
 
 ## [1.1.2] - 2026-03-27
 

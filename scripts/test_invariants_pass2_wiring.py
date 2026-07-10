@@ -5,9 +5,9 @@ deterministic-driver refactor dropped the Pass 2 phase definition while
 leaving five separate documentation references and the prompt file
 intact (in V1 path). An observed audit confirmed Pass 2 never ran
 in our V2 Thorough audit — `semantic_invariants.md` had only `Phase
-4a.5 Pass 1` content. v1.0.5 benchmark's PROCESS_LOG describes Pass 2
-specifically catching GT-M-06 (ETH sentinel `safeTransfer` DoS) — a
-finding the v2 audit MISSED.
+4a.5 Pass 1` content. A live-audit process log describes Pass 2
+specifically catching a missing-approve-on-sentinel-address regression
+— a finding an earlier v2 audit MISSED.
 
 These tests lock in the Pass 2 wiring:
 
@@ -68,7 +68,8 @@ def test_invariants_p2_prompt_has_required_sections():
         assert tok in text, (
             f"Pass 2 prompt missing required directive {tok!r}. This is a "
             "load-bearing classification — its omission was the regression "
-            "that hid GT-M-06 (ETH sentinel) and GT-M-12 (native ZETA wrap)."
+            "that hid a missing-approve-on-sentinel-address regression and a "
+            "native-token-wrap decode gap."
         )
 
 

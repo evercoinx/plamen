@@ -344,7 +344,7 @@ def test_promotion_parses_three_part_axis_ids(tmp_path):
     """Regression (feedback_id_regex_catalog): the M2 axis-worker emits
     AXIS-<shard>-<n> (AXIS-A-1..AXIS-F-4), not the bare AXIS-1 form the old
     fixture used. A `[A-Za-z]{2,6}-\\d+`-only heading regex silently dropped
-    every 3-part heading (14 findings incl. a High in the DODO run)."""
+    every 3-part heading (14 findings incl. a High in one Thorough regression run)."""
     eg = _eg()
     sp = tmp_path / ".scratchpad"
     sp.mkdir()

@@ -77,22 +77,22 @@ def _write_state_write_map(sp: Path, contract: str, variables: list[str]) -> Non
 
 def test_candidate_pairs_shared_state_var(tmp_path):
     cp = _cp()
-    _write_state_write_map(tmp_path, "Vault", ["refundInfos", "balances"])
+    _write_state_write_map(tmp_path, "Vault", ["pendingClaims", "balances"])
     _write_inventory(tmp_path, [
         {"id": "INV-001", "severity": "High", "location": "Vault.sol:L100",
-         "root_cause": "claimRefund deletes refundInfos before transfer",
-         "description": "refundInfos mapping mutated unsafely"},
+         "root_cause": "claimPayout deletes pendingClaims before transfer",
+         "description": "pendingClaims mapping mutated unsafely"},
         {"id": "INV-002", "severity": "Medium", "location": "Vault.sol:L300",
-         "root_cause": "onAbort writes refundInfos with wrong length",
-         "description": "refundInfos stored from abort context"},
+         "root_cause": "onAbort writes pendingClaims with wrong length",
+         "description": "pendingClaims stored from abort context"},
     ])
     out = cp.compute_chain_candidate_pairs(tmp_path)
     assert out["status"] == "ok"
     assert out["pairs"] >= 1
     text = (tmp_path / "chain_candidate_pairs.md").read_text(encoding="utf-8")
-    # The two findings share state var refundInfos → must be a STATE pair
+    # The two findings share state var pendingClaims → must be a STATE pair
     assert "INV-001" in text and "INV-002" in text
-    assert "refundInfos" in text
+    assert "pendingClaims" in text
 
 
 def test_candidate_pairs_excludes_provably_unrelated(tmp_path):
@@ -227,24 +227,24 @@ def test_candidate_pairs_fewer_than_two_findings(tmp_path):
 
 def test_variable_finding_map_basic(tmp_path):
     cp = _cp()
-    _write_state_write_map(tmp_path, "Vault", ["refundInfos", "feePercent"])
+    _write_state_write_map(tmp_path, "Vault", ["pendingClaims", "feePercent"])
     _write_inventory(tmp_path, [
         {"id": "INV-001", "severity": "High", "location": "Vault.sol:L1",
-         "root_cause": "refundInfos deleted early",
-         "description": "refundInfos mutation"},
+         "root_cause": "pendingClaims deleted early",
+         "description": "pendingClaims mutation"},
         {"id": "INV-002", "severity": "Medium", "location": "Vault.sol:L2",
          "root_cause": "feePercent has no upper bound",
          "description": "feePercent unchecked"},
         {"id": "INV-003", "severity": "Low", "location": "Vault.sol:L3",
-         "root_cause": "feePercent retroactive on refundInfos",
-         "description": "both feePercent and refundInfos involved"},
+         "root_cause": "feePercent retroactive on pendingClaims",
+         "description": "both feePercent and pendingClaims involved"},
     ])
     out = cp.compute_variable_finding_map(tmp_path)
     assert out["status"] == "ok"
     text = (tmp_path / "variable_finding_map.md").read_text(encoding="utf-8")
-    assert "refundInfos" in text and "feePercent" in text
-    # refundInfos row should list INV-001 and INV-003
-    refund_line = next(l for l in text.splitlines() if l.startswith("| refundInfos"))
+    assert "pendingClaims" in text and "feePercent" in text
+    # pendingClaims row should list INV-001 and INV-003
+    refund_line = next(l for l in text.splitlines() if l.startswith("| pendingClaims"))
     assert "INV-001" in refund_line and "INV-003" in refund_line
 
 
@@ -326,12 +326,12 @@ def test_malformed_inventory_does_not_raise(tmp_path):
 
 def test_idempotency(tmp_path):
     cp = _cp()
-    _write_state_write_map(tmp_path, "Vault", ["refundInfos"])
+    _write_state_write_map(tmp_path, "Vault", ["pendingClaims"])
     _write_inventory(tmp_path, [
         {"id": "INV-001", "severity": "High", "location": "Vault.sol:L100",
-         "root_cause": "refundInfos issue", "description": "refundInfos a"},
+         "root_cause": "pendingClaims issue", "description": "pendingClaims a"},
         {"id": "INV-002", "severity": "Medium", "location": "Vault.sol:L120",
-         "root_cause": "refundInfos issue two", "description": "refundInfos b"},
+         "root_cause": "pendingClaims issue two", "description": "pendingClaims b"},
     ])
     a = cp.run_chain_prep(tmp_path)
     pairs_a = a["candidate_pairs"]["pairs"]
