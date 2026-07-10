@@ -1,6 +1,6 @@
 # L1 Mode Severity Matrix
 
-> **Version**: v0.2 — Immunefi verbatim integration
+> **Version**: v0.3 — Latent/bundle-incomplete calibration rules added
 > **Scope**: All findings produced by `/plamen l1` mode
 > **Reference**: Aligned with [Immunefi Vulnerability Severity Classification System v2.3](https://immunefi.com/immunefi-vulnerability-severity-classification-system-v2-3/) for Blockchain/DLT infrastructure.
 
@@ -134,5 +134,6 @@ This makes grading auditable and makes disagreements mechanically resolvable in 
 
 ## Change log
 
+- **v0.3**: Extended "Plamen calibration adjustments" from six to eight rules — added rule 7 (latent dead-code findings capped at High absent a PoC'd activation path) and rule 8 (bundle-incomplete findings default to PARTIAL pending full field enumeration).
 - **v0.2 — 2026-04-10**: Integrated Round 4 research. Replaced paraphrased Immunefi section with verbatim tier definitions from the v2.3 classification (Critical/High/Medium/Low). Added bounty cap observations with real payout data. Added "Plamen calibration adjustments" section codifying six rules learned from real bug outcomes (eclipse default, mempool DoS mapping, RPC crash gating on market share, brute-force language, single-client consensus bugs, pre-auth panic severity floor).
 - **v0.1 — 2026-04-10**: Initial draft based on design.md Section 9 + known Immunefi classification shape.

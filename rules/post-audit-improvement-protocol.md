@@ -402,11 +402,11 @@ When running this protocol after an audit:
 | Generic security rules | 459-816 lines | 1000 | Reference doc, not fully loaded into agents |
 | Individual skills | 37-500 lines | 550 | Injected into agent prompts alongside other content |
 | Recon prompt | 653-1143 lines | 1200 | Largest per-tree file; recon agent gets dedicated context |
-| Inventory prompt | 298-378 lines | 400 | Single-purpose agent |
+| Inventory prompt | 299-379 lines | 400 | Single-purpose agent |
 | CLAUDE.md | ~90 lines (canonical `.plamen/CLAUDE.md`) | 500 | Loaded into every conversation |
 | Confidence scoring | 236 lines | 250 | Reference doc for scoring agent |
 | Chain prompt | 413 lines | 450 | Single-purpose agent |
-| Report prompts | 736 lines | 800 | Template for 3 parallel writers |
+| Report prompts | 737 lines | 800 | Template for 3 parallel writers |
 
 ## Appendix B: Change Type Impact Matrix
 

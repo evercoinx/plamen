@@ -482,7 +482,7 @@ If VERIFY FAIL: re-prompt the agent with `"Your Write to {FILE} failed. Return y
 > **Inject Into**: every Thorough-mode SC depth agent prompt (depth-token-flow, depth-state-trace, depth-edge-case, depth-external).
 > **Why**: Per-skill-step coverage observability.
 >
-> **v2.3.3 status**: Agent-emit is now ADVISORY. The Python driver auto-synthesizes
+> **Status**: Agent-emit is now ADVISORY. The Python driver auto-synthesizes
 > `step_execution_trace_{role}.md` from your `depth_{role}_findings.md` evidence-tag density
 > if you don't emit a richer one. Agents that DO follow the directive get per-skill
 > granularity preserved; agents that don't no longer halt the pipeline.

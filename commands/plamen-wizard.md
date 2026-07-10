@@ -93,7 +93,7 @@ AskUserQuestion(questions=[{
   options: [
     { label: "Light (Pro plan)", description: "~18-22 Sonnet agents. Fast, fits Pro rate limits." },
     { label: "Core (Recommended)", description: "~30-50 agents (Max plan). Standard audit depth." },
-    { label: "Thorough", description: "~50-70 agents (Max plan). Iterative depth, fuzz, skeptic-judge." },
+    { label: "Thorough", description: "~40-100 agents (Max plan). Iterative depth, fuzz, skeptic-judge." },
     { label: "Compare", description: "Diff a past report against ground truth." }
   ]
 }])
@@ -199,7 +199,7 @@ config = {
     "scratchpad": f"{PROJECT_PATH}/.scratchpad",
     "mode": MODE,           # "light" | "core" | "thorough"
     "pipeline": "sc",
-    "language": LANGUAGE,   # "evm" | "solana" | "soroban" | "aptos" | "sui"
+    "language": LANGUAGE,   # "evm" | "solana" | "soroban" | "aptos" | "sui" | "daml"
     "cli_backend": "claude",
     "claude_exec_mode": "pty",
     "docs_path": DOCS_PATH or "",

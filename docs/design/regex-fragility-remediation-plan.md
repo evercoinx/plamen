@@ -1,8 +1,10 @@
 # Fragile-Regex Class: Full Pipeline Audit + Safe Integration Plan
 
+> **STATUS: IMPLEMENTED & SHIPPED (retained as historical record).**
+
 ## 1. Verdict
 
-**Not fixed.** This is a live, recurring vulnerability class, not a set of isolated bugs.
+**Fixed.** This was a live, recurring vulnerability class, not a set of isolated bugs.
 
 | Metric | Count |
 |--------|-------|
@@ -26,34 +28,34 @@ The dominant historical failure mode is **false-WARN / futile-RETRY**, but the m
 
 | File:Line | Function | Signal | Consumer | Shape it misses |
 |-----------|----------|--------|----------|-----------------|
-| validators.py:16657-16692 | `_validate_inventory_structure._has_field` | Per-finding Source IDs / Severity / Location / Preferred Tag | Inventory hard-issue list; >40% missing → **HALT/retry** | `:`-only separator; **table cell `\| Severity \| High \|`**, `=` sep, backtick label. Uniform-tabular inventory trips the 40% hard issue. |
-| driver.py:8014-8051 | niche spawn-manifest parse | Which niche agents are `Required=YES` | Depth-phase spawn pool — missed row = **whole analysis lane never spawns** | Heading must be exactly `Niche Agents`; Required cell literal `YES` (misses `Required`/`Y`/`✓`). |
-| parsers.py:5401-5410 | `_MATRIX_IMPACT_RE` / `_MATRIX_LIKELIHOOD_RE` | Impact × Likelihood severity axes | `_enforce_severity_matrix` → expected-severity provenance gate | Leading-key-only, **TABLE-BLIND** (`\| Impact \| High \|` yields nothing → matrix silently skipped). |
-| parsers.py:6651-6672 | `_NO_FINDINGS_HEADING_RE` / `_FINDINGS_SECTION_RE` | `## No Findings` rationale / `## Findings` | `_structural_completeness_ok` HARD completion gate | `^##` H2-exact; H1/H3 drift false-fails a complete negative-result artifact. |
-| parsers.py:6023-6030 / 5445 | `_non_reportable_marker` / `_MATRIX_VIEW_FN_RE` | refuted/duplicate/merged + downgrade modifiers | Forces severity→Informational + verdict→REFUTED | **NEGATION-BLIND substring** — "this is NOT a duplicate" silently demotes a real finding. |
+| validators.py:18561-18613 | `_validate_inventory_structure._has_field` | Per-finding Source IDs / Severity / Location / Preferred Tag | Inventory hard-issue list; >40% missing → **HALT/retry** | `:`-only separator; **table cell `\| Severity \| High \|`**, `=` sep, backtick label. Uniform-tabular inventory trips the 40% hard issue. |
+| driver.py:8907-8952 | niche spawn-manifest parse | Which niche agents are `Required=YES` | Depth-phase spawn pool — missed row = **whole analysis lane never spawns** | Heading must be exactly `Niche Agents`; Required cell literal `YES` (misses `Required`/`Y`/`✓`). |
+| parsers.py:7009-7018 | `_MATRIX_IMPACT_RE` / `_MATRIX_LIKELIHOOD_RE` | Impact × Likelihood severity axes | `_enforce_severity_matrix` → expected-severity provenance gate | Leading-key-only, **TABLE-BLIND** (`\| Impact \| High \|` yields nothing → matrix silently skipped). |
+| parsers.py:8648-8675 | `_NO_FINDINGS_HEADING_RE` / `_FINDINGS_SECTION_RE` | `## No Findings` rationale / `## Findings` | `_structural_completeness_ok` HARD completion gate | `^##` H2-exact; H1/H3 drift false-fails a complete negative-result artifact. |
+| parsers.py:7996-8021 / 7053-7056 | `_non_reportable_marker` / `_MATRIX_VIEW_FN_RE` | refuted/duplicate/merged + downgrade modifiers | Forces severity→Informational + verdict→REFUTED | **NEGATION-BLIND substring** — "this is NOT a duplicate" silently demotes a real finding. |
 
 ### TIER B — RETRY-WASTE (futile / unwinnable retries)
 
 | File:Line | Function | Signal | Shape it misses |
 |-----------|----------|--------|-----------------|
-| validators.py:17525-17543 | `_valid_poc_skip` mock-negation | Valid `EXTERNAL_DEPENDENCY_NO_FORK` PoC-skip | **LIVE.** 80-char-proximity `.{0,80}` DOTALL: any negation within 80 chars of `mock` false-fires across sentence boundaries → **verifier provably cannot win**. Secondary: `_poc_contract_required` (L17557) reads queue `poc class` not the verifier's reclassified `PoC Class:` ledger field. |
-| driver.py:3066-3078 | `_chain_chunk_output_valid` | Impact / Source IDs presence in CC-chunk | Requires literal `^**Impact**:` bold+colon+line-start; misses em-dash, `Source ID:` singular, table-cell. |
-| validators.py:6127 / 7478 | `_parse_inventory_finding_meta` (+ tolerant twin) | title/severity/location/root_cause | Heading requires `:` after `]`; fields require literal bold+`:`. Two near-duplicate copies. |
-| parsers.py:4017-4018 | `_compute_dedup_candidate_pairs` | Location / Severity for dedup pairing | Raw `**Location**:` / `**Severity**:` exact — misses bullet/plain/table/`**Location:**`. |
-| parsers.py:1984-2055 | `classify_poc_testability` | PoC class from keyword substrings | No negation, no word boundary — "no overflow check" hits `overflow`→narrow_unit→impossible harness. |
+| validators.py:19739-19794 | `_valid_poc_skip` mock-negation | Valid `EXTERNAL_DEPENDENCY_NO_FORK` PoC-skip | **LIVE.** 80-char-proximity `.{0,80}` DOTALL: any negation within 80 chars of `mock` false-fires across sentence boundaries → **verifier provably cannot win**. Secondary: `_poc_contract_required` (L19857) reads queue `poc class` not the verifier's reclassified `PoC Class:` ledger field. |
+| driver.py:3066-3078 | `_chain_chunk_output_valid` (refactored away) | Impact / Source IDs presence in CC-chunk | Requires literal `^**Impact**:` bold+colon+line-start; misses em-dash, `Source ID:` singular, table-cell. |
+| validators.py:7073 / 8608 | `_parse_inventory_finding_meta` (+ tolerant twin) | title/severity/location/root_cause | Heading requires `:` after `]`; fields require literal bold+`:`. Two near-duplicate copies. |
+| parsers.py:4880 | `_compute_dedup_candidate_pairs` | Location / Severity for dedup pairing | Raw `**Location**:` / `**Severity**:` exact — misses bullet/plain/table/`**Location:**`. |
+| parsers.py:2120-2221 | `classify_poc_testability` | PoC class from keyword substrings | No negation, no word boundary — "no overflow check" hits `overflow`→narrow_unit→impossible harness. |
 
 ### TIER C — NOISE (false-WARN, non-blocking)
 
 | File:Line | Function | Status | Shape it misses |
 |-----------|----------|--------|-----------------|
-| validators.py:3455-3460 | `_SEMANTIC_GAP_COUNTER_RE` | **LIVE** (word-fallback protects) | Requires `:`/`=`; misses table cell `\| \`sync_gaps\` \| **5** \|` — loses the count. |
-| validators.py:7698-7704 | `_validate_invariants_pass2` `_FLAG_TOKEN` | **LIVE** (soft) | Same pipe-blindness as sibling counter. |
-| validators.py:7986-8065 | `_validate_attention_repair` SAFE_REASON closure | **LIVE** (soft) | Rigid `SAFE_REASON:<ENUM>`; flags rich `[TRACE]`/`[VARIATION]` prose closures. |
-| validators.py:9247-9266 | `_missing_perturbation_block_ids` | soft (under-warns) | Verdict/Severity literal bold+`:`. |
-| validators.py:8326-8332 | step-trace file:line | NOISE / **internal inconsistency** | Accepts only `file:L42`; twin at L8418 accepts `lines 42`/`L42`(space)/`#L42`. |
-| validators.py:11963 | `internal_id_leak` | gating FP (v2.7.8) | ID findall over prose flags legit report IDs. |
-| validators.py:17049 | `_has_live_placeholder_language` | **DEAD** (v2.7.9) | 6 stacked negation exemptions — the whack-a-mole exhibit. |
-| parsers.py:3619-3628 | `_parse_source_findings_for_ids` | NOISE | `^###` H3-exact; `**Location**:` literal. |
+| validators.py:3643-3648 | `_SEMANTIC_GAP_COUNTER_RE` | **LIVE** (word-fallback protects) | Requires `:`/`=`; misses table cell `\| \`sync_gaps\` \| **5** \|` — loses the count. |
+| validators.py:8789-8853 | `_validate_invariants_pass2` `_FLAG_TOKEN` (refactored away) | **LIVE** (soft) | Same pipe-blindness as sibling counter. |
+| validators.py:8854-8998 | `_validate_attention_repair` SAFE_REASON closure | **LIVE** (soft) | Rigid `SAFE_REASON:<ENUM>`; flags rich `[TRACE]`/`[VARIATION]` prose closures. |
+| validators.py:10188-10224 | `_missing_perturbation_block_ids` | soft (under-warns) | Verdict/Severity literal bold+`:`. |
+| validators.py:9256-9288 | step-trace file:line | NOISE / **internal inconsistency** | Accepts only `file:L42`; twin now unified at L9223 accepts `lines 42`/`L42`(space)/`#L42`. |
+| validators.py:13261 | `internal_id_leak` | gating FP (v2.7.8) | ID findall over prose flags legit report IDs. |
+| validators.py:19221 | `_has_live_placeholder_language` | **DEAD** (v2.7.9) | 6 stacked negation exemptions — the whack-a-mole exhibit. |
+| parsers.py:4399-4432 | `_parse_source_findings_for_ids` | NOISE | `^###` H3-exact; `**Location**:` literal. |
 
 ---
 
@@ -88,7 +90,7 @@ Three escalating durability levels emerged: **L1 per-shape** (widen one regex �
 
 ### Architecture: 3-layer signal channel + gate-class discipline
 
-**L1 — Mandated machine-readable signal block (source-side, deterministic).** Every signal-*producing* phase emits a fenced machine block parsed with zero shape ambiguity. **Extend the already-proven `<!-- PLAMEN_X: value -->` HTML-comment channel** (driver L7029 parser `re.finditer(r"<!--\s*PLAMEN_([A-Z_]+):\s*([^>]+?)\s*-->")`, already used for STATUS/ARTIFACT/EXPECTED_OUTPUT, whitespace-tolerant + format-invariant) with a `PLAMEN_SIGNALS` family carrying single-line JSON:
+**L1 — Mandated machine-readable signal block (source-side, deterministic).** Every signal-*producing* phase emits a fenced machine block parsed with zero shape ambiguity. **Extend the already-proven `<!-- PLAMEN_X: value -->` HTML-comment channel** (driver L7913 parser `re.finditer(r"<!--\s*PLAMEN_([A-Z_]+):\s*([^>]+?)\s*-->")`, already used for STATUS/ARTIFACT/EXPECTED_OUTPUT, whitespace-tolerant + format-invariant) with a `PLAMEN_SIGNALS` family carrying single-line JSON:
 ```
 <!-- PLAMEN_SIGNALS: {"sync_gaps":5,"accumulation_exposures":0,"conditional_writes":2,"cluster_gaps":1} -->
 ```
@@ -123,7 +125,7 @@ Regression strategy against the ~2900-test suite:
 1. **Strict-superset proof** per site (mechanical, blocks merge if any legacy accept regresses).
 2. **Negative-control preservation** (catches over-broadening — `id`≠`invalid`, proximity-negation, separator rows).
 3. **Recall-safe / detection-only** — no migrated gate may DROP a candidate; prose path = WARNING-or-fallback, never FAIL (test-asserted).
-4. **Sibling-sweep rule** (v2.2.2 lesson) — when migrating, grep siblings of the same field/ID/shape and migrate in the same commit (e.g. the two `**Location**:` extractors, the step-trace twin L8326 vs L8418).
+4. **Sibling-sweep rule** (v2.2.2 lesson) — when migrating, grep siblings of the same field/ID/shape and migrate in the same commit (e.g. the two `**Location**:` extractors, the step-trace twin L9256 vs L9223, now unified).
 5. **Canonical-source reuse** — IDs/tags/severities resolve through single sources-of-truth (v2.4.9/v2.6.0).
 
 ---
@@ -133,13 +135,13 @@ Regression strategy against the ~2900-test suite:
 | Phase | What to do | Exit criteria |
 |-------|-----------|---------------|
 | **0 — Substrate (inert)** | Land `PLAMEN_SIGNALS` HTML-comment parser in driver + `_field_anywhere` in parsers.py with full fixture corpus, **zero call-sites migrated**. | Full ~2900 suite shows **0 delta** (proves pure addition). Fixture corpus covers all `must_cover_shapes` per signal incl. the zero-harvest tripwire fixture. |
-| **1 — Inventory-structure HALT gate** (validators.py:16657) | Route `_has_field` through `_field_anywhere(table_ok=True)`; emit `PLAMEN_SIGNALS` field-presence from inventory phase as L1 authoritative source. | Tabular-inventory fixture passes (no false 40% hard issue); legacy `:`-form accepts unchanged; full suite green. |
-| **2 — Niche spawn-manifest** (driver.py:8014) | Heading + Required-cell via `_field_anywhere` + alias table; recon emits `PLAMEN_SIGNALS` niche list as L1. | All Required-cell variants (`YES`/`Required`/`Y`/`✓`) spawn the lane; heading synonyms matched; existing union-superset repair preserved. |
-| **3 — Severity-matrix** (parsers.py:5401) | Route `_MATRIX_*` through `_field_anywhere(table_ok=True, value_pattern=severity_enum)`. | Table + header+row Impact/Likelihood fixtures extract; provenance gate computes matrix instead of silently skipping. |
-| **4 — PoC mock-negation** (validators.py:17533) | Replace 80-char DOTALL proximity with clause-scoped `negation_guard`; fix `_poc_contract_required` (L17557) to read verifier `PoC Class:` ledger field. | Live false-fire prose returns valid=True; genuine "no mock provided" still rejected; targeted retry becomes winnable. |
-| **5 — Chain CC-chunk + retry-waste** (driver.py:3066) | Route Impact/Source-IDs presence through `_field_anywhere`. | Em-dash/singular/table-cell forms accepted; no futile chain retries on complete chunks. |
-| **6 — Finding-meta / dedup / source-ID convergence** (validators 6127+7478, parsers 4017+3619) | Converge all `**Field**:`-exact extractors onto `_field_anywhere`; collapse the duplicate twin into one call. | One extractor path; all bold/plain/table/`=` forms; dedup recall up; suite green. |
-| **7 — Noise batch (LAST)** (validators 3455/7698/7986/9247/8326, parsers 1984/6023) | Single batch: semantic-gap counter + invariants_p2 (table cell), attention_repair (accept rich prose closures), perturbation verdict/sev, step-trace twin alignment, `_non_reportable_marker` negation guard, `classify_poc_testability` word-boundary+negation. | False-WARN noise eliminated; counts read from table cells; all changes WARNING-class only. |
+| **1 — Inventory-structure HALT gate** (validators.py:18561) | Route `_has_field` through `_field_anywhere(table_ok=True)`; emit `PLAMEN_SIGNALS` field-presence from inventory phase as L1 authoritative source. | Tabular-inventory fixture passes (no false 40% hard issue); legacy `:`-form accepts unchanged; full suite green. |
+| **2 — Niche spawn-manifest** (driver.py:8907) | Heading + Required-cell via `_field_anywhere` + alias table; recon emits `PLAMEN_SIGNALS` niche list as L1. | All Required-cell variants (`YES`/`Required`/`Y`/`✓`) spawn the lane; heading synonyms matched; existing union-superset repair preserved. |
+| **3 — Severity-matrix** (parsers.py:7009) | Route `_MATRIX_*` through `_field_anywhere(table_ok=True, value_pattern=severity_enum)`. | Table + header+row Impact/Likelihood fixtures extract; provenance gate computes matrix instead of silently skipping. |
+| **4 — PoC mock-negation** (validators.py:19739) | Replace 80-char DOTALL proximity with clause-scoped `negation_guard`; fix `_poc_contract_required` (L19857) to read verifier `PoC Class:` ledger field. | Live false-fire prose returns valid=True; genuine "no mock provided" still rejected; targeted retry becomes winnable. |
+| **5 — Chain CC-chunk + retry-waste** (driver.py:3066, refactored away) | Route Impact/Source-IDs presence through `_field_anywhere`. | Em-dash/singular/table-cell forms accepted; no futile chain retries on complete chunks. |
+| **6 — Finding-meta / dedup / source-ID convergence** (validators 7073+8608, parsers 4880+4399) | Converge all `**Field**:`-exact extractors onto `_field_anywhere`; collapse the duplicate twin into one call. | One extractor path; all bold/plain/table/`=` forms; dedup recall up; suite green. |
+| **7 — Noise batch (LAST)** (validators 3643/8789/8854/10188/9256, parsers 2120/7996) | Single batch: semantic-gap counter + invariants_p2 (table cell), attention_repair (accept rich prose closures), perturbation verdict/sev, step-trace twin alignment, `_non_reportable_marker` negation guard, `classify_poc_testability` word-boundary+negation. | False-WARN noise eliminated; counts read from table cells; all changes WARNING-class only. |
 
 Each phase is independently shippable, fixture-backed, and recall-safe. A single unexpected suite delta blocks the commit.
 

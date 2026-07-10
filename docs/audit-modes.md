@@ -15,7 +15,7 @@
 | Breadth | 3-4 sonnet | 5-9 opus | 5-9 opus |
 | Re-scan (3b/3c) | Skip | Skip | Full (sonnet, 2 iters + per-contract) |
 | Depth loop | 4 merged sonnet, iter 1 | 8+ agents, iter 1 | Iter 1-3 (Devil's Advocate) |
-| Niche agents | Skip | Flag-triggered (up to 8) | Flag-triggered (up to 8) |
+| Niche agents | Skip | Flag-triggered (up to 9) | Flag-triggered (up to 9) |
 | Semantic invariants | Skip | Pass 1 only | Pass 1 + Pass 2 (recursive trace) |
 | Confidence scoring | None (verdicts only) | 2-axis (Evidence + Quality) | 4-axis (Evidence, Consensus, Quality, RAG) |
 | RAG Sweep | Skip | 1 sonnet | 1 sonnet |

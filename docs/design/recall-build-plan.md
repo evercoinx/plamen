@@ -1,8 +1,8 @@
 # Recall Build Plan — Assumption-Commitment Falsifier (M1) + Multi-Axis Coverage Meta-Pass (M2)
 
-> **Status**: execution-ready. Two mechanisms, each a single-seam extension of the existing deriver / soft-phase / promotion framework. No new schedule slots beyond one soft phase (M2); no LLM-clobberable target sets; full anti-overfit compliance.
+> **STATUS: IMPLEMENTED & SHIPPED in v2.2.2 (historical record).**
+> Two mechanisms, each a single-seam extension of the existing deriver / soft-phase / promotion framework. No new schedule slots beyond one soft phase (M2); no LLM-clobberable target sets; full anti-overfit compliance.
 > **Owner subsystems**: `scripts/enumeration_gate.py` (derivers + promotion), `scripts/plamen_driver.py` (hooks + phase dispatch), `scripts/plamen_types.py` (phase decl), `scripts/plamen_validators.py` (soft validators), `scripts/chain_prep.py` (STEP-0a-LC enabling — read-only, already compatible), `prompts/shared/v2/*` (commit hooks + deriver worker prompt).
-> **All line anchors verified against the live tree on plan-authoring date.**
 
 ---
 
@@ -49,20 +49,20 @@ Every row is a **question shape** (how to interrogate any function), never a nam
 - **Add** to the depth finding-emission contract: on a `CLEAR`/REFUTED verdict for a value-bearing path, optionally emit a `committed-invariant [CI-n]` block (same shape vocab). Optional at depth (skeptic phases are the primary emitters) to avoid depth-agent context bloat. ~8 lines.
 
 #### 2.1.4 `scripts/enumeration_gate.py` — NEW deriver `compute_invariant_assertion_candidates(scratchpad) -> list`
-- Sits alongside the three existing shape-derivers (`compute_critical_asset_mover_candidates` @L547, `compute_array_uniqueness_candidates` @L651, `compute_unbounded_input_candidates` @L715).
-- **Input**: scans skeptic/depth artifacts for `committed-invariant [CI-n]` blocks; resolves each block's locus to its enclosing function via `_fn_at_location` (@L102) over `_load_graph` (@L83).
-- **Output**: for each block, an inventory candidate carrying (a) the falsifiable assertion text, (b) a **Falsify Class** (§3.4), (c) chain pre/post metadata via `_chain_metadata_lines` (@L45) so it is a STEP-0a-LC enabler for free.
-- **Budget**: register in `run_enumeration_gate` (@L912) tuple, gets its own `_MAX_PER_DERIVER` (15) slot pool — INDEPENDENT of the co-ref `_MAX_ENUMGAP_PER_RUN` (40) pool, exactly as the existing three derivers do (per the @L917 docstring rationale). Bounded sum stays recall-safe.
-- **Emit**: via the existing `_emit_candidates(... _MAX_PER_DERIVER)` call already in `run_enumeration_gate`. No new promotion path — reuses the ENUMGAP stamping (candidates are `Source IDs: INVARIANT`, `Verdict: NEEDS_VERIFICATION`, `ENUMGAP`-tagged). ~70 lines.
+- Sits alongside the three existing shape-derivers (`compute_critical_asset_mover_candidates` @L595, `compute_array_uniqueness_candidates` @L699, `compute_unbounded_input_candidates` @L763).
+- **Input**: scans skeptic/depth artifacts for `committed-invariant [CI-n]` blocks; resolves each block's locus to its enclosing function via `_fn_at_location` (@L137) over `_load_graph` (@L118).
+- **Output**: for each block, an inventory candidate carrying (a) the falsifiable assertion text, (b) a **Falsify Class** (§3.4), (c) chain pre/post metadata via `_chain_metadata_lines` (@L80) so it is a STEP-0a-LC enabler for free.
+- **Budget**: register in `run_enumeration_gate` (@L1675) tuple, gets its own `_MAX_PER_DERIVER` (15) slot pool — INDEPENDENT of the co-ref `_MAX_ENUMGAP_PER_RUN` (40) pool, exactly as the existing three derivers do (per the @L1657 docstring rationale). Bounded sum stays recall-safe.
+- **Emit**: via the existing `_emit_candidates(... _MAX_PER_DERIVER)` call already in `run_enumeration_gate`. No new promotion path — reuses the ENUMGAP stamping (candidates are `Source IDs: INVARIANT`, `Verdict: NEEDS_VERIFICATION`, `ENUMGAP`-tagged). ~70 lines. (Shipped as `compute_invariant_assertion_candidates` @L864.)
 
 #### 2.1.5 `scripts/plamen_driver.py` — routing to the falsifier
-- **No new hook.** The deriver runs inside `run_enumeration_gate`, already invoked at the inventory post-hook (@L14949) and its sibling (@L15175). M1 candidates therefore materialise pre-depth and flow into:
-  1. **invariant-fuzz ingestion** — the `invariants` phase (`plamen_types.py` @L1167) already ingests finding-derived invariants; INVARIANT candidates carrying a Falsify Class are picked up as fuzz targets.
+- **No new hook.** The deriver runs inside `run_enumeration_gate`, already invoked at the inventory post-hook (@L15107) and its sibling (@L15333). M1 candidates therefore materialise pre-depth and flow into:
+  1. **invariant-fuzz ingestion** — the `invariants` phase (`plamen_types.py` @L1220) already ingests finding-derived invariants; INVARIANT candidates carrying a Falsify Class are picked up as fuzz targets.
   2. **PoC gate** — via standard verify (`phase5-verification-sc.md` / `-l1.md`); an un-executable assertion caps at `[CODE-TRACE]`/CONTESTED per the PoC Testability Ledger (never a silent pass).
-  3. **chain enabling** — `chain_prep._is_unverified_enabler` (@L549) already admits ENUMGAP/deriver candidates into `## STEP 0a-LC` (@L631); INVARIANT candidates qualify with zero change.
+  3. **chain enabling** — `chain_prep._is_unverified_enabler` (@L590) already admits ENUMGAP/deriver candidates into `## STEP 0a-LC` (@L805); INVARIANT candidates qualify with zero change.
 
 #### 2.1.6 `scripts/plamen_validators.py` — NEW `_validate_invariant_commitment(scratchpad, mode) -> list[str]`
-- Clone of `_validate_exploration_skeptic` (@L6658): **warning-only**, never `passed=False`. Checks that when skeptic phases produced `NO-GAP`/DOWNGRADE verdicts on value-bearing loci, corresponding `[CI-n]` blocks exist; writes a `.ci_gap` sentinel + warning for visibility. Soft — mirrors the exploration-skeptic gate. ~40 lines.
+- Clone of `_validate_exploration_skeptic` (@L6671): **warning-only**, never `passed=False`. Checks that when skeptic phases produced `NO-GAP`/DOWNGRADE verdicts on value-bearing loci, corresponding `[CI-n]` blocks exist; writes a `.ci_gap` sentinel + warning for visibility. Soft — mirrors the exploration-skeptic gate. ~40 lines. (Shipped as `_validate_invariant_commitment` @L6816.)
 
 ### 2.2 MECHANISM 2 — multi-axis coverage meta-pass
 
@@ -91,14 +91,14 @@ One driver module extension + one soft phase decl + one deriver-worker prompt (c
   | accounting/arithmetic | `[VARIATION:…]` OR `[BOUNDARY:…]` on numeric param; `[REGRESS:…]` |
   | provenance/freshness | `[EXTERNAL-ASSUMPTION:…]` OR `[CROSS-DOMAIN-DEP: external]`; staleness/oracle cite |
   | zero/boundary | `[BOUNDARY:X=0/1/MAX]` |
-- Enclosing-function mapping via `_fn_at_location` (@L102). Cell → `EXAMINED` / `N/A` (mechanically provable: pure view + no value-effect regex ⇒ theft `N/A`) / `GAP`. **Ambiguous ⇒ GAP not EXAMINED** (recall-safe default).
+- Enclosing-function mapping via `_fn_at_location` (@L137). Cell → `EXAMINED` / `N/A` (mechanically provable: pure view + no value-effect regex ⇒ theft `N/A`) / `GAP`. **Ambiguous ⇒ GAP not EXAMINED** (recall-safe default).
 - Writes `hot_function_axes.md` + `_hot_function_axes.json`. Returns the `GAP` rows. ~90 lines.
 
 #### 2.2.3 `scripts/enumeration_gate.py` — NEW `promote_axis_findings_to_inventory(scratchpad) -> dict`
 - Clone of `promote_enumgap_exploration_to_inventory` (@L799). Appends each new axis-deriver finding as a fresh `INV-*` block, `Source IDs: AXISGAP`, `Verdict: NEEDS_VERIFICATION`, idempotent via receipt. Chain metadata via `_chain_metadata_lines` (a freshness gap is naturally `EXTERNAL`/`TIMING`-typed → STEP-0a-LC enabler). ~40 lines.
 
 #### 2.2.4 `scripts/plamen_types.py` — NEW soft phase `axis_coverage`
-- Registered in BOTH the SC phase list (near @L1206–1233) and, if applicable, L1 list (near @L1529). Placement: **after** the depth post-hook AND **after** `exploration_skeptic` (@L1206) / `enumgap_exploration` (@L1223) so their findings count as coverage, **before** `sc_semantic_dedup` (@L1227) / `chain` (@L1230).
+- Registered in BOTH the SC phase list (near @L1259–1298) and, if applicable, L1 list (not applied to L1 in the shipped version — axis_coverage is SC-only). Placement: **after** the depth post-hook AND **after** `exploration_skeptic` (@L1259) / `enumgap_exploration` (@L1276) so their findings count as coverage, **before** `sc_semantic_dedup` (@L1295) / `chain` (@L1298).
   ```python
   Phase("axis_coverage", ["Phase 4b.8: Multi-Axis Coverage Meta-Pass"],
         ["axis_coverage_findings.md"],
@@ -107,14 +107,14 @@ One driver module extension + one soft phase decl + one deriver-worker prompt (c
 - `critical=False` → degrade-and-continue (never halts, matching every skeptic/enumgap phase). Thorough-only → Light/Core pay nothing.
 
 #### 2.2.5 `scripts/plamen_driver.py` — phase dispatch + skip-when-clean
-- **Add** an `axis_coverage` dispatch branch modeled on the `enumgap_exploration` branch (skip guard `_enumgap_exploration_has_no_obligations` @L18031). New helper `_axis_coverage_has_no_gaps(scratchpad)`: runs `compute_hot_function_set` + `compute_axis_coverage_gaps` mechanically FIRST, writes the matrix, and **only spawns the worker if `GAP` cells exist**; else stubs `axis_coverage_findings.md` and skips.
-- **Add** post-hook call to `promote_axis_findings_to_inventory` after the phase completes (parallel to the enumgap promotion @L14114). ~50 lines across the two edits.
+- **Add** an `axis_coverage` dispatch branch modeled on the `enumgap_exploration` branch (skip guard `_enumgap_exploration_has_no_obligations`, called at plamen_driver.py:18247; defined in scripts/plamen_parsers.py:2656). New helper `_axis_coverage_has_no_gaps(scratchpad)`: runs `compute_hot_function_set` + `compute_axis_coverage_gaps` mechanically FIRST, writes the matrix, and **only spawns the worker if `GAP` cells exist**; else stubs `axis_coverage_findings.md` and skips.
+- **Add** post-hook call to `promote_axis_findings_to_inventory` after the phase completes (parallel to the enumgap promotion @L14167). ~50 lines across the two edits.
 
 #### 2.2.6 `prompts/shared/v2/phase4b8-axis-coverage.md` — NEW deriver-worker prompt
 - Clone of `phase4b7-enumgap-exploration.md`. One bounded executor (per CLAUDE.md worker contract: one role, one output file, `PLAMEN_STATUS: COMPLETE`). Handed ONLY `GAP` rows: "For function `f`, axis = `<A>` was never examined. Open `f` at `<loc>`, interrogate on THIS axis only; emit a standard-format finding (Material-Harm + Rules-Applied + closed depth-evidence tags) OR a reasoned `CLEAR` naming a concrete safety locus." **Strictly additive** (ADD/UPGRADE only). ~120 lines.
 
 #### 2.2.7 `scripts/plamen_validators.py` — NEW `_validate_axis_coverage(scratchpad, mode) -> list[str]`
-- Clone of `_validate_exploration_skeptic` (@L6658): warning-only, writes `.axis_gap` sentinel + warning; never halts. ~40 lines.
+- Clone of `_validate_exploration_skeptic` (@L6671): warning-only, writes `.axis_gap` sentinel + warning; never halts. ~40 lines. (Shipped as `_validate_axis_coverage` @L6904.)
 
 ### 2.3 Shared / cross-cutting
 - `scripts/plamen_types.py`: register the new phase name in any phase-name allowlist / ID-catalog used by validators (per MEMORY "ID regex must catalog all formats" — add `AXISGAP` and `INVARIANT`/`CI-` shapes to the internal-finding-ID recognizers so completeness gates don't silently zero them).
@@ -190,7 +190,7 @@ Every emitted candidate/finding uses the standard format from `rules/finding-out
 - Extend `test_chain_baseline_regroup.py` / STEP-0a-LC coverage: `INVARIANT` and `AXISGAP` candidates appear as low-confidence enablers.
 - Extend `test_sc_subsystem_coverage_typeonly.py` or add a dedup test: an M1-invariant and an M2-axis candidate on the same function+fix-pattern are merged by 4e (no double-report).
 - `test_prompt_validator_alignment.py`: the two new/edited prompts pass the mechanical prompt-gate consistency checker (example_tokens = finding-ID shapes, not shard numbers).
-- Full-suite gate: `pytest scripts/` must stay green (current baseline ~2600+ tests).
+- Full-suite gate: `pytest scripts/` must stay green (4282 passing).
 
 ---
 
