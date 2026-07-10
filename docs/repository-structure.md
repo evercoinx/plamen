@@ -5,7 +5,7 @@
 ├── CLAUDE.md                          # Orchestrator config — mode table, rules, file refs
 ├── plamen.py                          # Terminal wrapper (Rich + InquirerPy)
 ├── plamen.sh / plamen.bat             # Launcher scripts
-├── VERSION                            # Semantic version (2.2.1)
+├── VERSION                            # Semantic version (2.2.3)
 │
 ├── commands/                          # Claude Code slash commands (4 files)
 │   ├── plamen.md                      # /plamen — full SC audit workflow
