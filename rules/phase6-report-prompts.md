@@ -132,6 +132,7 @@ For each hypothesis, apply this priority order:
    exists, apply only the listed override rows and record
    `SEVERITY_OVERRIDE(original_sev)` in Trust Adj. Agents must not invent this
    token without the driver-only ledger.
+10. Obey driver `status_binding.md`/`severity_binding.md` tokens (Fix 1/3; see `report-template.md`).
 
 ### STEP 1.25: Client-Worthiness Triage (CONSERVATIVE)
 
@@ -369,7 +370,7 @@ Write to {SCRATCHPAD}/report_index.md:
 | Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal Hypothesis |
 |-----------|-------|----------|----------|--------------|-----------|--------------------|
 | C-01 | [critical upstream title] | Critical | [location] | VERIFIED | - | <critical-internal-id> |
-| H-01 | [high upstream title] | High | [location] | VERIFIED | - | <high-internal-id> |
+| H-01 | [high upstream title] | High | [location] | CONFIRMED | - | <high-internal-id> |
 | M-01 | [trusted-actor-demoted high title] | Medium | [location] | UNVERIFIED | TRUSTED-ACTOR(High) | <trusted-actor-internal-id> |
 | ... | ... | ... | ... | ... | ... | ... |
 
@@ -527,7 +528,7 @@ Write to {SCRATCHPAD}/report_critical_high.md:
 
 ## High Findings
 
-### [H-01] Title [VERIFIED/UNVERIFIED/CONTESTED]
+### [H-01] Title [VERIFIED/CONFIRMED/UNVERIFIED/CONTESTED]
 [full section]
 
 ...

@@ -300,6 +300,90 @@ def test_graph_sweeps_directive_lists_lifecycle_replay_tokens():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# M1/M2 (recall-build-plan §5.3): the new/edited prompts must pass the mechanical
+# prompt-gate consistency checker — no unknown `.md` filename tokens, and the
+# example_tokens carry finding-ID shapes (or nothing), never numeric shard tokens.
+# Checker: scripts/plamen_prompt.py:_check_prompt_name_consistency
+# ---------------------------------------------------------------------------
+
+import importlib  # noqa: E402
+
+
+def _phase_by_name(name: str):
+    pt = importlib.import_module("plamen_types")
+    for lst in (pt.SC_PHASES, pt.L1_PHASES):
+        for p in lst:
+            if p.name == name:
+                return p
+    return None
+
+
+def test_axis_coverage_prompt_passes_consistency_checker():
+    """M2's new deriver-worker prompt (phase4b8-axis-coverage.md) must produce
+    ZERO unknown filename tokens against the axis_coverage Phase + the legitimate
+    subproducer allowlist. hot_function_axes.md (driver-written matrix) and
+    axis_coverage_findings.md must be recognized."""
+    pp = importlib.import_module("plamen_prompt")
+    ph = _phase_by_name("axis_coverage")
+    assert ph is not None, "axis_coverage phase not registered"
+    text = _read("prompts/shared/v2/phase4b8-axis-coverage.md")
+    assert text, "phase4b8-axis-coverage.md prompt missing"
+    unknowns = pp._check_prompt_name_consistency(text, ph)
+    assert unknowns == [], (
+        f"axis_coverage prompt has unrecognized filename tokens: {unknowns} — "
+        "add them to _LEGITIMATE_SUBPRODUCER_PATTERNS or the phase artifacts"
+    )
+
+
+def test_axis_coverage_example_tokens_not_numeric_shards():
+    """example_tokens must be finding-ID / role shapes, never numeric shard
+    tokens (`a`, `b`, `1`, `2`) that would mislead the filename generator."""
+    ph = _phase_by_name("axis_coverage")
+    assert ph is not None
+    for tok in (getattr(ph, "example_tokens", []) or []):
+        assert not str(tok).strip().isdigit(), (
+            f"axis_coverage example_token {tok!r} is a numeric shard token"
+        )
+        assert str(tok).strip().lower() not in {"a", "b", "c"}, (
+            f"axis_coverage example_token {tok!r} is a shard-letter token"
+        )
+
+
+def test_m1_edited_skeptic_prompts_pass_consistency_checker():
+    """M1's committed-invariant [CI-n] hooks were added to the exploration-skeptic
+    (4b.6) and skeptic (5.1) prompts. Neither may introduce an unknown filename
+    token — the CI blocks reference no new `.md` artifacts."""
+    pp = importlib.import_module("plamen_prompt")
+    for phname, rel in (
+        ("exploration_skeptic", "prompts/shared/v2/phase4b6-exploration-skeptic.md"),
+        ("skeptic", "prompts/shared/v2/phase5-skeptic.md"),
+    ):
+        ph = _phase_by_name(phname)
+        assert ph is not None, f"{phname} phase not registered"
+        text = _read(rel)
+        assert text, f"{rel} prompt missing"
+        unknowns = pp._check_prompt_name_consistency(text, ph)
+        assert unknowns == [], (
+            f"{rel} introduced unrecognized filename tokens after M1 edit: "
+            f"{unknowns}"
+        )
+
+
+def test_m1_ci_block_present_in_skeptic_prompts():
+    """Positive lock: the committed-invariant [CI-n] emission hook is actually
+    present in both skeptic-phase prompts (M1's emitter contract)."""
+    for rel in (
+        "prompts/shared/v2/phase4b6-exploration-skeptic.md",
+        "prompts/shared/v2/phase5-skeptic.md",
+    ):
+        text = _read(rel)
+        assert text, f"{rel} missing"
+        assert "committed-invariant" in text and "CI-" in text, (
+            f"{rel} missing the M1 committed-invariant [CI-n] emission hook"
+        )
+
+
 def test_finding_format_evidence_label_consistency():
     """Both `**Evidence**:` (code snippets) and `**Depth Evidence**`
     (tag list) are documented — make sure neither was accidentally

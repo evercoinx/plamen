@@ -199,12 +199,12 @@ def _dep_heavy_root(tmp_path: Path):
     root = tmp_path
     (root / "foundry.toml").write_text("[profile.default]\n", encoding="utf-8")
     # In-scope production sources.
-    for n in ("GatewayCrossChain", "GatewaySend", "GatewayTransferNative"):
+    for n in ("CrossChainRouter", "MessageRouter", "NativeVault"):
         _mk_sol(root / f"{n}.sol")
-    _mk_sol(root / "interfaces" / "IGateway.sol")
+    _mk_sol(root / "interfaces" / "IBridgeRouter.sol")
     _mk_sol(root / "libraries" / "Encoder.sol")
     # A mock (excluded from BOTH counts by name/dir rules).
-    _mk_sol(root / "mocks" / "GatewayEVMMock.sol")
+    _mk_sol(root / "mocks" / "BridgeRouterMock.sol")
     # Heavy dependency tree under lib/ — compiled by `forge build`, skipped by
     # the production filter.
     n_lib = 200
@@ -226,7 +226,7 @@ def test_compile_unit_count_includes_lib_deps(tmp_path):
     # Production count excludes lib/ + mocks entirely (the undercount source).
     assert len(prod) == 5, sorted(prod_names)
     assert not any("lib/" in p.relative_to(root).as_posix() for p in prod)
-    assert "GatewayEVMMock.sol" not in prod_names
+    assert "BridgeRouterMock.sol" not in prod_names
 
     # Compile-unit count INCLUDES the whole lib/ dep tree (what solc builds)...
     assert len(comp) >= n_lib + 5
@@ -268,27 +268,27 @@ def test_compile_unit_files_never_raises_on_bad_root(tmp_path):
 # (and, via _materialize_sc_slither_flat_files, slither/*.md). It must reflect
 # the AUDIT SURFACE (production contracts) — never the project's own
 # test/fuzz/mock harnesses, which encode answers and prime discovery. Regression
-# for the DODO contamination where `.medusa-tests`/`test/invariant` harnesses
+# for a real contamination case where `.medusa-tests`/`test/invariant` harnesses
 # leaked into the recon inventory.
 
 def test_gather_files_excludes_test_fuzz_mock_harnesses(tmp_path):
     proj = tmp_path
     # production (in-scope) contracts
-    _mk_sol(proj / "GatewayCrossChain.sol")
-    _mk_sol(proj / "interfaces" / "IGateway.sol")
+    _mk_sol(proj / "CrossChainRouter.sol")
+    _mk_sol(proj / "interfaces" / "IBridgeRouter.sol")
     # harness dirs that must NOT be inventoried
     _mk_sol(proj / "test" / "invariant" / "InvariantFuzz.t.sol")
-    _mk_sol(proj / "mocks" / "GatewayEVMMock.sol")
+    _mk_sol(proj / "mocks" / "BridgeRouterMock.sol")
     _mk_sol(proj / "fuzz" / "Handler.sol")
     _mk_sol(proj / "script" / "Deploy.s.sol")
     _mk_sol(proj / ".medusa-tests" / "MedusaCampaignV6.sol")
 
     got = {p.name for p in RP._gather_files(proj, "evm")}
 
-    assert "GatewayCrossChain.sol" in got
-    assert "IGateway.sol" in got
+    assert "CrossChainRouter.sol" in got
+    assert "IBridgeRouter.sol" in got
     # none of the harness/test files
-    for bad in ("InvariantFuzz.t.sol", "GatewayEVMMock.sol", "Handler.sol",
+    for bad in ("InvariantFuzz.t.sol", "BridgeRouterMock.sol", "Handler.sol",
                 "Deploy.s.sol", "MedusaCampaignV6.sol"):
         assert bad not in got, f"{bad} leaked into the discovery inventory"
 

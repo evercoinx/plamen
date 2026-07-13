@@ -71,7 +71,7 @@ def test_p21_round_trip(tmp_path):
 
 def test_p21_title_hash_stable_across_minor_variations():
     """Same logical title hashes identically across case/whitespace/ID-prefix."""
-    base = "GatewayTransferNative.withdraw() Is Public — Permissionless Drain"
+    base = "NativeVault.withdraw() Is Public — Permissionless Drain"
     h_base = _title_hash(base)
     assert _title_hash(base.lower()) == h_base
     assert _title_hash(f"  {base}  ") == h_base
@@ -89,8 +89,8 @@ def test_fix2_title_hash_dash_family_collapses():
 
 def test_fix2_title_hash_backtick_and_emphasis_ignored():
     """Code-framing/emphasis punctuation does not change identity (FIX 2)."""
-    a = "GatewayCrossChain.withdraw() is public"
-    b = "GatewayCrossChain.`withdraw()` is **public**"
+    a = "CrossChainRouter.withdraw() is public"
+    b = "CrossChainRouter.`withdraw()` is **public**"
     assert _title_hash(a) == _title_hash(b)
 
 
@@ -106,22 +106,22 @@ def test_fix2_titles_collide_false_on_abbrev_expansion():
     """Abbreviation expanded with otherwise-identical wording is same finding."""
     from plamen_parsers import _titles_collide
     a = "GCC trusts inbound externalId verbatim — no provenance"
-    b = "GatewayCrossChain trusts inbound externalId verbatim - no provenance"
+    b = "CrossChainRouter trusts inbound externalId verbatim - no provenance"
     assert _titles_collide(a, b) is False
 
 
 def test_fix2_titles_collide_false_on_added_trailing_detail():
     """Added trailing detail (prefix containment) is same finding, not collision."""
     from plamen_parsers import _titles_collide
-    a = "GatewayCrossChain trusts inbound externalId verbatim"
-    b = "GatewayCrossChain trusts inbound externalId verbatim, enabling spoof"
+    a = "CrossChainRouter trusts inbound externalId verbatim"
+    b = "CrossChainRouter trusts inbound externalId verbatim, enabling spoof"
     assert _titles_collide(a, b) is False
 
 
 def test_fix2_titles_collide_true_on_genuinely_different_finding():
     """Different findings reusing an ID MUST still be a collision (recall-safe)."""
     from plamen_parsers import _titles_collide
-    a = "GatewayTransferNative.withdraw() Is Public — Permissionless Drain"
+    a = "NativeVault.withdraw() Is Public — Permissionless Drain"
     b = "Missing reinitializer() function blocks upgrade"
     assert _titles_collide(a, b) is True
 
@@ -136,7 +136,7 @@ def test_fix2_register_reuses_on_cosmetic_reword(tmp_path):
     r = id_ledger_register(
         tmp_path, finding_id="GRP-01", owner_phase="chain",
         owner_attempt=2, owning_artifact="hypotheses.md",
-        title="GatewayCrossChain trusts inbound externalId verbatim - no provenance check",
+        title="CrossChainRouter trusts inbound externalId verbatim - no provenance check",
     )
     assert r["status"] == "REUSED"
 
@@ -146,7 +146,7 @@ def test_fix2_register_still_collides_on_different_finding(tmp_path):
     id_ledger_register(
         tmp_path, finding_id="GRP-01", owner_phase="chain",
         owner_attempt=1, owning_artifact="hypotheses.md",
-        title="GatewayTransferNative.withdraw() Is Public — Permissionless Drain",
+        title="NativeVault.withdraw() Is Public — Permissionless Drain",
     )
     r = id_ledger_register(
         tmp_path, finding_id="GRP-01", owner_phase="chain",
@@ -165,7 +165,7 @@ def test_fix2_collision_gate_no_false_alarm_on_chain_reword(tmp_path):
     assert _validate_id_ledger_collisions(tmp_path, "chain", attempt=1) == []
     # Retry reworded the SAME finding (abbrev expanded, em-dash -> hyphen).
     (tmp_path / "hypotheses.md").write_text(
-        "### GRP-01 - GatewayCrossChain trusts inbound externalId verbatim - no check\n",
+        "### GRP-01 - CrossChainRouter trusts inbound externalId verbatim - no check\n",
         encoding="utf-8",
     )
     assert _validate_id_ledger_collisions(tmp_path, "chain", attempt=2) == []
@@ -204,7 +204,7 @@ def test_p21_register_collision_when_title_differs(tmp_path):
     id_ledger_register(
         tmp_path, finding_id="GRP-01", owner_phase="chain_agent1",
         owner_attempt=1, owning_artifact="hypotheses.md",
-        title="GatewayTransferNative.withdraw() Is Public",
+        title="NativeVault.withdraw() Is Public",
     )
     r = id_ledger_register(
         tmp_path, finding_id="GRP-01", owner_phase="chain_agent1",
@@ -212,7 +212,7 @@ def test_p21_register_collision_when_title_differs(tmp_path):
         title="No reinitializer() Function",
     )
     assert r["status"] == "COLLISION"
-    assert r["existing"]["title_preview"].startswith("GatewayTransfer")
+    assert r["existing"]["title_preview"].startswith("NativeVault")
     assert r["current"]["title_preview"].startswith("No reinitializer")
 
 
@@ -310,7 +310,7 @@ def test_p24_parse_hypothesis_id_title_pairs():
     """Heading parser extracts (ID, title) pairs from hypotheses-like MD."""
     text = (
         "# Hypotheses\n\n"
-        "### GRP-01 — GatewayTransferNative.withdraw() Is Public\n\n"
+        "### GRP-01 — NativeVault.withdraw() Is Public\n\n"
         "Some body text.\n\n"
         "### HH-02 — Initial fee setter has no upper bound\n\n"
         "Body.\n\n"
@@ -319,7 +319,7 @@ def test_p24_parse_hypothesis_id_title_pairs():
     pairs = _parse_hypothesis_id_title_pairs(text)
     pair_dict = dict(pairs)
     assert "GRP-01" in pair_dict
-    assert "GatewayTransferNative" in pair_dict["GRP-01"]
+    assert "NativeVault" in pair_dict["GRP-01"]
     assert pair_dict.get("HH-02", "").startswith("Initial fee")
     assert pair_dict.get("CH-01", "").startswith("chain title")
 
@@ -426,7 +426,7 @@ def test_p24_chain_agent2_ignores_referenced_upstream_ids(tmp_path):
         owner_phase="chain",
         owner_attempt=1,
         owning_artifact="hypotheses.md",
-        title="claimRefund authorization bypass",
+        title="claimPayout authorization bypass",
     )
     (tmp_path / "chain_hypotheses.md").write_text(
         "# Chain Hypotheses\n\n"
@@ -437,7 +437,7 @@ def test_p24_chain_agent2_ignores_referenced_upstream_ids(tmp_path):
         "### Blocked Finding (A)\n"
         "- **ID**: H-09, **Title**: fee mismatch\n"
         "### Enabler Finding (B)\n"
-        "- **ID**: H-01, **Title**: claimRefund authorization bypass\n",
+        "- **ID**: H-01, **Title**: claimPayout authorization bypass\n",
         encoding="utf-8",
     )
 
@@ -461,7 +461,7 @@ def test_p24_chain_agent2_retry_prunes_failed_same_phase_allocations(tmp_path):
     (tmp_path / "chain_hypotheses.md").write_text(
         "| Chain ID | Finding A | Missing Precondition | Finding B | Chain Severity |\n"
         "|---|---|---|---|---|\n"
-        "| CH-01 | H-09: GatewayTransferNative.onCall() Missing amount -= platformFeesForTx | refund entry | H-01: claimRefund() Authorization Bypass for Non-EVM Wallets | Critical |\n",
+        "| CH-01 | H-09: NativeVault.onCall() Missing amount -= platformFeesForTx | refund entry | H-01: claimPayout() Authorization Bypass for Non-EVM Wallets | Critical |\n",
         encoding="utf-8",
     )
 

@@ -26,6 +26,11 @@ def _pv():
     return importlib.import_module("plamen_validators")
 
 
+def _cp():
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    return importlib.import_module("chain_prep")
+
+
 # ───────────────────────────── fixtures ─────────────────────────────
 
 
@@ -176,6 +181,41 @@ def test_retry_hint_generation(tmp_path: Path) -> None:
     assert "DA-3" in hint
     assert "OVERWRITE" in hint
     assert pv._generate_chain_baseline_regroup_retry_hint([]) == ""
+
+
+# ─── M1/M2 (recall-build-plan §5.3): INVARIANT + AXISGAP as STEP-0a-LC enablers ───
+
+
+def test_invariant_candidate_is_low_confidence_enabler(tmp_path: Path) -> None:
+    """An M1 INVARIANT candidate (promoted with Verdict NEEDS_VERIFICATION) is a
+    STEP-0a-LC low-confidence chain enabler — via the unverified verdict route,
+    and also via an ENUMGAP source-id tag when present."""
+    cp = _cp()
+    assert cp._is_unverified_enabler(
+        {"verdict": "NEEDS_VERIFICATION", "source_ids": ["INVARIANT"]}
+    )
+    assert cp._is_unverified_enabler(
+        {"verdict": "", "source_ids": ["INVARIANT", "ENUMGAP"]}
+    )
+
+
+def test_axisgap_candidate_is_low_confidence_enabler(tmp_path: Path) -> None:
+    """An M2 AXISGAP candidate (promoted with Verdict NEEDS_VERIFICATION) is a
+    STEP-0a-LC low-confidence chain enabler."""
+    cp = _cp()
+    assert cp._is_unverified_enabler(
+        {"verdict": "NEEDS_VERIFICATION", "source_ids": ["AXISGAP"]}
+    )
+
+
+def test_confirmed_finding_not_low_confidence_enabler(tmp_path: Path) -> None:
+    """Recall-safety anchor: a CONFIRMED finding with no unverified marker is NOT
+    misclassified as a low-confidence enabler (it belongs to the dangerous-state
+    baseline instead)."""
+    cp = _cp()
+    assert not cp._is_unverified_enabler(
+        {"verdict": "CONFIRMED", "source_ids": ["INV-3"]}
+    )
 
 
 # ──────────────────── FIX 1: inline auto-map tests ────────────────────

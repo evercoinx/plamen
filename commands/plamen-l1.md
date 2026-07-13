@@ -218,7 +218,7 @@ Include this block verbatim in every depth agent prompt:
 
 > **Mode gate**: Thorough mode only. Light/Core depth agents do NOT need to emit a step trace.
 >
-> **v2.3.3 status**: Agent-emit is now ADVISORY. The Python driver auto-synthesizes
+> **Status**: Agent-emit is now ADVISORY. The Python driver auto-synthesizes
 > `step_execution_trace_{role}.md` from your `depth_{role}_findings.md` evidence-tag density
 > (`[BOUNDARY:*]`, `[VARIATION:*]`, `[TRACE:*]`, etc.) if you don't emit a richer one.
 > Agents that DO follow the directive get per-skill granularity preserved; agents that
@@ -743,7 +743,7 @@ fallback_to_grep: false
 
 ### Telemetry gate (after all depth agents return)
 
-v2.1.9 — replaced the previous bash `grep -c '^\s*- file:.*scip/'` gate
+Internal milestone — replaced the previous bash `grep -c '^\s*- file:.*scip/'` gate
 with a Python YAML-aware check. The grep approach only matched the
 multi-line block form (`  - file: scip/...`) and emitted false-alarm
 [GATE FAIL]s on any agent that wrote the equivalent inline-array form
@@ -1046,7 +1046,7 @@ Write ONLY `{SCRATCHPAD}/verify_{FINDING_ID}.md`. Do NOT write
 `skeptic*.md` / `judge*.md` variant) — those are produced by Step 5.4
 (crossbatch) and Step 5.5 (skeptic-judge) in dedicated subsequent phases
 that the V2 driver runs separately. Inline writes from a verify shard are
-quarantined to `_overflow/` automatically (v2.1.8) but recurring
+quarantined to `_overflow/` automatically (internal milestone) but recurring
 violations indicate methodology drift; respect the phase boundary.
 Write your result to {SCRATCHPAD}/verify_{FINDING_ID}.md per §WRITE-THEN-VERIFY.
 Return ONLY: "DONE: {FINDING_ID} verdict={VERDICT} tag={TAG}"

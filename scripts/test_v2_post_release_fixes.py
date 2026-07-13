@@ -119,11 +119,11 @@ def test_scope_file_parses_markdown_table(tmp_path):
     sf.write_text(
         "| File | Lines |\n"
         "|------|-------|\n"
-        "| GatewaySend.sol | 301 |\n"
+        "| MessageRouter.sol | 301 |\n"
         "| Vault.sol | 200 |\n"
     )
     names = _load_scope_file_paths(str(sf))
-    assert "gatewaysend.sol" in names
+    assert "messagerouter.sol" in names
     assert "vault.sol" in names
 
 

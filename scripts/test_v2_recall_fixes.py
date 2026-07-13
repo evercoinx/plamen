@@ -6,7 +6,7 @@ Covers:
 - Fix 2: _validate_chain_anti_absorption — distinct-function / severity /
   Jaccard violations are flagged; explicit override clears them.
 - Fix 4: _per_constituent_claim_match — single_winner / shared_claim /
-  ambiguous classification on the AccountEncoder-style super-group case.
+  ambiguous classification on the PayloadCodec-style super-group case.
 - Fix 4: _apply_poc_fail_demotions writes poc_demotion_carveouts.md when
   the verifier tested only one constituent's claim.
 - Fix 5: CROSS_VM_ENCODING_NO_RUNTIME — keyword guard rejects abuse,
@@ -137,13 +137,30 @@ class TestAntiAbsorption:
             fm_lines.append(f"| {c[0]} | {hyp_id} |\n")
         (scratch / "finding_mapping.md").write_text("".join(fm_lines), encoding="utf-8")
 
-    def test_distinct_functions_flagged(self, scratch: Path):
+    def test_distinct_functions_not_hard_flagged(self, scratch: Path):
+        # Fix 6: distinct (file, function) ALONE is no longer a hard violation.
+        # Same-fix mirror-contract clusters legitimately span functions/files,
+        # so a same-severity, same-root-cause pair across two functions must
+        # NOT be flagged (and must never drive mechanical atomization).
         self._seed(scratch, [
-            ("INV-001", "Medium", "AccountEncoder.sol:L10 fooDecompress()", "memory layout pointer bug"),
+            ("INV-001", "Medium", "GatewayA.sol:L10 handleRefund()", "shared refund handler missing state reset"),
+            ("INV-002", "Medium", "GatewayB.sol:L20 handleRefund()", "shared refund handler missing state reset"),
+        ], "GRP-M-001")
+        issues = validators._validate_chain_anti_absorption(scratch, "thorough")
+        assert issues == []
+
+    def test_distinct_functions_soft_note_on_hard_violation(self, scratch: Path):
+        # When a REAL violation (here: zero-overlap root causes -> Jaccard) fires,
+        # the distinct-functions observation is surfaced as an advisory SOFT NOTE
+        # inside the same issue string, never as its own hard violation.
+        self._seed(scratch, [
+            ("INV-001", "Medium", "PayloadCodec.sol:L10 fooDecompress()", "memory layout pointer bug"),
             ("INV-002", "Medium", "GatewayTransfer.sol:L20 withdraw()", "access control missing"),
         ], "GRP-M-001")
         issues = validators._validate_chain_anti_absorption(scratch, "thorough")
         assert len(issues) == 1
+        assert "Jaccard" in issues[0]
+        assert "soft note" in issues[0]
         assert "distinct functions" in issues[0]
 
     def test_severity_span_flagged(self, scratch: Path):
@@ -167,7 +184,7 @@ class TestAntiAbsorption:
 
     def test_override_clears_violations(self, scratch: Path):
         self._seed(scratch, [
-            ("INV-001", "Medium", "AccountEncoder.sol:L10 fooDecompress()", "memory layout bug"),
+            ("INV-001", "Medium", "PayloadCodec.sol:L10 fooDecompress()", "memory layout bug"),
             ("INV-002", "Medium", "GatewayTransfer.sol:L20 withdraw()", "access control bug"),
         ], "GRP-M-001", override_text="agents detect same single defect")
         issues = validators._validate_chain_anti_absorption(scratch, "thorough")
@@ -182,8 +199,8 @@ class TestAntiAbsorption:
 
     def test_skipped_in_light_mode(self, scratch: Path):
         self._seed(scratch, [
-            ("INV-001", "Medium", "AccountEncoder.sol:L10 a()", "x"),
-            ("INV-002", "Medium", "Gateway.sol:L20 b()", "y"),
+            ("INV-001", "Medium", "PayloadCodec.sol:L10 a()", "x"),
+            ("INV-002", "Medium", "BridgeRouter.sol:L20 b()", "y"),
         ], "GRP-M-001")
         assert validators._validate_chain_anti_absorption(scratch, "light") == []
 
@@ -194,6 +211,141 @@ class TestAntiAbsorption:
         assert "ATTEMPT 2 RETRY" in hint
         assert "Anti-absorption override:" in hint
         assert "GRP-M-001" in hint
+
+
+# --- Fix 5+6: exact-locus sub-clustering repair (no singleton explosion) -----
+
+class TestAntiAbsorptionSubcluster:
+    def _seed(self, scratch: Path,
+              constituents: list[tuple[str, str, str, str]],
+              hyp_id: str = "GRP-M-001", hyp_sev: str = "Medium"):
+        _seed_inventory(scratch, constituents)
+        cids = ", ".join(c[0] for c in constituents)
+        (scratch / "hypotheses.md").write_text(
+            "# Hypotheses\n\n"
+            "| Hypothesis ID | Severity | Source Findings |\n"
+            "|---|---|---|\n"
+            f"| {hyp_id} | {hyp_sev} | {cids} |\n",
+            encoding="utf-8",
+        )
+        fm = ["| Finding ID | Hypothesis ID |\n", "|---|---|\n"]
+        for c in constituents:
+            fm.append(f"| {c[0]} | {hyp_id} |\n")
+        (scratch / "finding_mapping.md").write_text("".join(fm), encoding="utf-8")
+
+    def _result_groups(self, scratch: Path) -> list[tuple[str, list[str]]]:
+        text = (scratch / "hypotheses.md").read_text(encoding="utf-8")
+        out: list[tuple[str, list[str]]] = []
+        for line in text.splitlines():
+            if not line.strip().startswith("|"):
+                continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) < 5:
+                continue
+            hid = cells[0]
+            if hid == "Hypothesis ID" or set(hid) <= set("-: "):
+                continue
+            srcs = re.findall(r"INV-\d+", cells[3])
+            out.append((hid, srcs))
+        return out
+
+    # ---- helper-level ----
+    def test_line_ref_not_treated_as_function(self):
+        # location-only; line-ref tokens discarded; prose is never consulted
+        assert validators._normalize_locus_function("X.sol L671 (safeTransfer)") == ""
+        assert validators._normalize_locus_function("X.sol:661 (fn)") == ""
+        assert validators._normalize_locus_function("X.sol claimPayout()") == "claimpayout"
+        # a real `name()` in the Location field is still extracted
+        assert validators._normalize_locus_function("Vault.sol:L10 settle()") == "settle"
+
+    def test_partition_exact_keys_only(self):
+        meta = [
+            ("A", {"location": "F.sol L671 (x)", "root_cause": "rc", "severity": "High"}),
+            ("B", {"location": "F.sol:671-672", "root_cause": "rc", "severity": "High"}),
+            ("C", {"location": "G.sol foo()", "root_cause": "rc", "severity": "High"}),
+        ]
+        subs = validators._partition_into_subclusters(meta)
+        keys = [sorted(cid for cid, _ in s) for s in subs]
+        assert ["A", "B"] in keys   # same file + (normalized) empty func + tier
+        assert ["C"] in keys        # distinct exact locus
+        assert len(subs) == 2
+
+    # ---- repair-level ----
+    def test_same_locus_stays_one_finding_even_cross_tier(self, scratch: Path):
+        # The claimPayout-CEI cluster: three High CEI findings + one Low
+        # invariant note, ALL at the SAME claimPayout locus. Distinctness is
+        # location-based, so a single locus is ONE bug: all four stay one
+        # hypothesis (severity inherited as the highest, High), NOT split by
+        # tier or by prose. This is the corrected behavior that ends the
+        # fresh-generation over-fragmentation (the old code split the Low out
+        # and shattered paraphrase duplicates into many findings).
+        self._seed(scratch, [
+            ("INV-010", "High", "NativeVault.sol:661-680 (claimPayout); ordering between L671 (safeTransfer) and L672 (delete)",
+             "checks effects interactions violation refund reentrancy drain"),
+            ("INV-166", "High", "NativeVault.sol:671-672 (transfer at L671, delete at L672)",
+             "checks effects interactions violation refund reentrancy drain"),
+            ("INV-167", "High", "NativeVault.sol:L661-672 (claimPayout)",
+             "checks effects interactions violation refund reentrancy drain"),
+            ("INV-164", "Low", "NativeVault.sol:L661-672 (fn: claimPayout)",
+             "committed invariant claimPayout cannot be claimed twice disposition"),
+        ], "GRP-H-001", "High")
+        n = validators._repair_chain_anti_absorption_splits(scratch)
+        # single locus -> one bug -> NO split; the original grouping (all four
+        # constituents in one hypothesis) is preserved untouched.
+        assert n == 0
+        fm = (scratch / "finding_mapping.md").read_text(encoding="utf-8")
+        assert len(set(re.findall(r"GRP-\S+|H[HCLMI]?-\d+", fm))) == 1  # still one hypothesis
+
+    def test_same_locus_paraphrase_dups_do_not_split(self, scratch: Path):
+        # Fresh-generation failure mode: the SAME bug written by two agents with
+        # divergent prose (low token Jaccard) at the SAME locus must NOT split.
+        # This is the exact trigger that exploded 53 chain hypotheses -> 140.
+        self._seed(scratch, [
+            ("INV-300", "High", "NativeVault.sol:286-304 (withdraw)",
+             "public withdraw drains contract WrappedToken balance to an attacker recipient via the standing gateway allowance"),
+            ("INV-301", "Medium", "NativeVault.sol:286 (withdraw)",
+             "any account may invoke the unrestricted withdraw and redirect held tokens to itself"),
+        ], "GRP-H-002", "High")
+        n = validators._repair_chain_anti_absorption_splits(scratch)
+        assert n == 0  # same-locus paraphrases stay ONE finding (no explosion)
+
+    def test_distinct_bugs_at_distinct_loci_still_split(self, scratch: Path):
+        # Guardrail: two GENUINELY different bugs (different loci, unrelated
+        # root cause) bundled into one hypothesis MUST still split.
+        self._seed(scratch, [
+            ("INV-400", "Medium", "GatewayA.sol:10 (swapGas)",
+             "missing minAmountOut slippage bound on the gas conversion swap enables sandwich MEV"),
+            ("INV-401", "Medium", "Proxy.sol:99 (initialize)",
+             "uninitialized proxy lets any first caller seize admin and take over the contract"),
+        ], "GRP-M-002", "Medium")
+        n = validators._repair_chain_anti_absorption_splits(scratch)
+        assert n >= 1  # distinct-locus + unrelated root cause -> split
+
+    def test_distinct_functions_only_preserved_whole(self, scratch: Path):
+        # Post-Fix-6: distinct (file, function) alone does NOT violate, so the
+        # group is preserved intact — no split, no rewrite.
+        self._seed(scratch, [
+            ("INV-201", "Medium", "GatewayA.sol:L10 onRevert()", "unguarded pendingClaims overwrite same shared handler"),
+            ("INV-202", "Medium", "GatewayB.sol:L20 onAbort()", "unguarded pendingClaims overwrite same shared handler"),
+        ], "GRP-M-001", "Medium")
+        n = validators._repair_chain_anti_absorption_splits(scratch)
+        assert n == 0  # nothing split; LLM grouping preserved
+
+    def test_jaccard_same_locus_merges_not_singletons(self, scratch: Path):
+        # Two disjoint-root-cause findings at the EXACT same file+function+tier
+        # trip the Jaccard predicate, but exact-locus keying keeps them merged
+        # (same fix site = one finding) rather than exploding to singletons.
+        self._seed(scratch, [
+            ("INV-301", "Medium", "Vault.sol:L100 settle()", "missing length validation causes overflow"),
+            ("INV-302", "Medium", "Vault.sol:L100 settle()", "wrong return value type interface violation"),
+        ], "GRP-M-001", "Medium")
+        n = validators._repair_chain_anti_absorption_splits(scratch)
+        assert n == 0  # single exact-locus sub-cluster -> no reassignment
+        from plamen_parsers import _parse_hypothesis_constituents
+        mapping = _parse_hypothesis_constituents(scratch)
+        merged = [srcs for srcs in mapping.values()
+                  if "INV-301" in srcs or "INV-302" in srcs]
+        assert merged and set(merged[0]) == {"INV-301", "INV-302"}
 
 
 # --- Fix 4: per-constituent demotion ---------------------------------------
@@ -225,13 +377,13 @@ class TestPerConstituentDemotion:
         assert kind == "ambiguous"
 
     def test_apply_poc_fail_demotions_writes_carveout(self, scratch: Path):
-        # Seed inventory with 3 distinct AccountEncoder findings
+        # Seed inventory with 3 distinct PayloadCodec findings
         _seed_inventory(scratch, [
-            ("INV-001", "Medium", "AccountEncoder.sol:L10 decompressAccounts()",
+            ("INV-001", "Medium", "PayloadCodec.sol:L10 decompressAccounts()",
              "OOB read from attacker controlled len parameter"),
-            ("INV-002", "Medium", "AccountEncoder.sol:L20 decompressAccounts()",
+            ("INV-002", "Medium", "PayloadCodec.sol:L20 decompressAccounts()",
              "mload reads 32 bytes for 1-byte isWritable boolean field"),
-            ("INV-003", "High", "AccountEncoder.sol:L30 decompressAccounts()",
+            ("INV-003", "High", "PayloadCodec.sol:L30 decompressAccounts()",
              "memory layout uses pointer table instead of inline struct data"),
         ])
         # Hypothesis groups all 3
@@ -292,7 +444,7 @@ class TestCrossVmSkip:
     def test_valid_solana_skip(self):
         content = (
             "PoC Not Attempted Because: CROSS_VM_ENCODING_NO_RUNTIME\n"
-            "This finding involves AccountEncoder wire format for Solana decode.\n"
+            "This finding involves PayloadCodec wire format for Solana decode.\n"
         )
         # Build the regex inline to mirror validator behavior
         skip_codes = (
@@ -364,3 +516,43 @@ class TestSmokeIntegration:
         src = inspect.getsource(validators)
         assert "CROSS_VM_ENCODING_NO_RUNTIME" in src
         assert "cross_vm_keyword_present" in src
+
+
+# --- Fix 1: mechanical body-label binding from the report_index status column --
+
+class TestBodyStatusStamp:
+    _IDX = (
+        "## Master Finding Index\n\n"
+        "| Report ID | Title | Severity | Location | Verification | Trust Adj. | Internal |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| C-01 | claimPayout theft | Critical | GTN.sol:661 | VERIFIED | - | HC-01 |\n"
+        "| M-07 | unconditional refund write | Medium | GCC.sol:449 | CONFIRMED | - | HM-01 |\n"
+        "| M-08 | slippage bound | Medium | A.sol:10 | CONFIRMED | - | HM-02 |\n"
+        "| M-09 | contested thing | Medium | B.sol:20 | CONTESTED | - | HM-03 |\n"
+    )
+
+    def test_status_map_reads_verification_column(self):
+        sm = mech._index_status_map(self._IDX)
+        assert sm == {"C-01": "VERIFIED", "M-07": "CONFIRMED",
+                      "M-08": "CONFIRMED", "M-09": "CONTESTED"}
+
+    def test_body_header_overwritten_from_index(self):
+        # The tier-writer mislabeled M-07 [UNVERIFIED] and left M-08 untagged;
+        # the stamp must make BOTH read [CONFIRMED] (matching the index), and
+        # C-01 stays VERIFIED.
+        body = (
+            "## Critical Findings\n\n### [C-01] claimPayout theft [VERIFIED]\n\nx\n\n"
+            "## Medium Findings\n\n### [M-07] unconditional refund write [UNVERIFIED]\n\ny\n\n"
+            "### [M-08] slippage bound\n\nz\n\n### [M-09] contested thing [UNVERIFIED]\n\nw\n"
+        )
+        out = mech._stamp_body_header_status(body, mech._index_status_map(self._IDX))
+        assert "### [C-01] claimPayout theft [VERIFIED]" in out
+        assert "### [M-07] unconditional refund write [CONFIRMED]" in out
+        assert "### [M-08] slippage bound [CONFIRMED]" in out
+        assert "### [M-09] contested thing [CONTESTED]" in out
+        assert "[UNVERIFIED]" not in out  # no leftover mislabel
+
+    def test_unknown_id_keeps_existing_tag(self):
+        body = "### [L-99] not in index [UNVERIFIED]\n"
+        out = mech._stamp_body_header_status(body, mech._index_status_map(self._IDX))
+        assert out == body  # absent from map -> untouched

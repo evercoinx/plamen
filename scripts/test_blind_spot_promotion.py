@@ -2,7 +2,7 @@
 but silently dropped. `promote_blind_spot_to_inventory` appends only the LEAKED
 BLIND-* ids (absent from inventory), idempotently, append-only.
 
-Pins the real Umia leak: BLIND-B1/B2 promoted, BLIND-B3 (scored 0.47) dropped.
+Pins a real regression: BLIND-B1/B2 promoted, BLIND-B3 (scored 0.47) dropped.
 """
 from __future__ import annotations
 

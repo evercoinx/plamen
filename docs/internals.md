@@ -160,7 +160,7 @@ The pipeline driver (`plamen_driver.py`) executes phases as isolated subprocesse
 | `plamen_driver.py` | Phase scheduling, checkpointing, retry, gate checking, worker-pool orchestration |
 | `plamen_types.py` | Canonical definitions (evidence tags, severities, finding ID regex); `plamen_home()` resolves `~/.plamen/` (canonical install root) — `~/.claude/` and `~/.codex/plamen/` are install-created symlinks pointing at it, see `glossary.md` / `repository-structure.md` |
 | `plamen_parsers.py` | LLM output parsing (report index, verification results) |
-| `plamen_validators.py` | Artifact quality gates (mechanical, not LLM-dependent); per-row marker statuses (`_BREADTH_STATUS_*`, `scripts/plamen_validators.py:883-888`) |
+| `plamen_validators.py` | Artifact quality gates (mechanical, not LLM-dependent); per-row marker statuses (`_BREADTH_STATUS_*`, `scripts/plamen_validators.py:931-935`) |
 | `plamen_prompt.py` | Phase prompt building with forward-ref sanitization |
 | `plamen_mechanical.py` | Deterministic report assembly, dedup, tier dispatch |
 | `plamen_display.py` | Rich terminal UI for driver progress |
@@ -169,7 +169,7 @@ The pipeline driver (`plamen_driver.py`) executes phases as isolated subprocesse
 | `mechanical_verify.py` | Phase 5 mechanical verification helpers (severity caps, PoC demotions, integrity gates) |
 | `chain_prep.py` | Chain-analysis pre-pass: extracts candidate finding pairs with shared state / type before the chain LLM phase |
 | `report_index_machinery.py` | Report-index ID assignment and `report_coverage.md` ledger reconciliation |
-| `pty_exec.py` | Claude PTY session: POSIX `pty.openpty()` + `Popen` with `preexec_fn` setup, Windows `winpty.PtyProcess.spawn`; `ClaudePtySession`, transcript polling, compaction detection (`scripts/pty_exec.py:548-720`) |
+| `pty_exec.py` | Claude PTY session: POSIX `pty.openpty()` + `Popen` with `preexec_fn` setup, Windows `winpty.PtyProcess.spawn`; `ClaudePtySession`, transcript polling, compaction detection (`scripts/pty_exec.py:858-1245`) |
 | `preflight_pty_transports.py` | Per-host PTY transport probe; cache schema v3 (`scripts/preflight_pty_transports.py:62`) |
 | `codex_adapter.py` | Codex CLI backend: tool translation, path rewriting (`~/.claude/` ↔ `~/.codex/plamen/`) |
 | `recon_prepass.py` | Pre-recon static analysis (Slither, Opengrep, SCIP) |
@@ -180,7 +180,7 @@ The driver auto-detects the active backend via `plamen_home()` (`scripts/plamen_
 
 Three execution shapes coexist behind the same `plamen_home()` and disk-gate primitives:
 
-1. **Direct PTY worker pool** — used for `breadth`, `rescan`, `per_contract`, and `depth`. The driver builds a manifest of expected output artifacts (one per spawned worker), launches a bounded `ThreadPoolExecutor` (`_run_breadth_worker_pool_pty`, `scripts/plamen_driver.py:4636-4760`), and spawns one Claude PTY session per row via `ClaudePtySession`. Each worker's success is a disk artifact passing the row gate — the worker's prose `DONE` is **advisory only**.
+1. **Direct PTY worker pool** — used for `breadth`, `rescan`, `per_contract`, and `depth`. The driver builds a manifest of expected output artifacts (one per spawned worker), launches a bounded `ThreadPoolExecutor` (`_run_breadth_worker_pool_pty`, `scripts/plamen_driver.py:7696-7866`), and spawns one Claude PTY session per row via `ClaudePtySession`. Each worker's success is a disk artifact passing the row gate — the worker's prose `DONE` is **advisory only**.
 2. **LLM phase session** — used for sequential analytical phases (recon, inventory, chain, report_index, skeptic, judge, crossbatch, tier writers, etc.). The driver spawns one Claude PTY session per phase, supervises it with `wait_for_turn_complete`, and runs `gate_passes` against the scratchpad after the turn ends.
 3. **Python mechanical** — used for `inventory_prepare`, `report_assemble`, `chain_prep`, `verify_aggregate`, semantic-dedup fallback, severity binding, and similar plumbing phases. No LLM is spawned; deterministic Python in `plamen_mechanical.py` / `mechanical_verify.py` / `chain_prep.py` / `report_index_machinery.py` reads and writes scratchpad artifacts in-process.
 
@@ -195,7 +195,7 @@ Opus phases run on **Opus 4.8** (`claude-opus-4-8`) by default across all modes 
 The driver runs against two interchangeable CLI backends behind the same `plamen_home()` and disk-gate primitives:
 
 - **Claude Code** (default) — config files `CLAUDE.md` + `settings.json` + `mcp.json`.
-- **Codex CLI** (`codex exec`, **BETA / cost-saving**) — OpenAI's CLI as an alternative worker backend, with research-backed model/tier/compact configuration and per-job depth fan-out (one `codex exec` per depth job, which fixes the never-cut-stub halt). Codex model aliases map through `_CODEX_MODEL_MAP` (`scripts/plamen_types.py:128`), config files are `AGENTS.md` + `config.toml`, and `codex_adapter.py` regenerates them from the Claude-side manifests to prevent drift. Codex usage-cap messages are detected in natural language so the driver auto-waits instead of halting, Codex depth runs real Devil's-Advocate iter-2, and `context-exceeded` no longer perma-fails. The active backend is detected at startup (`backend == "codex"`, `scripts/plamen_driver.py:205`) and selected paths/tools are translated only when Codex is active.
+- **Codex CLI** (`codex exec`, **BETA / cost-saving**) — OpenAI's CLI as an alternative worker backend, with research-backed model/tier/compact configuration and per-job depth fan-out (one `codex exec` per depth job, which fixes the never-cut-stub halt). Codex model aliases map through `_CODEX_MODEL_MAP` (`scripts/plamen_types.py:128`), config files are `AGENTS.md` + `config.toml`, and `codex_adapter.py` regenerates them from the Claude-side manifests to prevent drift. Codex usage-cap messages are detected in natural language so the driver auto-waits instead of halting, Codex depth runs real Devil's-Advocate iter-2, and `context-exceeded` no longer perma-fails. The active backend is detected at startup (`backend == "codex"`, `scripts/plamen_driver.py:211`) and selected paths/tools are translated only when Codex is active.
 
 ### Cross-platform (Windows + macOS + Linux)
 
@@ -203,7 +203,7 @@ The PTY worker-pool model runs on all three platforms. POSIX hosts (macOS, Linux
 
 ### Ecosystem auto-detection
 
-The configured language/ecosystem is mechanically auto-detected and auto-corrected at startup with no halt-to-rerun (`_detect_ecosystem`, `scripts/plamen_driver.py:14879`), shown on the startup banner, and resolved via manifest-priority rules (a suffix-only signal never clobbers an explicit config; native-SDK / Pinocchio Solana is detected at high confidence). The auto-corrector is recall-safe by design — a wrong auto-correct is treated as worse than the status quo (`_language_correction`, `scripts/plamen_driver.py:14837`), and L1 pipelines always keep their configured Rust/Go language.
+The configured language/ecosystem is mechanically auto-detected and auto-corrected at startup with no halt-to-rerun (`_detect_ecosystem`, `scripts/plamen_driver.py:16280`), shown on the startup banner, and resolved via manifest-priority rules (a suffix-only signal never clobbers an explicit config; native-SDK / Pinocchio Solana is detected at high confidence). The auto-corrector is recall-safe by design — a wrong auto-correct is treated as worse than the status quo (`_language_correction`, `scripts/plamen_driver.py:16238`), and L1 pipelines always keep their configured Rust/Go language.
 
 ### Haltless resilience
 
@@ -211,7 +211,7 @@ A finished audit is never discarded at the finish line. The `report_index`, `ver
 
 ### Compaction as informational
 
-When a Claude PTY session's transcript shows an auto-compaction event, the driver emits a one-shot `INFO` log line for the affected phase (`compaction_warned` guard, `scripts/plamen_driver.py:3834-3880`). Compaction never gates a phase and never alters control flow — the disk-gate verdict is the only authority. A coordinator that emits `DONE` after compaction but leaves the disk gate red is treated identically to any other premature-DONE: the missing-only / live / resume continuation handles recovery.
+When a Claude PTY session's transcript shows an auto-compaction event, the driver emits a one-shot `INFO` log line for the affected phase (`compaction_warned` guard, `scripts/plamen_driver.py:5658-5757`). Compaction never gates a phase and never alters control flow — the disk-gate verdict is the only authority. A coordinator that emits `DONE` after compaction but leaves the disk gate red is treated identically to any other premature-DONE: the missing-only / live / resume continuation handles recovery.
 
 ---
 
@@ -221,7 +221,7 @@ Worker artifacts (breadth, depth, rescan, per-contract) carry an HTML-comment en
 
 ### Marker-driven row verdicts
 
-For each manifest row, `compute_phase_row_statuses` returns one of four verdicts (`scripts/plamen_validators.py:883-1153`):
+For each manifest row, `compute_phase_row_statuses` returns one of four verdicts (`scripts/plamen_validators.py:1488-1506`):
 
 | Verdict | Meaning | Driver action |
 |---------|---------|---------------|
@@ -272,12 +272,11 @@ At every spawn site, the child env is built via `_filtered_child_subprocess_envi
 
 ## Discovery aids
 
-Two driver-generated artifacts steer depth workers toward unbound or under-justified value flows without prescribing findings:
+A driver-generated artifact steers depth workers toward unbound or under-justified value flows without prescribing findings:
 
-- **`security_obligations.md`** — feature-derived obligation ledger. When present, depth workers read it as input 5 (`prompts/shared/v2/phase4b-depth.md:161-165`) and emit per-obligation receipts in their output (`[OBLIG:security_obligations.md:<SO-ID>] STATUS:R|D|C ...`).
-- **`asset_binding_matrix.md`** — value-flow binding checklist. Treated as a compact driver-generated checklist (not an expected-finding list); for each relevant row the depth worker either files a finding with file:line evidence for an unbound asset/amount/recipient/provenance pair or records why the pair is bound, unreachable, or irrelevant (`prompts/shared/v2/phase4b-depth.md:21-25`).
+- **`security_obligations.md`** — feature-derived obligation ledger. When present, depth workers read it as input 5 (`prompts/shared/v2/phase4b-depth.md:230`) and emit per-obligation receipts in their output (`[OBLIG:security_obligations.md:<SO-ID>] STATUS:R|D|C ...`).
 
-Both are consumed by depth workers; neither is a gate input.
+It is consumed by depth workers; not a gate input.
 
 ---
 
@@ -286,7 +285,7 @@ Both are consumed by depth workers; neither is a gate input.
 Finding IDs flow through three regimes:
 
 1. **Provisional analysis IDs** — assigned by breadth/depth/chain workers in their own output files (e.g. `[CS-1]`, `[TF-3]`, `[BLIND-2]`, `CH-2`). These are not stable and never appear in the client report.
-2. **Canonical identity map** — `_write_canonical_finding_identity_map` (`scripts/plamen_driver.py:9634-9658`) refreshes a driver-owned identity sidecar after every major discovery phase (`breadth`, `rescan`, inventory chunks, `depth`, `attention_repair`, `rag_sweep`, semantic dedup variants, chain variants, `post_verify_extract`, `skeptic`, `crossbatch`, `report_index`). Source artifacts are preserved; the map is additive.
+2. **Canonical identity map** — `_write_canonical_finding_identity_map` (`scripts/plamen_mechanical.py:1049`) refreshes a driver-owned identity sidecar after every major discovery phase (`breadth`, `rescan`, inventory chunks, `depth`, `attention_repair`, `rag_sweep`, semantic dedup variants, chain variants, `post_verify_extract`, `skeptic`, `crossbatch`, `report_index`). Source artifacts are preserved; the map is additive.
 3. **Final report IDs** — the `report_index` phase reassigns to clean sequential IDs grouped by severity tier: `C-01 / H-01 / M-01 / L-01 / I-01`. Tier writers and the report assembler consume only these IDs; internal pipeline IDs are explicitly forbidden in the client-facing report (see `rules/report-template.md`).
 
 ---
@@ -295,13 +294,13 @@ Finding IDs flow through three regimes:
 
 A per-scratchpad file lock prevents two driver invocations from racing on the same audit:
 
-- Lock file: `<scratchpad>/.plamen_run.lock` (`_RUN_LOCK_NAME`, `scripts/plamen_driver.py:9730`).
+- Lock file: `<scratchpad>/.plamen_run.lock` (`_RUN_LOCK_NAME`, `scripts/plamen_driver.py:15820`).
 - Payload records PID and acquisition timestamp; held for the lifetime of the driver process.
 
 When the user presses Esc / halts the run, the driver cancels queued workers and terminates in-flight ones with a bounded grace period:
 
-- `_cancel_pending_worker_futures` (`scripts/plamen_driver.py:1501-1513`) cancels each pending `Future` and calls `executor.shutdown(wait=False, cancel_futures=True)` — it does **not** wait for the pool to drain.
-- In-flight workers receive `SIGTERM` (POSIX `os.killpg`) or `terminate(force=False)` (Windows winpty), then `SIGKILL` / `kill` after `_HALT_TERMINATE_GRACE_S = 2.0` seconds (`scripts/plamen_driver.py:1498`). The same grace window is used at every PTY-session termination site in the driver.
+- `_cancel_pending_worker_futures` (`scripts/plamen_driver.py:1992-2007`) cancels each pending `Future` and calls `executor.shutdown(wait=False, cancel_futures=True)` — it does **not** wait for the pool to drain.
+- In-flight workers receive `SIGTERM` (POSIX `os.killpg`) or `terminate(force=False)` (Windows winpty), then `SIGKILL` / `kill` after `_HALT_TERMINATE_GRACE_S = 2.0` seconds (`scripts/plamen_driver.py:1939`). The same grace window is used at every PTY-session termination site in the driver.
 
 ---
 

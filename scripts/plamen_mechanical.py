@@ -47,11 +47,15 @@ __all__ = [
     "_dedup_parse_finding_info",
     "_dedup_survivor_superset_ok",
     "_resolve_dedup_survivor",
+    "_provenance_class_tokens",
+    "write_mechanism_attribution_ledger",
     "backfill_unrouted_inventory_into_queue",
     "_assemble_report_python",
     "_dedup_report_python",
     "_dedup_report_sections",
     "_dedup_report_candidate_pairs",
+    "build_dedup_cluster_map",
+    "_detect_dedup_report_clusters",
     "_dedup_data_loss_gate",
     "_reclassify_cosmetic_low_info_to_qo",
     "_finding_own_block",
@@ -1939,14 +1943,15 @@ def _defined_report_section_ids(*tier_texts: str) -> set[str]:
 def _finalize_report_tier_section(section: str, id_to_title: dict) -> str:
     """Rewrite generic/broken finding headings from the canonical index title
     and strip internal-status prose. Preserves a trailing verification-status
-    tag ([VERIFIED]/[UNVERIFIED]/[CONTESTED]); drops a [REPORT-BLOCKED ...] tag."""
+    tag ([VERIFIED]/[CONFIRMED]/[UNVERIFIED]/[CONTESTED]); drops a
+    [REPORT-BLOCKED ...] tag."""
     if not section:
         return section
     head_re = re.compile(
         r"^(#{2,3})\s*(?:\[REPORT-BLOCKED[^\]]*\]\s*)?\[\s*([CHMLI]-\d+)\s*\]\s*(.*?)\s*$"
     )
     status_re = re.compile(
-        r"(?i)(\[(?:VERIFIED|UNVERIFIED|CONTESTED|VERIFICATION NOT EXECUTED|REPORT-BLOCKED[^\]]*)\])\s*$"
+        r"(?i)(\[(?:VERIFIED|CONFIRMED|UNVERIFIED|CONTESTED|VERIFICATION NOT EXECUTED|REPORT-BLOCKED[^\]]*)\])\s*$"
     )
     out = []
     for ln in section.split("\n"):
@@ -2085,6 +2090,71 @@ def _recover_tier_locations(
     return sec_re.sub(_patch, section), n
 
 
+_BODY_STATUS_TOKENS = ("VERIFIED", "CONFIRMED", "CONTESTED", "UNRESOLVED", "UNVERIFIED")
+_BODY_HEADER_STATUS_RE = re.compile(
+    r"(?m)^(###\s+\[([CHMLI]-\d+)\]\s+.+?)"
+    r"(?:\s+\[(?:" + "|".join(_BODY_STATUS_TOKENS) + r")[^\]\n]*\])?\s*$"
+)
+
+
+def _index_status_map(idx_text: str) -> dict[str, str]:
+    """Map report_id -> canonical verification status from the report_index
+    Master Finding Index 'Verification' column.
+
+    The Verification column is driver-computed from `status_binding.md`
+    (verifier verdict + best evidence tag), so it is the single source of truth
+    for the body header tag. This lets the assembler stamp the body header
+    MECHANICALLY instead of trusting the tier-writer LLM's own [STATUS] token,
+    which historically disagreed with the index (index CONFIRMED vs body
+    UNVERIFIED). Returns {} when no Verification column is present.
+    """
+    out: dict[str, str] = {}
+    try:
+        section = _extract_h2_section(idx_text, "Master Finding Index")
+    except Exception:
+        section = ""
+    if not section:
+        return out
+    id_re = re.compile(r"^[\*\[`_]*([CHMLI]-\d+)\b")
+    vcol: int | None = None
+    for line in section.splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if vcol is None:
+            low = [c.lower() for c in cells]
+            if any("verification" in c for c in low):
+                vcol = next(i for i, c in enumerate(low) if "verification" in c)
+            continue
+        m = id_re.match(cells[0]) if cells else None
+        if not m or vcol >= len(cells):
+            continue
+        raw = cells[vcol].upper()
+        for tok in _BODY_STATUS_TOKENS:
+            if tok in raw:
+                out[m.group(1)] = tok
+                break
+    return out
+
+
+def _stamp_body_header_status(tier_text: str, status_map: dict[str, str]) -> str:
+    """Overwrite each `### [X-NN] Title [STATUS]` header's status token with the
+    canonical index status. Findings absent from the map keep their existing tag;
+    only a KNOWN trailing status token is replaced (a title's own `[...]` is left
+    alone). Mechanical — no LLM."""
+    if not status_map:
+        return tier_text
+
+    def _repl(m: "re.Match[str]") -> str:
+        canon = status_map.get(m.group(2))
+        if not canon:
+            return m.group(0)
+        return f"{m.group(1).rstrip()} [{canon}]"
+
+    return _BODY_HEADER_STATUS_RE.sub(_repl, tier_text)
+
+
 def _assemble_report_python(
     scratchpad: Path, project_root: str
 ) -> bool:
@@ -2135,6 +2205,17 @@ def _assemble_report_python(
     crit_high_text = _read(crit_high_path)
     medium_text = _read(medium_path)
     low_info_text = _read(low_info_path)
+
+    # Fix 1 (mechanical body-label binding): stamp every body header's
+    # verification status from the canonical report_index Verification column so
+    # the body can never disagree with the index. The tier-writer LLM's own
+    # [STATUS] token is overridden — it historically wrote [UNVERIFIED] for
+    # findings the index (correctly) marked CONFIRMED.
+    _status_map = _index_status_map(idx_text)
+    if _status_map:
+        crit_high_text = _stamp_body_header_status(crit_high_text, _status_map)
+        medium_text = _stamp_body_header_status(medium_text, _status_map)
+        low_info_text = _stamp_body_header_status(low_info_text, _status_map)
 
     if not (crit_high_text or medium_text or low_info_text):
         log.error(
@@ -2703,7 +2784,7 @@ def _dedup_report_sections(body: str) -> list[dict]:
                 impacts.add(bm.group(1).strip())
         title = hm.group(0)
         title = re.sub(r"(?i)^#{2,3}\s*\[\s*[CHMLI]-\d+\s*\]\s*", "", title)
-        title = re.sub(r"(?i)\s*\[(?:VERIFIED|UNVERIFIED|CONTESTED|UNRESOLVED[^\]]*|VERIFICATION NOT EXECUTED)\]\s*$", "", title).strip()
+        title = re.sub(r"(?i)\s*\[(?:VERIFIED|CONFIRMED|UNVERIFIED|CONTESTED|UNRESOLVED[^\]]*|VERIFICATION NOT EXECUTED)\]\s*$", "", title).strip()
         # Recommendation/fix prose: the load-bearing same-fix discriminator.
         fix_text = ""
         fix_block = re.search(
@@ -3044,6 +3125,338 @@ def _dedup_same_fix_ok(a: dict, b: dict) -> tuple[bool, str]:
     if jac < _DEDUP_SAME_FIX_JACCARD:
         return (False, f"fix-jaccard={jac:.2f}<{_DEDUP_SAME_FIX_JACCARD}")
     return (True, f"same-fix (fix-jaccard={jac:.2f})")
+
+
+# ── Fix 4: transitive-closure clustering (post pairwise dedup) ──────────────
+# Pairwise semantic dedup is LOCAL: it merges duplicate PAIRS but leaves N
+# co-referent survivors (e.g. three "public withdraw" halves each merged with a
+# different twin) as separate report findings — the ~2.5-3:1 fragmentation
+# source. This step builds an undirected graph over the SURVIVING findings where
+# an edge = (same file+function AND same root-cause/fix-pattern AND same tier),
+# then collapses each connected component to ONE finding (highest severity,
+# union of member locations as a location table). The edge predicate is the
+# EXISTING pairwise consolidation test `_dedup_same_fix_ok` (same-site + shared
+# function root cause + antonym veto) gated by same-tier equality — so it NEVER
+# merges across tiers (no severity blur) and NEVER across mechanisms. The key is
+# structural (file+function+fix-pattern); no protocol content leaks in.
+
+def _cluster_severity_tier(rec: dict) -> str:
+    """Normalized severity tier for a clustering record (default Medium)."""
+    return normalize_severity(rec.get("severity", "") or "Medium")
+
+
+def _cluster_primary_location(rec: dict) -> str:
+    """Best single location string for a member row in the location table."""
+    loc = (rec.get("location") or "").strip()
+    if loc:
+        return loc
+    locs = rec.get("locations") or set()
+    return sorted(locs)[0] if locs else ""
+
+
+def _cluster_union_locations(members: list[dict]) -> list[str]:
+    """Ordered, de-duplicated union of member primary locations."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for r in members:
+        loc = _cluster_primary_location(r)
+        key = _norm_loc(loc).lower()
+        if loc and key not in seen:
+            seen.add(key)
+            out.append(loc)
+    return out
+
+
+def _cluster_location_table(members: list[dict]) -> str:
+    """Render the consolidated Location table (one row per cluster member).
+
+    Mirrors the report-template Root-Cause-Consolidation location table so the
+    report writer can paste it verbatim into the single consolidated finding.
+    """
+    lines = [
+        "| Internal ID | Location | Severity |",
+        "|-------------|----------|----------|",
+    ]
+    for r in members:
+        lines.append(
+            f"| {r.get('id', '')} | {_cluster_primary_location(r) or '(unspecified)'} "
+            f"| {_cluster_severity_tier(r)} |"
+        )
+    return "\n".join(lines)
+
+
+# Fix 4: max members in a merged report cluster. Mirrors report-template's
+# 'max 6 locations per finding' consolidation rule; larger cliques are left
+# unmerged (a giant cluster is more likely over-broad than one real bug).
+_MAX_CLUSTER_MEMBERS = 6
+
+# Fix 4 hardening: opposite-direction cues checked over TITLE+DESC for clustering
+# edges only (a distinct-bug pair in one function can share fix wording). Generic
+# input-handling antonyms — no protocol content. Kept separate from the global
+# _DEDUP_FIX_ANTONYMS so pairwise dedup behavior is unchanged.
+_CLUSTER_EXTRA_ANTONYMS = (
+    ("accept", "revert"),
+    ("accept", "reject"),
+    ("underflow", "overflow"),
+    ("too small", "too large"),
+    ("below", "above"),
+)
+
+
+def _detect_dedup_report_clusters(records: list[dict]) -> list[dict]:
+    """Transitive-closure clustering over surviving findings (Fix 4).
+
+    Runs AFTER pairwise semantic dedup. Builds an undirected graph over the
+    surviving finding records where an edge exists iff two findings share the
+    SAME code site (file + function), the SAME root-cause / fix-pattern, AND the
+    SAME severity tier. Each connected component of size >= 2 collapses to ONE
+    finding whose severity is the shared tier and whose Location is the UNION of
+    member locations rendered as a location table.
+
+    Edge predicate = the EXISTING pairwise consolidation test
+    ``_dedup_same_fix_ok`` (same-site + shared-function root cause + antonym /
+    opposite-direction veto) gated by same-tier equality. Recall-safe: NEVER
+    merges across tiers (no severity blur) and NEVER across mechanisms.
+
+    ``records`` is a list of finding dicts carrying at minimum ``id``, ``title``,
+    ``severity`` (or a normalizable tier), and the same-fix schema fields
+    ``locations`` / ``files`` / ``anchors`` / ``fix_text`` / ``desc_text`` that
+    ``_dedup_report_sections`` (report body) and the inventory adapter produce.
+    Returns cluster dicts, largest first:
+    ``{survivor, members(sorted), severity, locations, location_table}``.
+    """
+    n = len(records)
+    if n < 2:
+        return []
+    parent = list(range(n))
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(x: int, y: int) -> None:
+        rx, ry = _find(x), _find(y)
+        if rx != ry:
+            parent[max(rx, ry)] = min(rx, ry)
+
+    # Chain-proofing (Fix 4 hardening): clustering has NO LLM confirmation of
+    # each merge (unlike pairwise dedup), and transitive closure over a
+    # location-tolerant predicate CHAINS unrelated bugs (A-B share a site, B-C
+    # share a site, ... => A..Z collapse even though A and Z are distinct). Two
+    # guards, both recall-safe (a false merge HIDES a finding, worse than a dup):
+    #   (1) EDGES use the STRICT same-root-cause signal only
+    #       (`_dedup_same_root_cause_ok`: same-site + shared FUNCTION + >=
+    #       MIN_ANCHORS shared title anchors + antonym veto) — NOT the looser
+    #       `_dedup_same_fix_ok` location/Jaccard legacy paths that chain.
+    #   (2) A component merges ONLY if it is a CLIQUE (every pair matches), not
+    #       merely connected — this kills transitive chaining outright — and is
+    #       capped at _MAX_CLUSTER_MEMBERS (report-template's max-locations rule).
+    #       Non-clique / oversized components fall back to singletons (no merge).
+    tiers = [_cluster_severity_tier(r) for r in records]
+
+    def _strict_edge(i: int, j: int) -> bool:
+        if tiers[i] != tiers[j]:
+            return False  # NEVER cross-tier (no severity blur)
+        ok, reason = _dedup_same_fix_ok(records[i], records[j])
+        if not ok:
+            return False
+        # Exclude the ONE chaining path: "identical-location + thin fix" links
+        # ANY two findings sharing a location token regardless of bug, so under
+        # transitive closure it collapses every finding in a busy file into one
+        # component. Keep the discriminating signals — same-root-cause via title
+        # (path 1) and substantive identical-fix Jaccard (path 3, the genuine
+        # H-05==H-09 duplicate-halves case) — drop only the location-alone path.
+        if "identical-location" in reason:
+            return False
+        a, b = records[i], records[j]
+        # SAME-FUNCTION guard: a clustering edge requires a shared code-identifier
+        # anchor in BOTH findings. Blocks fix-Jaccard (path 3) from merging
+        # DIFFERENT functions that happen to share fix wording (e.g. `deposit`
+        # reconciliation vs `redeem` reconciliation). Genuine duplicate halves
+        # (same function, differently-worded titles) still share the function
+        # anchor, so the H-05==H-09 case is preserved.
+        if not (a.get("anchors") and b.get("anchors")
+                and (a["anchors"] & b["anchors"])):
+            return False
+        # OPPOSITE-DIRECTION guard over TITLE+DESC (not just fix): two distinct
+        # bugs in the SAME function can carry near-identical fixes ("validate
+        # to_ray input") while being opposite-direction (`accepts negative` vs
+        # `reverts on overflow`). The fix-only antonym veto misses this because
+        # the opposition lives in the title/description. Scoped to clustering
+        # (stricter than pairwise dedup by design); does not touch global dedup.
+        at = (a.get("title", "") + " " + a.get("desc_text", "")).lower()
+        bt = (b.get("title", "") + " " + b.get("desc_text", "")).lower()
+        if _dedup_fix_antonym_conflict(at, bt):
+            return False
+        for x, y in _CLUSTER_EXTRA_ANTONYMS:
+            ax_, ay_ = x in at, y in at
+            bx_, by_ = x in bt, y in bt
+            if (ax_ and not ay_ and by_ and not bx_) or \
+               (ay_ and not ax_ and bx_ and not by_):
+                return False
+        return True
+
+    edge: dict = {}
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _strict_edge(i, j):
+                edge[(i, j)] = True
+                _union(i, j)
+
+    comps: dict[int, list[int]] = {}
+    for i in range(n):
+        comps.setdefault(_find(i), []).append(i)
+
+    clusters: list[dict] = []
+    for _root, idxs in comps.items():
+        if len(idxs) < 2:
+            continue
+        # CLIQUE guard: every pair in the component must carry a strict edge.
+        # A connected-but-not-complete component is an ambiguous chain -> do NOT
+        # merge it (leave members as separate findings). Oversized cliques
+        # (> _MAX_CLUSTER_MEMBERS) are also not merged (likely over-broad).
+        if len(idxs) > _MAX_CLUSTER_MEMBERS:
+            continue
+        is_clique = all(
+            edge.get((min(a, b), max(a, b)), False)
+            for k, a in enumerate(idxs) for b in idxs[k + 1:]
+        )
+        if not is_clique:
+            continue
+        members = [records[i] for i in idxs]
+        # Survivor = highest severity, then lowest ID number (deterministic).
+        # Within a cluster the tier is invariant, so this reduces to lowest ID.
+        members_sorted = sorted(
+            members,
+            key=lambda r: (
+                _SEVERITY_ORDER.index(_cluster_severity_tier(r)),
+                _dedup_id_num(r.get("id", "")),
+            ),
+        )
+        survivor = members_sorted[0]
+        member_ids = sorted(
+            (r.get("id", "") for r in members), key=_dedup_id_num
+        )
+        clusters.append({
+            "survivor": survivor.get("id", ""),
+            "members": member_ids,
+            "severity": _cluster_severity_tier(survivor),
+            "locations": _cluster_union_locations(members_sorted),
+            "location_table": _cluster_location_table(members_sorted),
+        })
+    clusters.sort(key=lambda c: (-len(c["members"]), _dedup_id_num(c["survivor"])))
+    return clusters
+
+
+def _inventory_records_for_clustering(text: str) -> list[dict]:
+    """Adapt findings_inventory.md blocks into clustering records.
+
+    Reuses ``_dedup_parse_finding_info`` for id/title/location/severity/block,
+    and enriches each SC block with the ``locations`` / ``files`` / ``anchors`` /
+    ``fix_text`` / ``desc_text`` fields the ``_dedup_same_fix_ok`` consolidation
+    predicate reads (same schema as ``_dedup_report_sections``).
+    """
+    base = _dedup_parse_finding_info(text)
+    records: list[dict] = []
+    for fid, info in base.items():
+        if info.get("kind") != "sc":
+            continue
+        block = info.get("block", "")
+        title = info.get("title", "")
+        loc = info.get("location", "")
+        locations = {
+            m.group(0).strip("`") for m in _DEDUP_LOCATION_TOKEN_RE.finditer(loc)
+        }
+        if not locations and loc:
+            locations = {loc}
+        files = {info["file"]} if info.get("file") else set()
+        anchors = {
+            m.group(1).lower()
+            for m in _DEDUP_ANCHOR_RE.finditer(title)
+            if m.group(1).lower() not in _DEDUP_TITLE_STOPWORDS
+        }
+        fix_text = ""
+        fix_block = re.search(
+            r"(?is)\*\*Recommendation\*\*\s*:?(.*?)(?:\n\*\*[A-Z]|\Z)", block
+        )
+        if fix_block:
+            fix_text = fix_block.group(1).strip()
+        desc_text = ""
+        desc_block = re.search(
+            r"(?is)\*\*Description\*\*\s*:?(.*?)(?:\n\*\*[A-Z]|\Z)", block
+        )
+        if desc_block:
+            desc_text = desc_block.group(1).strip()
+        records.append({
+            "id": fid,
+            "title": title,
+            "severity": info.get("severity", "Medium"),
+            "location": loc,
+            "locations": locations,
+            "files": files,
+            "anchors": anchors,
+            "fix_text": fix_text,
+            "desc_text": desc_text,
+        })
+    return records
+
+
+def build_dedup_cluster_map(scratchpad: Path) -> int:
+    """Fix 4: write the transitive-closure cluster map for report-index STEP-1.5.
+
+    Reads the (post-pairwise-dedup) ``findings_inventory.md``, clusters
+    co-referent survivors, and writes ``dedup_cluster_map.md`` — a consolidation
+    HINT the report-index STEP-1.5 reads so the writer emits ONE finding with a
+    location table per cluster (report-template Root-Cause-Consolidation rule).
+    Purely additive: writes only the hint artifact; the inventory is NOT
+    collapsed here (recall-safe — coverage accounting stays with the pairwise /
+    LLM merge path). Returns the number of clusters (>= 2 members).
+    """
+    inv = scratchpad / "findings_inventory.md"
+    if not inv.exists():
+        return 0
+    try:
+        text = inv.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return 0
+    records = _inventory_records_for_clustering(text)
+    clusters = _detect_dedup_report_clusters(records)
+    lines = [
+        "# Dedup Cluster Map",
+        "",
+        "> Fix 4: transitive-closure clusters over post-pairwise-dedup findings.",
+        "> Each cluster is ONE report finding — report-index STEP-1.5 consolidates",
+        "> the members into a single finding with the location table below (per the",
+        "> report-template Root-Cause-Consolidation rule). Recall-safe: same",
+        "> file+function+fix-pattern AND same tier only; never cross-tier /",
+        "> cross-mechanism. These are consolidation HINTS, not mandates.",
+        "",
+        f"**Clusters**: {len(clusters)}",
+        "",
+    ]
+    if not clusters:
+        lines.append("_No co-referent clusters detected._")
+    for i, cl in enumerate(clusters, 1):
+        lines.extend([
+            f"## Cluster CL-{i}",
+            "",
+            f"CLUSTER: {', '.join(cl['members'])}",
+            "",
+            f"**Survivor**: {cl['survivor']}",
+            f"**Severity**: {cl['severity']}",
+            f"**Members**: {', '.join(cl['members'])}",
+            "",
+            "**Consolidated Location table**:",
+            "",
+            cl["location_table"],
+            "",
+        ])
+    (scratchpad / "dedup_cluster_map.md").write_text(
+        "\n".join(lines).rstrip("\n") + "\n", encoding="utf-8",
+    )
+    return len(clusters)
 
 
 def _dedup_report_candidate_pairs(
@@ -6799,6 +7212,126 @@ def _resolve_dedup_survivor(
     return None
 
 
+# Clean, greppable generator class tokens stamped by the M1/M2 meta-passes:
+# `AXISGAP:<id>` (multi-axis coverage, M2) and `INVARIANT:<id>` (committed
+# invariant, M1). Pure provenance bookkeeping — no protocol content.
+_PROVENANCE_CLASS_RE = re.compile(r"\b(AXISGAP|INVARIANT):([A-Za-z0-9_.-]+)")
+
+
+def _provenance_class_tokens(text: str) -> list[str]:
+    """Extract clean generator-provenance class tokens (``AXISGAP:<id>``,
+    ``INVARIANT:<id>``) from a Source IDs value or a whole finding block.
+
+    These tokens mark a finding as (also) discovered by the multi-axis (M2) or
+    committed-invariant (M1) meta-pass. They must never be dropped on a dedup
+    merge — losing one makes a co-found GT item read as 100% normal-sourced and
+    breaks attribution. Order-preserving, de-duplicated. Never raises."""
+    out: list[str] = []
+    for m in _PROVENANCE_CLASS_RE.finditer(text or ""):
+        tok = f"{m.group(1).upper()}:{m.group(2)}"
+        if tok not in out:
+            out.append(tok)
+    return out
+
+
+def _attribution_tokens(source_text: str) -> tuple[list[str], list[str]]:
+    """Split a `**Source IDs**:` value into (normal_upstream_ids, class_tokens).
+
+    ``class_tokens`` are the clean generator tokens (``AXISGAP:<id>``,
+    ``INVARIANT:<id>``); ``normal_upstream_ids`` are the remaining ID-shaped
+    tokens with the class tokens' embedded IDs removed so they are not
+    double-counted. Order-preserving; never raises."""
+    cls = _provenance_class_tokens(source_text)
+    stripped = source_text or ""
+    for c in cls:
+        # Remove the exact class-token text (case-insensitive) so its embedded
+        # id (AXIS-101 / CI-3) is not re-counted as a normal upstream token.
+        stripped = re.sub(re.escape(c), " ", stripped, flags=re.IGNORECASE)
+    normal: list[str] = []
+    for m in re.finditer(r"\b([A-Za-z][A-Za-z0-9_]{0,24}-\d+)\b", stripped):
+        tok = m.group(1).upper()
+        if tok not in normal:
+            normal.append(tok)
+    return normal, cls
+
+
+def write_mechanism_attribution_ledger(scratchpad: Path) -> dict:
+    """Driver post-dedup hook. Write ``mechanism_attribution.md`` mapping each
+    surviving inventory finding to the Source provenance tokens that contributed
+    to it (normal upstream IDs + generator class tokens ``AXISGAP:``/
+    ``INVARIANT:``).
+
+    This makes "did the multi-axis (M2) or committed-invariant (M1) meta-pass
+    co-find this?" a mechanical grep instead of an LLM guess — the prerequisite
+    for measuring M1/M2 contribution. Pure provenance bookkeeping; no protocol
+    content. Never raises, never halts. Returns
+    ``{"rows": N, "axisgap": n, "invariant": n}``."""
+    scratchpad = Path(scratchpad)
+    try:
+        inv = scratchpad / "findings_inventory.md"
+        if not inv.exists():
+            return {"rows": 0, "axisgap": 0, "invariant": 0}
+        text = inv.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return {"rows": 0, "axisgap": 0, "invariant": 0}
+
+    rows: list[tuple[str, str, str, str]] = []
+    n_axis = 0
+    n_inv = 0
+    for m in re.finditer(
+        r"#{2,4}\s+(?:Finding\s+)?\[((?:INV|F)-\d+)\]:?\s*(.+?)(?:\n|$)"
+        r"((?:.*\n)*?)"
+        r"(?=#{2,4}\s+(?:Finding\s+)?\[(?:INV|F)-|\Z)",
+        text,
+    ):
+        fid = m.group(1)
+        title = (m.group(2) or "").strip()
+        body = m.group(3) or ""
+        src_line = ""
+        for ln in body.splitlines():
+            sm = _SOURCE_IDS_LINE_RE.match(ln)
+            if sm:
+                src_line = sm.group(1)
+                break
+        normal, cls = _attribution_tokens(src_line)
+        classes = sorted({c.split(":", 1)[0].upper() for c in cls})
+        if "AXISGAP" in classes:
+            n_axis += 1
+        if "INVARIANT" in classes:
+            n_inv += 1
+        all_tokens = normal + cls
+        rows.append((
+            fid,
+            title.replace("|", "/"),
+            ", ".join(all_tokens) if all_tokens else "-",
+            ", ".join(classes) if classes else "-",
+        ))
+
+    lines = [
+        "# Mechanism Attribution Ledger",
+        "",
+        "Maps each surviving inventory finding to the Source provenance tokens "
+        "that contributed to it — normal upstream IDs plus generator class "
+        "tokens `AXISGAP:` (multi-axis coverage, M2) and `INVARIANT:` "
+        "(committed invariant, M1). Mechanical grep target for measuring "
+        "whether the M1/M2 meta-passes co-found a finding. Provenance-only; "
+        "regenerated post-dedup so merged findings retain absorbed provenance.",
+        "",
+        "| Finding ID | Title | Source Tokens | Generator Provenance |",
+        "|------------|-------|---------------|----------------------|",
+    ]
+    for fid, title, toks, classes in rows:
+        lines.append(f"| {fid} | {title} | {toks} | {classes} |")
+    lines.append("")
+    try:
+        (scratchpad / "mechanism_attribution.md").write_text(
+            "\n".join(lines), encoding="utf-8"
+        )
+    except Exception:
+        return {"rows": len(rows), "axisgap": n_axis, "invariant": n_inv}
+    return {"rows": len(rows), "axisgap": n_axis, "invariant": n_inv}
+
+
 def _couple_absorbed_into_survivor_block(
     block: str, absorb_id: str, absorb_info: dict, keep_info: dict,
 ) -> str:
@@ -6808,15 +7341,39 @@ def _couple_absorbed_into_survivor_block(
     Couples: absorbed Location (expanded Location list), distinct Impact /
     Recommendation as a coupled paragraph, union Source IDs, higher Severity,
     strongest evidence tag. Idempotent on the ``Coupled from {id}`` marker.
+
+    Provenance-preserving merge: any generator class token (``AXISGAP:`` /
+    ``INVARIANT:``) carried by the ABSORBED finding is appended to the
+    survivor's Source IDs when the survivor lacks it, so an M1/M2 co-discovery
+    is never dropped by the merge.
     """
     if f"Coupled from {absorb_id}" in block:
         return block
     lines = block.splitlines()
     out: list[str] = []
     a_loc = (absorb_info.get("location") or "").strip()
+    # Provenance-preserving merge: carry EVERY generator class token
+    # (AXISGAP:/INVARIANT:) from BOTH sides into the survivor. The absorbed
+    # finding's tokens must never be dropped — losing one makes an M1/M2
+    # co-discovery read as 100% normal-sourced.
+    _prov_tokens: list[str] = []
+    for _blk in (block, keep_info.get("block", ""), absorb_info.get("block", "")):
+        for _pt in _provenance_class_tokens(_blk):
+            if _pt not in _prov_tokens:
+                _prov_tokens.append(_pt)
+    _prov_upper = {t.upper() for t in _prov_tokens}
+    # Drop any (possibly garbled) class-prefixed token from the parsed sets;
+    # the clean forms are re-appended below so the output grep-resolves.
     union_src = sorted(
-        (keep_info.get("source_ids") or set()) | (absorb_info.get("source_ids") or set())
+        t for t in (
+            (keep_info.get("source_ids") or set())
+            | (absorb_info.get("source_ids") or set())
+        )
+        if not t.upper().startswith(("AXISGAP:", "INVARIANT:"))
     )
+    for _pt in _prov_tokens:
+        if _pt not in union_src:
+            union_src.append(_pt)
     new_sev = _higher_severity(keep_info.get("severity", ""), absorb_info.get("severity", ""))
     new_ev = _strongest_evidence(keep_info.get("evidence", ""), absorb_info.get("evidence", ""))
     saw_location = False

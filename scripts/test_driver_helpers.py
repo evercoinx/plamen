@@ -1306,7 +1306,7 @@ def test_G5b2_sc_coverage_excludes_interfaces_directory():
         "contract_inventory.md": (
             "| Contract | Path |\n"
             "|----------|------|\n"
-            "| IRouteProxy | interfaces/IRouteProxy.sol |\n"
+            "| ISwapRouter | interfaces/ISwapRouter.sol |\n"
             "| IUniswapV2Factory | interfaces/IUniswapV2Factory.sol |\n"
             "| IUniswapV2Router01 | interfaces/IUniswapV2Router01.sol |\n"
             "| IWETH9 | interfaces/IWETH9.sol |\n"
@@ -1328,9 +1328,9 @@ def test_G5b3_sc_coverage_excludes_mocks_directory():
             "| Contract | Path |\n"
             "|----------|------|\n"
             "| ERC20Mock | mocks/ERC20Mock.sol |\n"
-            "| GatewayMock | mocks/GatewayEVMMock.sol |\n"
-            "| ZRC20Mock | mocks/ZRC20Mock.sol |\n"
-            "| RouteProxyMock | mocks/RouteProxyMock.sol |\n"
+            "| GatewayMock | mocks/BridgeRouterMock.sol |\n"
+            "| WrappedTokenMock | mocks/WrappedTokenMock.sol |\n"
+            "| SwapRouterMock | mocks/SwapRouterMock.sol |\n"
             "| CoreA | contracts/core/CoreA.sol |\n"
             "| CoreB | contracts/core/CoreB.sol |\n"
         ),
@@ -1372,7 +1372,7 @@ def test_G5b5_sc_coverage_still_flags_real_uncited_prod_buckets():
         "contract_inventory.md": (
             "| Contract | Path |\n"
             "|----------|------|\n"
-            "| IRouteProxy | interfaces/IRouteProxy.sol |\n"
+            "| ISwapRouter | interfaces/ISwapRouter.sol |\n"
             "| IUniswapV2Factory | interfaces/IUniswapV2Factory.sol |\n"
             "| IUniswapV2Router01 | interfaces/IUniswapV2Router01.sol |\n"
             "| IWETH9 | interfaces/IWETH9.sol |\n"

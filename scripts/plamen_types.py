@@ -18,6 +18,8 @@ __all__ = [
     "plamen_home",
     "EVIDENCE_TAGS_PROOF", "EVIDENCE_TAGS_TRACE", "EVIDENCE_TAGS_FAIL",
     "EVIDENCE_TAGS_PROD", "has_proof_grade_evidence",
+    "canonical_verification_status", "canonical_status_sort_key",
+    "CANONICAL_VERIFICATION_STATUSES",
     "EVIDENCE_TAGS_ALL", "EVIDENCE_TAG_DEFAULT", "EVIDENCE_TAG_NAMES_RE",
     "DEPTH_EVIDENCE_TAG_NAMES", "DEPTH_EVIDENCE_TAG_RE",
     "FINDING_BLOCK_HEADING_RE",
@@ -205,6 +207,57 @@ def has_proof_grade_evidence(text: str) -> bool:
     callers that genuinely mean "a test executed and passed"."""
     return has_mechanical_proof(text) or any(
         tag in text for tag in EVIDENCE_TAGS_PROD
+    )
+
+
+# ── Canonical verification-status token (Fix 1, single source of truth) ────
+# The report_index Verification column and the body finding-header tag used to
+# be derived by DIFFERENT rules (index: verdict-only → 71 "VERIFIED"; body:
+# mechanical-proof-only → 12 "VERIFIED"; PoC-pass count: 17). That collision
+# made the label meaningless. This ONE pure function maps
+# (verifier_verdict, best_evidence_proof_grade) to a single canonical token so
+# every downstream consumer reads the same word.
+#
+#   VERIFIED  = verdict CONFIRMED AND best evidence is proof-grade
+#               ([POC-PASS]/[MEDUSA-PASS]/[PROD-*]/other proof tag)
+#   CONFIRMED = verdict CONFIRMED but best evidence is only [CODE-TRACE]
+#   CONTESTED = disputed (verifier CONTESTED / UNRESOLVED / PARTIAL)
+#   UNVERIFIED = refuted / false-positive / duplicate / none
+#
+# Sort key (VERIFIED > CONFIRMED > CONTESTED > UNVERIFIED) lets callers order
+# findings by evidence strength without re-deriving the ternary.
+CANONICAL_VERIFICATION_STATUSES: tuple[str, ...] = (
+    "VERIFIED", "CONFIRMED", "CONTESTED", "UNVERIFIED",
+)
+_CANONICAL_STATUS_SORT: dict[str, int] = {
+    s: i for i, s in enumerate(CANONICAL_VERIFICATION_STATUSES)
+}
+
+
+def canonical_verification_status(verifier_status: str, proof_grade: bool) -> str:
+    """Map (verifier verdict token, proof-grade?) → ONE canonical status token.
+
+    `verifier_status` is the token from `_verifier_status_from_text` (already
+    normalized: PARTIAL→UNRESOLVED, TRUE_POSITIVE/VALID→CONFIRMED, etc.).
+    `proof_grade` is `has_proof_grade_evidence(verify_text)`.
+
+    Pure/side-effect-free so validators, the driver status_binding writer, the
+    mechanical report_index renderer, and tests all share ONE mapping.
+    """
+    s = (verifier_status or "").strip().upper().replace("-", "_")
+    s = re.sub(r"\s+", "_", s)
+    if s in ("CONFIRMED", "TRUE_POSITIVE", "VALID"):
+        return "VERIFIED" if proof_grade else "CONFIRMED"
+    if s in ("CONTESTED", "UNRESOLVED", "PARTIAL"):
+        return "CONTESTED"
+    # REFUTED / FALSE_POSITIVE / INFEASIBLE / DUPLICATE / DROP_* / empty / etc.
+    return "UNVERIFIED"
+
+
+def canonical_status_sort_key(status: str) -> int:
+    """Rank a canonical status by evidence strength (0 = strongest)."""
+    return _CANONICAL_STATUS_SORT.get(
+        (status or "").strip().upper(), len(CANONICAL_VERIFICATION_STATUSES)
     )
 
 
@@ -1223,6 +1276,21 @@ SC_PHASES = [
     Phase("enumgap_exploration", ["Phase 4b.7: Enumeration-Obligation Exploration"],
           ["enumgap_exploration_findings.md"],
           base_timeout_s=3600, modes={"core", "thorough"}, critical=False,
+          model="sonnet"),
+    # Phase 4b.8: Multi-Axis Coverage Meta-Pass (M2). Thorough only. Builds a
+    # driver-owned, DETERMINISTIC `function × axis` completeness matrix over the
+    # mechanically-hot functions and spawns a targeted deriver-worker ONLY for
+    # orthogonal risk axes that were never examined (axis-EXAMINED read from the
+    # CLOSED depth-evidence tag vocabulary; ambiguous ⇒ GAP, recall-safe). The
+    # driver computes the matrix FIRST and skips the LLM spawn when no GAP cells
+    # exist; the worker is strictly ADDITIVE. Placed AFTER exploration_skeptic
+    # (4b.6) and enumgap_exploration (4b.7) so THEIR findings count as coverage
+    # (shrinking the worklist), and BEFORE sc_semantic_dedup/chain so an added
+    # axis finding is deduped + chained + verified. Soft (critical=False):
+    # degrade-and-continue, never halts. Sonnet (not in the opus-promotion set).
+    Phase("axis_coverage", ["Phase 4b.8: Multi-Axis Coverage Meta-Pass"],
+          ["axis_coverage_findings.md"],
+          base_timeout_s=3600, modes={"thorough"}, critical=False,
           model="sonnet"),
     Phase("sc_semantic_dedup", ["Phase 4e: Semantic Dedup"],
           ["dedup_decisions.md", "findings_inventory_deduped.md"],

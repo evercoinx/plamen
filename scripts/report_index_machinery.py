@@ -539,10 +539,19 @@ def _trust_adj_for(c: dict) -> str:
 
 
 def _verification_status(c: dict) -> str:
-    """Map effective_tag to the [VERIFIED/UNVERIFIED/CONTESTED] status."""
+    """Map effective_tag to the canonical [VERIFIED/CONFIRMED/CONTESTED/
+    UNVERIFIED] status (Fix 1).
+
+    A body candidate (this renderer only ever runs over REPORTABLE queue rows,
+    never refuted ones) with a proof-grade tag is VERIFIED; one demoted to
+    [POC-FAIL]/INFLATED_PROSE is CONTESTED; a plain [CODE-TRACE] verdict-
+    confirmed finding is CONFIRMED (previously mislabeled UNVERIFIED — the
+    label collision Fix 1 removes)."""
     tag = (c.get("effective_tag") or "").upper()
-    if "POC-PASS" in tag or "MEDUSA-PASS" in tag:
+    if "POC-PASS" in tag or "MEDUSA-PASS" in tag or "PROD-" in tag \
+            or "FUZZ-PASS" in tag or "DIFF-PASS" in tag \
+            or "CONFORMANCE-PASS" in tag or "NON-DET-PASS" in tag:
         return "VERIFIED"
-    if "POC-FAIL" in tag:
+    if "POC-FAIL" in tag or (c.get("integrity_state") == "INFLATED_PROSE"):
         return "CONTESTED"
-    return "UNVERIFIED"
+    return "CONFIRMED"

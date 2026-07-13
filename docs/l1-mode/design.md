@@ -1,11 +1,11 @@
 # Plamen L1 Mode — Design Document
 
-> **Status**: Design spec v0.4 — T2/T3 in-scope (see Section 3 for tier expectations).
+> **Status**: Design spec v0.5 — implementation delivered; T2/T3 in-scope (see Section 3 for tier expectations).
 > **Owner**: evercoinx
 
 ## 1. Why this mode exists
 
-Plamen today is a mature pipeline for **smart contract audits**. It handles 5k-30k LOC Solidity / Move / Rust-contract codebases via 5 language trees, 118 skills, and 4 depth agent roles. It does not handle **L1 node-client infrastructure**: 50k-500k LOC of Go or Rust implementing consensus, p2p networking, execution engines, mempools, RPC surfaces, cryptography, and state storage.
+Plamen today is a mature pipeline for **smart contract audits**. It handles 5k-30k LOC Solidity / Move / Rust-contract codebases via 6 language trees, 113 skills, and 4 depth agent roles. It does not handle **L1 node-client infrastructure**: 50k-500k LOC of Go or Rust implementing consensus, p2p networking, execution engines, mempools, RPC surfaces, cryptography, and state storage.
 
 The gap matters because:
 
@@ -97,7 +97,7 @@ The Phase 1 benchmark (5 T0/T1 targets) is the **smoke test**, not the ceiling. 
 ### 4.4 What gets added
 
 - **Phase 0.5 Primitive warmup** (new phase).
-- **L1 injectable skill pack** (10 skills, see Section 6).
+- **L1 injectable skill pack** (24 skills, see Section 6).
 - **Two new depth agent roles** (see Section 7).
 - **New verification evidence tags** (see Section 8).
 - **Layer-oriented breadth decomposition** (new recon output).
@@ -179,6 +179,8 @@ The pack is lifted from the OpenZeppelin infrastructure auditing checklist, cros
 | 9 | `execution-client-hardening` | VM/execution-engine detected | execution |
 | 10 | `cross-environment-semantic-drift` | L2 / EVM-on-non-EVM / precompile / inherited-base detected | cross-env |
 
+The pack has grown to 24 skills under `agents/skills/injectable/l1/` (excluding the `_opengrep-rules/` local rule pack, which is rules not a skill) as of v0.5 — see the v0.5 change log entry for the full addition list, including `cosmos-sdk-module-safety` and `cosmos-ibc-security` for Cosmos-SDK/IBC targets. The full, current trigger table is maintained in `rules/skill-index.md` under "L1 Skills"; the 10 core rows above are the original set and are not re-numbered here to avoid churn.
+
 ### 6.1 Language-specific supplements
 
 Short skill-lets (≤50 lines) that augment the above based on implementation language:
@@ -216,10 +218,11 @@ Every L1 skill follows this structure, matching existing Plamen skills:
 
 Every skill MUST include fallback methodology because primitive availability is environment-dependent.
 
-## 7. New depth agent roles
+## 7. Depth agent roles (shipped in v0.5)
 
 ### 7.1 `depth-consensus-invariant`
 
+- **Definition**: `agents/depth-consensus-invariant.md`
 - **Input**: consensus code slice (call-graph-sliced via LSP from consensus entry points), extracted invariants from Phase 4a.5, known-bad patterns from skill library
 - **Methodology**:
   1. For each documented invariant, enumerate all write sites via LSP `find-references`
@@ -230,6 +233,7 @@ Every skill MUST include fallback methodology because primitive availability is 
 
 ### 7.2 `depth-network-surface`
 
+- **Definition**: `agents/depth-network-surface.md`
 - **Input**: p2p/rpc code slice, trust boundaries from recon, known DoS patterns
 - **Methodology**:
   1. Enumerate entry points via LSP `workspace/symbol` filtered by known interface names (`Handler`, `Service`, `Api`, `Listener`, message-type enums)

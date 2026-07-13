@@ -4,8 +4,8 @@
 ~/.plamen/
 ├── CLAUDE.md                          # Orchestrator config — mode table, rules, file refs
 ├── plamen.py                          # Terminal wrapper (Rich + InquirerPy)
-├── plamen.sh / plamen.bat             # Launcher scripts
-├── VERSION                            # Semantic version (2.2.1)
+├── plamen / plamen.sh / plamen.bat    # Launcher scripts (plamen = extensionless, for PATH symlink installs)
+├── VERSION                            # Semantic version (2.2.3)
 │
 ├── commands/                          # Claude Code slash commands (4 files)
 │   ├── plamen.md                      # /plamen — full SC audit workflow
@@ -24,7 +24,9 @@
 │   ├── phase6-report-prompts.md       # Report pipeline — Index → Writers → Assembler
 │   ├── report-template.md             # Report format, severity matrix, consolidation
 │   ├── skill-index.md                 # Master skill registry (all trees)
-│   └── post-audit-improvement-protocol.md
+│   ├── post-audit-improvement-protocol.md
+│   ├── language-toolchain-registry.json  # Build/test/fuzz command registry per language
+│   └── skill-registry.json            # Machine-readable skill trigger/injection registry
 │
 ├── agents/                            # Agent definitions (language-agnostic)
 │   ├── depth-token-flow.md
@@ -44,6 +46,8 @@
 │   ├── soroban/                       # 13 files (Soroban/Stellar)
 │   ├── daml/                          # 5 files (DAML/Canton)
 │   ├── l1/                            # L1 infrastructure prompts
+│   ├── go/                            # Go depth-template supplement (L1 mode)
+│   ├── rust/                          # Rust depth-template supplement (L1 mode)
 │   └── shared/                        # Shared prompt components
 │       └── v2/                        # V2-specific shared prompts
 │
@@ -55,7 +59,7 @@
 │   ├── soroban/                       # 19 Soroban skill templates
 │   ├── daml/                          # 12 DAML/Canton skill templates
 │   ├── injectable/                    # 9 protocol-type-specific skills
-│   │   └── l1/                        # 22+ L1 infrastructure skills
+│   │   └── l1/                        # 24 L1 infrastructure skills (+ _opengrep-rules/ local rule pack)
 │   └── niche/                         # 9 flag-triggered niche agents
 │
 ├── scripts/                           # V2 driver and utilities
@@ -74,16 +78,17 @@
 │   ├── chain_prep.py                  # Chain-analysis pre-pass (candidate pair extraction)
 │   ├── report_index_machinery.py      # Report-index ID assignment / coverage
 │   ├── codex_adapter.py               # Codex CLI backend adapter (BETA) — per-job depth fan-out, usage-cap auto-wait
-│   └── recon_prepass.py               # Pre-recon static analysis (deterministic recon prepass)
+│   ├── recon_prepass.py               # Pre-recon static analysis (deterministic recon prepass)
+│   └── enumeration_gate.py            # Mechanical enumeration-completeness gate
 │
 ├── codex-adapter/                     # Codex CLI backend config source (BETA, cost-saving alternative backend)
 │   ├── AGENTS.md                      # Codex orchestrator config (injected into ~/.codex/AGENTS.md)
 │   ├── README.md                      # Codex adapter notes
+│   ├── config.toml                    # Codex model/profile config template (shipped source, distinct from generated ~/.codex/config.toml)
 │   ├── mcp_permissions.toml           # Per-server MCP permission gates
 │   ├── agents/                        # TOML role definitions (spawned via Codex spawn_agent)
 │   ├── commands/                      # Codex slash commands (4 files, mirror commands/)
 │   └── skills/                        # Codex skill overrides
-│   # ~/.codex/config.toml is generated at install time, not shipped in the repo
 │
 ├── custom-mcp/                        # MCP servers
 │   ├── unified-vuln-db/               # RAG database (code only, data/ gitignored)
@@ -91,8 +96,14 @@
 │   ├── farofino-mcp/                  # [submodule] Aderyn integration
 │   └── slither-mcp/                   # [submodule] Trail of Bits Slither
 │
+├── opengrep-rules/                    # Opengrep rule-pack submodules (cross-ecosystem static analysis)
+│   ├── aptos-move-rules/              # [submodule] Aptos Move semgrep rules
+│   ├── decurity-rules/                # [submodule] Decurity smart-contract rules
+│   └── opengrep-rules/                # [submodule] Opengrep OSS rule pack
+│
 ├── docs/                              # Documentation
-│   └── l1-mode/                       # L1 mode design docs and severity matrix
+│   ├── l1-mode/                       # L1 mode design docs and severity matrix
+│   └── design/                        # Internal design/remediation planning docs
 ├── mcp-packages/                      # Pinned npm MCP server packages
 ├── mcp.json.example                   # MCP server config template
 ├── settings.json.example              # Permissions config template

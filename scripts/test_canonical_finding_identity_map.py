@@ -96,8 +96,8 @@ def test_unmapped_id_tokens_ignore_source_line_ranges(tmp_path: Path):
     (sp / "analysis_cross_chain.md").write_text(
         "### Finding [CC-1]: issue\n\n"
         "**Severity**: High\n"
-        "**Location**: GatewayCrossChain.sol:L571-590, "
-        "GatewayTransferNative.sol:L661-680\n"
+        "**Location**: CrossChainRouter.sol:L571-590, "
+        "NativeVault.sol:L661-680\n"
         "**Description**: mentions code at L355-365 and real future ZKX-77.\n",
         encoding="utf-8",
     )

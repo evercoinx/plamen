@@ -140,6 +140,53 @@ not emit it as a live finding block. Put that decision in a separate
 with the canonical severity cell set to `Informational` if a severity cell is
 required. The Python verifier treats disposition-as-severity as contract drift.
 
+### Committed-Invariant Emission (MANDATORY — value-bearing CLEAR/REFUTED)
+
+Whenever you reach a `CLEAR`/REFUTED verdict for a value-bearing path (value
+movement, supply/shares, accounting, authorization, or a funds/liveness-gating
+boundary), you MUST additionally emit a `committed-invariant [CI-n]` block naming
+the local guard that makes the path safe — this is the Code-Augur "commit the
+invariant behind every safe judgment" locus. Depth is the richest reservoir of
+concluded-safe verdicts, so it is now the PRIMARY CI emitter (the skeptic phases
+remain secondary). Emit the block as exactly ONE of the six generic SHAPES —
+`CONSERVATION`, `REQUESTED_EQ_DELIVERED`, `APPROVE_EQ_SPEND`,
+`NO_REVERT_AT_BOUNDARY`, `ROUNDTRIP`, `FRESHNESS` — with symbols resolved at the
+locus but no protocol constant baked as "the answer":
+
+```
+committed-invariant [CI-n]
+Locus: <file>:L<nn>  (fn: <enclosing function>)
+Shape: <one of the six shapes>
+Assertion: <the falsifiable relation, symbols resolved>
+Falsify Class: <property | boundary | roundtrip | conservation>
+Provenance: depth CLEAR @ <candidate>
+```
+
+This is MANDATORY for every value-bearing CLEAR/REFUTED verdict and strictly
+additive — it changes no verdict, severity, or prior finding. A non-value-bearing
+CLEAR (pure view, no funds/liveness/accounting/authorization stake) does not
+require a block. Emitted blocks are mechanically harvested downstream into
+falsifiable candidates for the fuzz/PoC gates. The six shapes are generic
+relational forms; NEVER encode a specific protocol/token/function as "the answer"
+— symbols resolve at the locus at runtime.
+
+**FALSIFIABILITY-AWARE SHAPE SELECTION (MANDATORY).** Emit the shape whose
+falsifier could actually FAIL at this locus. If the shape you first reach for is
+*true by construction* — its assertion cannot be violated by any reachable input
+because the code trivially satisfies it (for example a 1:1 unwrap step
+trivially satisfies `CONSERVATION`, so a conservation falsifier can never break)
+— that block is worthless as a downstream PoC target. In that case you MUST ALSO
+add at least one shape that CAN break at the same locus: a
+`NO_REVERT_AT_BOUNDARY` block (does the boundary/limit case revert, brick, or
+mis-round?) and/or a `REQUESTED_EQ_DELIVERED` block (does the amount/asset the
+caller requested equal what the callee actually delivered, across a
+conversion/bridge/wrap boundary?). You MAY emit **2–3 CI blocks per locus** for
+exactly this reason — one per distinct falsifiable relation. This is a generic
+HOW-directive about picking a *breakable* invariant; it names no protocol, token,
+or function (a native↔wrapped conversion is only an illustrative example of a
+boundary where `CONSERVATION` looks satisfied yet `REQUESTED_EQ_DELIVERED` can
+still diverge). Symbols always resolve at the locus at runtime.
+
 ### Language-Specific Depth Template Binding (MANDATORY)
 
 Before spawning any of the 4 standard depth agents, read:

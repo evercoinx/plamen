@@ -153,6 +153,24 @@ def test_no_orphaned_pipeline_phases_in_commands_plamen_md():
     print(msg, file=sys.stderr)
 
 
+def test_axis_coverage_phase_wired():
+    """M2 (recall-build-plan §5.3) drift lock: the `axis_coverage` phase must be
+    wired into V2 SC_PHASES with its 4b.8 section_marker. If it regresses out of
+    the phase list (or its marker drifts), this fires loud so the meta-pass can
+    never silently stop running."""
+    sc_names = {ph.name for ph in SC_PHASES}
+    assert "axis_coverage" in sc_names, (
+        "axis_coverage phase missing from SC_PHASES — the Multi-Axis Coverage "
+        "Meta-Pass (M2) has been unwired from the V2 driver."
+    )
+    wired = _collect_wired_markers()
+    match = any("4b.8" in m or "Multi-Axis Coverage" in m for m in wired)
+    assert match, (
+        "Expected a wired section_marker matching the axis_coverage phase "
+        "(4b.8 / Multi-Axis Coverage), none found. The M2 wiring has regressed."
+    )
+
+
 def test_known_orphans_now_wired():
     """Explicit positive lock: the 3 phases we just wired must be
     findable by the orphan check (i.e. they should NOT appear in the

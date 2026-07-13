@@ -77,22 +77,22 @@ def _write_state_write_map(sp: Path, contract: str, variables: list[str]) -> Non
 
 def test_candidate_pairs_shared_state_var(tmp_path):
     cp = _cp()
-    _write_state_write_map(tmp_path, "Vault", ["refundInfos", "balances"])
+    _write_state_write_map(tmp_path, "Vault", ["pendingClaims", "balances"])
     _write_inventory(tmp_path, [
         {"id": "INV-001", "severity": "High", "location": "Vault.sol:L100",
-         "root_cause": "claimRefund deletes refundInfos before transfer",
-         "description": "refundInfos mapping mutated unsafely"},
+         "root_cause": "claimPayout deletes pendingClaims before transfer",
+         "description": "pendingClaims mapping mutated unsafely"},
         {"id": "INV-002", "severity": "Medium", "location": "Vault.sol:L300",
-         "root_cause": "onAbort writes refundInfos with wrong length",
-         "description": "refundInfos stored from abort context"},
+         "root_cause": "onAbort writes pendingClaims with wrong length",
+         "description": "pendingClaims stored from abort context"},
     ])
     out = cp.compute_chain_candidate_pairs(tmp_path)
     assert out["status"] == "ok"
     assert out["pairs"] >= 1
     text = (tmp_path / "chain_candidate_pairs.md").read_text(encoding="utf-8")
-    # The two findings share state var refundInfos → must be a STATE pair
+    # The two findings share state var pendingClaims → must be a STATE pair
     assert "INV-001" in text and "INV-002" in text
-    assert "refundInfos" in text
+    assert "pendingClaims" in text
 
 
 def test_candidate_pairs_excludes_provably_unrelated(tmp_path):
@@ -227,24 +227,24 @@ def test_candidate_pairs_fewer_than_two_findings(tmp_path):
 
 def test_variable_finding_map_basic(tmp_path):
     cp = _cp()
-    _write_state_write_map(tmp_path, "Vault", ["refundInfos", "feePercent"])
+    _write_state_write_map(tmp_path, "Vault", ["pendingClaims", "feePercent"])
     _write_inventory(tmp_path, [
         {"id": "INV-001", "severity": "High", "location": "Vault.sol:L1",
-         "root_cause": "refundInfos deleted early",
-         "description": "refundInfos mutation"},
+         "root_cause": "pendingClaims deleted early",
+         "description": "pendingClaims mutation"},
         {"id": "INV-002", "severity": "Medium", "location": "Vault.sol:L2",
          "root_cause": "feePercent has no upper bound",
          "description": "feePercent unchecked"},
         {"id": "INV-003", "severity": "Low", "location": "Vault.sol:L3",
-         "root_cause": "feePercent retroactive on refundInfos",
-         "description": "both feePercent and refundInfos involved"},
+         "root_cause": "feePercent retroactive on pendingClaims",
+         "description": "both feePercent and pendingClaims involved"},
     ])
     out = cp.compute_variable_finding_map(tmp_path)
     assert out["status"] == "ok"
     text = (tmp_path / "variable_finding_map.md").read_text(encoding="utf-8")
-    assert "refundInfos" in text and "feePercent" in text
-    # refundInfos row should list INV-001 and INV-003
-    refund_line = next(l for l in text.splitlines() if l.startswith("| refundInfos"))
+    assert "pendingClaims" in text and "feePercent" in text
+    # pendingClaims row should list INV-001 and INV-003
+    refund_line = next(l for l in text.splitlines() if l.startswith("| pendingClaims"))
     assert "INV-001" in refund_line and "INV-003" in refund_line
 
 
@@ -326,12 +326,12 @@ def test_malformed_inventory_does_not_raise(tmp_path):
 
 def test_idempotency(tmp_path):
     cp = _cp()
-    _write_state_write_map(tmp_path, "Vault", ["refundInfos"])
+    _write_state_write_map(tmp_path, "Vault", ["pendingClaims"])
     _write_inventory(tmp_path, [
         {"id": "INV-001", "severity": "High", "location": "Vault.sol:L100",
-         "root_cause": "refundInfos issue", "description": "refundInfos a"},
+         "root_cause": "pendingClaims issue", "description": "pendingClaims a"},
         {"id": "INV-002", "severity": "Medium", "location": "Vault.sol:L120",
-         "root_cause": "refundInfos issue two", "description": "refundInfos b"},
+         "root_cause": "pendingClaims issue two", "description": "pendingClaims b"},
     ])
     a = cp.run_chain_prep(tmp_path)
     pairs_a = a["candidate_pairs"]["pairs"]
@@ -364,3 +364,121 @@ def test_enabler_baseline_overwrites_passthrough_stub(tmp_path):
     text = (tmp_path / "enabler_results.md").read_text(encoding="utf-8")
     assert "MECHANICAL_BASELINE_STEP0A" in text
     assert "No new enabler paths were mechanically introduced" not in text
+
+
+# ---------------------------------------------------------------------------
+# Fix 7 Part B — CROSS-DOMAIN-DEP → STEP-0a-LC enabler harvester
+# ---------------------------------------------------------------------------
+
+
+def _write_depth_findings(sp: Path, name: str, body: str) -> None:
+    (sp / name).write_text(body, encoding="utf-8")
+
+
+def test_cross_domain_harvest_substantive_only(tmp_path):
+    """Substantive [CROSS-DOMAIN-DEP: domain — detail] tags become enablers;
+    bare domain-only tags and the `none` admission are skipped."""
+    cp = _cp()
+    _write_depth_findings(tmp_path, "depth_external_findings.md", (
+        "### Finding [DX-1]\n"
+        "**Location**: Bridge.sol:L42\n"
+        "Analysis. [CROSS-DOMAIN-DEP: external — destination VM deserialization "
+        "scheme decides whether the payload decodes]\n\n"
+        "### Finding [DX-2]\n"
+        "**Location**: Bridge.sol:L88\n"
+        "Bare tag. [CROSS-DOMAIN-DEP: external]\n\n"
+        "### Finding [DX-3]\n"
+        "**Location**: Bridge.sol:L120\n"
+        "In-scope. [CROSS-DOMAIN-DEP: none — fully in-scope permissionless theft]\n"
+    ))
+    _write_inventory(tmp_path, [
+        {"id": "INV-001", "severity": "High", "location": "Bridge.sol:L42",
+         "verdict": "CONFIRMED", "root_cause": "real dangerous state"},
+    ])
+    harv = cp._harvest_cross_domain_enablers(tmp_path, cp._load_inventory(tmp_path))
+    dets = [h["detail"] for h in harv]
+    assert len(harv) == 1, dets
+    assert "destination VM deserialization" in harv[0]["detail"]
+    assert harv[0]["finding_id"] == "DX-1"
+    assert harv[0]["domain"] == "external"
+    # bare + none must NOT appear
+    assert all("none" != h["domain"] for h in harv)
+    assert all("fully in-scope" not in h["detail"] for h in harv)
+
+
+def test_cross_domain_harvest_dedup_by_locus_detail(tmp_path):
+    """Identical (locus, detail) tags in two files collapse to one enabler."""
+    cp = _cp()
+    common = ("### Finding [DE-1]\n**Location**: X.sol:L10\n"
+              "[CROSS-DOMAIN-DEP: token-flow — pooled residual provides drained funds]\n")
+    _write_depth_findings(tmp_path, "depth_token_flow_findings.md", common)
+    _write_depth_findings(tmp_path, "depth_edge_case_findings.md", common)
+    _write_inventory(tmp_path, [
+        {"id": "INV-001", "severity": "High", "location": "X.sol:L10",
+         "verdict": "CONFIRMED", "root_cause": "rc"},
+    ])
+    harv = cp._harvest_cross_domain_enablers(tmp_path, cp._load_inventory(tmp_path))
+    assert len(harv) == 1
+
+
+def test_cross_domain_harvest_dedup_vs_axisgap_provenance(tmp_path):
+    """A CROSS-DOMAIN-DEP tag at a locus already covered by an M2 AXISGAP
+    provenance-gap candidate is not re-emitted (append-only dedup)."""
+    cp = _cp()
+    _write_depth_findings(tmp_path, "depth_external_findings.md", (
+        "### Finding [DX-9]\n**Location**: Y.sol:L55\n"
+        "[CROSS-DOMAIN-DEP: external — assumes freshness of an off-domain value]\n"
+    ))
+    _write_inventory(tmp_path, [
+        # An AXISGAP provenance candidate at the SAME locus (Y.sol:L55).
+        {"id": "INV-050", "severity": "Low", "location": "Y.sol:L55",
+         "verdict": "NEEDS_VERIFICATION",
+         "source_ids": "AXISGAP:AXIS-9 (multi-axis coverage meta-pass)",
+         "root_cause": "provenance axis unexamined at hot function",
+         "description": "provenance freshness gap"},
+    ])
+    entries = cp._load_inventory(tmp_path)
+    assert cp._axisgap_provenance_loci(entries)  # locus is recognized
+    harv = cp._harvest_cross_domain_enablers(tmp_path, entries)
+    assert harv == []
+
+
+def test_cross_domain_harvest_cap_40(tmp_path):
+    """The harvester never emits more than _MAX_CROSS_DOMAIN_ENABLERS."""
+    cp = _cp()
+    blocks = []
+    for i in range(60):
+        blocks.append(
+            f"### Finding [DX-{i}]\n**Location**: F.sol:L{i}\n"
+            f"[CROSS-DOMAIN-DEP: external — distinct off-domain assumption number {i}]\n"
+        )
+    _write_depth_findings(tmp_path, "depth_external_findings.md", "\n".join(blocks))
+    _write_inventory(tmp_path, [
+        {"id": "INV-001", "severity": "High", "location": "F.sol:L1",
+         "verdict": "CONFIRMED", "root_cause": "rc"},
+    ])
+    harv = cp._harvest_cross_domain_enablers(tmp_path, cp._load_inventory(tmp_path))
+    assert len(harv) <= cp._MAX_CROSS_DOMAIN_ENABLERS == 40
+
+
+def test_enabler_baseline_writes_cross_domain_table(tmp_path):
+    """compute_enabler_baseline emits the CROSS-DOMAIN-DEP enabler sub-table and
+    counts them; bare tags do not appear."""
+    cp = _cp()
+    _write_depth_findings(tmp_path, "depth_external_findings.md", (
+        "### Finding [DX-1]\n**Location**: Bridge.sol:L42\n"
+        "[CROSS-DOMAIN-DEP: external — destination VM deserialization scheme]\n"
+        "### Finding [DX-2]\n**Location**: Bridge.sol:L88\n"
+        "[CROSS-DOMAIN-DEP: external]\n"
+    ))
+    _write_inventory(tmp_path, [
+        {"id": "INV-001", "severity": "High", "location": "Bridge.sol:L42",
+         "verdict": "CONFIRMED", "root_cause": "real dangerous state"},
+    ])
+    out = cp.compute_enabler_baseline(tmp_path)
+    assert out["status"] == "ok"
+    assert out["cross_domain_enablers"] == 1
+    text = (tmp_path / "enabler_results.md").read_text(encoding="utf-8")
+    assert "Cross-Domain Dependency Enablers" in text
+    assert "destination VM deserialization scheme" in text
+    assert "DX-1" in text

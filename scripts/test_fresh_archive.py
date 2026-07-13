@@ -37,8 +37,8 @@ def test_archives_reports_rca_and_fuzz_harness(tmp_path):
     _mk(proj / ".medusa-tests" / "MedusaCampaignV6.sol",
         "// usePreFeeForSwap true = buggy (production)")
     # legitimate in-scope source that must be UNTOUCHED
-    _mk(proj / "GatewayCrossChain.sol", "pragma solidity ^0.8.0;\ncontract G {}")
-    _mk(proj / "interfaces" / "IGateway.sol", "interface I {}")
+    _mk(proj / "CrossChainRouter.sol", "pragma solidity ^0.8.0;\ncontract G {}")
+    _mk(proj / "interfaces" / "IBridgeRouter.sol", "interface I {}")
 
     archive = PD._archive_prior_audit_artifacts(proj)
 
@@ -62,8 +62,8 @@ def test_archives_reports_rca_and_fuzz_harness(tmp_path):
     assert (archive / ".medusa-tests" / "MedusaCampaignV6.sol").is_file()
 
     # legitimate source is UNTOUCHED
-    assert (proj / "GatewayCrossChain.sol").is_file()
-    assert (proj / "interfaces" / "IGateway.sol").is_file()
+    assert (proj / "CrossChainRouter.sol").is_file()
+    assert (proj / "interfaces" / "IBridgeRouter.sol").is_file()
 
 
 def test_dot_prefixed_archive_is_invisible_to_source_walks(tmp_path):
@@ -89,7 +89,7 @@ def test_dot_prefixed_archive_is_invisible_to_source_walks(tmp_path):
 
 def test_noop_when_nothing_to_archive(tmp_path):
     proj = _proj(tmp_path)
-    _mk(proj / "GatewayCrossChain.sol", "contract G {}")
+    _mk(proj / "CrossChainRouter.sol", "contract G {}")
     assert PD._archive_prior_audit_artifacts(proj) is None
     # no stray archive dir created
     assert not any(p.name.startswith(".plamen_archive_")

@@ -29,6 +29,7 @@ from plamen_types import (
     _VALID_PIPELINES, _VALID_MODES,
     EVIDENCE_TAGS_PROOF, EVIDENCE_TAG_NAMES_RE, has_mechanical_proof,
     has_proof_grade_evidence,
+    canonical_verification_status,
     FINDING_BLOCK_HEADING_RE,
     normalize_severity,
     plamen_home,
@@ -41,6 +42,7 @@ from plamen_parsers import (
     _split_markdown_table_row,
     _manifest_row_from_cells,
     _manifest_row_is_spawned_breadth_agent,
+    _poc_kw_present,
 )
 
 __all__ = [
@@ -131,6 +133,7 @@ __all__ = [
     "_write_chain_passthrough_outputs",
     "_body_writer_evidence_fields",
     "_expected_report_index_severities",
+    "_expected_report_index_statuses",
     "_forced_chain_seed_rows",
     "_is_substantive_body_evidence",
     "_is_spec_support_path",
@@ -182,6 +185,8 @@ __all__ = [
     "_validate_chain_iter2",
     "_validate_exploration_skeptic",
     "_validate_enumgap_exploration",
+    "_validate_invariant_commitment",
+    "_validate_axis_coverage",
     "_validate_chain_anti_absorption",
     "_declared_depth_findings",
     "_validate_chain_baseline_not_regrouped",
@@ -3036,6 +3041,14 @@ def _owned_artifact_patterns(pipeline: str, scratchpad: Optional[Path] = None) -
         # inventory in the post-hook (mirroring the enumeration gate's own
         # inventory append, which depth already performs).
         "enumgap_exploration": ["enumgap_exploration_findings.md"],
+        # Phase 4b.8 (M2): multi-axis coverage meta-pass. Writes its additive
+        # findings artifact plus the driver-owned hot-function/axis matrix; the
+        # driver promotes gap findings into the inventory in the post-hook
+        # (mirroring enumgap_exploration).
+        "axis_coverage": [
+            "axis_coverage_findings.md", "hot_function_axes.md",
+            "_hot_function_axes.json", "axis_coverage_promotion_receipt.md",
+        ],
         "sc_semantic_dedup": ["dedup_decisions.md", "findings_inventory_deduped.md"],
         "attention_repair": ["attention_repair_summary.md", "attention_repair_findings.md"],
         "chain": ["hypotheses.md", "finding_mapping.md", "enabler_results.md"],
@@ -5898,7 +5911,7 @@ def _is_spec_support_path(path: str) -> bool:
         return True
     if re.match(r"^i[a-z0-9][a-z0-9_]*\.(?:sol|vy)$", leaf):
         return True
-    # Mock/stub/fake declared via SUFFIX (ERC20Mock.sol, GatewayEVMMock.sol)
+    # Mock/stub/fake declared via SUFFIX (ERC20Mock.sol, BridgeRouterMock.sol)
     # are test-support doubles, not production surface.
     stem = leaf.rsplit(".", 1)[0]
     if stem.endswith(("mock", "stub", "fake", "mockup", "harness")):
@@ -6778,6 +6791,157 @@ def _validate_enumgap_exploration(scratchpad: Path, mode: str) -> list[str]:
     return []
 
 
+# M1 committed-invariant commitment ------------------------------------------
+#
+# The skeptic phases (4b.6 exploration-skeptic, 5.1 skeptic) are told that every
+# time they clear a value-bearing instance as NO-GAP or DOWNGRADE a value-bearing
+# finding, they must ALSO emit a `committed-invariant [CI-n]` block encoding the
+# tacit local guard as a falsifiable assertion. This SOFT validator confirms the
+# habit: it counts NO-GAP/DOWNGRADE signals in the skeptic artifacts and the
+# `[CI-n]` blocks present, and if there are value-bearing clears but zero
+# committed invariants it writes a `.ci_gap` sentinel + warning for visibility.
+# WARNING-only: never returns a hard issue, never sets passed=False, never halts.
+# The habit is recall-positive (more falsifiable candidates); its absence loses
+# no prior finding, so a gap is advisory, not fatal.
+
+_CI_BLOCK_PRESENCE_RE = re.compile(r"committed-invariant\s*\[\s*CI(?:-[A-Za-z0-9]+)+\s*\]", re.IGNORECASE)
+_CI_CLEAR_SIGNAL_RE = re.compile(r"\bNO-?GAP\b|\bDOWNGRADE\b", re.IGNORECASE)
+# Format-agnostic committed-invariant header counter. Any `committed-invariant
+# [<anything>]` header, regardless of ID shape. Compared against the harvestable
+# _CI_BLOCK_PRESENCE_RE count to detect ID-format drift (a block the deriver's
+# _CI_BLOCK_RE cannot parse = a silently-dropped committed invariant).
+_CI_BLOCK_ANY_RE = re.compile(r"committed-invariant\s*\[\s*[^\]\n]+\]", re.IGNORECASE)
+
+
+def _validate_invariant_commitment(scratchpad: Path, mode: str) -> list[str]:
+    """SOFT validator for M1 committed-invariant emission (skeptic phases).
+
+    Recall-positive / additive. Like _validate_exploration_skeptic, it returns []
+    in every branch — it can never set passed=False and can never halt. When a
+    skeptic artifact records value-bearing clears (NO-GAP / DOWNGRADE) but carries
+    NO `committed-invariant [CI-n]` block, it writes a `.ci_gap` sentinel and a
+    warning so the missing falsifiable assertions are visible. Never raises.
+    """
+    if mode != "thorough":
+        return []
+    try:
+        scratchpad = Path(scratchpad)
+    except Exception:
+        return []
+    arts = []
+    for name in ("exploration_skeptic_findings.md", "skeptic_findings.md"):
+        try:
+            p = scratchpad / name
+            if p.exists() and p.stat().st_size > 30:
+                arts.append(p)
+        except OSError:
+            continue
+    if not arts:
+        return []
+    clears = 0
+    ci_blocks = 0
+    ci_blocks_any = 0
+    for p in arts:
+        try:
+            body = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        clears += len(_CI_CLEAR_SIGNAL_RE.findall(body))
+        ci_blocks += len(_CI_BLOCK_PRESENCE_RE.findall(body))
+        ci_blocks_any += len(_CI_BLOCK_ANY_RE.findall(body))
+    # Harvest-vs-emit reconciliation (durable guard against ID-format drift):
+    # committed-invariant blocks the harvester regex can't parse are silently
+    # dropped — the CI-A1-vs-`CI-\d+` class that dark-dropped 12 skeptic
+    # invariants pre-fix. If the artifacts carry more CI headers than the
+    # harvestable pattern matches, surface it LOUDLY (sentinel + warning) rather
+    # than letting the deriver harvest 0 with no signal. Never raises.
+    if ci_blocks_any > ci_blocks:
+        import logging as _logging
+        _logging.getLogger("plamen.validators").warning(
+            "[invariant_commitment] CI ID-FORMAT DRIFT: %d committed-invariant "
+            "block(s) present but only %d match the harvestable pattern — %d "
+            "would be silently dropped by the deriver. Investigate _CI_BLOCK_RE "
+            "/ _CI_BLOCK_PRESENCE_RE ID shape.",
+            ci_blocks_any, ci_blocks, ci_blocks_any - ci_blocks,
+        )
+        try:
+            (scratchpad / "invariant_commitment.ci_format_gap").write_text(
+                f"[INVARIANT_COMMITMENT_CI_FORMAT_GAP] {ci_blocks_any} "
+                f"committed-invariant block(s) present but only {ci_blocks} are "
+                f"harvestable ({ci_blocks_any - ci_blocks} dropped by ID-format "
+                "mismatch). The deriver's _CI_BLOCK_RE cannot parse these IDs; "
+                "broaden it to match the emitted ID shape.\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    if clears > 0 and ci_blocks == 0:
+        import logging as _logging
+        _logging.getLogger("plamen.validators").warning(
+            "[invariant_commitment] %d NO-GAP/DOWNGRADE clear(s) recorded across "
+            "skeptic artifacts but 0 committed-invariant [CI-n] blocks emitted — "
+            "each value-bearing clear should commit its tacit local guard as a "
+            "falsifiable assertion. WARNING-only; sentinel written, pipeline "
+            "continues (no prior finding is lost).",
+            clears,
+        )
+        try:
+            (scratchpad / "invariant_commitment.ci_gap").write_text(
+                "[INVARIANT_COMMITMENT_CI_GAP] The skeptic artifacts recorded "
+                f"{clears} value-bearing clear(s) (NO-GAP/DOWNGRADE) but emitted "
+                "0 committed-invariant [CI-n] block(s). Per M1, each value-bearing "
+                "clear should commit its tacit local guard as a falsifiable "
+                "assertion for the falsifier. This is WARNING-only and "
+                "recall-positive: nothing is dropped or downgraded; the missing "
+                "assertions should be surfaced as committed invariants.\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    return []
+
+
+def _validate_axis_coverage(scratchpad: Path, mode: str) -> list[str]:
+    """SOFT validator for Phase 4b.8 (M2 multi-axis coverage meta-pass).
+
+    Recall-positive / additive phase. Like _validate_enumgap_exploration /
+    _validate_exploration_skeptic, it returns [] in EVERY branch — it can never
+    set passed=False and can never halt. The phase only ADDS axis-coverage
+    findings (or reasoned clears over GAP cells); its absence loses no prior
+    finding because the mechanical matrix (hot_function_axes.md) is always
+    persisted and the phase is skipped-when-clean.
+
+    On missing/near-empty output it writes an `.axis_gap` degraded sentinel and
+    a warning, then lets the pipeline proceed. Never raises.
+    """
+    if mode != "thorough":
+        return []
+    try:
+        scratchpad = Path(scratchpad)
+        out_path = scratchpad / "axis_coverage_findings.md"
+        if not (out_path.exists() and out_path.stat().st_size > 30):
+            try:
+                (scratchpad / "axis_coverage.degraded").write_text(
+                    "[AXIS_COVERAGE_DEGRADED] axis_coverage_findings.md missing or "
+                    "<30 bytes. Pipeline continues; this phase is additive-only — "
+                    "the mechanical hot-function × axis matrix (hot_function_axes.md) "
+                    "is persisted regardless, so no prior finding is lost by its "
+                    "absence.\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+            import logging as _logging
+            _logging.getLogger("plamen.validators").warning(
+                "[axis_coverage] axis_coverage_findings.md missing/empty — sentinel "
+                "written, pipeline continues (the mechanical axis matrix remains "
+                "available for human review)"
+            )
+    except Exception:
+        pass
+    return []
+
+
 # v2.x Fix 2: Anti-Absorption Hard Gate ---------------------------------------
 #
 # Chain Agent 1 groups raw findings into hypotheses (GRP-* IDs). The prompt's
@@ -7645,22 +7809,33 @@ def _validate_chain_anti_absorption(scratchpad: Path, mode: str) -> list[str]:
         rc_low_similarity = rc_min_sim < 0.30
 
         violations: list[str] = []
-        if distinct_functions:
-            funcs_str = ", ".join(
-                f"{ff[0] or '?'}:{ff[1] or '?'}" for ff in sorted(file_func_pairs)
-            )
-            violations.append(f"distinct functions ({funcs_str})")
+        # Fix 6: distinct (file, function) is DEMOTED to a soft retry-hint note.
+        # It is NEVER, by itself, a hard violation and must never drive
+        # mechanical atomization or a standalone retry — same-fix mirror-contract
+        # clusters legitimately span functions/files. It is surfaced only as
+        # advisory context WHEN a real (severity/Jaccard) violation already
+        # forces a retry.
         if severity_violation:
             sev_strs = sorted({m["severity"] for _, m in meta_list if m["severity"]})
             violations.append(f"severity span > 1 tier ({', '.join(sev_strs)})")
         if rc_low_similarity:
             violations.append(f"root-cause Jaccard {rc_min_sim:.2f} < 0.30")
         if not violations:
+            # Distinct functions alone -> preserve the LLM's grouping; no issue.
             continue
+        soft_note = ""
+        if distinct_functions:
+            funcs_str = ", ".join(
+                f"{ff[0] or '?'}:{ff[1] or '?'}" for ff in sorted(file_func_pairs)
+            )
+            soft_note = (
+                f" [soft note: constituents span distinct functions ({funcs_str}) "
+                "— advisory only, not itself a split trigger]"
+            )
         constituent_ids = ", ".join(cid for cid, _ in meta_list)
         issues.append(
             f"{hyp_id} absorbs {len(meta_list)} constituents ({constituent_ids}) "
-            f"with anti-absorption violations: {'; '.join(violations)}"
+            f"with anti-absorption violations: {'; '.join(violations)}{soft_note}"
         )
     return issues
 
@@ -8074,27 +8249,44 @@ def _next_chain_hyp_id(prefix: str, used: set[str], counters: dict[str, int]) ->
 def _chain_group_violates_anti_absorption(
     meta_list: list[tuple[str, dict[str, str]]],
 ) -> bool:
+    # A group is a mechanical anti-absorption VIOLATION (-> split) ONLY when it
+    # bundles constituents at genuinely DIFFERENT locations that are also
+    # different bugs. Distinctness is judged on LOCATION, never on lexical
+    # overlap: same-location constituents -- paraphrase duplicates with divergent
+    # prose, and the same bug labeled at adjacent severities -- are ONE finding
+    # and must never be split. (The prior prose-Jaccard trigger fired on
+    # same-location paraphrases generated fresh each run and shattered single
+    # root bugs into many findings: 53 chain hypotheses -> 140, 2 -> 6 Criticals.)
     if len(meta_list) < 2:
         return False
-    file_func_pairs = set()
-    for _, m in meta_list:
-        f = _extract_file_name(m.get("location", ""))
-        fn = (
-            _extract_function_name(m.get("location", ""))
-            or _extract_function_name(m.get("root_cause", ""))
+    loc_keys = [
+        (
+            _extract_file_name(m.get("location", "")).lower(),
+            _normalize_locus_function(m.get("location", "")),
         )
-        file_func_pairs.add((f.lower(), fn.lower()))
-    file_func_pairs.discard(("", ""))
-    if len(file_func_pairs) >= 2:
-        return True
-    sev_ranks = [_severity_tier(m.get("severity", "")) for _, m in meta_list]
-    sev_ranks = [r for r in sev_ranks if r >= 0]
-    if sev_ranks and max(sev_ranks) - min(sev_ranks) > 1:
-        return True
-    rcs = [m.get("root_cause") or m.get("title", "") for _, m in meta_list]
-    for i in range(len(rcs)):
-        for j in range(i + 1, len(rcs)):
-            if _jaccard_token_similarity(rcs[i], rcs[j]) < 0.30:
+        for _, m in meta_list
+    ]
+    if len({k for k in loc_keys if k[0] or k[1]}) <= 1:
+        return False  # a single locus -> one bug -> never split
+    # >= 2 distinct loci: a distinctness signal counts ONLY between constituents
+    # at DIFFERENT loci (never between same-locus prose paraphrases).
+    #   (b) a severity span > 1 tier across distinct loci (obscures a real gap);
+    #   (c) unrelated root cause across distinct loci (token Jaccard < 0.30).
+    for i in range(len(meta_list)):
+        ki = loc_keys[i]
+        if not (ki[0] or ki[1]):
+            continue
+        ti = _severity_tier(meta_list[i][1].get("severity", ""))
+        rci = meta_list[i][1].get("root_cause") or meta_list[i][1].get("title", "")
+        for j in range(i + 1, len(meta_list)):
+            kj = loc_keys[j]
+            if ki == kj or not (kj[0] or kj[1]):
+                continue  # same locus (or unknown) -> not a distinctness signal
+            tj = _severity_tier(meta_list[j][1].get("severity", ""))
+            if ti >= 0 and tj >= 0 and abs(ti - tj) > 1:
+                return True
+            rcj = meta_list[j][1].get("root_cause") or meta_list[j][1].get("title", "")
+            if _jaccard_token_similarity(rci, rcj) < 0.30:
                 return True
     return False
 
@@ -8115,14 +8307,107 @@ def _hypothesis_override_present(hyp_text: str, hyp_id: str) -> bool:
     return False
 
 
-def _repair_chain_anti_absorption_splits(scratchpad: Path) -> int:
-    """Mechanically split over-absorbed chain hypotheses.
+_LINE_REF_TOKEN_RE = re.compile(r"^[Ll]?\d+$")
 
-    The safe repair for anti-absorption failure is never another merge. If a
-    multi-constituent hypothesis violates the rule and lacks an explicit
-    override, split each unique constituent into its own hypothesis. This
-    preserves every source finding and avoids spending a retry on an obvious
-    deterministic transformation.
+
+def _normalize_locus_function(location: str) -> str:
+    """Best-effort function token for exact-locus sub-cluster keying.
+
+    Reuses `_extract_function_name` on the STRUCTURED Location field ONLY, then
+    discards line-reference-shaped tokens (`L671`, `671`) that the extractor can
+    mistake for a function name — a line ref is never a function and would
+    otherwise fragment an exact locus. The root-cause / description prose is
+    deliberately NOT consulted: free text routinely places a common word before
+    a parenthesis (`... non-20-byte wallets (Solana ...)`, `... reordered L20
+    (delete)`), which `_extract_function_name` would return as a bogus function
+    and shatter same-fix mirror-contract clusters into singletons. Returns ""
+    when no real function token is identifiable — findings at the same
+    file + severity tier then correctly cluster together.
+    """
+    fn = _extract_function_name(location or "")
+    if fn and _LINE_REF_TOKEN_RE.match(fn):
+        fn = ""
+    return fn.lower()
+
+
+def _partition_into_subclusters(
+    meta_list: list[tuple[str, dict[str, str]]],
+) -> list[list[tuple[str, dict[str, str]]]]:
+    """Partition constituents into MAXIMAL sub-clusters (Fix 5).
+
+    Key = EXACT normalized (file, function) — tier is NOT keyed. This is a strict
+    equality partition — NEVER fuzzy union-find — so it cannot transitively
+    over-merge: two constituents merge only when they share the identical locus.
+    Constituents at the same exact fix site stay ONE hypothesis regardless of the
+    severity each was labeled with (same fix = one finding, per report-template's
+    "same fix, not same file" consolidation rule; severity inherited as the
+    highest); genuinely-unshared loci fall out as singletons. Order-preserving
+    (first-seen key order) for deterministic IDs.
+    """
+    # Key = EXACT normalized (file, function). Severity tier is deliberately NOT
+    # in the key: the SAME bug labeled at two tiers (e.g. a public function
+    # reported once High, once Medium) must merge into ONE hypothesis (severity
+    # inherited as the highest), not fragment across tier boundaries.
+    buckets: dict[tuple[str, str], list[tuple[str, dict[str, str]]]] = {}
+    order: list[tuple[str, str]] = []
+    for cid, m in meta_list:
+        key = (
+            _extract_file_name(m.get("location", "")).lower(),
+            _normalize_locus_function(m.get("location", "")),
+        )
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append((cid, m))
+    return [buckets[k] for k in order]
+
+
+def _build_merged_group(
+    hyp_id: str,
+    sub: list[tuple[str, dict[str, str]]],
+    reason: str,
+) -> dict[str, object]:
+    """Assemble ONE hypothesis row for a sub-cluster, retaining every source_id.
+
+    The primary member's title heads the row; every other member's title is
+    carried as a merged-angle description bullet (mirrors the C-01 "distinct
+    angles preserved" pattern) so no constituent framing is lost. If members
+    carry differing downstream verdicts (verdict field is absent at chain time,
+    so this is inert here but correct if ever populated), the merged row keeps
+    them together and surfaces the contested members as an `[UNRESOLVED]`
+    sub-note rather than splitting one bug into diverging verify passes.
+    """
+    sev = _highest_constituent_severity(sub)
+    titles = [(m.get("title") or cid).replace("|", "/") for cid, m in sub]
+    title = titles[0] if titles else hyp_id
+    extra = [t for t in titles[1:] if t]
+    if extra:
+        title = f"{title} [+ merged angles: {'; '.join(extra)}]"
+    verdicts = {(m.get("verdict") or "").strip().upper() for _, m in sub}
+    verdicts.discard("")
+    if len(verdicts) > 1:
+        contested = [cid for cid, m in sub if (m.get("verdict") or "").strip()]
+        title = f"{title} [UNRESOLVED: contested members {', '.join(contested)}]"
+    return {
+        "id": hyp_id,
+        "severity": sev,
+        "title": title,
+        "source_ids": [cid for cid, _ in sub],
+        "reason": reason,
+    }
+
+
+def _repair_chain_anti_absorption_splits(scratchpad: Path) -> int:
+    """Mechanically resolve over-absorbed chain hypotheses via sub-clustering.
+
+    The safe repair for an anti-absorption failure is never another merge and
+    never a per-constituent explosion. When a multi-constituent hypothesis
+    violates the (post-Fix-6) rule and lacks an explicit override, partition it
+    into maximal sub-clusters keyed on EXACT (file, function) + severity tier
+    (Fix 5): emit ONE hypothesis per sub-cluster carrying ALL of its source_ids,
+    with singletons only for truly-unshared loci. This resolves a severity-span
+    violation by tier and keeps same-locus clusters intact instead of atomizing
+    them, preserving every source finding without spending a retry.
     """
     try:
         from plamen_parsers import _parse_hypothesis_constituents
@@ -8155,42 +8440,45 @@ def _repair_chain_anti_absorption_splits(scratchpad: Path) -> int:
     for hyp_id in sorted(mapping):
         constituent_ids = list(dict.fromkeys(cid for cid in mapping[hyp_id] if cid in inventory))
         meta_list = [(cid, inventory[cid]) for cid in constituent_ids]
-        if (
+        violates = (
             len(meta_list) >= 2
             and not _hypothesis_override_present(hyp_text, hyp_id)
             and _chain_group_violates_anti_absorption(meta_list)
-        ):
+        )
+        if violates:
+            subclusters = _partition_into_subclusters(meta_list)
+            if len(subclusters) <= 1:
+                # All constituents share one exact locus + tier -> same fix
+                # site -> keep merged under the original id; nothing to split.
+                final_groups.append(_build_merged_group(
+                    hyp_id, meta_list, "preserved same-locus cluster"
+                ))
+                continue
             split_count += 1
+            # Retire the over-absorbed id; every sub-cluster is emitted as a
+            # freshly-minted, correctly-scoped hypothesis carrying ALL of its
+            # own source_ids (never a per-constituent singleton unless the
+            # constituent is truly unshared).
             used.discard(hyp_id)
-            for cid, meta in meta_list:
-                sev = normalize_severity(meta.get("severity", "")) or "Medium"
-                prefix = _chain_hyp_prefix_for_severity(sev)
-                new_id = _next_chain_hyp_id(prefix, used, counters)
-                title = (meta.get("title") or f"Recovered {cid}").replace("|", "/")
-                final_groups.append({
-                    "id": new_id,
-                    "severity": sev,
-                    "title": title,
-                    "source_ids": [cid],
-                    "reason": "MECHANICAL_ANTI_ABSORPTION_SPLIT",
-                })
-                repaired_rows.append({
-                    "old": hyp_id,
-                    "new": new_id,
-                    "source": cid,
-                    "reason": "distinct root cause/function/fix risk",
-                })
+            for sub in subclusters:
+                sev0 = _highest_constituent_severity(sub)
+                prefix = _chain_hyp_prefix_for_severity(sev0)
+                target_id = _next_chain_hyp_id(prefix, used, counters)
+                for cid, _ in sub:
+                    repaired_rows.append({
+                        "old": hyp_id,
+                        "new": target_id,
+                        "source": cid,
+                        "reason": "distinct exact locus (file+function+severity tier)",
+                    })
+                final_groups.append(_build_merged_group(
+                    target_id, sub, "MECHANICAL_ANTI_ABSORPTION_SUBCLUSTER"
+                ))
             continue
         if meta_list:
-            sev = _highest_constituent_severity(meta_list)
-            first_title = meta_list[0][1].get("title") or hyp_id
-            final_groups.append({
-                "id": hyp_id,
-                "severity": sev,
-                "title": first_title.replace("|", "/"),
-                "source_ids": [cid for cid, _ in meta_list],
-                "reason": "preserved original chain grouping",
-            })
+            final_groups.append(_build_merged_group(
+                hyp_id, meta_list, "preserved original chain grouping"
+            ))
 
     if not repaired_rows:
         return 0
@@ -8248,7 +8536,8 @@ def _repair_chain_anti_absorption_splits(scratchpad: Path) -> int:
             titles_by_id = {
                 str(group["id"]): str(group.get("title") or group["id"])
                 for group in final_groups
-                if str(group.get("reason") or "") == "MECHANICAL_ANTI_ABSORPTION_SPLIT"
+                if str(group.get("reason") or "")
+                == "MECHANICAL_ANTI_ABSORPTION_SUBCLUSTER"
             }
             for row in repaired_rows:
                 new_id = str(row.get("new") or "").strip()
@@ -11602,7 +11891,17 @@ def _validate_report_body(body: str, manifest: dict) -> dict:
             # forces boilerplate. Keep the Impact requirement; skip PoC Result
             # for UNVERIFIED. RPT-2: accept the Evidence Tag/Evidence field as a
             # valid PoC-evidence surface (parity with the post-assembly gate).
-            if "[UNVERIFIED]" not in section.upper() and not _is_substantive_body_evidence(_field_or_section(
+            # Fix 1: a [CONFIRMED] finding is verdict-confirmed on [CODE-TRACE]
+            # with NO executed PoC — same no-PoC-to-report basis as [UNVERIFIED],
+            # so it is exempt from the substantive-PoC-Result requirement too.
+            # Fix 2: a [UNPROVEN-EXTERNAL] finding likewise has NO executed PoC
+            # (its external leg could not be fork-verified for want of a
+            # reachable RPC) — same no-PoC-to-report basis, so it is exempt too.
+            _section_upper = section.upper()
+            if "[UNVERIFIED]" not in _section_upper \
+                    and "[CONFIRMED]" not in _section_upper \
+                    and "[UNPROVEN-EXTERNAL]" not in _section_upper \
+                    and not _is_substantive_body_evidence(_field_or_section(
                 section,
                 _BODY_POC_FIELDS,
                 _BODY_POC_SECTIONS,
@@ -12633,6 +12932,14 @@ def _check_speculative_critical_chains(scratchpad: Path) -> list[str]:
         verif = (r.get("verification") or "").strip().upper()
         if "VERIFIED" in verif and "UNVERIFIED" not in verif:
             continue  # genuinely verifier-confirmed
+        # Fix 1 (atomic migration): the canonical Verification column now uses
+        # CONFIRMED for a verdict-confirmed / [CODE-TRACE]-only finding (distinct
+        # from UNVERIFIED = refuted/none). STEP 1 rule 8 treats CONFIRMED as
+        # non-speculative just like VERIFIED — otherwise the ~54 CONFIRMED
+        # findings would each read as an unverified Critical chain and get
+        # falsely flagged/capped on a label change alone.
+        if "CONFIRMED" in verif:
+            continue  # verdict-confirmed (CODE-TRACE) is non-speculative
         if _chain_constituents_verified(scratchpad, r.get("report_id", "")):
             continue  # Critical inherited from verified constituent(s) (rule 8)
         flagged.append(
@@ -13206,6 +13513,10 @@ def _run_report_quality_gate(
             if t in ("C", "H", "M")
             and "VERIFICATION NOT EXECUTED" not in s.upper()
             and "[UNVERIFIED]" not in s.upper()
+            # Fix 1: [CONFIRMED] (verdict-confirmed on [CODE-TRACE], no executed
+            # PoC) is exempt from the substantive-PoC-Result requirement, same
+            # basis as [UNVERIFIED].
+            and "[CONFIRMED]" not in s.upper()
             and not _section_field_substantive(
                 s,
                 _BODY_POC_FIELDS,
@@ -16839,6 +17150,11 @@ def _report_index_adjustment_reason_present(*values: str) -> bool:
         # trail. A preserved (uncapped) severity carrying this note records
         # that the verifier blessed a genuine structural-untestability blocker
         # for the finding's PoC class, so the provenance gate must accept it.
+        # NOTE (Fix 3): the EXTERNAL-ASSUMPTION-CAP(sev) token is already
+        # accepted here via the `assumption` and `cap` alternatives above — no
+        # new alternative is needed. A canonical Verification word (CONFIRMED /
+        # VERIFIED / UNVERIFIED) is deliberately NOT added: it is a STATUS, not a
+        # severity-change REASON, and must never excuse a silent severity delta.
         r"structural|untestable",
         text,
         re.IGNORECASE,
@@ -16905,6 +17221,247 @@ def _structurally_untestable(scratchpad: Path, vtxt: str, poc_class: str) -> boo
     return True
 
 
+# ── Fix 3: narrow always-on brake for unproven external-assumption Highs ───
+# A precision post-mortem found Highs promoted purely on R10 worst-case-external
+# assumption: a finding whose in-scope-proven fact is only the ABSENCE of a
+# balance-delta check, and whose fund-loss HARM materializes solely when an
+# untrusted EXTERNAL contract's return value diverges from reality (over-report
+# / return-inflation / misrouted output). No PoC was (or could be, without a
+# fork) executed. Such a finding stays IN THE BODY (it is a real hardening gap)
+# but its severity must not ride at High on an assumed worst-case external
+# behavior — it is capped to Medium (floor Medium, never Low) and stamped
+# EXTERNAL-ASSUMPTION-CAP(<orig>). Three CONJUNCTIVE guards keep this narrow so
+# it never touches an in-scope-proven or PoC-executed finding.
+
+_EXTERNAL_ASSUMPTION_BLOCKERS: frozenset[str] = frozenset({
+    "EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS",
+    "DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL",
+    "STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION",
+})
+
+
+def _poc_not_attempted(content: str) -> bool:
+    """Guard 2: the PoC ledger says `Attempted: NO` with one of the
+    external/deployment/structural no-fork blockers.
+
+    This is the exact class the fork-PoC mandate (Fix 2) would target once an
+    RPC egress exists; until then Fix 3 caps it deterministically."""
+    if _poc_attempted_value(content) != "NO":
+        return False
+    return _poc_skip_code(content) in _EXTERNAL_ASSUMPTION_BLOCKERS
+
+
+def _poc_attempted_and_passed(content: str) -> bool:
+    """Load-bearing carve-out: the ledger shows `Attempted: YES` AND the
+    Execution Result recorded a passing run.
+
+    Protects findings whose author actually built and ran a harness that PASSED
+    (even if the tag was integrity-downgraded to [CODE-TRACE] because the PoC
+    lacked an assertion) — those are NOT unproven external-assumption Highs.
+    Redundant with guard 2 (Attempted:YES ⇒ _poc_not_attempted is False) but
+    stated explicitly so a format drift in the skip fields cannot re-expose a
+    genuinely-executed finding to the cap."""
+    if _poc_attempted_value(content) != "YES":
+        return False
+    m = re.search(
+        r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?Result(?:\*\*)?\s*:\s*\**\s*(PASS)\b",
+        content or "",
+    )
+    return bool(m)
+
+
+def _external_assumption_promoted(content: str) -> bool:
+    """Guard 3: the finding's harm is anchored to an UNTRUSTED-EXTERNAL-
+    RETURN-VALUE mechanism and its severity is promoted on that assumption.
+
+    Requires BOTH:
+      (a) an external call whose RETURN VALUE is trusted verbatim (no re-derived
+          balance-delta) — the specific in-scope-proven structural fact; AND
+      (b) a promotion signal that the HARM rides on assumed worst-case external
+          behavior — a literal `[EXTERNAL-ASSUMPTION:]` tag, R10 worst-case
+          language, or explicit external-dependency conditioning co-located with
+          the return-trust.
+
+    The mechanism requirement (a) is what makes this NOT a bare-R10 match: an
+    R10 mention alone (or any finding without external-return-value trust) never
+    fires. Anchored to a mechanism, not a protocol name (no-overfit)."""
+    low = _llm_norm(content or "").lower()
+    return_trust = bool(re.search(
+        r"return\s+value|returned?\s+(?:by|value|figure|amount)|"
+        r"reported\s+(?:figure|amount|value|output)|raw\s+\w*\s*return|"
+        r"consumed\s+verbatim|trusted\s+verbatim|ground\s+truth",
+        low,
+    ))
+    balance_delta = bool(re.search(
+        r"balance[- ]?delta|balanceof\s*delta|no\s+balance|"
+        r"without\s+[^.]*balance|delta\s+(?:check|verification|measure|bracket)|"
+        r"over[- ]?(?:pay|report)|under[- ]?deliver|"
+        r"return[- ]?inflation|inflat\w*",
+        low,
+    ))
+    if not (return_trust and balance_delta):
+        return False
+    promoted = bool(re.search(
+        r"\[\s*external-assumption\s*:|worst[- ]?(?:realistic|case)|\br10\b|"
+        r"external(?:ly)?[,\s][^.]{0,60}"
+        r"(?:dependency|contract|router|integration|system\s+contract)|"
+        r"trusted[- ]by[- ]integration|misbehav|malicious",
+        low,
+    ))
+    return promoted
+
+
+def _external_assumption_cap_applies(vtxt: str) -> bool:
+    """Whole three-guard conjunction + carve-out for the external-assumption
+    severity brake. Kept as one predicate so the severity map and the status
+    map read from the identical decision."""
+    if _poc_attempted_and_passed(vtxt):
+        return False  # carve-out: a real passing run is not unproven
+    return (
+        not has_proof_grade_evidence(vtxt)   # guard 1: no proof-grade evidence
+        and _poc_not_attempted(vtxt)          # guard 2: Attempted:NO + ext blocker
+        and _external_assumption_promoted(vtxt)  # guard 3: ext-return-value promo
+    )
+
+
+# ── Fix 2: severity-aware fork-PoC mandate (INERT-SAFE without RPC egress) ──
+# A Medium+ external-integration fund-drain/misrouting finding whose harm rides
+# on an untrusted external contract at a KNOWN deployed address is exactly the
+# class a `forge test --fork-url --fork-block-number` PoC can PROVE — instead of
+# being refused with a self-declared `structural` PoC class and no attempt. Two
+# pieces:
+#   (1) `_effective_poc_class` floors such a finding to `integration` so a
+#       verifier cannot zero the PoC requirement by self-declaring `structural`.
+#   (2) `_valid_poc_skip` rejects an EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS skip
+#       for a Medium+ CONFIRMED finding ONLY when an RPC egress-reachability
+#       probe SUCCEEDS *and* the verifier prose names a concrete address — i.e.
+#       a fork PoC is actually runnable here.
+#
+# The entire mandate is GATED on the egress-reachability probe. With NO reachable
+# RPC (this environment) the probe returns False, the skip STAYS valid, and the
+# finding is stamped `[UNPROVEN-EXTERNAL]` — the mandate is a strict NO-OP versus
+# the pre-Fix-2 disposition. Anchored to GENERIC mechanisms (no protocol names).
+
+# Client-facing evidence-honesty stamp for a Medium+ external-integration
+# finding whose fork PoC could NOT be attempted because no RPC egress was
+# reachable. It co-exists with `[CODE-TRACE]` (it is NOT a proof/trace tag and
+# is deliberately NOT in EVIDENCE_TAGS_PROOF — it must never upgrade a finding to
+# proof-grade). It records "the harm mechanism is in-scope-proven but its
+# external leg is unverified for want of a fork" so R10 can block promotion
+# ABOVE the proven-mechanism severity (never below).
+_UNPROVEN_EXTERNAL_STAMP = "[UNPROVEN-EXTERNAL]"
+
+# GENERIC fund-drain / misrouting harm vocabulary (no protocol/contract/function
+# names). A finding asserting funds are drained, mis-routed to a wrong
+# recipient/chain, over-paid, or lost across an EXTERNAL integration carries a
+# concrete fund-flow harm — the kind a fork PoC proves. Matching is
+# negation-aware via `_poc_kw_present`.
+_EXTERNAL_INTEGRATION_HARM_PATTERNS = (
+    "fund drain", "funds drained", "drain funds", "drains funds",
+    "fund loss", "funds lost", "loss of funds", "steal funds",
+    "misroute", "misrouted", "mis-routed", "mis-route",
+    "wrong recipient", "wrong destination", "wrong chain",
+    "routed to the wrong", "sent to the wrong",
+    "over-pay", "over-payment", "overpay", "overpayment",
+    "under-deliver", "misdirected", "siphon",
+)
+
+
+def _matches_external_integration_harm(*texts: str) -> bool:
+    """True iff any *text* asserts a GENERIC external-integration fund-drain /
+    misrouting harm. Negation-aware (a negated mention does not match).
+
+    Recall-direction: a match only ever routes a finding TOWARD a testable
+    (`integration`) class / keeps it in the body, never drops it."""
+    return any(
+        _poc_kw_present(p, *texts) for p in _EXTERNAL_INTEGRATION_HARM_PATTERNS
+    )
+
+
+# A concrete deployed address the verifier prose names — a RESOLVABLE target a
+# `--fork-url` PoC can pin against. This requires an actual address TOKEN, not
+# just the words "deployed address": a bare phrase like "no deployed address is
+# known" describes the ABSENCE of a target and must NOT satisfy the guard. We
+# accept a 0x-hex EVM address, an explicit "deployed/mainnet at 0x…" phrase, or a
+# base58 program-id (32–44 chars) co-located with an address/program-id cue.
+_DEPLOYED_ADDRESS_RE = re.compile(
+    r"0x[0-9a-fA-F]{40}\b"
+    r"|(?:deployed|mainnet|live|on[- ]?chain|pinned|canonical|forked?)\s+"
+    r"(?:contract\s+|program\s+)?(?:at\s+)?"
+    r"(?:0x[0-9a-fA-F]{40}\b|[1-9A-HJ-NP-Za-km-z]{32,44}\b)"
+    r"|(?:address|program\s*id)\s+(?:is\s+)?"
+    r"(?:0x[0-9a-fA-F]{40}\b|[1-9A-HJ-NP-Za-km-z]{32,44}\b)",
+    re.IGNORECASE,
+)
+
+
+def _names_resolvable_deployed_address(content: str) -> bool:
+    """Guard: the verifier prose names a concrete deployed/on-chain address
+    TOKEN (0x-hex or base58 program-id) so a `--fork-url` PoC has a pinned target
+    to fork against. A bare mention of the words "deployed address" WITHOUT an
+    actual address token does NOT satisfy this — that describes the absence of a
+    fork target, not a resolvable one."""
+    return bool(_DEPLOYED_ADDRESS_RE.search(content or ""))
+
+
+def _fork_rpc_url(scratchpad: Path) -> str:
+    """Resolve a fork RPC URL from config.json or the environment. Empty when
+    none is configured — in which case the fork-PoC mandate is inert."""
+    for env_key in ("PLAMEN_FORK_RPC_URL", "FORK_RPC_URL", "ETH_RPC_URL"):
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            return val
+    try:
+        cfg = scratchpad / "config.json"
+        if cfg.exists():
+            data = json.loads(cfg.read_text(encoding="utf-8", errors="replace"))
+            for key in ("fork_rpc_url", "rpc_url", "fork_url"):
+                val = str(data.get(key, "") or "").strip()
+                if val:
+                    return val
+    except Exception:
+        pass
+    return ""
+
+
+def _unproven_external_stamped(vtxt: str) -> bool:
+    """True when the verifier body carries the `[UNPROVEN-EXTERNAL]` stamp: an
+    external-integration finding whose fund-flow harm is in-scope-proven but
+    whose external leg could NOT be fork-verified (no reachable RPC). R10 uses
+    this to hold the report severity at the proven-mechanism floor (never above),
+    never below. Legacy verify files never carry the stamp, so this is a strict
+    no-op on pre-Fix-2 data."""
+    return _UNPROVEN_EXTERNAL_STAMP.upper() in (vtxt or "").upper()
+
+
+def _egress_rpc_reachable(scratchpad: Path) -> bool:
+    """Egress-reachability probe for the fork-PoC mandate (Fix 2).
+
+    Returns True ONLY when a fork RPC endpoint is BOTH configured AND reachable
+    via a short, bounded TCP connect. With no configured URL, no network egress,
+    or any failure, returns False — so the whole mandate is a strict no-op in an
+    RPC-less environment (this one). This is the SINGLE interlock the plan
+    requires; tests monkeypatch it to simulate a reachable RPC without real
+    network access.
+    """
+    url = _fork_rpc_url(scratchpad)
+    if not url:
+        return False
+    try:
+        import socket
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url if "://" in url else "//" + url, scheme="https")
+        host = parsed.hostname
+        if not host:
+            return False
+        port = parsed.port or (443 if (parsed.scheme or "https") == "https" else 80)
+        with socket.create_connection((host, port), timeout=2.0):
+            return True
+    except Exception:
+        return False
+
+
 def _expected_report_index_severities(scratchpad: Path) -> dict[str, str]:
     caps = _poc_demotion_caps_for_validator(scratchpad)
     proven_only = _config_proven_only(scratchpad)
@@ -16938,6 +17495,33 @@ def _expected_report_index_severities(scratchpad: Path) -> dict[str, str]:
             sev = _demote_severity_once(sev)
         if fid in caps:
             sev = _cap_report_index_severity(sev, caps[fid])
+        # Fix 3: NARROW always-on external-assumption severity brake. Fires
+        # (regardless of proven_only) ONLY on the three-guard conjunction —
+        # CODE-TRACE-only + Attempted:NO-with-external-blocker + external-
+        # return-value-promotion — and NOT on a finding with a passing run.
+        # Caps to Medium (floor Medium, never Low, in-body). `continue` so the
+        # proven_only Low-cap below can never push this class below Medium.
+        if _external_assumption_cap_applies(vtxt):
+            sev = _cap_report_index_severity(sev, "Medium")
+            out[fid] = sev
+            continue
+        # Fix 2 R10: a finding stamped `[UNPROVEN-EXTERNAL]` (external-integration
+        # fund-drain/misrouting harm whose external leg was NOT fork-verified for
+        # want of a reachable RPC) must NOT be promoted ABOVE its proven-mechanism
+        # severity on the assumed external behavior. Cap to Medium (floor Medium,
+        # in-body, never below) and `continue` so the proven_only Low-cap cannot
+        # push it lower. Gated on the LITERAL stamp + Attempted:NO + no
+        # proof-grade evidence, so it is a strict no-op on any legacy/proven
+        # finding (the stamp is absent) — this is the R10 promotion brake the
+        # INERT mandate relies on.
+        if (
+            _unproven_external_stamped(vtxt)
+            and not has_proof_grade_evidence(vtxt)
+            and _poc_attempted_value(vtxt) == "NO"
+        ):
+            sev = _cap_report_index_severity(sev, "Medium")
+            out[fid] = sev
+            continue
         # Proven-only cap for [CODE-TRACE]-only findings, WITH a structural-
         # untestability carve-out. The blanket "cap [CODE-TRACE] at Low" rule
         # conflates (1) weak/lazy traces (a harness exists but no PoC was
@@ -16956,6 +17540,72 @@ def _expected_report_index_severities(scratchpad: Path) -> dict[str, str]:
                 sev = _cap_report_index_severity(sev, "Low")
             # else: verifier-blessed structural untestability → preserve sev
         out[fid] = sev
+    return out
+
+
+# A tag-downgrade audit annotation the driver writes into a verify file when it
+# demotes a prose proof tag: e.g. `[CODE-TRACE] (was [POC-PASS], integrity
+# downgrade: ...)` or `[CODE-TRACE] (was [POC-PASS], mechanical integrity=...)`.
+# The RESIDUAL `[POC-PASS]` inside that parenthetical is NOT current evidence —
+# scanning raw text would mis-read the finding as proof-grade (the exact bug
+# that inflated index-VERIFIED to 71). Strip these before reading the tag.
+_TAG_DOWNGRADE_ANNOTATION_RE = re.compile(
+    r"\(\s*(?:was|previously|formerly)\s*\[[^\]]+\][^)]*\)",
+    re.IGNORECASE,
+)
+
+
+def _effective_proof_grade_from_verify(vtxt: str) -> bool:
+    """Is the finding's EFFECTIVE (post-integrity-downgrade) best evidence
+    proof-grade?
+
+    Reads the verify file's current evidence-tag field (the leading bracketed
+    token, after stripping any `(was [X], downgrade …)` audit annotation) and
+    tests it against the proof-grade vocabulary. Self-contained (one source:
+    the verify file the driver already rewrites on integrity downgrade), so a
+    finding whose `[POC-PASS]` was demoted to `[CODE-TRACE]` reads CONFIRMED,
+    not VERIFIED — restoring evidence honesty to the status label."""
+    stripped = _TAG_DOWNGRADE_ANNOTATION_RE.sub(" ", vtxt or "")
+    field = _field_from_markdown(
+        stripped,
+        ("Evidence Tag", "Preferred Tag", "Mechanical-Tag", "Evidence"),
+    )
+    m = re.search(r"\[([A-Za-z0-9\-]+)\]", field or "")
+    if m:
+        return f"[{m.group(1).upper()}]" in (
+            EVIDENCE_TAGS_PROOF | frozenset({
+                "[PROD-ONCHAIN]", "[PROD-SOURCE]", "[PROD-FORK]",
+            })
+        )
+    # No evidence-tag field at all: fall back to a proof-grade scan of the
+    # annotation-stripped body (still honest — the residual proof tags removed).
+    return has_proof_grade_evidence(stripped)
+
+
+def _expected_report_index_statuses(scratchpad: Path) -> dict[str, str]:
+    """Fix 1: driver-compute ONE canonical verification-status token per
+    finding — the single source of truth for BOTH the report_index Verification
+    column and the body finding-header tag.
+
+    Derived from (verifier verdict, EFFECTIVE best-evidence proof-grade) via the
+    pure `canonical_verification_status` helper. Keyed on finding ID (same key
+    space as `_expected_report_index_severities`). Emitted to `status_binding.md`
+    by the driver so the Index Agent stops re-deriving the label from raw prose
+    (which produced the 71-index / 12-body / 17-PoC collision)."""
+    out: dict[str, str] = {}
+    for row in parse_verification_queue_rows(scratchpad):
+        fid = (row.get("finding id") or "").strip()
+        if not fid:
+            continue
+        vf = _verify_file_for_id(scratchpad, fid)
+        try:
+            vtxt = _llm_norm(vf.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            vtxt = ""
+        status = _verifier_status_from_text(vtxt)
+        out[fid] = canonical_verification_status(
+            status, _effective_proof_grade_from_verify(vtxt)
+        )
     return out
 
 
@@ -19086,13 +19736,34 @@ def _poc_skip_code(content: str) -> str:
     return m.group(1).upper() if m else ""
 
 
-def _valid_poc_skip(content: str, poc_class: str) -> bool:
+def _valid_poc_skip(
+    content: str,
+    poc_class: str,
+    scratchpad: Optional[Path] = None,
+    severity: str = "",
+) -> bool:
     skip_code = _poc_skip_code(content)
     if not skip_code:
         return False
     if poc_class in {"unit", "property"} and skip_code == "STRUCTURAL_NO_EXECUTABLE_HARM_ASSERTION":
         return False
     if poc_class == "unit" and skip_code == "DEPLOYMENT_ONLY_REQUIRES_LIVE_EXTERNAL":
+        return False
+    # Fix 2: severity-aware fork-PoC mandate. An
+    # EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS skip becomes INVALID for a Medium+
+    # finding ONLY when a fork PoC is actually runnable here — the egress-
+    # reachability probe SUCCEEDS *and* the verifier prose names a concrete
+    # deployed address to fork against. In an RPC-less environment the probe
+    # returns False, so this branch never fires and the skip stays valid (the
+    # finding then rides `[UNPROVEN-EXTERNAL]`). This is INERT-SAFE: it can only
+    # ADD an obligation when a real fork endpoint exists, never in this env.
+    if (
+        skip_code == "EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS"
+        and scratchpad is not None
+        and normalize_severity(severity) in {"Critical", "High", "Medium"}
+        and _names_resolvable_deployed_address(content)
+        and _egress_rpc_reachable(scratchpad)
+    ):
         return False
     # Mock-feasibility blocker (THE intentional recall-safe narrowing): an
     # EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS skip is invalid when the verifier's
@@ -19160,6 +19831,18 @@ def _effective_poc_class(
     # (A queue estimate that is already unit/property is left as-is.)
     if _matches_resource_exhaustion(content):
         return poc_class if poc_class in {"unit", "property"} else "property"
+    # STICKY FLOOR (Fix 2, mirror of the resource-exhaustion floor above): a
+    # finding whose harm is an external-integration fund-drain / misrouting AND
+    # whose verifier prose names a concrete deployed address HAS a fork-testable
+    # harm. Do NOT honor a verifier self-declaring `structural`/`spec`/`docs` to
+    # zero the PoC requirement — floor the effective class at `integration` so
+    # the fork-PoC mandate re-queues a real attempt (when RPC egress exists).
+    # A queue estimate already at unit/property/integration is left as-is (only
+    # a non-testable self-declaration is blocked). GENERIC — no protocol names.
+    if _matches_external_integration_harm(content) and \
+            _names_resolvable_deployed_address(content):
+        return poc_class if poc_class in {"unit", "property", "integration"} \
+            else "integration"
     declared_raw, _shape = _field_anywhere(
         content, ("PoC Class", "Poc Class"), table_ok=True
     )
@@ -19306,7 +19989,9 @@ def _validate_poc_contract_for_rows(
             ):
                 issues.append(f"{fid} says Attempted:YES but lacks concrete Test File/Command")
             continue
-        if attempted_no and _valid_poc_skip(content, poc_class):
+        if attempted_no and _valid_poc_skip(
+            content, poc_class, scratchpad, row.get("severity", "")
+        ):
             # Medium+ project-mock override (parity with the aggregate
             # skip-vocabulary audit, scoped to Critical/High/Medium to avoid
             # Low/Info retry churn): an EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS
@@ -19384,6 +20069,62 @@ def _validate_poc_attempt_coverage(scratchpad: Path, mode: str) -> list[str]:
         queue_class = row.get("poc class", "structural").strip().lower()
         severity = (row.get("severity") or "").strip().lower()
         fid = row.get("finding id", "")
+
+        # Fix 2 (fork-PoC mandate, INERT-SAFE): an external-integration
+        # fund-drain / misrouting finding whose harm rides on an untrusted
+        # external contract at a known deployed address is fork-testable — even
+        # when the queue/verifier class is `integration`/`structural` (so the
+        # unit/property gate below `continue`s past it). Handle that class HERE.
+        #   * Mandate ACTIVE (RPC egress reachable + verifier names a concrete
+        #     address): an EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS skip is INVALID
+        #     — log POC_ATTEMPT_SKIPPED for Medium+ so a fork PoC is demanded.
+        #   * Mandate INERT (no reachable RPC — this env): the skip STAYS valid;
+        #     stamp `[UNPROVEN-EXTERNAL]` and record an informational note. This
+        #     is a strict no-op versus pre-Fix-2 (no new violation).
+        # Only fires when the finding is NOT already caught by the unit/property
+        # path below (queue_class not unit/property), so no double-processing.
+        if (
+            queue_class not in ("unit", "property")
+            and severity in ("critical", "high", "medium")
+        ):
+            fpath = _find_verify_file(scratchpad, fid)
+            if fpath:
+                try:
+                    fcontent = fpath.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    fcontent = ""
+                eff_class = _effective_poc_class(queue_class, fcontent)
+                if (
+                    eff_class == "integration"
+                    and _matches_external_integration_harm(fcontent)
+                    and _names_resolvable_deployed_address(fcontent)
+                    and not has_mechanical_proof(fcontent)
+                    and _poc_attempted_value(fcontent) == "NO"
+                    and _poc_skip_code(fcontent)
+                    == "EXTERNAL_DEPENDENCY_NO_FORK_OR_ADDRESS"
+                ):
+                    if _egress_rpc_reachable(scratchpad):
+                        # Mandate ACTIVE: a fork PoC is runnable — demand it.
+                        warnings.append(
+                            f"POC_ATTEMPT_SKIPPED: {fid} (poc_class={eff_class}, "
+                            f"severity={severity}) — external-integration "
+                            "fund-drain/misrouting harm at a named deployed "
+                            "address with a reachable fork RPC: run "
+                            "`forge test --fork-url <rpc> --fork-block-number "
+                            "<pinned>` against the pinned address, or "
+                            "non-silently reclassify with justification"
+                        )
+                    else:
+                        # Mandate INERT (no RPC egress): NO-OP. Record the
+                        # evidence-honesty stamp so downstream R10 keeps the
+                        # finding at its proven-mechanism severity (never above).
+                        warnings.append(
+                            f"POC_UNPROVEN_EXTERNAL: {fid} (poc_class={eff_class}, "
+                            f"severity={severity}) — {_UNPROVEN_EXTERNAL_STAMP} "
+                            "external leg unverified (no reachable fork RPC); "
+                            "skip valid, severity held at proven-mechanism floor"
+                        )
+            continue
 
         # First-pass cheap gate on the QUEUE class (no I/O): if not even the
         # queue estimate makes this testable, skip without reading the file.

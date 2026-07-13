@@ -33,6 +33,7 @@ Read:
 - `{SCRATCHPAD}/blind_spot_*_findings.md` or `{SCRATCHPAD}/scanner_*_findings.md` (scanner findings)
 - `{SCRATCHPAD}/validation_sweep_findings.md` or `{SCRATCHPAD}/scanner_validation_findings.md` (validation findings)
 - `{SCRATCHPAD}/dedup_candidate_pairs.md` (OPTIONAL — pre-computed same-file finding pairs with high title overlap or shared code identifiers, produced by the depth promotion pipeline. Use as HINTS for Step 1.5 consolidation.)
+- `{SCRATCHPAD}/dedup_cluster_map.md` (OPTIONAL — pre-computed transitive-closure CLUSTERS of co-referent survivors (`CLUSTER: A, B, C` lines) that share the same file+function+fix-pattern AND the same tier, each with a ready-made consolidated Location table. These are the STRONGEST Step 1.5 hint: consolidate each cluster's members into ONE report finding and reuse its location table. Recall-safe (same-tier, same-mechanism only); still apply the consolidation test before merging.)
 - `{SCRATCHPAD}/poc_demotions.md` (OPTIONAL — mechanically-computed severity caps for findings where PoC execution disproved the claimed harm. If present, apply caps in STEP 1 rule 7.)
 
 Forbidden inputs:
@@ -199,11 +200,13 @@ Before assigning report IDs, consolidate hypotheses that share the same root cau
 
 ### Pre-computed Hints
 
-Two sources of dedup signals exist. Both are HINTS — the LLM makes the final semantic decision using the consolidation test below. Neither source ever blocks or removes findings mechanically.
+Three sources of dedup signals exist. All are HINTS — the LLM makes the final semantic decision using the consolidation test below. No source ever blocks or removes findings mechanically.
 
 1. **`[LIKELY-DUP]` tags in `findings_inventory.md`**: Depth-promoted findings that share the same file AND >=80% title overlap with an existing inventory entry carry a `**Dedup Signal**: [LIKELY-DUP of "..." score=X.XX]` line. These are the strongest mechanical signal — evaluate them first. If the two findings describe the SAME root cause with the SAME fix, consolidate. If they describe different bugs that happen to use similar words, keep them separate.
 
-2. **`dedup_candidate_pairs.md`**: Pre-computed same-file finding pairs with >=50% title overlap or shared function/struct identifiers. Broader than `[LIKELY-DUP]` — evaluate each pair using the consolidation test below.
+2. **`dedup_cluster_map.md`**: Pre-computed transitive-closure CLUSTERS (each a `CLUSTER: A, B, C` line under a `## Cluster CL-n` heading) of co-referent survivors that ALREADY passed the pairwise consolidation predicate at the SAME code site (file+function), SAME root-cause/fix-pattern, AND SAME tier — the exact fragmentation that pairwise dedup cannot collapse on its own. For each cluster, consolidate ALL its members into ONE report finding and reuse the ready-made **Consolidated Location table** verbatim as that finding's Location. This is the highest-value Step 1.5 input; still confirm the consolidation test below before merging (the cluster is same-tier and same-mechanism by construction, so it should pass).
+
+3. **`dedup_candidate_pairs.md`**: Pre-computed same-file finding pairs with >=50% title overlap or shared function/struct identifiers. Broader than the cluster map — evaluate each pair using the consolidation test below.
 
 **When in doubt, do NOT merge.** A duplicate finding in the report is a cosmetic issue. A dropped true positive is a missed vulnerability.
 

@@ -41,6 +41,7 @@ from plamen_parsers import _dedup_live_pair_cap  # noqa: F401
 # it by name too (mirrors the _dedup_live_pair_cap robustness pattern) so the
 # phase wiring below is insulated from __all__ drift.
 from plamen_parsers import _compute_dedup_candidate_blocks  # noqa: F401
+from plamen_parsers import _compute_report_dedup_candidate_pairs  # noqa: F401
 from plamen_mechanical import _extract_dedup_absorbed_ids  # noqa: F401
 import plamen_display as display
 from pty_exec import (
@@ -2305,11 +2306,18 @@ def _phase_content_gate_issues(
     if phase.name == "exploration_skeptic":
         # Soft, additive phase: validator only ever returns [], so this is
         # always content-valid on resume — prevents a false resume-halt.
+        # M1: the committed-invariant soft validator runs alongside (also
+        # always returns []); it only writes a `.ci_gap` sentinel for visibility.
+        _validate_invariant_commitment(scratchpad, mode)
         return list(_validate_exploration_skeptic(scratchpad, mode))
     if phase.name == "enumgap_exploration":
         # Soft, additive phase (validator always returns []) — content-valid on
         # resume so it never causes a false resume-halt.
         return list(_validate_enumgap_exploration(scratchpad, mode))
+    if phase.name == "axis_coverage":
+        # Soft, additive phase (M2 validator always returns []) — content-valid on
+        # resume so it never causes a false resume-halt.
+        return list(_validate_axis_coverage(scratchpad, mode))
     if phase.name == "report_assemble":
         # RESUME-3: the FC4 content re-check must be SIDE-EFFECT-FREE and
         # content-only. Do NOT run _run_report_quality_gate here (it writes
@@ -3943,8 +3951,13 @@ def _propagate_dedup_absorbed_to_finding_mapping(scratchpad: Path) -> int:
 
     # Build survivor_id -> hypothesis_id from existing finding_mapping rows:
     #   | <finding_id> | <hypothesis_id> | <status> | <notes> |
+    # Both columns use the widened / unified ID shapes so severity-encoded L1
+    # hypothesis IDs (H-C01, HC-01, L1-H-12) and multi-segment finding IDs are
+    # not silently skipped — the same ID-format-too-narrow drop class fixed for
+    # the AXIS/CI promoters. Column 2 reuses _ID_HYPO_ALTS (no capture groups).
     row_re = re.compile(
-        r"^\|\s*([A-Za-z]+-\d+)\s*\|\s*(H-\d+|CH-\d+)\s*\|", re.MULTILINE
+        r"^\|\s*([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)\s*\|\s*(" + _ID_HYPO_ALTS + r")\s*\|",
+        re.MULTILINE,
     )
     survivor_to_hyp: dict[str, str] = {}
     existing_finding_ids: set[str] = set()
@@ -8723,8 +8736,15 @@ def _parse_sc_skill_bindings(
             re.IGNORECASE,
         )
         cross_chain = re.search(
-            r"\b(cross-chain|cross chain|destination chain|withdrawAndCall|"
-            r"GatewayZEVM|GatewayEVM|revertMessage|onRevert|onAbort)\b",
+            # Generic cross-chain-messaging vocabulary (bridge/relay families —
+            # LayerZero/Wormhole/Axelar/CCIP-style), NOT any one protocol's literal
+            # contract/method names. Drawn from the CROSS_CHAIN_MESSAGE_INTEGRITY
+            # trigger set. The AND-gate with `positive` (Solana/Bitcoin/Borsh) keeps
+            # this from over-firing on plain EVM bridges.
+            r"\b(cross-chain|cross chain|destination chain|source chain|bridge|"
+            r"relay|gateway|payload|onRevert|onAbort|onFailure|onCall|onMessage|"
+            r"onReceive|withdrawAndCall|sendAndCall|ccipReceive|"
+            r"receiveWormholeMessages)\b",
             hay,
             re.IGNORECASE,
         )
@@ -10585,7 +10605,7 @@ def _tokenize_path(file_path: str) -> set[str]:
     """Tokenize a file path for focus-area matching.
 
     Splits on path separators, dots, underscores, hyphens, AND
-    camelCase boundaries (so ``GatewayCrossChain.sol`` yields
+    camelCase boundaries (so ``CrossChainRouter.sol`` yields
     ``gateway``, ``cross``, ``chain``, ``sol``). Lowercase.
     """
     if not file_path:
@@ -10628,7 +10648,7 @@ def _focus_area_tokens(focus: str) -> set[str]:
 # to every agent whose focus-area name corresponds to that bucket
 # (token overlap between focus_area and bucket name), IN ADDITION to
 # file-path routing. This fixes the under-routing failure where an
-# access-control finding in GatewayCrossChain.sol routed only to the
+# access-control finding in CrossChainRouter.sol routed only to the
 # cross-chain agents because the FILENAME contained cross/chain --
 # the access-control agent never saw it. Content-based routing is the
 # PRIMARY signal; file-path is one additional signal.
@@ -10750,7 +10770,7 @@ def _match_agents_for_row(
         (see ``_OPENGREP_SEMANTIC_BUCKETS``). The row routes to every
         agent whose focus-area name shares a token with a matched
         bucket name. This is what gets an access-control finding in
-        GatewayCrossChain.sol to the access_control agent even though
+        CrossChainRouter.sol to the access_control agent even though
         the filename screams cross-chain.
 
       Signal B (file path, ONE additional signal): the agent's
@@ -11615,6 +11635,29 @@ def _run_depth_codex_fanout(
     # Let the existing depth gate (validator after run_phase) judge overall
     # completeness — it now sees real artifacts, not stubs.
     return 0
+
+
+def _axis_coverage_has_no_gaps(scratchpad: Path) -> bool:
+    """Pre-spawn skip-when-clean signal for phase `axis_coverage` (M2, Phase 4b.8).
+
+    Runs the mechanical hot-function ranking + `function × axis` matrix build
+    FIRST (persisting hot_function_axes.md + _hot_function_axes.json for
+    visibility), then reports whether ANY GAP cell exists. Returns True (skip the
+    LLM spawn) ONLY when the matrix has zero GAP cells — every hot function was
+    already examined on every in-scope axis, or the axis is a provable N/A.
+
+    Conservative on failure: returns False (do NOT skip) so a real gap set is
+    never silently dropped — recall over cost. The phase is soft, so a spurious
+    spawn only wastes one sonnet turn. The ambiguous-⇒-GAP default inside
+    compute_axis_coverage_gaps means the matrix over-reports gaps rather than
+    under-reporting them, so a True return is a genuine all-clear.
+    """
+    try:
+        import enumeration_gate as _eg
+        gaps = _eg.compute_axis_coverage_gaps(Path(scratchpad))
+        return not gaps
+    except Exception:
+        return False
 
 
 # --- Core ---
@@ -14097,6 +14140,16 @@ def _run_phase_validators(
     # output. Same soft-dispatch idiom as invariants_p2/chain_iter2.
     if phase.name == "exploration_skeptic" and passed and not recovery_preflight:
         _validate_exploration_skeptic(scratchpad, config.get("mode", "core"))
+        # M1: committed-invariant soft validator (always []; sentinel-only).
+        _validate_invariant_commitment(scratchpad, config.get("mode", "core"))
+
+    # --- skeptic (Phase 5.1) — M1 committed-invariant soft validator ----
+    # Recall-positive / additive. The skeptic emits [CI-n] blocks on value-
+    # bearing DOWNGRADE/refute; the enumeration gate later harvests them. This
+    # soft validator only writes a `.ci_gap` sentinel when clears carry no CI
+    # block; it always returns [] and never halts.
+    if phase.name == "skeptic" and passed and not recovery_preflight:
+        _validate_invariant_commitment(scratchpad, config.get("mode", "core"))
 
     # --- enumgap_exploration (Phase 4b.7) -------------------------------
     # Recall-positive / additive soft phase. The depth-exploration agent TRACED
@@ -14122,6 +14175,64 @@ def _run_phase_validators(
         except Exception as exc:
             log.warning(
                 f"[{phase.name}] enumgap exploration promotion skipped "
+                f"(non-blocking): {exc}"
+            )
+
+    # --- axis_coverage (Phase 4b.8, M2) ---------------------------------
+    # Recall-positive / additive soft phase. The deriver-worker interrogated each
+    # GAP cell (a mechanically-hot function on a previously-unexamined risk axis)
+    # and wrote a real finding or a reasoned clear; now promote those findings into
+    # findings_inventory.md as AXISGAP-sourced INV-* blocks so they flow through the
+    # SAME inventory -> dedup -> chain -> verify path as every other finding. The
+    # validator is soft (always []) and the promotion never raises — if the phase
+    # degraded, no findings are promoted and no prior finding is lost.
+    if phase.name == "axis_coverage" and passed and not recovery_preflight:
+        _validate_axis_coverage(scratchpad, config.get("mode", "core"))
+        try:
+            import enumeration_gate as _eg
+            _pr = _eg.promote_axis_findings_to_inventory(scratchpad)
+            # Harvest-vs-emit reconciliation (durable guard against ID-format
+            # drift silently dropping candidates — the class that dark-dropped
+            # 14 AXIS findings, incl. a High, pre-fix). If the artifact carries
+            # finding headings but promotion parsed none, the parser/ID-format
+            # has drifted; surface it LOUDLY instead of the prior silent 0.
+            try:
+                _axf = Path(scratchpad) / "axis_coverage_findings.md"
+                _headings = 0
+                if _axf.exists():
+                    import re as _re
+                    _headings = len(_re.findall(
+                        r"(?m)^#{2,4}\s*Finding\s*\[",
+                        _axf.read_text(encoding="utf-8", errors="replace")))
+                if _headings > 0 and _pr.get("parsed", 0) == 0:
+                    log.warning(
+                        f"[{phase.name}] AXIS PROMOTION MISMATCH: {_headings} "
+                        "finding heading(s) in axis_coverage_findings.md but "
+                        "promotion parsed 0 — ID-format/parser drift; candidates "
+                        "would be silently dropped. Investigate _EXPL_HEADING_RE."
+                    )
+                    try:
+                        (Path(scratchpad) / "axis_coverage_promotion_receipt.md"
+                         ).write_text(
+                            f"[AXIS_PROMOTION_MISMATCH] {_headings} finding "
+                            "heading(s) present but 0 parsed — ID-format/parser "
+                            "drift. No AXIS candidate reached the inventory. Fix "
+                            "the heading parser (_EXPL_HEADING_RE).\n",
+                            encoding="utf-8")
+                    except OSError:
+                        pass
+            except Exception:
+                pass
+            if _pr.get("emitted"):
+                log.info(
+                    f"[{phase.name}] promoted {_pr['emitted']} multi-axis "
+                    f"coverage finding(s) into findings_inventory.md "
+                    f"(parsed {_pr['parsed']}; see "
+                    "axis_coverage_promotion_receipt.md)"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] axis coverage promotion skipped "
                 f"(non-blocking): {exc}"
             )
 
@@ -14494,6 +14605,53 @@ def _run_phase_validators(
                 f"[{phase.name}] dedup absorbed-map propagation failed "
                 f"(non-blocking): {exc!r}"
             )
+
+        # Attribution ledger: map each surviving inventory finding to its
+        # contributing Source tokens (normal + generator class tokens
+        # AXISGAP:/INVARIANT:). Runs AFTER all absorptions so a merged
+        # survivor's ledger row reflects the provenance-preserving merge —
+        # makes "did M1/M2 co-find this" a mechanical grep. Non-blocking.
+        try:
+            _attr = write_mechanism_attribution_ledger(scratchpad)
+            if _attr.get("rows"):
+                log.info(
+                    f"[{phase.name}] wrote mechanism_attribution.md: "
+                    f"{_attr['rows']} finding(s), {_attr.get('axisgap', 0)} "
+                    f"AXISGAP-sourced, {_attr.get('invariant', 0)} "
+                    "INVARIANT-sourced"
+                )
+        except Exception as exc:
+            log.warning(
+                f"[{phase.name}] mechanism attribution ledger failed "
+                f"(non-blocking): {exc!r}"
+            )
+
+        # Fix 4: transitive-closure clustering over the surviving inventory.
+        # Pairwise dedup leaves N co-referent survivors (fragmentation); this
+        # collapses each same-file+function+fix-pattern, same-tier connected
+        # component to ONE report finding and writes dedup_cluster_map.md — a
+        # consolidation HINT the report-index STEP-1.5 reads so the writer emits
+        # a single finding with a location table. Runs AFTER all absorptions so
+        # it clusters the final survivor set. SC-only, non-blocking.
+        if phase.name == "sc_semantic_dedup":
+            try:
+                n_cl = build_dedup_cluster_map(scratchpad)
+                if n_cl > 0:
+                    log.info(
+                        f"[{phase.name}] wrote dedup_cluster_map.md: {n_cl} "
+                        "co-referent cluster(s) for report-index STEP-1.5 "
+                        "consolidation (location-table findings)"
+                    )
+                else:
+                    log.info(
+                        f"[{phase.name}] no co-referent clusters detected; "
+                        "dedup_cluster_map.md is empty"
+                    )
+            except Exception as exc:
+                log.warning(
+                    f"[{phase.name}] cluster-map build failed "
+                    f"(non-blocking): {exc!r}"
+                )
 
     # --- recon: Slither materialization + coverage + scope_leftover ---
     if phase.name == "recon":
@@ -17760,6 +17918,25 @@ def main():
             # actual bounded dedup worker.
             _skip_artifact_recovery_this_phase = True
 
+        # Fix 4: pre-compute the cross-tier same-location candidate HINT list for
+        # the report_dedup_agent (Phase 6d LLM proposer). The mechanical
+        # report_dedup pass has no candidate list, so an identical-location twin
+        # across tiers (a High and a Medium at the same lines) never reached the
+        # proposer. This writes report_dedup_candidate_pairs.md (candidate-only —
+        # the agent's same-root-cause + same-fix test stays the sole merge
+        # authority). Best-effort: a failure only loses the hint, never a finding.
+        if phase.name == "report_dedup_agent":
+            try:
+                n_cand = _compute_report_dedup_candidate_pairs(scratchpad)
+                log.info(
+                    f"[report_dedup_agent] wrote report_dedup_candidate_pairs.md "
+                    f"({n_cand} cross-tier same-location candidate pair(s))"
+                )
+            except Exception as exc:
+                log.warning(
+                    f"[report_dedup_agent] candidate-pair pre-compute failed: {exc!r}"
+                )
+
         # Pre-compute binding severity table for report_index LLM.
         # Eliminates retry cycles caused by the LLM silently inflating
         # severity without a Trust Adj. reason.
@@ -17788,6 +17965,45 @@ def main():
                     )
             except Exception as exc:
                 log.warning(f"[report_index] severity binding failed: {exc!r}")
+
+            # Fix 1: pre-compute the ONE canonical verification-status token per
+            # finding (status_binding.md). The Index Agent fills BOTH the
+            # report_index Verification column AND the body finding-header tag
+            # from this file, ending the 71-index / 12-body / 17-PoC label
+            # collision. Best-effort: a failure only loses the convenience
+            # binding (the LLM falls back to reading the verify verdicts).
+            try:
+                status_map = _expected_report_index_statuses(scratchpad)
+                if status_map:
+                    _slines = [
+                        "# Verification Status Binding Table",
+                        "",
+                        "Driver-computed canonical verification-status token per "
+                        "finding, from (verifier verdict, best evidence tag). The "
+                        "Index Agent MUST use these tokens for BOTH the "
+                        "report_index Verification column AND the body "
+                        "`### [X-NN] Title [STATUS]` header tag.",
+                        "",
+                        "- VERIFIED  = verdict CONFIRMED + proof-grade evidence "
+                        "([POC-PASS]/[MEDUSA-PASS]/[PROD-*])",
+                        "- CONFIRMED = verdict CONFIRMED but only [CODE-TRACE]",
+                        "- CONTESTED = disputed (CONTESTED/UNRESOLVED/PARTIAL)",
+                        "- UNVERIFIED = refuted / none",
+                        "",
+                        "| Finding ID | Verification Status |",
+                        "|------------|---------------------|",
+                    ]
+                    for fid in sorted(status_map, key=lambda x: x.upper()):
+                        _slines.append(f"| {fid} | {status_map[fid]} |")
+                    (scratchpad / "status_binding.md").write_text(
+                        "\n".join(_slines) + "\n", encoding="utf-8",
+                    )
+                    log.info(
+                        f"[report_index] wrote status_binding.md "
+                        f"({len(status_map)} finding(s))"
+                    )
+            except Exception as exc:
+                log.warning(f"[report_index] status binding failed: {exc!r}")
 
             # R2: mechanical completeness backbone. Enumerate every finding/
             # hypothesis ID from bounded ledgers so the Index Agent never has
@@ -18056,6 +18272,45 @@ def main():
                 display.print_phase_skipped(
                     phase_idx + 1, total_active, phase.name,
                     "N/A (no enumeration obligations)",
+                )
+                continue
+
+        # Phase 4b.8 (M2) pre-spawn skip-when-clean. The driver computes the
+        # hot-function × axis matrix MECHANICALLY FIRST (writing hot_function_axes.md
+        # + _hot_function_axes.json), and ONLY spawns the deriver-worker if GAP
+        # cells exist. With no GAP cells there is nothing to interrogate: write a
+        # deterministic stub, mark complete, skip the LLM. Recall-safe: the matrix
+        # is always persisted for visibility; the ambiguous-⇒-GAP default in
+        # compute_axis_coverage_gaps means a spurious skip cannot hide a true gap.
+        if phase.name == "axis_coverage":
+            if _axis_coverage_has_no_gaps(scratchpad):
+                try:
+                    (scratchpad / "axis_coverage_findings.md").write_text(
+                        "# Multi-Axis Coverage Meta-Pass\n\n"
+                        "_The mechanically-computed hot-function × axis matrix "
+                        "(see hot_function_axes.md) has no GAP cells — every "
+                        "mechanically-hot function was already examined on every "
+                        "in-scope risk axis (or the axis is a provable N/A). There "
+                        "is nothing to interrogate; this additive phase is skipped. "
+                        "No prior finding is lost._\n\n"
+                        "## Coverage Record\n\n"
+                        "| Function | Axis | Disposition | Evidence |\n"
+                        "|----------|------|-------------|----------|\n"
+                        "| (none) | (none) | CLEAR | no GAP cells in the matrix |\n",
+                        encoding="utf-8",
+                    )
+                except OSError:
+                    pass
+                checkpoint.mark_completed(phase.name)
+                checkpoint.clear_degraded_sentinel(scratchpad, phase.name)
+                checkpoint.save(scratchpad)
+                log.info(
+                    f"[{phase.name}] N/A — hot-function × axis matrix has no GAP "
+                    "cells; skipping spawn (matrix persisted for visibility)"
+                )
+                display.print_phase_skipped(
+                    phase_idx + 1, total_active, phase.name,
+                    "N/A (no unexamined axes)",
                 )
                 continue
 

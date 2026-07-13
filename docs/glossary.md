@@ -136,10 +136,10 @@ explained inline where it's used.
   inherited SIGCHLD. On Windows: `winpty.PtyProcess.spawn` via `pywinpty`.
   Lets `/plamen` launch from inside a Claude Code session without parent
   process state poisoning the children.
-- **Discovery aids** — feature-derived analysis prompts consumed by depth
-  workers: `security_obligations.md` (obligation ledger from recon) and
-  `asset_binding_matrix.md` (value-flow binding checklist). Protocol-agnostic
-  — generalize across DEX, vault, lending, bridge, L1 client, etc.
+- **Discovery aids** — feature-derived analysis prompt consumed by depth
+  workers: `security_obligations.md` (obligation ledger from recon).
+  Protocol-agnostic — generalizes across DEX, vault, lending, bridge, L1
+  client, etc.
 
 ## Resilience & recovery
 

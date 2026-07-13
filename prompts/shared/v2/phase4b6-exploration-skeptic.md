@@ -191,6 +191,40 @@ When in doubt between NO-GAP and ADD, choose ADD. This phase is additive-only;
 an extra ADD is recoverable downstream, a falsely-cleared instance is a missed
 vulnerability.
 
+### Committed-Invariant Emission (ADDITIVE — for every value-bearing NO-GAP)
+
+Whenever you record `NO-GAP` for a value-bearing instance (one touching value
+movement, supply/shares, accounting, authorization, or a boundary that gates
+funds/liveness), you are asserting a tacit LOCAL GUARD makes it safe. Do not
+leave that guard implicit — commit it as an executable, falsifiable assertion so
+the falsifier can try to break it. This is strictly additive and inherits this
+phase's ADD/UPGRADE-only authority; it never drops, merges, or downgrades any
+finding.
+
+For each such `NO-GAP`, additionally emit a `committed-invariant [CI-n]` block
+naming the local guard you believe makes the instance safe, expressed as exactly
+ONE of the six generic SHAPES — `CONSERVATION` (Σin == Σout ± fee),
+`REQUESTED_EQ_DELIVERED`, `APPROVE_EQ_SPEND`, `NO_REVERT_AT_BOUNDARY`
+(min/mid/max), `ROUNDTRIP` (decode∘encode == id), `FRESHNESS` (input age ≤ bound
+/ source == expected). Resolve symbols at the locus (`file:Lnn`, real
+variable/function names) but NEVER bake a protocol constant as "the answer" — the
+assertion is a relational shape, not a hardcoded value.
+
+```
+committed-invariant [CI-n]
+Locus: <file>:L<nn>  (fn: <enclosing function>)
+Shape: <one of CONSERVATION|REQUESTED_EQ_DELIVERED|APPROVE_EQ_SPEND|NO_REVERT_AT_BOUNDARY|ROUNDTRIP|FRESHNESS>
+Assertion: <the falsifiable relation at the locus, symbols resolved>
+Falsify Class: <property | boundary | roundtrip | conservation>
+Provenance: skeptic NO-GAP @ <instance>
+```
+
+Emit one block per value-bearing NO-GAP instance. A non-value-bearing NO-GAP
+(pure view, no funds/liveness effect) needs no block. These blocks are
+mechanically harvested downstream into falsifiable candidates and handed to the
+fuzz/PoC gates; a survived assertion sharpens the spec, a triggered one is a real
+bug.
+
 ---
 
 ## Output Requirements

@@ -1,8 +1,8 @@
-# Plamen (v2.2.1)
+# Plamen (v2.2.3)
 
 Autonomous Web3 security auditor for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [OpenAI Codex CLI](https://github.com/openai/codex).
 
-Orchestrates 18-100 AI agents across 8 phases to produce audit reports with verified PoC exploits — for **smart contracts** and **L1 node-client infrastructure**.
+Orchestrates 18-100 AI agents across 40+ phases to produce audit reports with verified PoC exploits — for **smart contracts** and **L1 node-client infrastructure**.
 
 Supports **EVM/Solidity**, **Solana/Anchor**, **Aptos Move**, **Sui Move**, **Soroban/Stellar**, **DAML/Canton**, and **L1 Go/Rust node clients**.
 
@@ -80,8 +80,9 @@ python plamen.py install --codex     # optional: add Codex CLI backend
 ```
 
 > **Use `git clone --recurse-submodules`, not "Download ZIP"**. The repo ships
-> `custom-mcp/slither-mcp/` and `custom-mcp/farofino-mcp/` as git submodules; ZIP
-> downloads silently omit them. If you already cloned without
+> `custom-mcp/slither-mcp/`, `custom-mcp/farofino-mcp/`, and the three
+> `opengrep-rules/*` rule sets (`aptos-move-rules`, `decurity-rules`,
+> `opengrep-rules`) as git submodules; ZIP downloads silently omit them. If you already cloned without
 > `--recurse-submodules`, run `git submodule update --init --recursive` from
 > inside `~/.plamen/` before `plamen install`.
 >
@@ -308,7 +309,7 @@ normally never need to open it; `AUDIT_REPORT.md` is the deliverable. See
 
 ---
 
-## What's New in v2.1.0
+## What Changed in v2.1.0
 
 v2.1.0 changes *how* the pipeline runs, not what the agents analyze. Highlights:
 

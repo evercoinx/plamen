@@ -74,13 +74,13 @@ def test_block_parser_parses_ds_de_blind_headings():
         "depth_state_trace_findings.md": (
             "## DEPTH ANALYSIS: State Trace\n\n"
             "### Finding [DS-1]: Drain via empty swapData\n"
-            "**Severity**: High\n**Location**: GatewayTransferNative.sol:L530\n"
+            "**Severity**: High\n**Location**: NativeVault.sol:L530\n"
             "**Verdict**: CONFIRMED\n**Preferred Tag**: [CODE-TRACE]\n"
             "**Description**: distinct mechanism.\n\n"
             "### Source: DS-9 (mutation analysis of an existing finding)\n"
             "this is a perturbation/source analysis block, NOT a new finding\n\n"
             "### Finding [BLIND-C1]: renounceOwnership callable\n"
-            "**Severity**: Medium\n**Location**: GatewayCrossChain.sol:L19\n"
+            "**Severity**: Medium\n**Location**: CrossChainRouter.sol:L19\n"
             "**Verdict**: CONFIRMED\n**Description**: permanent ownership loss.\n"
         ),
     })
@@ -103,15 +103,15 @@ def test_token_flow_file_now_in_promotion_globs():
 _INV = (
     "# Findings Inventory\n\n"
     "### Finding [INV-001]: Existing unrelated finding\n"
-    "**Severity**: Medium\n**Location**: GatewayCrossChain.sol:L100\n"
+    "**Severity**: Medium\n**Location**: CrossChainRouter.sol:L100\n"
     "**Description**: unrelated.\n"
 )
 
 _DEPTH_DS1 = (
     "## DEPTH ANALYSIS: State Trace\n\n"
-    "### Finding [DS-1]: withdrawToNativeChain ETH-path drains any held ZRC20 via empty swapData\n"
+    "### Finding [DS-1]: withdrawToNativeChain ETH-path drains any held WrappedToken via empty swapData\n"
     "**Severity**: High\n"
-    "**Location**: GatewayTransferNative.sol:L530-600\n"
+    "**Location**: NativeVault.sol:L530-600\n"
     "**Verdict**: CONFIRMED\n"
     "**Preferred Tag**: [CODE-TRACE]\n"
     "**Description**: empty swapData returns amount unswapped; withdraw pays out "
