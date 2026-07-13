@@ -1,18 +1,21 @@
-"""Update ~/.claude/settings.json to use locally-installed pinned MCP packages.
+"""Pin locally-installed MCP npm packages via `claude mcp add-json -s user`.
 
 Replaces npx commands with direct node invocations pointing at the local
-node_modules. Wraps servers that need schema sanitization. Preserves all
-existing env vars and non-npm servers untouched.
+node_modules. Wraps servers that need schema sanitization. Preserves each
+server's existing env vars.
 
 Cross-platform: works on Windows, macOS, and Linux.
-Target: ~/.claude/settings.json (the Claude Code canonical MCP config).
+Target: Claude Code's user-scope MCP registry, via the `claude` CLI —
+NOT ~/.claude/settings.json, whose `mcpServers` key the `claude` binary
+does not read.
 """
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 
-MCP_JSON = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
 MCP_DIR = os.path.dirname(os.path.abspath(__file__))
 NM = os.path.join(MCP_DIR, "node_modules")
 SANITIZER = os.path.join(MCP_DIR, "schema-sanitizer.js")
@@ -48,18 +51,33 @@ def _build_args(entry_js, needs_sanitizer, node_bin):
         return [entry_js]
 
 
+def _existing_env(name):
+    """Read a currently-registered server's env vars from ~/.claude.json.
+
+    `claude mcp get` has no machine-readable output (no --json flag) — reading
+    the user-scope entry directly from ~/.claude.json is the only way to
+    recover env vars before a remove+re-add. This is a read, not a write;
+    all writes still go through `claude mcp add-json`.
+    """
+    path = os.path.join(os.path.expanduser("~"), ".claude.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data.get("mcpServers", {}).get(name, {}).get("env", {})
+
+
 def main():
-    if not os.path.isfile(MCP_JSON):
-        print(f"ERROR: {MCP_JSON} not found. Run 'plamen install' first.", file=sys.stderr)
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        print("ERROR: claude CLI not found on PATH.", file=sys.stderr)
         sys.exit(1)
 
-    with open(MCP_JSON, "r") as f:
-        config = json.load(f)
-
-    config.setdefault("mcpServers", {})
-    servers = config["mcpServers"]
     node_bin = _find_node()
-    updated = []
+    updated, failed = [], []
 
     for name, (rel_path, needs_sanitizer) in NPM_SERVERS.items():
         entry_js = os.path.join(NM, rel_path)
@@ -67,10 +85,7 @@ def main():
             print(f"  SKIP {name}: {entry_js} not found")
             continue
 
-        # Preserve existing env vars
-        existing_env = {}
-        if name in servers and "env" in servers[name]:
-            existing_env = servers[name]["env"]
+        existing_env = _existing_env(name)
 
         new_entry = {
             "command": node_bin,
@@ -79,17 +94,27 @@ def main():
         if existing_env:
             new_entry["env"] = existing_env
 
-        servers[name] = new_entry
+        # Re-registering requires removing any prior registration first —
+        # `claude mcp add-json` errors if the name already exists.
+        subprocess.run([claude_bin, "mcp", "remove", name, "-s", "user"],
+                        capture_output=True, text=True, timeout=15)
+        r = subprocess.run(
+            [claude_bin, "mcp", "add-json", name, json.dumps(new_entry), "-s", "user"],
+            capture_output=True, text=True, timeout=15,
+        )
         tag = "+ SANITIZER" if needs_sanitizer else "direct"
-        updated.append(f"  {name}: pinned ({tag})")
+        if r.returncode == 0:
+            updated.append(f"  {name}: pinned ({tag})")
+        else:
+            failed.append(f"  {name}: {r.stderr.strip()[:200]}")
 
-    with open(MCP_JSON, "w") as f:
-        json.dump(config, f, indent=2)
-        f.write("\n")
-
-    print(f"DONE: {len(updated)} npm-based MCP servers updated in settings.json:")
+    print(f"DONE: {len(updated)} npm-based MCP servers pinned (user scope):")
     for line in updated:
         print(line)
+    if failed:
+        print(f"\nFAILED: {len(failed)}")
+        for line in failed:
+            print(line)
     print()
     print("Unchanged: Python-based servers (unified-vuln-db, slither-analyzer, etc.)")
 

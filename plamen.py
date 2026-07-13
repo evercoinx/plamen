@@ -534,17 +534,40 @@ def _npx_package_cached(pkg: str) -> bool:
     return False
 
 
+def _registered_mcp_servers() -> dict:
+    """Read Plamen's MCP server configs as actually registered with Claude Code.
+
+    Servers are registered via `claude mcp add-json -s user`, persisted to
+    ~/.claude.json (user scope) — NOT ~/.claude/settings.json, which the
+    `claude` binary never reads for MCP. Only reports servers whose name
+    appears in mcp.json.example, so foreign user-added servers aren't probed.
+    """
+    import json as _json
+    example = os.path.join(PLAMEN_HOME, "mcp.json.example")
+    if not os.path.isfile(example):
+        return {}
+    try:
+        with open(example) as f:
+            plamen_names = set(_json.load(f).get("mcpServers", {}).keys())
+    except Exception:
+        return {}
+
+    claude_json_path = os.path.join(os.path.expanduser("~"), ".claude.json")
+    if not os.path.isfile(claude_json_path):
+        return {}
+    try:
+        with open(claude_json_path) as f:
+            registered = _json.load(f).get("mcpServers", {})
+    except Exception:
+        return {}
+    return {k: v for k, v in registered.items() if k in plamen_names}
+
+
 def _probe_mcp_servers() -> list:
     """Probe configured MCP servers for health. Returns list of (name, ok) tuples.
     npx-based servers are skipped if the package isn't cached (download would exceed timeout)."""
-    import json as _json
-    settings_path = os.path.join(CLAUDE_HOME, "settings.json")
-    if not os.path.isfile(settings_path):
-        return []
-    try:
-        with open(settings_path) as f:
-            mcp = _json.load(f)
-    except Exception:
+    mcp = {"mcpServers": _registered_mcp_servers()}
+    if not mcp["mcpServers"]:
         return []
 
     results = []
@@ -2234,11 +2257,13 @@ def _setup_mcp_packages(w):
     """Install pinned MCP npm packages and update config to use them.
 
     This only activates when mcp-packages/node_modules already exists (user opted in)
-    or when ~/.claude/mcp.json has bare 'npx -y @pkg' without version pins (legacy config).
+    or when Claude Code's registered servers (~/.claude.json, user scope — see
+    `_registered_mcp_servers`) have bare 'npx -y @pkg' without version pins (legacy config).
     New users get correctly pinned npx commands from mcp.json.example and don't need this.
 
-    Target: ~/.claude/mcp.json (the MCP-specific config).
-    NEVER writes to ~/.claude.json (global Claude config — not our file to touch).
+    Target: registers pinned servers via `claude mcp add-json -s user` (see
+    mcp-packages/update_config.py), same as `_merge_mcp_json`. Never writes
+    directly to ~/.claude.json or ~/.claude/settings.json.
     """
     import json as _json
 
@@ -2251,15 +2276,13 @@ def _setup_mcp_packages(w):
         return  # mcp-packages not part of this install — skip silently
 
     # Only activate if: (a) node_modules already exists (user previously opted in), or
-    # (b) ~/.claude/settings.json has bare npx -y without version pins (legacy config needing fix)
+    # (b) a registered server has bare npx -y without version pins (legacy config needing fix)
     has_local_install = os.path.isdir(nm_dir)
     has_legacy_config = False
-    mcp_json_path = os.path.join(CLAUDE_HOME, "settings.json")
-    if os.path.isfile(mcp_json_path):
+    registered = _registered_mcp_servers()
+    if registered:
         try:
-            with open(mcp_json_path) as f:
-                mj = _json.load(f)
-            for _name, srv in mj.get("mcpServers", {}).items():
+            for _name, srv in registered.items():
                 cmd = str(srv.get("command", ""))
                 if "npx" not in cmd:
                     continue
@@ -3003,14 +3026,26 @@ def _merge_settings_json(w):
 
 
 def _merge_mcp_json(w):
-    """Merge Plamen's MCP servers into ~/.claude/settings.json (additive only)."""
+    """Register Plamen's MCP servers with Claude Code via `claude mcp add-json -s user`.
+
+    Claude Code's `claude` binary does not read an `mcpServers` key from
+    ~/.claude/settings.json — that key is inert. The only mechanisms it
+    actually honors are `claude mcp add`/`add-json` (persisted to
+    ~/.claude.json under local/user/project scope) or a project's
+    .mcp.json. We use `-s user` so servers are available regardless of the
+    cwd the `plamen` driver is invoked from (verified: same behavior from
+    a project root and from arbitrary subdirectories).
+    """
     import json as _json
 
     example = os.path.join(PLAMEN_HOME, "mcp.json.example")
-    target = os.path.join(CLAUDE_HOME, "settings.json")
 
     if not os.path.isfile(example):
         w(f"  {_C_ORANGE}mcp.json.example not found — skipping{_RST}\n")
+        return
+
+    if not shutil.which("claude"):
+        w(f"  {_C_ORANGE}claude CLI not found on PATH — skipping MCP registration{_RST}\n")
         return
 
     with open(example) as f:
@@ -3049,79 +3084,58 @@ def _merge_mcp_json(w):
             config["cwd"] = os.path.join(PLAMEN_HOME, config["cwd"][2:])
         config["command"] = _resolve_command(config["command"])
 
-    existing = {}
-    if os.path.isfile(target):
-        try:
-            with open(target) as f:
-                existing = _json.load(f)
-        except (_json.JSONDecodeError, ValueError) as e:
-            w(f"  {_C_RED}settings.json is not valid JSON: {e}{_RST}\n")
-            w(f"  {_C_GRAY}  Fix the file manually, then re-run install.{_RST}\n")
-            w(f"  {_C_GRAY}  Common cause: trailing commas or missing quotes.{_RST}\n")
-            return
-        existing.setdefault("mcpServers", {})
-    else:
-        existing["mcpServers"] = {}
+    # Read Claude Code's own view of currently-registered user-scope servers
+    # (via `claude mcp list`) rather than re-parsing ~/.claude.json directly —
+    # keeps us decoupled from that file's internal schema.
+    existing_names = set()
+    try:
+        r = subprocess.run(["claude", "mcp", "list"], capture_output=True,
+                            text=True, timeout=60)
+        for line in r.stdout.splitlines():
+            m = re.match(r'^([A-Za-z0-9_-]+):\s', line)
+            if m:
+                existing_names.add(m.group(1))
+    except Exception as e:
+        w(f"  {_C_RED}claude mcp list failed: {e}{_RST}\n")
+        return
 
-    def _is_wrong_platform_path(path: str) -> bool:
-        """Detect paths from a different OS (e.g., Windows paths on macOS/Linux)."""
-        if not path:
-            return False
-        if sys.platform == "win32":
-            return path.startswith("/") and not path.startswith("//")
-        return bool(re.match(r'^[A-Za-z]:[/\\]', path))
+    def _add_server(name: str, config: dict) -> bool:
+        clean = {k: v for k, v in config.items() if k != "_comment"}
+        payload = _json.dumps(clean)
+        r = subprocess.run(
+            ["claude", "mcp", "add-json", name, payload, "-s", "user"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return r.returncode == 0
 
-    added, skipped, patched_env, patched_paths = [], [], [], []
+    added, skipped, failed = [], [], []
     for name, config in plamen.get("mcpServers", {}).items():
-        if name in existing["mcpServers"]:
+        if name in existing_names:
             skipped.append(name)
-            ex = existing["mcpServers"][name]
-
-            # Fix stale command/cwd paths from a different platform.
-            # Preserves user's env vars and any other customizations —
-            # only overwrites command and cwd with the resolved template values.
-            if _is_wrong_platform_path(ex.get("command", "")):
-                ex["command"] = config["command"]
-                patched_paths.append(f"{name}.command")
-            if _is_wrong_platform_path(ex.get("cwd", "")):
-                ex["cwd"] = config["cwd"]
-                patched_paths.append(f"{name}.cwd")
-
-            # Backfill missing env vars into existing servers (e.g., new keys added
-            # to mcp.json.example after initial install — propagate to existing config)
-            template_env = config.get("env", {})
-            if template_env:
-                existing_env = ex.setdefault("env", {})
-                for k, v in template_env.items():
-                    if k not in existing_env and not v.startswith("YOUR_"):
-                        existing_env[k] = v
-                        patched_env.append(f"{name}.{k}")
-        else:
-            clean = {k: v for k, v in config.items() if k != "_comment"}
-            existing["mcpServers"][name] = clean
+            continue
+        if _add_server(name, config):
             added.append(name)
-
-    with open(target, "w") as f:
-        _json.dump(existing, f, indent=2)
-        f.write("\n")
+        else:
+            failed.append(name)
 
     if added:
-        w(f"  {_C_GREEN}settings.json: added MCP servers {', '.join(added)}{_RST}\n")
-    if patched_paths:
-        w(f"  {_C_GREEN}settings.json: fixed MCP platform paths: {', '.join(patched_paths)}{_RST}\n")
-    if patched_env:
-        w(f"  {_C_GREEN}settings.json: backfilled MCP env vars: {', '.join(patched_env)}{_RST}\n")
+        w(f"  {_C_GREEN}claude mcp: registered servers (user scope) {', '.join(added)}{_RST}\n")
     if skipped:
-        w(f"  {_C_GRAY}settings.json: kept existing MCP servers {', '.join(skipped)}{_RST}\n")
-    if not added and not skipped and not patched_env and not patched_paths:
-        w(f"  {_C_GREEN}settings.json: MCP servers up to date{_RST}\n")
+        w(f"  {_C_GRAY}claude mcp: kept existing servers {', '.join(skipped)}{_RST}\n")
+        w(f"  {_C_GRAY}  (re-run with these removed via `claude mcp remove <name> -s user` "
+          f"to pick up path/env changes from mcp.json.example){_RST}\n")
+    if failed:
+        w(f"  {_C_RED}claude mcp: failed to register {', '.join(failed)}{_RST}\n")
+    if not added and not skipped and not failed:
+        w(f"  {_C_GREEN}claude mcp: MCP servers up to date{_RST}\n")
 
     # Remind about API keys for newly added servers
     needs_keys = [n for n in added if any(
         "YOUR_" in str(v) for v in (plamen.get("mcpServers", {}).get(n, {}).get("env", {})).values()
     )]
     if needs_keys:
-        w(f"  {_C_GRAY}  Edit ~/.claude/settings.json to add API keys for: {', '.join(needs_keys)}{_RST}\n")
+        w(f"  {_C_GRAY}  Register with real keys via: claude mcp remove <name> -s user "
+          f"&& claude mcp add-json <name> '...' -s user, for: {', '.join(needs_keys)}{_RST}\n")
         w(f"  {_C_GRAY}  Free keys: solodit.cyfrin.io, etherscan.io/apis, tavily.com{_RST}\n")
 
 
@@ -3483,26 +3497,20 @@ def run_uninstall():
                 f.write("\n")
             w(f"  {_C_GREEN}settings.json: removed Plamen entries{_RST}\n")
 
-    # Remove Plamen MCP servers from settings.json
-    settings_mcp_path = os.path.join(CLAUDE_HOME, "settings.json")
-    if os.path.isfile(settings_mcp_path):
-        with open(settings_mcp_path) as f:
-            settings_mcp = _json.load(f)
-        example = os.path.join(PLAMEN_HOME, "mcp.json.example")
-        if os.path.isfile(example):
-            with open(example) as f:
-                plamen_mcp = _json.load(f)
-            removed_servers = []
-            for name in plamen_mcp.get("mcpServers", {}):
-                if settings_mcp.get("mcpServers", {}).pop(name, None) is not None:
-                    removed_servers.append(name)
-            if not settings_mcp.get("mcpServers"):
-                settings_mcp.pop("mcpServers", None)
-            with open(settings_mcp_path, "w") as f:
-                _json.dump(settings_mcp, f, indent=2)
-                f.write("\n")
-            if removed_servers:
-                w(f"  {_C_GREEN}settings.json: removed MCP servers {', '.join(removed_servers)}{_RST}\n")
+    # Remove Plamen MCP servers registered via `claude mcp add-json -s user`
+    # (not settings.json — the `claude` binary never reads MCP config from there).
+    example = os.path.join(PLAMEN_HOME, "mcp.json.example")
+    if os.path.isfile(example) and shutil.which("claude"):
+        with open(example) as f:
+            plamen_mcp = _json.load(f)
+        removed_servers = []
+        for name in plamen_mcp.get("mcpServers", {}):
+            r = subprocess.run(["claude", "mcp", "remove", name, "-s", "user"],
+                                capture_output=True, text=True, timeout=15)
+            if r.returncode == 0:
+                removed_servers.append(name)
+        if removed_servers:
+            w(f"  {_C_GREEN}claude mcp: removed servers {', '.join(removed_servers)}{_RST}\n")
 
     for mp in manifest_paths_found:
         try:

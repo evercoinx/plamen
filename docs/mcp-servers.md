@@ -2,7 +2,7 @@
 
 Plamen uses 9 MCP servers configured in `mcp.json` (Claude Code) or `[mcp_servers.*]` TOML sections in `~/.codex/config.toml` (Codex). All keys are optional — the pipeline degrades gracefully.
 
-MCP runs natively under both backends. On Claude Code the servers are loaded from `~/.claude/mcp.json`; on Codex the servers are loaded from `[mcp_servers.*]` blocks in `~/.codex/config.toml`, which `scripts/codex_adapter.py:generate_config_toml` generates from `mcp.json.example` at install time and `plamen install --codex` copies into place. The "tool translation" sometimes referenced elsewhere is prompt-text rewriting in `plamen_driver.py` (paths, `Task()` → `spawn_agent`, bash → PowerShell) — it is NOT an MCP transport shim.
+MCP runs natively under both backends. On Claude Code, `plamen install` registers each server with the `claude` CLI itself (`claude mcp add-json <name> <json> -s user`), persisted to `~/.claude.json` under user scope — this is the only mechanism the `claude` binary actually reads; an `mcpServers` key placed directly in `~/.claude/settings.json` or `~/.claude/mcp.json` is inert and silently ignored. User scope means registration is available regardless of the cwd `plamen`/`claude` is invoked from. On Codex the servers are loaded from `[mcp_servers.*]` blocks in `~/.codex/config.toml`, which `scripts/codex_adapter.py:generate_config_toml` generates from `mcp.json.example` at install time and `plamen install --codex` copies into place. The "tool translation" sometimes referenced elsewhere is prompt-text rewriting in `plamen_driver.py` (paths, `Task()` → `spawn_agent`, bash → PowerShell) — it is NOT an MCP transport shim.
 
 Two Codex-specific caveats:
 1. `evm-chain-data` is currently disabled on Codex due to an MCP protocol version mismatch (`scripts/codex_adapter.py:276`).
@@ -48,11 +48,11 @@ Tool permissions on Codex cannot be pre-configured: select "Always allow" on the
 
 ## Configuration Example
 
-**Claude Code**: See `mcp.json.example` for the full 9-server configuration. After `plamen install`, `mcp.json` is placed in `~/.claude/`.
+**Claude Code**: See `mcp.json.example` for the full 9-server configuration. After `plamen install`, each server is registered via `claude mcp add-json -s user` (check with `claude mcp list`). To re-pin an npm-based server or apply an env var change, remove it first: `claude mcp remove <name> -s user`, then re-run `plamen install`.
 
 **Codex**: MCP servers are loaded from `[mcp_servers.*]` TOML blocks in `~/.codex/config.toml`, generated at install time by `scripts/codex_adapter.py` from `mcp.json.example`. After `plamen install --codex` the config is at `~/.codex/config.toml`. Tool permissions are interactive on first use per server. See the two Codex caveats above (disabled `evm-chain-data`, schema-sanitized Python servers).
 
-Key `mcp.json` entries:
+Key `mcp.json.example` entries (each becomes one `claude mcp add-json <name> '<this object>' -s user` call):
 
 ```json
 {
